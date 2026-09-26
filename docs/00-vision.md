@@ -3,6 +3,13 @@
 - **Status:** Draft
 - **Last updated:** 2026-09-26
 
+## Name
+
+**loongagent** — after the Chinese 龙 (loong), a mythical creature composed of
+the strongest body parts of many animals (antlers of a deer, scales of a fish,
+claws of an eagle…). The name is the design philosophy: take the best part of
+every tool, and the composition becomes something none of the parts could be.
+
 ## Mission
 
 Build a coding agent that combines the best ideas from the best tools —
@@ -41,7 +48,7 @@ impossible merge.
 
 ## Open questions (seed list — grows during brainstorming)
 
-- [ ] Project name?
+- [x] ~~Project name?~~ → **loongagent** (decided 2026-09-26)
 - [ ] Implementation language(s) for core vs. surfaces?
 - [ ] One shared core + thin surfaces, or surface-native apps over an API?
 - [ ] What does "support all roles" mean concretely — tool packs, personas,

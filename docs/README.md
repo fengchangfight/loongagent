@@ -1,7 +1,9 @@
-# Design Docs — Project "LoongCoder" (working title)
+# Design Docs — loongagent
 
-This folder is the living memory of the project. All design discussion between the
-human and the agent is tracked here so decisions survive context windows and sessions.
+This folder is the living memory of **loongagent** (龙 — the Chinese dragon,
+a creature assembled from the strongest parts of many animals: our product
+philosophy in one name). All design discussion between the human and the agent
+is tracked here so decisions survive context windows and sessions.
 
 ## Conventions
 

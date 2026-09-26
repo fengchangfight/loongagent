@@ -160,7 +160,7 @@ what, and the recommended trade-off (**T1–T10** will become ADRs once decided)
 
 ---
 
-## C. Strawman blueprint ("LoongCoder v0") — to be argued against
+## C. Strawman blueprint ("loongagent v0") — to be argued against
 
 **One brain, many faces, sized to the model in front of it.**
 

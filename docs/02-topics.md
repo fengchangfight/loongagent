@@ -208,6 +208,48 @@ Open questions:
 - How do role profiles (T: role-specialized research) map to UX personas —
   same thing or two axes (role × seniority)?
 
+## T-07 · Model profiles, not model pickers — `Seed`
+
+Seeded 2026-09-26.
+
+Owner's idea: in the firm-internal context, engineers should NOT pick raw
+models/providers directly (DeepSeek here, Claude there). Instead the org packs
+and provides **named profiles** — e.g. `default`, `supersmart` — where each
+profile = a curated set of models + a smart routing strategy underneath.
+
+Design shape (to discuss):
+- **Profile = named bundle**: model pool per scenario (main loop / deep-think /
+  background / edit-apply / review), routing + escalation strategy, budget
+  ceiling, cost class. Engineers declare *intent*; the org controls *vendors*.
+- **Profiles are defined by admins in the backend control plane** (T-05) —
+  tamper-resistant, versioned, auditable. Routing tables refresh from the
+  server; local fallback table when offline.
+- **Shipping defaults**: a curated ladder, e.g. `fast` (cheapest adequate),
+  `default` (balanced), `supersmart` (frontier, escalation-gated), maybe
+  `local-only` (air-gapped/private code). Naming by *capability*, never by
+  vendor — the provider mix underneath can change without users noticing
+  (that's the point).
+- **The win**: cost governance becomes structural (T-04 — `supersmart` can
+  require justification or have per-day caps); model churn disappears behind
+  profiles (Amp's lesson: re-route silently as the frontier moves); support
+  and benchmarking become possible ("profile X on task class Y" is measurable).
+- **Precedents**: Amp's capability dial (`low`→`ultra`, no model picker —
+  users loved it); CCR's scenario routing; Codex `requirements.toml` admin
+  bans; Cursor enterprise model blocklists; Chinese vendors' admin-controlled
+  model menus ("compliance is the product").
+- **Tension to resolve**: power users *love* model freedom (Pi's mid-session
+  switching is beloved; blocking Claude Max in OpenCode caused revolt).
+  Resolution options: admin-granted escape hatches per team; a visible
+  "served-by" line each turn (transparency without control); personal/solo
+  tier keeps full freedom while firm tier is profile-gated.
+
+Open questions:
+- Profile granularity: per session, per task, or per request (with escalation)?
+- Do users see which model actually served each turn? (Recommend: yes, on
+  demand — transparency feeds T-02's implicit feedback loop.)
+- Can engineers propose profile changes (PR against profile config) rather than
+  just file tickets? (Git-native config, per role-specialized lesson.)
+
 ---
 
 *Next topics go here. Just say the idea — capture is automatic.*

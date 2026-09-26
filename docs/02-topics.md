@@ -250,6 +250,42 @@ Open questions:
 - Can engineers propose profile changes (PR against profile config) rather than
   just file tickets? (Git-native config, per role-specialized lesson.)
 
+## T-08 · Authentication & identity (flexible, firm-internal first) — `Seed`
+
+Seeded 2026-09-26.
+
+Owner's intent: loongagent is a firm-internal tool, so authentication must be
+**flexibly adaptable to whatever the firm already has** — SSO, service
+principals, or anything else. No hardcoded auth scheme.
+
+Design shape (to discuss):
+- **Pluggable identity layer in the backend control plane (T-05)**: SSO via
+  OIDC/SAML (Keycloak, Entra ID, Okta, Authentik, firm-internal IdPs), LDAP
+  where legacy demands it, and **service principals** (non-human identities
+  for CI, cloud workers, automations). Local dev mode: no-auth or personal
+  token, clearly marked.
+- **Identity is the coordination mechanism** (Codex's lesson): sessions roam
+  across surfaces and devices because they belong to a *user*, not a machine.
+  Also the anchor for T-02 audit ("who did what"), T-04 budgets ("whose
+  quota"), and T-07 profile permissions ("which teams may use supersmart").
+- **RBAC lives behind identity**: roles/groups from the IdP map to loongagent
+  permissions — profile access, admin policy editing, dashboard visibility.
+  Precedents: Cursor Teams (SAML/OIDC + SCIM), Codex managed config,
+  GitHub governance defaults.
+- **Agent identity is a first-class question**: when an async worker opens a
+  PR or runs a migration, whose identity is it? Recommended: the agent acts
+  as a distinct service principal *on behalf of* a human (attribution chain:
+  human → session → action), never anonymously, and GitHub-style governance
+  applies (requester can't approve their own agent's PR).
+- **Credential handling**: provider API keys live server-side in the model
+  gateway (T-05) — engineers never hold vendor keys; the backend brokers
+  model access behind auth. (Also kills the "leaked key in dotfiles" class
+  of incident.)
+- **Flexibility contract**: auth = a documented adapter interface with 2-3
+  reference implementations (OIDC, static token, service principal); a firm
+  can plug its own without forking. Zero auth logic in the local client
+  beyond token acquisition/refresh.
+
 ---
 
 *Next topics go here. Just say the idea — capture is automatic.*

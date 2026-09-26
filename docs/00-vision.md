@@ -56,4 +56,6 @@ impossible merge.
 - [ ] One shared core + thin surfaces, or surface-native apps over an API?
 - [ ] What does "support all roles" mean concretely — tool packs, personas,
       permission profiles?
-- [ ] Local-first, cloud-first, or hybrid sessions?
+- [ ] ~~Local-first, cloud-first, or hybrid sessions?~~ → leaning **hybrid:
+  local-capable client + rich backend control plane** (see T-05); to be
+  confirmed when T-05 is discussed in depth

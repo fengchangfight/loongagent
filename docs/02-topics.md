@@ -2,7 +2,7 @@
 
 - **Status:** Living document — append ideas as they come; promote to numbered
   design docs or ADRs when discussed.
-- **Last updated:** 2026-09-26
+- **Last updated:** 2026-09-26 (T-05 added)
 How this works: the owner drops raw ideas in conversation; they land here as
 topics with a one-line seed connecting them to what the research already knows
 (`research/`, `01-landscape-synthesis.md`). When a topic gets discussed in
@@ -113,6 +113,44 @@ Design directions (to discuss):
 Research hooks: T10 (cost transparency), CCR scenario routing, Amp capability
 dial, Codex enterprise `requirements.toml`, HN "agentic coding only makes sense
 through subscription billing" (BYOK users get burned — budgets are the fix).
+
+## T-05 · Rich backend / control plane (not a local-only tool) — `Seed`
+
+Seeded 2026-09-26.
+
+Owner's idea: loongagent is **not a local-only tool**. There should be a rich
+backend that local clients *smartly* communicate with — handling audit,
+statistics, cascading/routing decisions, and other smart orchestration work
+beyond what a local process should do.
+
+What the backend could own (to discuss):
+- **Audit & statistics aggregation** (T-02): org-wide event streams, cost
+  dashboards, usage analytics.
+- **Routing & policy brain** (T-01/T-04): the cascading router, model ceilings,
+  budgets, and task-class policy live server-side so they're centrally managed
+  and tamper-resistant (client-side policy is bypassable).
+- **Model gateway**: centralized provider keys, billing, cache sharing across
+  the team (shared prompt cache is a *big* cost lever), per-org provider config.
+- **Orchestration**: cloud/async workers, scheduled jobs, cross-session memory,
+  team knowledge, session sync across the user's devices and surfaces.
+- **Identity**: the account as the rendezvous between surfaces (Codex's lesson:
+  identity, not file sync, is the coordination mechanism).
+
+Critical design constraint — **control plane, not data plane; enhancement, not
+dependency:**
+- Cursor's biggest trust liability is routing *all* model requests through its
+  backend even with BYOK; OpenCode got burned for phoning home for session
+  titles. **The local client must remain fully functional offline/disconnected**
+  (degraded: no org stats, no central policy refresh, local routing fallback).
+- When connected, sync is smart: batch, delta, resumable — and every byte that
+  leaves the machine is visible/opt-in per our local-first principle.
+- Deployment shapes (T-03): managed cloud backend OR self-hosted team server,
+  same code. Enterprise/privacy customers run their own.
+- Open question: does the agent *core* (tool execution, sandbox) always stay
+  local near the code, with the backend as pure control plane? (Recommended:
+  yes — code never needs to transit our backend except model calls that go to
+  providers anyway. Cloud workers are the explicit exception: there the code
+  lives on the runner by definition.)
 
 ---
 

@@ -45,6 +45,9 @@ impossible merge.
   citizens, not an afterthought.
 - **The harness is the product.** Model quality commoditizes; orchestration,
   context engineering, UX, and extensibility are the durable moat.
+- **Cost-conscious by design.** No user should ever burn frontier-model tokens
+  on a trivial or off-topic request. Expensive intelligence is spent on
+  demand and on evidence, never by default or by habit (see T-04).
 
 ## Open questions (seed list — grows during brainstorming)
 

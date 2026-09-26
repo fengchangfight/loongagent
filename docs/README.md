@@ -21,4 +21,5 @@ human and the agent is tracked here so decisions survive context windows and ses
 |-----|-------|--------|
 | [00-vision.md](00-vision.md) | Vision, ambition, non-goals, target users | Draft |
 | [01-landscape-synthesis.md](01-landscape-synthesis.md) | Cross-tool synthesis: features, pros/cons, design tensions | Draft |
+| [02-topics.md](02-topics.md) | Idea backlog — raw topics, waiting to be discussed | Living |
 | research/ | Per-tool deep dives | — |

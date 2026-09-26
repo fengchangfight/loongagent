@@ -48,6 +48,11 @@ impossible merge.
 - **Cost-conscious by design.** No user should ever burn frontier-model tokens
   on a trivial or off-topic request. Expensive intelligence is spent on
   demand and on evidence, never by default or by habit (see T-04).
+- **UX is the product.** Every role gets a deliberate "this is THE tool for me"
+  moment: the wizard's lightning CLI, the manager's three-click cost insight,
+  the PM's visual spec canvas, the newbie's beautiful web UI. Same brain,
+  different faces; progressive disclosure of power; beauty is functional
+  (see T-06).
 
 ## Open questions (seed list — grows during brainstorming)
 

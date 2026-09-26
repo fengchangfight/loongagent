@@ -152,6 +152,62 @@ dependency:**
   providers anyway. Cloud workers are the explicit exception: there the code
   lives on the runner by definition.)
 
+## T-06 · Per-role UX: the "this is THE tool for me" moment — `Seed` (HIGH PRIORITY)
+
+Seeded 2026-09-26. Owner emphasis: **"I cannot emphasize more about how
+important UX is for the success of this project."**
+
+Idea: every role — regardless of seniority or surface preference — should get a
+strong "oh my god, this is just the tool I want" feeling. Not one average UX for
+everyone; a *deliberate wow moment per persona*.
+
+Personas and their wow moments (owner's examples + extensions):
+- **Experienced engineer** → "holy sh*t this CLI is lightning fast and the
+  responses are smart." Terse, keyboard-driven, zero ceremony, stays in flow.
+  (Research: latency is a feature — Cursor Tab's sub-30s iteration changes
+  behavior; Pi's 1.4k-token overhead; native-scrollback TUI.)
+- **Engineering manager** → "this really saves money; statistics and feedback
+  in a few clicks; everything summarized so clearly I know what to improve."
+  (T-02/T-04 dashboards: cost per person/task/model, waste detection, trend
+  summaries written in manager language, not engineer language.)
+- **PM / product-minded user** → "it clears my ideas visually and efficiently."
+  Visual spec canvas: vague idea → structured spec (Kiro-style EARS
+  requirements) with drag/refine UX; idea → plan → delegated tasks without
+  touching a terminal. (Links: kiro-spec-driven research; T-01 routing lets PM
+  queries run on cheap models.)
+- **Newbie / web-preferring user** → "wow, the web interface works even better
+  than CLI and it's pretty." Zero-install onboarding, guided first session,
+  safe defaults (sandbox + preview-then-approve), beautiful by default —
+  terminal-aesthetics quality bar applied to the web.
+- **DevOps/SRE** → evidence chains, not guesses (incident.io's contract);
+  read-only investigate mode that's genuinely safe against prod; runbook
+  execution with checkpoints.
+- **QA** → visual test review, screenshot diffs, coverage heatmaps.
+- **Data engineer** → schema-aware SQL assistance, dry-run/plan before query
+  (WrenAI guardrails), notebook-friendly surface.
+
+Design principles implied:
+- **Same brain, different faces** — the core agent is shared; the *surface,
+  density, vocabulary, and defaults* adapt per role. A manager never sees a
+  token trace; an engineer never sees a dashboard card first.
+- **Progressive disclosure of power** — resolve the power-vs-simplicity tension
+  by layering: the newbie web UI and the wizard's CLI talk to the same core;
+  complexity reveals itself as the user asks for it.
+- **Beauty is functional** — pretty = trustworthy = adopted. Terminal UI gets
+  the same design budget as web (Charm/OpenTUI set the bar).
+- **Every persona gets a measurable wow metric** — time-to-first-success,
+  time-to-first-insight (manager), time-to-first-spec (PM). If we can't
+  measure the wow, we can't defend it.
+
+Open questions:
+- Which persona is the **beachhead**? (You can't wow everyone on day one —
+  sequencing matters. Candidates: senior engineers for credibility, or
+  web-first newbies for volume.)
+- Does "PM mode" produce artifacts that engineers' sessions consume? (Specs as
+  the handoff protocol between personas — links kiro-spec-driven research.)
+- How do role profiles (T: role-specialized research) map to UX personas —
+  same thing or two axes (role × seniority)?
+
 ---
 
 *Next topics go here. Just say the idea — capture is automatic.*

@@ -226,4 +226,103 @@ existing primitives:
    with CLAUDE.md/.cursor import?
 4. How much async/cloud is in v1 scope vs. architecture-only?
 5. Which role profiles ship first? (suggest: devops + qa, biggest gap)
-6. Name?
+6. ~~Name?~~ → **loongagent**
+
+---
+
+## F. Round-2 landscape additions (2026-09-26)
+
+Seven more categories researched (`research/kiro-spec-driven.md`,
+`role-specialized.md`, `multi-agent-orchestration.md`, `web-app-builders.md`,
+`ide-ecosystem.md`, `china-ecosystem.md`, `enterprise-context-review.md`).
+The decision-relevant lessons:
+
+**Specs & planning (Kiro, Spec Kit, Tessl)**
+- Specs work when they are *terse, diffable, repo-native markdown* with ceremony
+  scaled to task size — auto-triage when to spec at all; a bug fix must not
+  become 4 stories/16 criteria (Kiro's adoption killer).
+- Tessl's $125M "spec-as-source" bet **failed on non-deterministic codegen** —
+  specs are a control-plane protocol consumed by agents, never regenerated as
+  source of truth for code.
+- Kiro's agent hooks ("CI for agent behavior," git-committed event-triggered
+  automations) — sleeper feature nobody else ships; aligns with our hook layer.
+- Requirement↔task traceability links make coverage auditable — cheap to add to
+  our plan artifacts.
+
+**Role-specialized tools (Qodo, K8sGPT, incident.io, WrenAI, Diffblue)**
+- The winning pattern: **LLM inside a deterministic harness** — K8sGPT's
+  rule-based analyzers find issues, the LLM only explains; Diffblue guarantees
+  tests compile/pass. Autonomy is allocated *per action* (investigate free,
+  write gated), not per product.
+- Role profile = pluggable context pipeline + verification harness + per-action
+  autonomy ladder. Org context (WrenAI's MDL) as Git-native, PR-reviewable
+  artifacts.
+- incident.io's contract: "evidence, not guesses" — every root cause cites a
+  PR/deploy. Verification strength varies by role; allocate autonomy accordingly.
+
+**Multi-agent orchestration (MetaGPT, ChatDev, vibe-kanban, Conductor)**
+- MetaGPT's real innovation: **artifact-based pub/sub** between agents (typed
+  docs, not chat). Fixed org charts failed — ChatDev's own team moved to
+  learned/DAG orchestration.
+- Anthropic's data + Cognition's "Don't Build Multi-Agents": most coding tasks
+  aren't parallelizable; multi-agent costs ~15× tokens; subagents make
+  conflicting implicit decisions.
+- The unsolved ceiling is **human review at 3–5 parallel agents**. Our opening:
+  tiered review (LLM pre-review + human sign-off) and merge-time conflict
+  intelligence — nobody owns this.
+- Orchestration belongs in the control plane *above* agents (T-05), not
+  hardcoded roles inside the agent.
+
+**Web app builders (Replit, Bolt, v0, Lovable)**
+- The Replit Lemkin incident is the canonical lesson: **prompts are not
+  permission systems** — the agent deleted a prod DB during a code freeze, then
+  fabricated records. The fix was architectural (dev/prod separation). Validates
+  T3/T5: safety must be structural.
+- Secure-by-default generation (Lovable's RLS-off breach: 170+ apps).
+- Instant preview loops + environment-in-a-box are worth borrowing for web
+  surfaces; credit-burn economics ("paying for the AI's own bug-fix retries")
+  is the #1 churn driver — validates T-04.
+
+**IDE ecosystem (Zed/ACP, Void, Junie, Continue, Goose)**
+- **ACP (Agent Client Protocol) is now the interop standard** — Zed, JetBrains,
+  Neovim, Emacs + 25 agents. Resolution for our IDE strategy: **implement ACP
+  server-side from day one; no editor fork, no per-editor plugin maintenance.**
+  (Void is dead; Continue acqui-hired — thin OSS layers on others' platforms die.)
+- Continue's "hub" (shareable model/rules/tool config packs with secret
+  templating + org governance) is an **ownerless concept** — a natural fit for
+  our role profiles + team sharing (T-03).
+- Goose: MCP-first orthogonality, even built-in tools are MCP servers; YAML
+  recipes with retries/validation/cron.
+
+**China ecosystem (Trae, Qoder, Lingma, CodeBuddy, Comate)**
+- Compliance is the product: "not one drop of code leaks out" — VPC/air-gapped
+  deployment and admin-controlled model menus close enterprise deals, not model
+  IQ. Trae's telemetry scandal shows the cost of getting this wrong.
+- Split-product reality: every vendor ships separate intl/CN products (models,
+  accounts, infra). A vendor-neutral, privacy-certifiable control plane is an
+  **unclaimed wedge in both directions**.
+- Qoder's cost-aware multi-model scheduler (5–10× per-call spread) and
+  Repo Wiki (precomputed human-readable repo index) are directly relevant to
+  T-01 and T7.
+
+**Enterprise context & review (Augment, Cody, Greptile, CodeRabbit, Tabby)**
+- Retrieval at scale converges on **structural-first** (grep, symbol/call
+  graphs, explore subagents) with embeddings demoted to an optional recall
+  layer — confirms T7.
+- Review bots compete on **noise suppression**, not detection: ~28% of
+  CodeRabbit comments are noise; teams mute noisy bots and true positives die.
+  Quiet-by-default or nothing.
+- "Detection and remediation decouple": review findings emitted as structured
+  artifacts consumed by the user's own agent — matches our artifact-bus idea.
+- Greptile's self-host architecture (worker queue + llmproxy + pgvector) is a
+  reimplementable blueprint for the T-05 backend.
+
+**What round 2 changed in our priors:**
+1. IDE strategy is now *answered*: ACP server-side, no fork (was open Q #4-ish).
+2. T-04 strengthened: one LLM proxy metering all spend is the enterprise pattern.
+3. T-05 strengthened: the control plane is where every gap lives — nobody unifies
+   permission-aware context + execution + quiet review + cost governance.
+4. Role profiles sharpened: context pipeline + verification harness + per-action
+   autonomy ladder, not just "different system prompts."
+5. Spec workflow: adopt spec-first *with size-scaled ceremony*; never
+   spec-as-source.

@@ -2,14 +2,43 @@
 
 - **Status:** Living document — append ideas as they come; promote to numbered
   design docs or ADRs when discussed.
-- **Last updated:** 2026-09-26 (T-05 added)
+- **Last updated:** 2026-09-30 (T-09..T-21 added; coverage map added)
 How this works: the owner drops raw ideas in conversation; they land here as
 topics with a one-line seed connecting them to what the research already knows
 (`research/`, `01-landscape-synthesis.md`). When a topic gets discussed in
 depth, it graduates to its own `NN-<topic>.md` or an ADR in `decisions/`, and
 its status here changes to **Promoted**.
 
-Legend: `Seed` (captured, not yet discussed) · `Discussing` · `Promoted → <doc>`
+Legend: `Seed` (captured, not yet discussed) · `Discussing` · `Promoted → <doc>` · `Wanted` (owner has said "I want this" — direction agreed, details to discuss)
+
+## Coverage map (owner checklist of 2026-09-30)
+
+| Owner's item | Covered by |
+|---|---|
+| hooks | T-09 |
+| memory system | T-10 |
+| budget system | T-04 (cost governance) + T-07 (profile budget caps) |
+| permission & sandbox | T-11 |
+| model provider profile (flexible but controlled) | T-07 |
+| pi try/retry/fork | T-12 |
+| pi-style "understand why the agent is doing X" | T-13 |
+| team work & sharing | T-14 (extends T-03) |
+| MCP | T-15 |
+| commands | T-16 |
+| subagents | T-17 |
+| skills marketplace | T-18 |
+| IDE integration | T-19 |
+| git diff & spec-driven dev process | T-20 |
+| opencode-style server (client/server) | Strawman #1 / synthesis T2 + T-05 |
+| context engineering paramount, nothing hidden | Vision principles + T-13 |
+| core = minimal "model + tool loop" | Vision principles + synthesis T1 |
+| session tree (Pi's killer feature — "I want this") | T-12 |
+| models don't need much harness | Vision principles |
+| harness cheap to change, pluggable with good defaults | Vision principles + T-21 |
+| be careful and mean with context | Vision principles |
+| allow pick/steer mid-run | T-12 |
+| avoid Pi's steep learning curve | T-21 |
+| one agent core, multiple frontends | Vision principles + T-05 |
 
 ---
 
@@ -285,6 +314,163 @@ Design shape (to discuss):
   reference implementations (OIDC, static token, service principal); a firm
   can plug its own without forking. Zero auth logic in the local client
   beyond token acquisition/refresh.
+
+## T-09 · Hooks & deterministic enforcement — `Seed`
+
+Seeded 2026-09-30.
+
+The guarantee layer where markdown rules are only advisory (synthesis T5).
+Lifecycle events (session start/end, pre/post tool use, compaction, permission
+decisions) fire hooks that can block, mutate, or enrich — Claude Code's
+exit-code-2 pattern (block + feed reason back to the model), OpenCode's
+plugin veto at the tool boundary, Kiro's git-committed agent hooks ("CI for
+agent behavior"). Open questions: hook language (shell vs in-process TS/WASM),
+sync vs async, trust gating (repo-shipped hooks caused Claude Code CVEs —
+untrusted repos must never auto-execute).
+
+## T-10 · Memory system — `Seed`
+
+Seeded 2026-09-30.
+
+Dual authorship: human-written rules (versioned in git, team-shared) vs
+agent-written memory (typed notes: user/feedback/project/reference) with a
+bounded index loaded each session + topic files read on demand (Claude Code's
+design); Cursor's sidecar-observer proposes memories with user confirmation.
+Requirements for us: memory must be inspectable/editable/deletable (T-13 —
+nothing hidden), scoped (user/project/org), and git-native where team-shared
+(WrenAI lesson: org context as PR-reviewable artifacts). Open: what earns
+memory, decay/TTL, cross-session memory for cloud workers.
+
+## T-11 · Permissions & sandbox — `Seed`
+
+Seeded 2026-09-30.
+
+Per synthesis T3 (direction agreed): OS sandbox default-on
+(seatbelt/bubblewrap/micro-VM), approval policy as a separate axis, YOLO as
+opt-out. Extras from research: Codex's `sandbox self-test` command;
+Guardian-style semantic approval reviewer (later); OpenCode's doom-loop and
+external-directory guards as ordinary permission rules; role-specialized
+lesson — autonomy allocated **per action** (investigate free, write gated),
+varying by role profile. Replit Lemkin incident is the canonical warning:
+prompts are not permission systems; safety must be structural.
+
+## T-12 · Session tree: fork, retry, steer — `Wanted`
+
+Seeded 2026-09-30. Owner: **"Session tree is the killer feature — I want this."**
+
+Pi's design, adopted: sessions as a **tree** in one JSONL file
+(id/parentId); `/tree` navigation, `/fork`, branch summaries of abandoned
+paths, lossless compaction (full history survives). **Retry** = fork from the
+failure point with a new approach instead of polluting the linear history.
+**Steer vs follow-up** queues (Pi): deliver-after-current-tool vs
+deliver-when-idle. **Pick**: the agent presents structured options and the
+user picks (AskUserQuestion pattern). Combined with T-13, the session tree is
+the user's x-ray into agent behavior — and with shadow git snapshots
+(synthesis T9), rewind covers both conversation and code.
+
+## T-13 · Observability: "what is the agent doing and *why*" — `Seed`
+
+Seeded 2026-09-30.
+
+Pi's founding promise, owner-endorsed: **nothing hidden, everything
+inspectable, documented session format.** Concrete requirements: verbose
+startup report of exactly what entered context (Pi's silent skill-loading
+failure is the anti-pattern); Cursor-style context breakdown per category;
+every injected token surfaced in the UI; the event log (T-02) answers "why did
+it do that" — tool call, reasoning, cost, policy decision. Observability is
+also T-21's teaching tool: juniors learn by watching a legible agent.
+
+## T-14 · Teamwork & sharing — `Seed`
+
+Seeded 2026-09-30. Extends T-03.
+
+Session/thread sharing as durable artifacts (Amp threads: shareable URLs,
+"show how the agent reached the result"); team rules/skills/memory via git;
+**persona handoffs** — PM's spec artifact becomes the engineer's session
+input (T-06); live co-watch and human takeover (Devin); review-in-place for
+parallel agents (multi-agent-orchestration research: human review is the
+3–5-agent ceiling — tiered review is our opening). Privacy: sharing is
+opt-in per artifact (OpenCode's auto-sync backlash).
+
+## T-15 · MCP & external tool ecosystem — `Seed`
+
+Seeded 2026-09-30.
+
+MCP supported but **lazily loaded** — Pi's critique stands (Playwright MCP =
+21 tools / 13.7k tokens dumped into every context); Amp's pattern: skills
+bundle their MCP config so tools enter context only when the skill triggers.
+Goose's orthogonality: even built-in tools as MCP servers. Org angle (T-05):
+an approved-server gateway/registry; prompt injection via MCP content is the
+dominant attack class — pinning, scanning, and trust levels required.
+
+## T-16 · Commands — `Seed`
+
+Seeded 2026-09-30.
+
+Slash commands as markdown prompt templates with frontmatter (Pi/OpenCode):
+`$ARGUMENTS`, shell-output injection, `@file` inclusion, `subtask: true` to
+run in a subagent keeping main context clean. Claude Code's evolution note:
+custom commands merged into skills — decide whether our commands and skills
+(T-18) are one mechanism or two. Layers: built-in < team < user.
+
+## T-17 · Subagents — `Seed`
+
+Seeded 2026-09-30.
+
+Per synthesis T6 (direction agreed): first-class but **observable and
+artifact-based** — each subagent is a visible branch in the session tree
+(T-12), writes a structured report artifact, returns only a summary, inherits
+the parent sandbox. Built-ins: explore (read-only, fast model), plan,
+general. Per-subagent model routing (T-01: cheap explore, strong build).
+OpenCode trick: denied subagents are removed from the task tool's description
+so the model never attempts them.
+
+## T-18 · Skills & marketplace — `Seed`
+
+Seeded 2026-09-30.
+
+Agent Skills open standard (Anthropic): description-only in context until
+invoked; skills bundle files/scripts and (Amp-style) their own MCP config.
+**Marketplace**: firm-internal registry first (org-approved, versioned,
+auditable — Continue's "hub" concept is ownerless and ours to take); public
+registry later. Trust: skills can carry code → same trust gating as hooks
+(T-09). Tessl's post-pivot registry is proof the concept has legs.
+
+## T-19 · IDE integration via ACP — `Seed` (direction agreed in round-2 research)
+
+Seeded 2026-09-30.
+
+**ACP server-side from day one; no editor fork, no per-editor plugins.**
+Zed, JetBrains, Neovim, Emacs + 25 agents adopted ACP; Void died, Continue
+was acqui-hired — thin layers on others' platforms die. The editor is also a
+context *source* (open files, selection, diagnostics — Windsurf's flow
+awareness, scaled to taste). JetBrains lesson: a mature semantic index beats
+text search inside IDEs — our repo map (T7) plugs in here.
+
+## T-20 · Git-diff-centric workflow & spec-driven process — `Seed`
+
+Seeded 2026-09-30.
+
+Two halves of the dev process: (1) **git as the review/undo layer** — shadow
+snapshots per message (synthesis T9), per-file staged diff review
+(Cursor 3.0's preview-then-approve), PR as the deliverable for async work.
+(2) **Spec-first with size-scaled ceremony** — terse repo-native markdown
+specs, auto-triage when to spec at all (a bug fix ≠ 4 stories/16 criteria),
+requirement↔task traceability links; NEVER spec-as-source (Tessl's $125M
+lesson). Specs are the handoff protocol between personas (T-06/T-14).
+
+## T-21 · Layered approachability: junior-proof defaults, senior-proof depth — `Seed`
+
+Seeded 2026-09-30.
+
+Owner: avoid Pi's steep learning curve. Pi converts experts but "has no
+guardrails to catch" newcomers. Resolution: **defaults carry juniors**
+(batteries on, sandbox on, curated profiles, guided first session — T-06
+newbie persona) while **every layer is openable for seniors** (extensions,
+raw config, self-modification à la Pi's `/reload`). The harness is pluggable
+with good defaults — "nobody knows the right shape yet," so both we and our
+users must be able to re-shape it cheaply. Onboarding is a designed
+progression, not a cliff.
 
 ---
 

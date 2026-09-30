@@ -54,6 +54,26 @@ impossible merge.
   different faces; progressive disclosure of power; beauty is functional
   (see T-06).
 
+### Principles adopted from Pi (owner-endorsed 2026-09-30)
+
+- **The core is just "model + tool loop."** The minimal harness. Everything
+  else is a visible, optional layer with good defaults — pluggable, because
+  nobody knows the right shape yet, and the harness must be cheap to change.
+- **Context engineering is paramount: nothing hidden, everything
+  inspectable.** No injecting things behind the user's back that aren't
+  surfaced in the UI. Documented session format; every token in context is
+  visible.
+- **Be careful and *mean* with context.** Frontier models are RL-trained to
+  be coding agents — they don't need 10k-token system prompts. Spend context
+  on the user's work, not on explaining the agent to itself.
+- **The session tree is a killer feature.** Branch, fork, retry, rewind —
+  sessions are trees, not linear logs (T-12).
+- **Steer, don't just watch.** Mid-run steering and structured picks are
+  first-class interactions (T-12).
+- **Junior-proof defaults, senior-proof depth.** Safe guided defaults for
+  newcomers; total customization for experts (T-21).
+- **One agent core, multiple frontends.**
+
 ## Open questions (seed list — grows during brainstorming)
 
 - [x] ~~Project name?~~ → **loongagent** (decided 2026-09-26)

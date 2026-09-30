@@ -83,7 +83,7 @@ visible) and the model calls themselves, which go through the gateway to
 providers anyway. Cloud/async workers (T8) are the deliberate exception —
 there the code lives on the runner by definition.
 
-### AQ-1 · Runtime topology — how do client and core meet? — `Open`
+### AQ-1 · Runtime topology — how do client and core meet? — `Decided` → [ADR-0001](decisions/0001-one-binary-client-server.md)
 
 **Question:** what is the process shape of the **local** agent server (the
 data-plane box in the topology above)? Scope note: this AQ is only about the
@@ -176,7 +176,7 @@ Rust for the core doesn't kill community extensibility.
 
 **Constrains:** AQ-12 (language) most strongly; T-09/T-15/T-16/T-18 all land here.
 
-### AQ-5 · Backend control plane — shape and scope — `Open`
+### AQ-5 · Backend control plane — shape and scope — `Open` (deferred per owner, 2026-09-30 — team-collaboration shape not yet clear; revisit after local-side AQs settle)
 
 **Question:** what exactly lives server-side, and as what deployment shape?
 
@@ -295,8 +295,10 @@ what order do we build?
   zero agent logic client-side. This is what makes "same brain, many faces"
   true rather than aspirational.
 - Build order lean: **TUI first** (dogfood, senior-engineer beachhead, fastest
-  iteration loop) → **web** (newbie/manager/PM personas, served by the
-  backend) → **ACP adapter** (IDEs come free) → desktop = web in a shell.
+  iteration loop) → **web** (newbie/manager/PM personas) → **ACP adapter**
+  (IDEs come free). **Desktop app and CI surface: dropped** (owner,
+  2026-09-30) — not surfaces we build; a headless mode may still exist
+  internally for scripting, but it is not a product surface.
 - TUI framework depends on AQ-12 (ratatui vs OpenTUI vs ...); web stack is
   independent (backend serves it).
 - Per-role UX (T-06) is a *surface+profile* composition, not a fork.
@@ -305,17 +307,16 @@ what order do we build?
 Principle: **one artifact, many faces.** The single `loongagent` binary
 *contains* the local agent server; every surface is either a client of it or
 a mode of it. Installing loongagent = getting that binary — no separate
-install per surface (IDE plugins and the desktop shell are thin wrappers
-around it, not parallel products).
+install per surface (IDE-side ACP plugins are thin wrappers, not parallel
+products).
 
 | Surface | Install path | How it connects |
 |---|---|---|
 | TUI (default) | `curl` install script / brew / npm / firm-internal package mirror | spawns or attaches to the local server (unix socket) |
 | Web — local | zero extra install: `loongagent web` serves the UI from the binary on localhost | same machine, same server |
-| Web — team/newbie | zero install: browser → firm control-plane URL | two routes, see sub-question below |
+| Web — team | zero install: browser → firm control-plane URL | relays to the user's own local server (see below) |
 | IDE | the editor's own ACP client (Zed built-in; JetBrains/Neovim/Emacs plugins) pointed at `loongagent acp`; optional thin loongagent-branded VS Code extension later | ACP/JSON-RPC over stdio to the local binary |
-| Desktop | later — the web UI in a native shell (Tauri-style) | bundles/embeds the local server |
-| CI / headless | same binary: `loongagent run`; official container image | non-interactive client of the same API |
+| ~~Desktop~~ / ~~CI~~ | dropped (owner, 2026-09-30) | — |
 
 Distribution principles:
 - Single static binary per OS; firm-internal mirror (Artifactory-style) for
@@ -327,13 +328,13 @@ Distribution principles:
   binary, different mode) — one artifact story end-to-end; sub-question for
   AQ-5.
 
-**Open sub-question — where does code live for a browser-only user?**
-Two routes: **(a) relay** — the team web UI connects through the control plane
-to the user's *own* local agent server (identity as rendezvous, Codex/Tailscale
-pattern); code stays on the user's machine. **(b) runner-hosted workspace** —
-for users with no machine at all, code lives on a firm runner (the async-runner
-infrastructure, T8). Lean: **support both; relay first** (cheap, privacy-clean),
-runner-hosted in v2 (it reuses the cloud-runner machinery anyway).
+**Sub-question — where does code live for a browser-only user? — RESOLVED
+(owner, 2026-09-30): code is always local.** The web experience works like the
+DeepSeek-style local harness: the web UI — whether served by the user's own
+binary (`loongagent web`) or reached via the firm control plane — always
+operates against the user's **local agent server and local code**. No
+runner-hosted workspaces in scope; if the firm-wide story ever needs them, it
+comes back with the AQ-5 team-collaboration discussion (deferred by owner).
 
 **Constrains:** T-06 wow moments, beachhead sequencing, AQ-12.
 
@@ -385,3 +386,13 @@ web / IDE via ACP / desktop / CI), distribution principles (single static
 binary, stable/LTS channels, control plane from same codebase), and the open
 sub-question of where code lives for browser-only users (relay vs
 runner-hosted; lean: both, relay first).
+
+### 2026-09-30 — AQ-1 decided; surfaces trimmed; web = local code
+- **AQ-1 decided (owner sign-off):** one binary, always client/server →
+  graduated to ADR-0001.
+- Owner dropped **Desktop and CI** as product surfaces; AQ-11 table and build
+  order updated.
+- Browser-only sub-question **resolved: code is always local** (DeepSeek-harness
+  style); runner-hosted workspaces out of scope, may return with AQ-5.
+- AQ-5 (firm control plane / team collaboration) **deferred** at owner's
+  request — revisit after local-side AQs settle.

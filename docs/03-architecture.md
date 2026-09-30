@@ -286,9 +286,10 @@ story (Codex `requirements.toml` precedent).
 
 **Constrains:** T-14, T-17, T-20 (PR-as-deliverable).
 
-### AQ-11 · Surfaces — thin-client rule and build order — `Open`
+### AQ-11 · Surfaces — thin-client rule, build order, installation — `Discussing`
 
-**Question:** what does each surface contain, and in what order do we build?
+**Question:** what does each surface contain, how do users install it, and in
+what order do we build?
 
 - **Thin-client rule:** surfaces render the event stream and send intents;
   zero agent logic client-side. This is what makes "same brain, many faces"
@@ -299,6 +300,40 @@ story (Codex `requirements.toml` precedent).
 - TUI framework depends on AQ-12 (ratatui vs OpenTUI vs ...); web stack is
   independent (backend serves it).
 - Per-role UX (T-06) is a *surface+profile* composition, not a fork.
+
+**Installation & distribution (owner's prompt, 2026-09-30).**
+Principle: **one artifact, many faces.** The single `loongagent` binary
+*contains* the local agent server; every surface is either a client of it or
+a mode of it. Installing loongagent = getting that binary — no separate
+install per surface (IDE plugins and the desktop shell are thin wrappers
+around it, not parallel products).
+
+| Surface | Install path | How it connects |
+|---|---|---|
+| TUI (default) | `curl` install script / brew / npm / firm-internal package mirror | spawns or attaches to the local server (unix socket) |
+| Web — local | zero extra install: `loongagent web` serves the UI from the binary on localhost | same machine, same server |
+| Web — team/newbie | zero install: browser → firm control-plane URL | two routes, see sub-question below |
+| IDE | the editor's own ACP client (Zed built-in; JetBrains/Neovim/Emacs plugins) pointed at `loongagent acp`; optional thin loongagent-branded VS Code extension later | ACP/JSON-RPC over stdio to the local binary |
+| Desktop | later — the web UI in a native shell (Tauri-style) | bundles/embeds the local server |
+| CI / headless | same binary: `loongagent run`; official container image | non-interactive client of the same API |
+
+Distribution principles:
+- Single static binary per OS; firm-internal mirror (Artifactory-style) for
+  managed rollouts.
+- Update channels: **stable/LTS + canary**; token-cost-affecting changes are
+  treated as breaking changes (01 §D — daily-release churn is a known
+  ecosystem failure mode).
+- The firm control plane ships from the **same codebase** (ideally the same
+  binary, different mode) — one artifact story end-to-end; sub-question for
+  AQ-5.
+
+**Open sub-question — where does code live for a browser-only user?**
+Two routes: **(a) relay** — the team web UI connects through the control plane
+to the user's *own* local agent server (identity as rendezvous, Codex/Tailscale
+pattern); code stays on the user's machine. **(b) runner-hosted workspace** —
+for users with no machine at all, code lives on a firm runner (the async-runner
+infrastructure, T8). Lean: **support both; relay first** (cheap, privacy-clean),
+runner-hosted in v2 (it reuses the cloud-runner machinery anyway).
 
 **Constrains:** T-06 wow moments, beachhead sequencing, AQ-12.
 
@@ -339,4 +374,14 @@ Owner asked whether AQ-1's client/server accounts for the firm-wide remote
 server (statistics, team collaboration, orchestration). Answer: yes — that is
 the AQ-5/T-05 control plane, distinct from the local data-plane server. Added
 the two-server topology diagram + AQ-1 scope note to make the distinction
-structural in the doc.
+structural in the doc. AQ-1 still open (owner probing scope before deciding).
+
+### 2026-09-30 — Installation & multi-client story
+Owner asked whether "client" means only TUI and how users install the product
+(TUI default, web-based, IDE plugin). Clarified: all surfaces are first-class
+clients of the same local server from day one. Added to AQ-11 (now
+`Discussing`): one-artifact-many-faces install table (TUI / local web / team
+web / IDE via ACP / desktop / CI), distribution principles (single static
+binary, stable/LTS channels, control plane from same codebase), and the open
+sub-question of where code lives for browser-only users (relay vs
+runner-hosted; lean: both, relay first).

@@ -126,7 +126,7 @@ the transport isn't HTTP). Steer-don't-watch (T-12) and live event streaming
 
 **Constrains:** client SDK count, ACP adapter effort, third-party clients.
 
-### AQ-3 · Session & event storage — `Open`
+### AQ-3 · Session & event storage — `Decided` → [ADR-0003](decisions/0003-jsonl-truth-sqlite-index.md)
 
 **Question:** how are session trees, events, and audit data persisted?
 
@@ -402,3 +402,8 @@ Owner accepted the lean: **JSON-RPC 2.0 bidirectional** (unix socket/stdio
 local, WebSocket remote), schema-first and versioned, ACP as a dialect of our
 own protocol → ADR-0002. Remaining open in the first cluster: AQ-3 (storage),
 AQ-4 (extension model).
+
+### 2026-09-30 — AQ-3 decided
+Owner accepted the lean: **JSONL event log as source of truth + derived,
+rebuildable SQLite index**; audit and session events are one stream → ADR-0003.
+First cluster now down to AQ-4 (extension model).

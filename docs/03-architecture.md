@@ -107,7 +107,7 @@ cores as boring in-process objects — Pi's single-process simplicity lives
 
 **Constrains:** AQ-2 (protocol), AQ-3 (storage ownership), all surfaces.
 
-### AQ-2 · Wire protocol & API shape — `Open`
+### AQ-2 · Wire protocol & API shape — `Decided` → [ADR-0002](decisions/0002-json-rpc-wire-protocol.md)
 
 **Question:** what do clients and server speak?
 
@@ -396,3 +396,9 @@ runner-hosted; lean: both, relay first).
   style); runner-hosted workspaces out of scope, may return with AQ-5.
 - AQ-5 (firm control plane / team collaboration) **deferred** at owner's
   request — revisit after local-side AQs settle.
+
+### 2026-09-30 — AQ-2 decided
+Owner accepted the lean: **JSON-RPC 2.0 bidirectional** (unix socket/stdio
+local, WebSocket remote), schema-first and versioned, ACP as a dialect of our
+own protocol → ADR-0002. Remaining open in the first cluster: AQ-3 (storage),
+AQ-4 (extension model).

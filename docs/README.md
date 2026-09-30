@@ -24,6 +24,7 @@ is tracked here so decisions survive context windows and sessions.
 | [00-vision.md](00-vision.md) | Vision, ambition, non-goals, target users | Draft |
 | [01-landscape-synthesis.md](01-landscape-synthesis.md) | Cross-tool synthesis: features, pros/cons, design tensions | Draft |
 | [02-topics.md](02-topics.md) | Idea backlog — raw topics, waiting to be discussed | Living |
+| [03-architecture.md](03-architecture.md) | Architecture, question-driven (AQ-1…AQ-12 decision map) | Discussing |
 | research/ | Per-tool deep dives (round 1: major agents; round 2: categories) | — |
 
 **Round 1:** claude-code, codex, opencode, cursor, pi, deepseek-harness, other-agents

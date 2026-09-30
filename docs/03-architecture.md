@@ -47,9 +47,47 @@ These are agreed direction (owner-endorsed); the AQs design *how*, not *whether*
 
 Ordered by dependency. Each AQ: the question, options, lean, what it constrains.
 
+### The two-server topology (clarified 2026-09-30, owner's prompt)
+
+"Server" is two different machines doing different jobs. AQ-1…AQ-4 design the
+**local** one; AQ-5 designs the **firm-wide** one:
+
+```
+ ┌───────┐ ┌───────┐ ┌────────┐ ┌──────────┐
+ │  TUI  │ │ Web   │ │IDE/ACP │ │CI/headless│   surfaces — thin clients (AQ-11)
+ └───┬───┘ └───┬───┘ └───┬────┘ └────┬─────┘
+     └─────────┴────┬────┴───────────┘
+                   │ JSON-RPC — unix socket locally, WebSocket remotely (AQ-2)
+          ┌────────▼─────────┐
+          │ LOCAL AGENT      │  per-user, on the engineer's machine, next to
+          │ SERVER           │  the code: session trees, tool loop, sandbox,
+          │ (data plane)     │  JSONL truth, retrieval. AQ-1 … AQ-4.
+          └────────┬─────────┘
+                   │ smart sync — events/stats up, policy & profiles down
+                   │ (batch, delta, resumable; offline = degraded, never dead)
+          ┌────────▼─────────┐
+          │ FIRM CONTROL     │  firm-wide backend: auth (T-08), model profiles
+          │ PLANE            │  & routing brain (T-07/T-01), model gateway
+          │ (control plane)  │  (keys, metering, shared cache), audit/stats
+          │                  │  (T-02), team sharing (T-14), orchestration.
+          └────────┬─────────┘  AQ-5. Self-hosted or managed, same code (T-03).
+                   │ metered model calls only
+          ┌────────▼─────────┐
+          │ MODEL PROVIDERS  │
+          └──────────────────┘
+```
+
+Key property: **code never transits the control plane.** Tool execution and
+file access stay local; the only things that flow up are events/stats (opt-in,
+visible) and the model calls themselves, which go through the gateway to
+providers anyway. Cloud/async workers (T8) are the deliberate exception —
+there the code lives on the runner by definition.
+
 ### AQ-1 · Runtime topology — how do client and core meet? — `Open`
 
-**Question:** what is the process shape of a local loongagent deployment?
+**Question:** what is the process shape of the **local** agent server (the
+data-plane box in the topology above)? Scope note: this AQ is only about the
+per-user machine; the firm-wide control plane is AQ-5.
 
 - **A) One binary, always client/server (Codex app-server model).** The
   `loongagent` CLI transparently spawns or connects to a per-user local server
@@ -295,3 +333,10 @@ cluster posed, the owner's direction, resulting doc edits.
 Doc created. Foundations imported from 01/vision. Decision map AQ-1…AQ-12
 laid out. First cluster posed to owner: **AQ-1 (topology), AQ-2 (protocol),
 AQ-3 (storage), AQ-4 (extension model)** — leans A/A/C/C respectively.
+
+### 2026-09-30 — Two-server clarification
+Owner asked whether AQ-1's client/server accounts for the firm-wide remote
+server (statistics, team collaboration, orchestration). Answer: yes — that is
+the AQ-5/T-05 control plane, distinct from the local data-plane server. Added
+the two-server topology diagram + AQ-1 scope note to make the distinction
+structural in the doc.

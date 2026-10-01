@@ -174,6 +174,28 @@ untrusted code structurally contained (T-11 philosophy), and — critically —
 **decouples the extension ecosystem from AQ-12's language choice**, so picking
 Rust for the core doesn't kill community extensibility.
 
+**Refinement — borrow from the DeepSeek-harness ecosystem (owner's prompt,
+2026-10-01): the "everything is a plugin" instinct is right at the *edges* and
+wrong at the *center*.** Frame the whole design as a **microkernel**:
+
+- *Pluggable at the edges:* **provider adapters + in-flight request/response
+  transformers** are plugins (CCR's transformer chain — the normalization layer
+  that absorbs protocol drift: stripping `document` blocks a backend rejects,
+  clamping `max_tokens`, rewriting mid-conversation system messages); the
+  per-model capability registry is **pure data** (Aider: adding a model = adding
+  a record, not code); tools — *including built-ins* — sit behind one uniform
+  interface (Goose's MCP-first orthogonality), so permissions, hooks, and cost
+  metering each get exactly one chokepoint; routing strategies are pluggable.
+- *Fixed at the center:* the agent kernel (minimal model+tool loop, event
+  append, context assembly) is **not** a plugin point. Pi's lesson: a stable,
+  tiny, observable core is what keeps T-13's "nothing hidden" promise true —
+  if the loop itself were swappable, behavior would hide and churn.
+
+Net effect on option C: unchanged for third-party *deep* extensions (WASM),
+but the edge-plugin set (providers, transformers, tools, routing) is now
+explicitly part of the extension surface — mostly as **data + subprocess +
+WASM**, not as core patches.
+
 **Constrains:** AQ-12 (language) most strongly; T-09/T-15/T-16/T-18 all land here.
 
 ### AQ-5 · Backend control plane — shape and scope — `Open` (deferred per owner, 2026-09-30 — team-collaboration shape not yet clear; revisit after local-side AQs settle)
@@ -204,8 +226,13 @@ Sub-questions to decide:
 
 - Provider adapters for the ~4 wire protocols (Pi's insight) behind one
   internal `Model` interface: `complete(messages, tools, budget) → stream`.
+  Adapters are **edge plugins** (AQ-4 microkernel), with a **transformer chain**
+  (CCR pattern) that normalizes protocol drift per endpoint — and logs every
+  downgrade it applies.
 - Per-model **capability registry** + startup endpoint probe (T4): context
   size, edit format reliability, tool-calling, thinking, structured output.
+  Registry entries are **pure data** (Aider pattern: new model = new record),
+  benchmark-derived where possible (format compliance, not just task success).
 - **Where does routing execute?** Options: (a) client-side router with
   server-distributed policy tables (works offline, tamperable); (b) server-side
   router, client sends *intent + task class*, never a model name (tamper-proof,
@@ -407,3 +434,13 @@ AQ-4 (extension model).
 Owner accepted the lean: **JSONL event log as source of truth + derived,
 rebuildable SQLite index**; audit and session events are one stream → ADR-0003.
 First cluster now down to AQ-4 (extension model).
+
+### 2026-10-01 — AQ-4 refinement: microkernel framing (DeepSeek-harness borrow)
+Owner asked whether the DeepSeek-harness "everything is a plugin" approach has
+anything worth borrowing. Decision-in-discussion: borrow at the **edges** —
+provider adapters + in-flight transformer chain as plugins (CCR), capability
+registry as pure data (Aider), uniform tool interface incl. built-ins (Goose),
+pluggable routing — but keep the **kernel fixed** (minimal loop, event append,
+context assembly stay non-pluggable per Pi's observability lesson). AQ-4 and
+AQ-6 updated; AQ-4 lean C unchanged but the edge-plugin surface is now
+explicit.

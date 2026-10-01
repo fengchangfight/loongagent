@@ -148,7 +148,7 @@ stream — the backend's aggregator (T-05) consumes the same JSONL shape.
 **Constrains:** T-02 (audit/stats), T-12 (tree), T-13 (inspectability),
 backend sync format.
 
-### AQ-4 · Extension model — how deep do plugins go? — `Open`
+### AQ-4 · Extension model — how deep do plugins go? — `Decided` → [ADR-0004](decisions/0004-microkernel-extension-model.md)
 
 **Question:** what can extend loongagent, and in what execution model?
 Four distinct extension kinds demand different answers:
@@ -444,3 +444,9 @@ pluggable routing — but keep the **kernel fixed** (minimal loop, event append,
 context assembly stay non-pluggable per Pi's observability lesson). AQ-4 and
 AQ-6 updated; AQ-4 lean C unchanged but the edge-plugin surface is now
 explicit.
+
+### 2026-10-01 — AQ-4 decided
+Owner accepted the microkernel framing: pluggable edges (providers,
+transformers, tools, hooks, routing), tiny fixed kernel → ADR-0004. First
+cluster complete: AQ-1 ✅ AQ-2 ✅ AQ-3 ✅ AQ-4 ✅. Next cluster proposed:
+AQ-6 (model layer / routing execution) + AQ-7 (context engine).

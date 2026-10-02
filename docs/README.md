@@ -25,7 +25,7 @@ is tracked here so decisions survive context windows and sessions.
 | [01-landscape-synthesis.md](01-landscape-synthesis.md) | Cross-tool synthesis: features, pros/cons, design tensions | Draft |
 | [02-topics.md](02-topics.md) | Idea backlog — raw topics, waiting to be discussed | Living |
 | [03-architecture.md](03-architecture.md) | Architecture, question-driven (AQ-1…AQ-12 decision map) | Discussing |
-| decisions/ | ADRs — one per locked decision (0001: runtime topology; 0002: wire protocol; 0003: session/event storage; 0004: extension model) | — |
+| decisions/ | ADRs — one per locked decision (0001: runtime topology; 0002: wire protocol; 0003: session/event storage; 0004: extension model; 0005: routing philosophy) | — |
 | research/ | Per-tool deep dives (round 1: major agents; round 2: categories) | — |
 
 **Round 1:** claude-code, codex, opencode, cursor, pi, deepseek-harness, other-agents

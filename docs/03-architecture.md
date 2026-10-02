@@ -220,7 +220,7 @@ Sub-questions to decide:
 
 **Constrains:** T-03 deployment shapes, T-05, T-08, enterprise/self-host story.
 
-### AQ-6 · Model layer — abstraction, routing, execution point — `Open`
+### AQ-6 · Model layer — abstraction, routing, execution point — `Decided` (routing philosophy; implementation details deferred per owner) → [ADR-0005](decisions/0005-routing-philosophy.md)
 
 **Question:** how do profiles, routing, and provider protocols fit together?
 
@@ -233,13 +233,19 @@ Sub-questions to decide:
   size, edit format reliability, tool-calling, thinking, structured output.
   Registry entries are **pure data** (Aider pattern: new model = new record),
   benchmark-derived where possible (format compliance, not just task success).
-- **Where does routing execute?** Options: (a) client-side router with
-  server-distributed policy tables (works offline, tamperable); (b) server-side
-  router, client sends *intent + task class*, never a model name (tamper-proof,
-  dead offline); (c) **both** — server is the brain when connected, a local
-  fallback table takes over offline (lean: c).
+- **Routing philosophy — local decides, server learns (owner, 2026-10-02):**
+  the **local brain is always responsible for the immediate routing decision**
+  — never the server, even when connected. The server's role is to **enhance,
+  learn, and close the feedback loop**: local reports its routing decisions
+  (batched, on sync); the server evaluates whether those were good decisions
+  (cost, outcome, verification results), updates policy when they weren't, and
+  **delivers policy packs** so the local brain is smarter next time. This
+  dissolves the online/offline authority split — local is authoritative in
+  every moment; the server shapes *future* decisions. Implementation details
+  (policy-pack format, evaluation signals, update cadence) deferred per owner.
 - Escalation loop (T-04): cheap first, escalate on verification failure or low
-  confidence; every escalation is an auditable event with a reason.
+  confidence; every escalation is an auditable event with a reason — and one
+  of the server's key learning signals.
 - Shared prompt cache at the gateway (big cost lever, T-05).
 
 **Constrains:** T-01, T-04, T-07; defines what "profile" means concretely.
@@ -450,3 +456,12 @@ Owner accepted the microkernel framing: pluggable edges (providers,
 transformers, tools, hooks, routing), tiny fixed kernel → ADR-0004. First
 cluster complete: AQ-1 ✅ AQ-2 ✅ AQ-3 ✅ AQ-4 ✅. Next cluster proposed:
 AQ-6 (model layer / routing execution) + AQ-7 (context engine).
+
+### 2026-10-02 — AQ-6 routing philosophy decided
+Owner refined the routing design: **local brain always decides immediate
+routing (even when connected); server enhances/learns/closes the feedback
+loop** — local reports decisions, server evaluates, updates policy, ships
+policy packs. Implementation details (policy-pack format, evaluation signals,
+cadence) deferred per owner → ADR-0005. The online/offline authority tension
+dissolves as a result. AQ-7 (context engine) and its memory-write sub-question
+remain open.

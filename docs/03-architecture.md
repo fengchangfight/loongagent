@@ -1,7 +1,7 @@
 # 03 — Architecture (question-driven design)
 
 - **Status:** Discussing
-- **Last updated:** 2026-09-30
+- **Last updated:** 2026-10-04
 
 This document designs the loongagent architecture **iteratively, through
 structured questions (AQ-N)** discussed with the owner. Method: each AQ lists
@@ -250,24 +250,42 @@ Sub-questions to decide:
 
 **Constrains:** T-01, T-04, T-07; defines what "profile" means concretely.
 
-### AQ-7 · Context engine — assembly, budget, retrieval — `Open`
+### AQ-7 · Context engine — assembly, budget, retrieval — `Decided` → [ADR-0006](decisions/0006-context-engine.md)
 
 **Question:** who assembles the model's context, and how is it governed?
 
-Design stance from our principles: **the core alone assembles context**;
-nothing injects silently (T-13). Concretely:
-- A **context ledger**: every block entering context (system prompt, tools,
-  rules, memory, MCP tools, retrieval results, history) is a typed entry with
-  token count and provenance — the Cursor-style context ring falls out for free.
-- **Budget policy** per profile/model: caps per category, eviction/compaction
-  order, all visible.
-- Retrieval pipeline (foundation #10) runs as core services, results enter
-  through the ledger like everything else.
-- Compaction is a visible event; the tree keeps the lossless record (AQ-3).
+**Decision (owner sign-off, 2026-10-04): the kernel alone assembles context;
+nothing enters the model's context outside a typed, token-counted ledger
+entry.**
 
-Open sub-questions: memory write path (T-10) — who may add ledger entries
-(agent-proposed + user-confirmed?); per-role context packs (T-06) as versioned
-bundles.
+- **Context ledger is the only write path.** System prompt, tools, rules,
+  memory, MCP tools, retrieval results, history — all typed entries.
+  Plugins/MCP/skills/hooks/subagents may *propose* entries; none may append
+  directly. There is no side channel to the model.
+- **Every entry carries provenance and cost:** category, source + version,
+  token count, insertion seq, lifetime (turn/session/persistent),
+  pinned vs evictable. "Why is this in my context?" is a query, not an
+  inference; the Cursor-style context ring falls out of the same data.
+- **Budget policy per profile/model, fully visible:** caps per category,
+  eviction order, and the request's token floor — the floor is what AQ-6's
+  routing reads before deciding.
+- **Compaction is a visible event**, with what was summarized and why; the
+  session tree (AQ-3) keeps the lossless record, so it is reversible in
+  principle.
+- **Retrieval is a kernel service writing through the ledger** — grep →
+  repo map → explore subagent results compete for budget like everything else.
+- **Memory write path (T-10) — propose-and-confirm.** The agent proposes into
+  a staging area; **low-risk project facts** may auto-accept; anything about
+  **user preferences/feedback** requires explicit confirmation. Confirmed
+  memories are ordinary ledger entries (inspectable/editable/deletable), and
+  the write is an event — auditable and revertible.
+- **Per-role context packs (T-06) are versioned ledger entries**, i.e.
+  profile + role pack composition, never a hidden per-role prompt.
+
+Deferred to later discussion: ledger schema, default caps per profile,
+eviction algorithm details, role-pack versioning/distribution (AQ-9/AQ-5),
+memory decay/TTL and cross-session memory for async workers (T-10), and the
+exact auto-accept rule set for low-risk project facts.
 
 **Constrains:** T-10, T-13, T-06 role packs; token cost floor (T-04).
 
@@ -465,3 +483,16 @@ policy packs. Implementation details (policy-pack format, evaluation signals,
 cadence) deferred per owner → ADR-0005. The online/offline authority tension
 dissolves as a result. AQ-7 (context engine) and its memory-write sub-question
 remain open.
+
+### 2026-10-04 — AQ-7 context engine decided
+Owner accepted the lean: **kernel-assembled, ledger-visible, budgeted
+context** → ADR-0006. The context ledger is the only write path (proposals
+only, no side channel), every entry carries provenance + token cost, budget
+policy is per profile/model and visible, compaction is a visible event with the
+lossless tree behind it (AQ-3), and retrieval enters through the ledger.
+Memory write path (T-10) resolved as **propose-and-confirm**: agent proposes
+into a staging area, low-risk project facts may auto-accept, user
+preferences/feedback require explicit confirmation. Per-role context packs
+(T-06) are versioned ledger entries. Session was resumed from a Kimi Code CLI
+transcript (see `docs/handoff/kimi-session-49a7c44c/`); no design content
+changed in the transfer.

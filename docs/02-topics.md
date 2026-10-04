@@ -2,7 +2,7 @@
 
 - **Status:** Living document — append ideas as they come; promote to numbered
   design docs or ADRs when discussed.
-- **Last updated:** 2026-09-30 (T-09..T-21 added; coverage map added)
+- **Last updated:** 2026-10-04 (T-10 write path resolved by ADR-0006)
 How this works: the owner drops raw ideas in conversation; they land here as
 topics with a one-line seed connecting them to what the research already knows
 (`research/`, `01-landscape-synthesis.md`). When a topic gets discussed in
@@ -330,7 +330,12 @@ untrusted repos must never auto-execute).
 
 ## T-10 · Memory system — `Seed`
 
-Seeded 2026-09-30.
+Seeded 2026-09-30. **Write path decided 2026-10-04 (ADR-0006):**
+agent-proposed into a staging area; low-risk project facts may auto-accept;
+user preferences/feedback require explicit confirmation; memories are ledger
+entries and writes are events (auditable, revertible). The rest of the topic
+(what earns memory, decay/TTL, scoping, cross-session memory for async
+workers) is still open.
 
 Dual authorship: human-written rules (versioned in git, team-shared) vs
 agent-written memory (typed notes: user/feedback/project/reference) with a

@@ -4,10 +4,12 @@
 - **Last updated:** 2026-10-04
 
 This document designs the loongagent architecture **iteratively, through
-structured questions (AQ-N)** discussed with the owner. Method: each AQ lists
-the decision, the options, the constraints our principles impose, and a
-recommended lean. Nothing here is "Decided" until the owner signs off in
-conversation; locked decisions graduate to `decisions/` ADRs.
+structured architecture questions, numbered `AQ-N`** — **AQ = architecture
+question** — discussed with the owner. Method: each AQ lists the decision, the
+options, the constraints our principles impose, and a recommended lean. Nothing
+here is "Decided" until the owner signs off in conversation; locked decisions
+graduate to `decisions/` ADRs. So **AQ-N is an open question; the matching ADR
+is the record of its answer** (e.g. AQ-1 → ADR-0001).
 
 When the AQs are answered, the **implementation language (AQ-12) falls out
 last** — it is a consequence of the architecture, not a precondition.

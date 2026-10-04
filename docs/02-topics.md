@@ -2,7 +2,7 @@
 
 - **Status:** Living document — append ideas as they come; promote to numbered
   design docs or ADRs when discussed.
-- **Last updated:** 2026-10-04 (T-09/T-10/T-11 updated by ADR-0006/0007)
+- **Last updated:** 2026-10-04 (T-07/T-09/T-10/T-11 updated by ADR-0006/0007/0008)
 How this works: the owner drops raw ideas in conversation; they land here as
 topics with a one-line seed connecting them to what the research already knows
 (`research/`, `01-landscape-synthesis.md`). When a topic gets discussed in
@@ -239,7 +239,14 @@ Open questions:
 
 ## T-07 · Model profiles, not model pickers — `Seed`
 
-Seeded 2026-09-26.
+Seeded 2026-09-26. **Distribution decided 2026-10-04 (ADR-0008):** the org
+layer is admin-authored in the control plane and shipped to local installs as a
+**signed, versioned pack** (same envelope as policy/context packs); the local
+install verifies the signature, caches the pack, and stays functional offline
+with the last synced version; live routing decisions remain local (ADR-0005).
+Unsigned artifacts can never occupy the org layer. Still open: profile payload
+schema, pack transport/update cadence (AQ-5), and the power-user escape-hatch
+design.
 
 Owner's idea: in the firm-internal context, engineers should NOT pick raw
 models/providers directly (DeepSeek here, Claude there). Instead the org packs

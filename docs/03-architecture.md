@@ -335,18 +335,44 @@ model/budget policy.
 
 **Constrains:** T-11, T-09, role autonomy (T-06), async runner safety (T8).
 
-### AQ-9 · Configuration & profile layering — `Open`
+### AQ-9 · Configuration & profile layering — `Decided` → [ADR-0008](decisions/0008-configuration-layering.md)
 
 **Question:** file formats, precedence, and distribution of config?
 
-- Precedence chain: built-in defaults < org managed (server-distributed,
-  tamper-resistant) < project (repo-committed) < user < session overrides.
-- Format: TOML for machine-managed config (profiles, policies) vs markdown
-  for human-authored (rules, commands, skills — already decided by ecosystem
-  convention). Lean: both, each where it fits; AGENTS.md as the native rules
-  format with CLAUDE.md/.cursor import (01 open Q3).
-- Profiles (T-07) are versioned, server-distributed, PR-reviewable (git-native
-  config lesson from role-specialized research).
+**Decision (owner sign-off, 2026-10-04): one layered stack with a per-key merge
+kind, so no lower layer can loosen a higher one.**
+
+- **Layers/ownership:** built-in defaults < org managed < project
+  (repo-committed) < user < session. The **org layer** is admin-authored in the
+  control plane (T-05) and reaches the install as a versioned pack; project is
+  committed; user/session stay local; a solo install is the same code with an
+  empty org layer. Offline = older pack, never a dead system, and **live
+  decisions stay local** (ADR-0005).
+- **Merge kinds (monotonicity):** *free-override* (UX prefs, profile choice
+  within the allowed set) = lowest layer wins; *narrow-only* (permissions,
+  allow/deny lists, autonomy class, budgets, timeouts, token ceilings) =
+  strictest wins, lower layers may never widen/replace/disable; *add-only*
+  (rules, commands, skills, memory, context packs) = union, and a lower layer
+  may disable a specific higher-layer entry by identity as an event (allowed
+  because content is advisory, per ADR-0007); *reference* (secrets, endpoints).
+  **Replacement is not a merge kind for lists** — it is the widening vector.
+- **Formats:** TOML for machine-managed config; markdown + YAML frontmatter for
+  human-authored content; **AGENTS.md native**, with CLAUDE.md/`.cursorrules`
+  handled by explicit one-time import, never a live dual-source merge.
+- **Explainable resolution:** every key answers "why is this the value?" —
+  winning layer + source artifact + entry identity; `loongagent config explain
+  <key>`, and turn-relevant values can appear as ledger entries (ADR-0006).
+- **Secrets never in config:** credentials/keys live in the OS credential store
+  or the control-plane gateway (T-08/T-05); config carries only references.
+- **Packs:** one **signed envelope** (id, semver, payload schema, issuer, scope,
+  signature) for profiles (T-07), policy packs (ADR-0005), and role/context
+  packs (ADR-0006/0007). Signature verification is what makes the org layer
+  tamper-resistant; **unsigned packs are only allowed at project/user layers**.
+  AQ-9 fixes the envelope; payload schemas stay with their domains.
+
+Deferred: key schemas per domain, pack transport/update cadence (AQ-5),
+signature algorithm and key distribution, discovery paths, importer
+normalization.
 
 **Constrains:** T-07, T-21 (what seniors can open), enterprise managed-config
 story (Codex `requirements.toml` precedent).
@@ -539,3 +565,20 @@ orthogonal axis, YOLO as a visible auditable opt-out; v1 covers file writes and
 network egress, micro-VM deferred to async runners. Approvals are first-class
 events with granted scope and structured reasons fed back to the model; the
 repo-hook trust gate is absolute; Guardian-style LLM pre-review deferred to v2.
+
+### 2026-10-04 — AQ-9 configuration & profile layering decided
+Owner accepted the lean → ADR-0008. Owner also asked for one point to be made
+explicit, and it is now part of the decision: the **org layer** (profiles,
+policy, budgets) is maintained in the firm control plane and distributed to
+each user's local install as a **versioned pack**; project config lives in the
+repo, user/session config stays local; offline means an older pack, not a dead
+system; and live decisions remain local (ADR-0005). The core rule is
+**monotonicity**: each key declares a merge kind (free-override / narrow-only /
+add-only / reference) and no lower layer may loosen a higher one — which
+retires the earlier "lists replace by default, `+` to extend" lean, since
+replacement was the widening vector. Formats split TOML (machine) vs markdown +
+frontmatter (human), with AGENTS.md native and foreign rules files imported
+explicitly once rather than merged live. One **signed pack envelope** now
+carries profiles, policy packs, and role/context packs; unsigned artifacts are
+limited to project/user layers. Every key is explainable layer-by-layer, and
+secrets are references rather than values (§ADR-0008).

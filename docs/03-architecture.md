@@ -385,15 +385,15 @@ normalization.
 **Constrains:** T-07, T-21 (what seniors can open), enterprise managed-config
 story (Codex `requirements.toml` precedent).
 
-### AQ-10 · Team/async runtime — `Open` (local parallelism only; **cloud/cross-user/scheduled orchestration dropped 2026-10-04 — owner: no use case**, see discussion log)
+### AQ-10 · Team/async runtime — `Decided` → [ADR-0011](decisions/0011-local-parallelism.md) (local parallelism only; **cloud/cross-user/scheduled orchestration dropped 2026-10-04 — owner: no use case**, see discussion log)
 
 **Question:** how do parallel agents and worktrees compose locally?
 
 Scope: AQ-10 is now about **local parallelism inside one user's session**.
 Cross-user and scheduled orchestration, cloud runners, and a runner scheduler
 are **out of scope until a concrete use case appears** (owner, 2026-10-04);
-ADR-0010 had already removed their collaboration driver. Proposed lean,
-**pending owner sign-off**:
+ADR-0010 had already removed their collaboration driver. **Decision (owner
+sign-off, 2026-10-04)** — authoritative detail in ADR-0011:
 
 - **Write isolation:** any write-capable subagent runs in its own **git
   worktree**; read-only research subagents share the workspace. Isolation is
@@ -426,7 +426,10 @@ ADR-0010 had already removed their collaboration driver. Proposed lean,
   + human sign-off) reviewing **the user's own** agents (rescoped by ADR-0010).
   Review-relevant data is first-class in the event stream from v1; the rich
   review UI arrives with the web surface.
-- **v1 scope:** local worktrees + subagents only.
+- **v1 scope:** local worktrees + subagents only. Review is bounded by human
+  attention (3–5), worktree lifecycle/GC is product surface, and the worktree
+  isolation buys trustworthy verification, per-step diffs, and free
+  abandonment — not scheduling features, which are deliberately refused.
 
 **Constrains:** T-17, T-20 (PR-as-deliverable); T-14 resolved as
 knowledge-sharing rather than session-sharing (ADR-0010).
@@ -658,3 +661,18 @@ limits, and helper libraries are all unaffected). Two isolation boundaries were
 added to the AQ-10 lean: a worktree isolates files but **not** external
 resources (ports/DBs/containers/shared caches), and non-git workspaces fall
 back to a temporary copy or serialization.
+
+### 2026-10-04 — AQ-10 decided: local parallelism
+Owner accepted the lean → **ADR-0011**. Write-capable subagents run in their own
+**git worktree** (read-only researchers share the workspace), with the two
+boundaries recorded: a worktree isolates files but not external resources, and
+non-git workspaces degrade to a temporary copy or serialization. Subagents are
+**session-tree branches returning structured artifacts** rather than
+transcripts, keeping the parent context small (ADR-0006). There is **one
+orchestrator — the parent agent's visible, steerable plan** — with no scheduler,
+plus an explicit boundary test for future "put it in the backend" requests
+(lifetime + authority) and explicit non-meanings. Review is bounded by human
+attention (**3–5 agents**, tiered LLM pre-review + human sign-off over the
+user's own agents). Cloud/cross-user/scheduled orchestration stays out of scope
+for lack of a use case. **This closes AQ-10**: the local-side decision map is
+complete except the deferred AQ-5 and the final AQ-12.

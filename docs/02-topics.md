@@ -2,7 +2,7 @@
 
 - **Status:** Living document — append ideas as they come; promote to numbered
   design docs or ADRs when discussed.
-- **Last updated:** 2026-10-04 (T-07/T-09/T-10/T-11/T-14/T-19 updated by ADR-0006…0010)
+- **Last updated:** 2026-10-04 (T-05/T-07/T-09/T-10/T-11/T-14/T-17/T-19 updated by ADR-0006…0011)
 How this works: the owner drops raw ideas in conversation; they land here as
 topics with a one-line seed connecting them to what the research already knows
 (`research/`, `01-landscape-synthesis.md`). When a topic gets discussed in
@@ -456,7 +456,14 @@ custom commands merged into skills — decide whether our commands and skills
 
 ## T-17 · Subagents — `Seed`
 
-Seeded 2026-09-30.
+Seeded 2026-09-30. **Execution model decided 2026-10-04 (ADR-0011):**
+write-capable subagents run in their own **git worktree** (read-only ones share
+the workspace); each is a **session-tree branch** returning a **structured
+artifact** (files + summary), not a transcript; there is **one orchestrator —
+the parent's visible plan**, no scheduler; concurrency is bounded by human
+review attention (**3–5**, tiered review over the user's own agents). Still
+open: artifact/summary schema, worktree lifecycle & GC, external-resource
+declaration.
 
 Per synthesis T6 (direction agreed): first-class but **observable and
 artifact-based** — each subagent is a visible branch in the session tree

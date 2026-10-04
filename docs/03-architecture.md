@@ -1,6 +1,6 @@
 # 03 — Architecture (question-driven design)
 
-- **Status:** Discussing
+- **Status:** Agreed — AQ-1…AQ-12 all decided (see table below and `decisions/`)
 - **Last updated:** 2026-10-04
 
 This document designs the loongagent architecture **iteratively, through
@@ -12,7 +12,8 @@ graduate to `decisions/` ADRs. So **AQ-N is an open question; the matching ADR
 is the record of its answer** (e.g. AQ-1 → ADR-0001).
 
 When the AQs are answered, the **implementation language (AQ-12) falls out
-last** — it is a consequence of the architecture, not a precondition.
+last** — it is a consequence of the architecture, not a precondition. *(Done
+2026-10-04: Rust kernel/servers + TypeScript web client — ADR-0013.)*
 
 ---
 
@@ -471,8 +472,9 @@ what order do we build?
 - **No single-surface capability:** implemented once in the server and
   *exposed* per surface; a surface may lag in exposing (visible unsupported
   marker), never diverge locally. No surface-only features, ever.
-- **Build order:** TUI first → web → ACP adapter. TUI framework falls out of
-  AQ-12; the web stack is independent (served by the binary).
+- **Build order:** TUI first → web → ACP adapter. TUI framework: `ratatui`
+  (fell out of AQ-12 → ADR-0013); the web stack is TypeScript and independent
+  (served by the binary).
 - **Attach semantics:** **one writer + N observers** per session; takeover is
   explicit and is an event (ADR-0003), so roaming never means two fronts
   steering the same session.
@@ -493,25 +495,34 @@ cadence and rollback, branded VS Code extension scope, observer write-token UX.
 
 **Constrains:** T-06 wow moments, beachhead sequencing, AQ-12.
 
-### AQ-12 · Implementation language — `Open` (decided LAST)
+### AQ-12 · Implementation language — `Decided` → [ADR-0013](decisions/0013-implementation-language.md)
 
-Not a question to answer now — it **falls out** of AQ-1…AQ-11. Criteria the
-answers above will populate:
+**Question:** which language, now that the architecture is settled?
 
-| Criterion | Fed by |
-|---|---|
-| Single-binary distribution, per-OS sandbox code | AQ-1, AQ-8 |
-| TUI ecosystem quality | AQ-11 |
-| Concurrency model for many sessions/tools per server | AQ-1, AQ-10 |
-| WASM/plugin embedding story | AQ-4 |
-| JSON-RPC/ACP library maturity | AQ-2 |
-| Contributor pool & self-modification ambitions | AQ-4, T-21 |
-| Performance floor (event sourcing, retrieval, repo map) | AQ-3, AQ-7 |
+**Decision (owner sign-off, 2026-10-04): Rust for the kernel and servers,
+TypeScript for the web client.**
 
-Candidates carried forward from research: **Rust** (Codex: robustness, single
-binary, sandbox FFI, ratatui), **TypeScript/Bun** (Pi/OpenCode/Claude Code:
-extension ecosystem, self-modification, fastest product iteration), **Go**
-(Amp/OpenHands-CLI: middle ground, great server ergonomics, weaker TUI).
+| Criterion | Fed by | Resolved by |
+|---|---|---|
+| Single-binary distribution, per-OS sandbox code | AQ-1, AQ-8 | Rust: one binary per OS; sandbox via native FFI (seatbelt / Landlock+bubblewrap / Job Objects) |
+| WASM/plugin embedding story | AQ-4 | Rust + `wasmtime` (reference host); capabilities gated, host API versioned |
+| Performance floor (event sourcing, retrieval, repo map) | AQ-3, AQ-7 | Rust: append + SQLite index + repo map at 10M+ LOC scale |
+| Signed packs | ADR-0008 | Mature Rust crypto libraries for signature verification |
+| Concurrency for sessions/tools/subagents | AQ-1, AQ-10 | Rust async + cheap subprocesses + worktree orchestration |
+| Small control plane, same codebase | ADR-0012 | Same Rust codebase, one binary in another mode |
+| TUI ecosystem quality | AQ-11 | `ratatui` (consequence of this decision) |
+| JSON-RPC/ACP library maturity | AQ-2 | Schema-first protocol (ADR-0002) generates the TS client's types |
+| Contributor pool & self-modification | AQ-4, T-21 | Addressed by ADR-0004: extensions are WASM/markdown/hooks, so behavior changes need no Rust; self-modification targets the extension surface, not the kernel |
+
+The web surface is a **thin client** in TypeScript, built to static assets and
+served by the same binary, talking JSON-RPC to the local server. The boundary is
+one-way and narrow: **types are generated from the protocol schema**, not
+hand-maintained. Rust's smaller contributor pool is the accepted cost, mitigated
+by keeping the kernel tiny and fixed and pushing iteration to the edges.
+
+Deferred: workspace/toolchain layout (cargo workspace; Bun vs Node for the web
+build), whether the control-plane backend is the same binary in another mode or
+a sibling binary, and the concrete WASM host API surface.
 
 ---
 
@@ -708,3 +719,17 @@ are session bus (ADR-0010), document server (ADR-0010), job scheduler (AQ-10),
 and session-state sync service. The model gateway is named as the one residual
 concentration point, mitigated by self-hosting (T-03). **This closes AQ-5** —
 AQ-12 (implementation language, decided last) is the only open question left.
+
+### 2026-10-04 — AQ-12 decided: Rust kernel/servers + TypeScript web. Decision map complete
+Owner accepted the lean → **ADR-0013**. The language fell out of the decided
+architecture: Rust covers the single-binary requirement (ADR-0001/0009), FFI-level
+sandbox enforcement (ADR-0007), the WASM host via `wasmtime` (ADR-0004), the
+performance floor for event sourcing and retrieval (ADR-0003/0006), and signing
+(ADR-0008). TypeScript covers the thin web client only (ADR-0009), with its types
+**generated from the schema-first protocol** (ADR-0002) so the boundary cannot
+drift. The "harness must stay cheap to change" concern is answered by ADR-0004:
+behavior changes arrive as WASM plugins, markdown skills/commands, hooks, and
+config — not as core patches; self-modification targets the extension surface,
+not the kernel. Accepted cost: two languages and a smaller core contributor pool.
+Knock-ons recorded: TUI toolkit `ratatui`, WASM host `wasmtime`. **AQ-1…AQ-12 are
+now all decided → 03 is `Agreed`**; ADRs 0001–0013 hold the answers.

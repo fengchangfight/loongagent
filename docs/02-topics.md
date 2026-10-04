@@ -2,7 +2,7 @@
 
 - **Status:** Living document — append ideas as they come; promote to numbered
   design docs or ADRs when discussed.
-- **Last updated:** 2026-10-04 (T-05/T-07/T-09/T-10/T-11/T-14/T-17/T-19 updated by ADR-0006…0011)
+- **Last updated:** 2026-10-04 (T-05/T-07/T-09/T-10/T-11/T-14/T-17/T-19 updated by ADR-0006…0012)
 How this works: the owner drops raw ideas in conversation; they land here as
 topics with a one-line seed connecting them to what the research already knows
 (`research/`, `01-landscape-synthesis.md`). When a topic gets discussed in
@@ -145,12 +145,15 @@ through subscription billing" (BYOK users get burned — budgets are the fix).
 
 ## T-05 · Rich backend / control plane (not a local-only tool) — `Seed`
 
-Seeded 2026-09-26. **Scope narrowed 2026-10-04 (ADR-0010):** the backend owns
-identity/auth, policy & profile packs, the model gateway (keys/metering/shared
-cache), and **opt-in aggregated** audit/statistics. It is **not** a session bus,
-collaboration server, or document server — team knowledge moves through git and
-signed packs (ADR-0008/0010). Async runner orchestration deferred with AQ-10's
-cloud half. AQ-5 stays open with this smaller scope.
+Seeded 2026-09-26. **Decided 2026-10-04 (ADR-0012):** the backend is
+deliberately small — identity/auth, policy & profile pack distribution, the
+model gateway (keys/metering/shared cache), and **opt-in aggregated**
+audit/statistics. Explicitly not a session bus, collaboration server, document
+server, job scheduler, or **session-state sync service** (personal cross-device
+session sync: not built for now; roaming stays per machine). The uplink is an
+allow-list with session bodies excluded; the model gateway is the one residual
+concentration point, avoidable by self-hosting (T-03). Still open: the auth
+protocol (T-08), rollup schema/retention, and packaging.
 
 Owner's idea: loongagent is **not a local-only tool**. There should be a rich
 backend that local clients *smartly* communicate with — handling audit,

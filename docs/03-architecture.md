@@ -200,32 +200,47 @@ WASM**, not as core patches.
 
 **Constrains:** AQ-12 (language) most strongly; T-09/T-15/T-16/T-18 all land here.
 
-### AQ-5 · Backend control plane — shape and scope — `Open` (deferred per owner, 2026-09-30; **scope narrowed 2026-10-04** by [ADR-0010](decisions/0010-team-collaboration-knowledge-not-sessions.md) and the orchestration decision — no shared live sessions and no cross-user/scheduled orchestration, so the backend is identity + packs + gateway + opt-in stats; revisit after the remaining local-side AQs)
+### AQ-5 · Backend control plane — shape and scope — `Decided` → [ADR-0012](decisions/0012-control-plane.md)
 
 **Question:** what exactly lives server-side, and as what deployment shape?
 
-Per T-05 (direction agreed) and narrowed by ADR-0010 + the 2026-10-04
-orchestration decision: the backend owns auth (T-08), profile/routing **policy
-packs** (T-07/T-01/ADR-0008), the model gateway (keys, metering, shared cache),
-and **opt-in aggregated** audit/statistics (T-02). It is **not** a session bus,
-a collaboration server, a document server, or a job scheduler — team knowledge
-moves through git and signed packs (ADR-0010), and cross-user/scheduled
-orchestration is out of scope for lack of a use case (AQ-10). Agent core + tool
-execution + sandbox always stay local near the code; offline = degraded, never
-dead.
+**Decision (owner sign-off, 2026-10-04): a deliberately small backend.** Three
+earlier decisions (ADR-0010, the orchestration drop, and the owner's call on
+cross-device sync) had already removed most of T-05's original wish list.
 
-Sub-questions to decide:
-- **Monolith or services?** Lean: one backend binary, modular inside (module
-  boundaries where scaling differs: gateway vs. dashboards). Microservices are
-  an ops tax we haven't earned.
-- **Data store:** Postgres (events rollup, users, policies) + object storage
-  (shared artifacts, cache blobs)? Lean: yes, boring and sufficient.
-- **Sync protocol:** clients push event batches (delta, resumable); server
-  pushes policy/profile updates. Every byte user-visible and opt-in per
-  feature (local-first promise).
-- **Personal cross-device session sync** (Codex's identity-based model): in
-  scope for the control plane, or deferred with the rest? This is personal
-  continuity, not multi-user collaboration (ADR-0010 open sub-question).
+- **Shape:** one backend binary, modular inside where scaling differs (model
+  gateway / dashboards & statistics / pack distribution); no microservices;
+  same codebase as the local agent, deployable **managed or self-hosted**
+  (T-03).
+- **Data:** Postgres (users, policies, event rollups) + object storage (shared
+  prompt-cache blobs, signed packs).
+- **Uplink is an allow-list, opt-in by category:** clients push event batches
+  (delta, resumable); the server pushes only policy/profile/knowledge packs.
+  **Default uplink = audit events + aggregate statistics; session bodies and
+  transcripts are not in the contract.** Offline stays fully functional.
+- **Identity:** flexible firm-internal auth (SSO / service principal, T-08) —
+  the account is the rendezvous for the *person* (policy, profiles, metering),
+  not a session-continuity mechanism.
+- **Complete job list:** identity/auth; policy & profile pack distribution
+  (ADR-0008); the model gateway (provider keys, metering, shared prompt cache);
+  opt-in aggregated audit/statistics (T-02).
+- **Explicit non-jobs:** session bus / live collaboration server (ADR-0010);
+  document or knowledge server (knowledge travels as git + signed packs);
+  job scheduler for cross-user/scheduled orchestration (AQ-10, no use case);
+  session-state sync service.
+- **Personal cross-device session sync: not built for now** (owner,
+  2026-10-04). Sessions stay a purely local event stream (ADR-0003); roaming
+  (ADR-0009) remains **per machine**. Alternatives recorded: manual
+  export/import, or the user's own file sync — with the caveat that git is a
+  poor fit for a high-frequency append-only log.
+- Agent core + tool execution + sandbox always stay local near the code;
+  offline = degraded, never dead. **The model gateway is the one residual
+  concentration point** (model traffic passes through it by definition of
+  centralized keys/metering/cache) — visible, and avoidable by self-hosting.
+
+Deferred: concrete auth protocol (T-08), rollup schema and retention,
+cache-sharing policy details, managed-vs-self-hosted packaging, gateway
+failover/quotas.
 
 **Constrains:** T-03 deployment shapes, T-05, T-08, enterprise/self-host story.
 
@@ -678,3 +693,18 @@ attention (**3–5 agents**, tiered LLM pre-review + human sign-off over the
 user's own agents). Cloud/cross-user/scheduled orchestration stays out of scope
 for lack of a use case. **This closes AQ-10**: the local-side decision map is
 complete except the deferred AQ-5 and the final AQ-12.
+
+### 2026-10-04 — AQ-5 decided: a deliberately small control plane
+Owner accepted the lean, with one explicit call: **personal cross-device session
+sync is not built for now** → **ADR-0012**. Shape: one backend binary (modular
+inside: gateway / dashboards & stats / pack distribution), no microservices;
+Postgres + object storage. The uplink is an **allow-list, opt-in per category** —
+audit events and aggregate statistics by default, **session bodies never** — and
+the server pushes only policy/profile/knowledge packs. Identity is the person's
+rendezvous (policy, profiles, metering), explicitly **not** session continuity,
+so roaming (ADR-0009) stays per machine. The complete job list is identity,
+pack distribution, model gateway, opt-in aggregate stats; the explicit non-jobs
+are session bus (ADR-0010), document server (ADR-0010), job scheduler (AQ-10),
+and session-state sync service. The model gateway is named as the one residual
+concentration point, mitigated by self-hosting (T-03). **This closes AQ-5** —
+AQ-12 (implementation language, decided last) is the only open question left.

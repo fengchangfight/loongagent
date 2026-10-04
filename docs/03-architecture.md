@@ -198,23 +198,24 @@ WASM**, not as core patches.
 
 **Constrains:** AQ-12 (language) most strongly; T-09/T-15/T-16/T-18 all land here.
 
-### AQ-5 · Backend control plane — shape and scope — `Open` (deferred per owner, 2026-09-30; **scope narrowed 2026-10-04 by [ADR-0010](decisions/0010-team-collaboration-knowledge-not-sessions.md)** — no shared live sessions, so the backend is identity + packs + gateway + opt-in stats; revisit after the remaining local-side AQs)
+### AQ-5 · Backend control plane — shape and scope — `Open` (deferred per owner, 2026-09-30; **scope narrowed 2026-10-04** by [ADR-0010](decisions/0010-team-collaboration-knowledge-not-sessions.md) and the orchestration decision — no shared live sessions and no cross-user/scheduled orchestration, so the backend is identity + packs + gateway + opt-in stats; revisit after the remaining local-side AQs)
 
 **Question:** what exactly lives server-side, and as what deployment shape?
 
-Per T-05 (direction agreed) and narrowed by ADR-0010: the backend owns auth
-(T-08), profile/routing **policy packs** (T-07/T-01/ADR-0008), the model gateway
-(keys, metering, shared cache), and **opt-in aggregated** audit/statistics
-(T-02). It is **not** a session bus, a collaboration server, or a document
-server — team knowledge moves through git and signed packs (ADR-0010). Async
-runner orchestration is deferred along with the cloud half of AQ-10. Agent core
-+ tool execution + sandbox always stay local near the code; offline = degraded,
-never dead.
+Per T-05 (direction agreed) and narrowed by ADR-0010 + the 2026-10-04
+orchestration decision: the backend owns auth (T-08), profile/routing **policy
+packs** (T-07/T-01/ADR-0008), the model gateway (keys, metering, shared cache),
+and **opt-in aggregated** audit/statistics (T-02). It is **not** a session bus,
+a collaboration server, a document server, or a job scheduler — team knowledge
+moves through git and signed packs (ADR-0010), and cross-user/scheduled
+orchestration is out of scope for lack of a use case (AQ-10). Agent core + tool
+execution + sandbox always stay local near the code; offline = degraded, never
+dead.
 
 Sub-questions to decide:
 - **Monolith or services?** Lean: one backend binary, modular inside (module
-  boundaries where scaling differs: gateway vs. dashboards vs. runner
-  scheduler). Microservices are an ops tax we haven't earned.
+  boundaries where scaling differs: gateway vs. dashboards). Microservices are
+  an ops tax we haven't earned.
 - **Data store:** Postgres (events rollup, users, policies) + object storage
   (shared artifacts, cache blobs)? Lean: yes, boring and sufficient.
 - **Sync protocol:** clients push event batches (delta, resumable); server
@@ -324,7 +325,8 @@ information point.
 - **Sandbox default-on; approval policy is an orthogonal axis; YOLO is a
   visible opt-out** (the opt-out is itself an event, and it travels in audit).
   `sandbox self-test` before the first tool call. v1 scope: the file-write
-  boundary and network egress; micro-VM deferred to async runners (AQ-10).
+  boundary and network egress; the micro-VM tier stays deferred — its original
+  driver (async runners) is out of scope for now (AQ-10).
 - **Approvals are first-class events:** request, decision, granted scope
   (once / this class for this session / persistent for this project), and
   reason — all in the JSONL stream (ADR-0003), replayable in the session tree.
@@ -383,33 +385,50 @@ normalization.
 **Constrains:** T-07, T-21 (what seniors can open), enterprise managed-config
 story (Codex `requirements.toml` precedent).
 
-### AQ-10 · Team/async runtime — `Open` (split 2026-10-04 by [ADR-0010](decisions/0010-team-collaboration-knowledge-not-sessions.md): local half decidable now, cloud half deferred)
+### AQ-10 · Team/async runtime — `Open` (local parallelism only; **cloud/cross-user/scheduled orchestration dropped 2026-10-04 — owner: no use case**, see discussion log)
 
-**Question:** how do parallel agents, worktrees, and cloud runners compose?
+**Question:** how do parallel agents and worktrees compose locally?
 
-ADR-0010 removed the collaboration driver from the cloud half: with no shared
-live sessions, async runners need their own justification (long-running
-scheduled or org-wide batch work, a *personal* capability), not co-watching. The
-local half stands alone. Proposed lean, **pending owner sign-off**:
+Scope: AQ-10 is now about **local parallelism inside one user's session**.
+Cross-user and scheduled orchestration, cloud runners, and a runner scheduler
+are **out of scope until a concrete use case appears** (owner, 2026-10-04);
+ADR-0010 had already removed their collaboration driver. Proposed lean,
+**pending owner sign-off**:
 
 - **Write isolation:** any write-capable subagent runs in its own **git
   worktree**; read-only research subagents share the workspace. Isolation is
   spent only where conflicts are real.
+  - *Boundary:* a worktree isolates **files, not external resources** — ports,
+    databases, container names, shared caches, and global locks still collide.
+    Concurrent write subagents must therefore declare/allocate such resources,
+    or the concurrent-write count is capped.
+  - *Boundary:* in a **non-git workspace** the fallback is a temporary copy or
+    serialization — never shared concurrent writes.
 - **Subagents are session-tree branches:** each is a branch linked by its
   parent tool call; results return as a **structured artifact** (files plus a
   structured summary), not as long transcripts re-entering the parent context —
   which is also ADR-0006 token discipline.
-- **Two layers of orchestration, kept distinct:** *local* orchestration is the
-  parent agent's plan, visible and steerable in the session tree — **no separate
-  scheduler**; firm-wide or scheduled orchestration belongs to the control
-  plane, if it ever exists.
+- **One orchestrator: the parent agent's plan.** Local orchestration *is* the
+  parent's visible, steerable plan in the session tree — there is **no separate
+  scheduler and no second decision-maker**. This keeps orchestration
+  explainable and steerable (T-13/T-12), keeps cost attribution on a visible
+  decision (T-04), and avoids a component whose lifetime outlives the session.
+  - *Boundary test for any future "put it in the backend" request:* **how long
+    must this work live, and who has the authority to decide it?** If it cannot
+    outlive the session and the user authorizes it, it belongs to the parent's
+    plan. Cross-user/scheduled work would fail that test — but it is out of
+    scope for now anyway.
+  - *This does not mean:* no parallelism (one spawn call can fan out N), no
+    limits (budget caps, the 3–5 ceiling, sandbox and permissions still come
+    from the kernel — ADR-0007/0008), or no helper library (a spawn/wait
+    utility is fine; what is forbidden is a component that decides the plan).
 - **Human ceiling 3–5 parallel agents**, with **tiered review** (LLM pre-review
   + human sign-off) reviewing **the user's own** agents (rescoped by ADR-0010).
   Review-relevant data is first-class in the event stream from v1; the rich
   review UI arrives with the web surface.
-- **v1 scope:** local worktrees + subagents only; cloud runners deferred.
+- **v1 scope:** local worktrees + subagents only.
 
-**Constrains:** T-17, T-20 (PR-as-deliverable); T-14 now resolved as
+**Constrains:** T-17, T-20 (PR-as-deliverable); T-14 resolved as
 knowledge-sharing rather than session-sharing (ADR-0010).
 
 ### AQ-11 · Surfaces — thin-client rule, build order, installation — `Decided` → [ADR-0009](decisions/0009-surfaces.md)
@@ -622,3 +641,20 @@ AQ-10's cloud half**, leaving local parallelism (worktrees, subagents, tiered
 review) decidable on its own — lean recorded there, pending sign-off. Open
 sub-questions: personal cross-device session sync, knowledge artifact
 granularity/attribution, and org knowledge delivery (pack vs mirrored git repo).
+
+### 2026-10-04 — Cross-user/scheduled orchestration dropped; AQ-10 is local-only
+Owner: **"跨用户/定时" has no application scenario yet — do not build it for
+now.** AQ-10 is therefore rescoped to **local parallelism inside one user's
+session**; cloud runners, a runner scheduler, and cross-user/scheduled
+orchestration are out of scope until a concrete use case appears (this also
+retires the driver ADR-0010 had already weakened). Consequences recorded: AQ-5
+loses orchestration from the backend's job list (identity + packs + gateway +
+opt-in stats remain), and ADR-0007's micro-VM tier stays deferred because its
+driver is gone. The local orchestration rule is stated as **one orchestrator —
+the parent agent's visible plan** — with an explicit boundary test for any
+future "put it in the backend" request (**how long must the work live, and who
+has authority over it?**) and explicit non-meanings (parallelism, kernel
+limits, and helper libraries are all unaffected). Two isolation boundaries were
+added to the AQ-10 lean: a worktree isolates files but **not** external
+resources (ports/DBs/containers/shared caches), and non-git workspaces fall
+back to a temporary copy or serialization.

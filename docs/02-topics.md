@@ -167,6 +167,9 @@ What the backend could own (to discuss):
   the team (shared prompt cache is a *big* cost lever), per-org provider config.
 - **Orchestration**: cloud/async workers, scheduled jobs, cross-session memory,
   team knowledge, session sync across the user's devices and surfaces.
+  **Cross-user and scheduled orchestration dropped for now** (owner,
+  2026-10-04: no use case — see AQ-10); personal cross-device session sync is
+  still an open sub-question.
 - **Identity**: the account as the rendezvous between surfaces (Codex's lesson:
   identity, not file sync, is the coordination mechanism).
 

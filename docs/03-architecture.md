@@ -17,32 +17,32 @@ last** — it is a consequence of the architecture, not a precondition. *(Done
 
 ---
 
-## Part 1 — Foundations already locked (from 01-landscape-synthesis + vision)
+## Part 1 — Foundations (historical framing, 2026-09-30)
 
-These are agreed direction (owner-endorsed); the AQs design *how*, not *whether*:
+These twelve items were the pre-AQ framing, imported from vision and rounds 1–2
+of research before the decision map existed. They are kept as the record of
+*why* the questions were asked. The **current, authoritative** statement of each
+is in the ADRs on the right; where an item was superseded rather than refined,
+it says so.
 
-1. **Client/server core from day one** (T2). TUI, web, desktop, IDE/ACP, CI
-   are all clients of one agent server. Cheap from day one, painful to retrofit.
-2. **Minimal Pi-grade loop inside the server** (T1): few tools, tiny prompt,
-   no hidden context. Everything else is a *visible, budgeted, disable-able*
-   batteries layer.
-3. **Sessions are trees** (T-12, owner: "killer feature — I want this");
-   fork/retry/steer/pick are first-class. Files: shadow git snapshots (T9).
-4. **Nothing hidden, everything inspectable** (T-13): every token in context,
-   every policy decision, every cost is an event visible in the UI.
-5. **OS sandbox default-on, approval policy separate, YOLO opt-out** (T3/T-11).
-6. **Model profiles, not model pickers** (T-07): capability-named profiles
-   (`fast`/`default`/`supersmart`), admin-curated, server-distributed.
-7. **Cost-conscious by design** (T-04): $0 path for trivial tasks, escalation
-   upward-on-need, hard budgets, everything metered.
-8. **Control plane ≠ data plane** (T-05): agent core stays local near the code;
-   the backend owns auth, profiles, routing brain, model gateway, audit/stats
-   aggregation. Fully functional offline, degraded.
-9. **ACP server-side for IDEs; no editor fork** (T-19).
-10. **Layered retrieval**: grep/symbols → token-budgeted repo map → explore
-    subagent. No vector DB in v1 (T7).
-11. **Sync-first, async-ready** (T8): worktree isolation + PR-as-deliverable.
-12. **Junior-proof defaults, senior-proof depth** (T-21): every layer openable.
+| # | Framing item (as written 2026-09-30) | Where it lives now |
+|---|---|---|
+| 1 | Client/server core from day one (T2) | ADR-0001 — one binary, always client/server |
+| 2 | Minimal Pi-grade loop inside the server (T1) | ADR-0004 — tiny fixed kernel: loop, event append, context assembly |
+| 3 | Sessions are trees (T-12) | ADR-0003 (`id`/`parentId` in one JSONL) + the T-12 feature spec (fork/retry/steer/pick) |
+| 4 | Nothing hidden, everything inspectable (T-13) | ADR-0006 (context ledger) + ADR-0007 (the rule that fired) + ADR-0003 (every decision is an event) |
+| 5 | Sandbox default-on, approval policy separate, YOLO opt-out (T3/T-11) | ADR-0007 — PDP in the kernel, PEPs at the OS |
+| 6 | Model profiles, not model pickers (T-07) | ADR-0005 (local decides, server learns) + ADR-0008 (org layer, signed packs) |
+| 7 | Cost-conscious by design (T-04) | ADR-0005 (escalation as an auditable event) + ADR-0006 (token floor) + ADR-0009 (cost-affecting changes are breaking) |
+| 8 | Control plane ≠ data plane (T-05) | ADR-0012 (a deliberately small backend) + ADR-0010 (knowledge via git; no shared sessions) |
+| 9 | ACP server-side, no editor fork (T-19) | ADR-0009 (one artifact, many faces) + ADR-0002 (ACP as a dialect) |
+| 10 | Layered retrieval, no vector DB in v1 (T7) | ADR-0006 — retrieval enters through the context ledger |
+| 11 | Sync-first, async-ready (T8) | **Partially superseded:** local worktree isolation → ADR-0011; cloud/async and cross-user/scheduled orchestration are **out of scope** (AQ-10 decision, 2026-10-04) |
+| 12 | Junior-proof defaults, senior-proof depth (T-21) | ADR-0007 (per-action ladder defaults) + ADR-0008 (layered config with monotonicity) + ADR-0009 (YOLO as a visible opt-out) |
+
+For the end-to-end picture of the system **as decided**, read
+[04-system-overview.md](04-system-overview.md). This document keeps the
+question-by-question record.
 
 ---
 
@@ -50,15 +50,19 @@ These are agreed direction (owner-endorsed); the AQs design *how*, not *whether*
 
 Ordered by dependency. Each AQ: the question, options, lean, what it constrains.
 
-### The two-server topology (clarified 2026-09-30, owner's prompt)
+### The two-server topology
 
-"Server" is two different machines doing different jobs. AQ-1…AQ-4 design the
-**local** one; AQ-5 designs the **firm-wide** one:
+"Server" is two different machines doing different jobs: the **local** agent
+server (AQ-1…AQ-4, AQ-6…AQ-11) and the **firm** control plane (AQ-5). The
+canonical, up-to-date diagram lives in
+[04-system-overview.md](04-system-overview.md#2-the-shape); the version below is
+the 2026-09-30 original, kept for the record, with the two items retired since
+then marked:
 
 ```
- ┌───────┐ ┌───────┐ ┌────────┐ ┌──────────┐
- │  TUI  │ │ Web   │ │IDE/ACP │ │CI/headless│   surfaces — thin clients (AQ-11)
- └───┬───┘ └───┬───┘ └───┬────┘ └────┬─────┘
+ ┌───────┐ ┌───────┐ ┌────────┐ ┌────────────┐
+ │  TUI  │ │ Web   │ │IDE/ACP │ │ ~~CI/headless~~│  surfaces — thin clients (AQ-11);
+ └───┬───┘ └───┬───┘ └───┬────┘ └────┬───────┘  CI dropped as a product surface
      └─────────┴────┬────┴───────────┘
                    │ JSON-RPC — unix socket locally, WebSocket remotely (AQ-2)
           ┌────────▼─────────┐
@@ -69,11 +73,11 @@ Ordered by dependency. Each AQ: the question, options, lean, what it constrains.
                    │ smart sync — events/stats up, policy & profiles down
                    │ (batch, delta, resumable; offline = degraded, never dead)
           ┌────────▼─────────┐
-          │ FIRM CONTROL     │  firm-wide backend: auth (T-08), model profiles
-          │ PLANE            │  & routing brain (T-07/T-01), model gateway
-          │ (control plane)  │  (keys, metering, shared cache), audit/stats
-          │                  │  (T-02), team sharing (T-14), orchestration.
-          └────────┬─────────┘  AQ-5. Self-hosted or managed, same code (T-03).
+          │ FIRM CONTROL     │  deliberate scope (ADR-0012): auth (T-08), profile
+          │ PLANE            │  & policy packs (ADR-0008), model gateway (keys,
+          │ (control plane)  │  metering, shared cache), opt-in aggregate stats.
+          │                  │  ~~team sharing~~ (ADR-0010) ~~orchestration~~ (AQ-10)
+          └────────┬─────────┘  Self-hosted or managed, same code (T-03).
                    │ metered model calls only
           ┌────────▼─────────┐
           │ MODEL PROVIDERS  │
@@ -81,10 +85,12 @@ Ordered by dependency. Each AQ: the question, options, lean, what it constrains.
 ```
 
 Key property: **code never transits the control plane.** Tool execution and
-file access stay local; the only things that flow up are events/stats (opt-in,
-visible) and the model calls themselves, which go through the gateway to
-providers anyway. Cloud/async workers (T8) are the deliberate exception —
-there the code lives on the runner by definition.
+file access stay local; the only things that flow up are audit events and
+aggregate statistics (opt-in, visible, allow-listed — ADR-0012) and the model
+calls themselves, which go through the gateway to providers anyway. There is no
+cloud/async runner tier: it was dropped for lack of a use case (2026-10-04), so
+the old "code lives on the runner" exception no longer applies.
+
 
 ### AQ-1 · Runtime topology — how do client and core meet? — `Decided` → [ADR-0001](decisions/0001-one-binary-client-server.md)
 
@@ -609,8 +615,7 @@ Memory write path (T-10) resolved as **propose-and-confirm**: agent proposes
 into a staging area, low-risk project facts may auto-accept, user
 preferences/feedback require explicit confirmation. Per-role context packs
 (T-06) are versioned ledger entries. Session was resumed from a Kimi Code CLI
-transcript (see `docs/handoff/kimi-session-49a7c44c/`); no design content
-changed in the transfer.
+transcript (decoded out-of-band; the transfer changed no design content).
 
 ### 2026-10-04 — AQ-8 permission & sandbox engine decided
 Owner accepted the lean → ADR-0007. The PDP (policy decision point) sits inside
@@ -733,3 +738,18 @@ config — not as core patches; self-modification targets the extension surface,
 not the kernel. Accepted cost: two languages and a smaller core contributor pool.
 Knock-ons recorded: TUI toolkit `ratatui`, WASM host `wasmtime`. **AQ-1…AQ-12 are
 now all decided → 03 is `Agreed`**; ADRs 0001–0013 hold the answers.
+
+### 2026-10-04 — Session export/import in scope (ADR-0014); docs restructured (route B)
+Owner asked for **full session context export/import** so a session can continue
+on another machine → **ADR-0014**. This is explicitly **not** the sync that
+ADR-0012 §6 rejected: the user moves a checksummed bundle (event log + tree
+lineage + manifest + optional file-history), the workspace is **re-bound** on
+import, and mismatches are reported rather than enforced. The security core:
+**authority never travels** — historical approvals are records not grants, config
+re-resolves locally, credentials are never included, and an imported session is
+untrusted input under the local ladder. ADR-0012 §6 was amended to point here
+(sync stays out; continuity is file-based). Also decided this round: the **docs
+were restructured route B** — Part 1 of this document is now historical framing
+with an ADR mapping table, the canonical topology diagram moved to the new
+[04-system-overview.md](04-system-overview.md), and the Kimi handoff bundle was
+deleted (its content is fully absorbed; the ADRs are the record).

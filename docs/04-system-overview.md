@@ -1,0 +1,220 @@
+# 04 — System overview (the architecture as decided)
+
+- **Status:** Agreed (derived — reflects ADR-0001…ADR-0014)
+- **Last updated:** 2026-10-04
+
+This is the **one-read picture** of loongagent as it stands. It is *derived*
+from the decision record: [03-architecture.md](03-architecture.md) holds the
+question-by-question Q&A, and [`decisions/`](decisions/) holds the ADRs. If this
+document ever disagrees with an ADR, **the ADR wins** — fix this document.
+
+---
+
+## 1. What we are building
+
+**loongagent** is a coding agent assembled from the strongest parts of Claude
+Code, Codex, OpenCode, Cursor, Pi, and the DeepSeek-style open-model harnesses —
+combining what can be combined, and making **explicit trade-offs** where the
+sources contradict.
+
+- **Firm-internal first.** Profiles and policy are org-managed; self-hosted and
+  managed deployments are the same code.
+- **All surfaces, one brain.** TUI, web, and IDE (via ACP) are thin clients of a
+  single local agent server. Build order: TUI → web → ACP.
+- **All engineering roles.** Frontend, backend, DevOps, QA, data — plus the
+  manager and PM who need to see cost and progress, and the newcomer who wants
+  a browser.
+- **Name:** 龙 (loong) — a creature composed of the strongest parts of many
+  animals; the design philosophy in one word.
+
+**Non-goals:** not "another Claude Code / Codex / Cursor"; not an editor fork;
+not a local-only toy (there is a small control plane); not a shared-session
+collaboration platform (see §6).
+
+---
+
+## 2. The shape
+
+```
+  ┌───────┐  ┌───────┐  ┌─────────┐
+  │  TUI  │  │  Web  │  │ IDE/ACP │     thin clients: render events, send intents,
+  └───┬───┘  └───┬───┘  └────┬────┘     zero agent logic (ADR-0009)
+      └──────────┴─────┬─────┘
+                       │ JSON-RPC 2.0 — unix socket locally, WebSocket remotely (ADR-0002)
+             ┌─────────▼──────────┐
+             │  LOCAL AGENT       │  per user, on the engineer's machine, next to the
+             │  SERVER (kernel)   │  code: model+tool loop, event log, context ledger,
+             │  Rust              │  PDP, sandbox, retrieval, session trees
+             └───┬────────────┬───┘
+                 │            │
+   events/stats  │            │  model calls (metered)
+   (opt-in,      │            │
+   allow-listed) │            │
+       ┌─────────▼──────────┐ │
+       │  CONTROL PLANE     │ │      identity/auth; policy & profile packs;
+       │  Rust, same code   │ │      model gateway (keys, metering, shared cache);
+       │  managed or self-  │ │      opt-in aggregate audit/statistics (ADR-0012)
+       │  hosted (T-03)     │ │
+       └─────────┬──────────┘ │
+                 │            │
+                 └───────┬────┘
+                 ┌───────▼────────┐
+                 │ MODEL PROVIDERS│
+                 └────────────────┘
+```
+
+**One artifact, many faces:** the single `loongagent` binary *contains* the
+local agent server. `loongagent web` serves the web UI; `loongagent acp` speaks
+ACP to editors. Installing loongagent means getting that binary (ADR-0009).
+
+**Two properties worth remembering:** code never transits the control plane,
+and the local server is fully functional offline — the control plane only makes
+it smarter, never alive (ADR-0001, ADR-0012).
+
+---
+
+## 3. What the kernel owns (and why nothing else may)
+
+Four things are **fixed and non-pluggable**, because behavior that can be
+swapped can hide (ADR-0004):
+
+1. **The model + tool loop** — minimal, Pi-grade: few tools, tiny prompt, no
+   hidden context.
+2. **The event log** — JSONL is the source of truth; SQLite is a derived,
+   rebuildable index; sessions are trees; every tool call, approval, policy
+   decision, and cost is an event (ADR-0003).
+3. **Context assembly** — the **context ledger is the only write path** to the
+   model. Plugins, MCP servers, skills, and subagents may *propose* entries;
+   none may append directly (ADR-0006).
+4. **The PDP** — policy decisions happen in the kernel at the single tool
+   chokepoint, returning allow / ask / deny **plus the rule that fired**;
+   enforcement lives at the OS (seatbelt / Landlock+bubblewrap / Job Objects)
+   (ADR-0007).
+
+**Everything else is an edge:** provider adapters, protocol transformers, tools
+(built-ins included), hooks, routing strategies, WASM extensions,
+markdown skills and commands, and configuration packs (ADR-0004).
+
+---
+
+## 4. Every decision, in one table
+
+| AQ | Decision | ADR |
+|---|---|---|
+| AQ-1 | One binary, always client/server; sessions live in the server | [0001](decisions/0001-one-binary-client-server.md) |
+| AQ-2 | JSON-RPC 2.0, bidirectional, schema-first; ACP is a dialect | [0002](decisions/0002-json-rpc-wire-protocol.md) |
+| AQ-3 | JSONL event log as truth + derived SQLite index; one event stream | [0003](decisions/0003-jsonl-truth-sqlite-index.md) |
+| AQ-4 | Microkernel: pluggable edges, tiny fixed kernel; WASM for deep extensions | [0004](decisions/0004-microkernel-extension-model.md) |
+| AQ-5 | Deliberately small control plane: identity, packs, gateway, opt-in stats | [0012](decisions/0012-control-plane.md) |
+| AQ-6 | Routing: **local decides live**, server learns and ships policy packs | [0005](decisions/0005-routing-philosophy.md) |
+| AQ-7 | Context ledger only; per-profile budgets; visible compaction; memory = propose-and-confirm | [0006](decisions/0006-context-engine.md) |
+| AQ-8 | PDP in the kernel, PEPs at the OS; per-action autonomy ladder; approvals are events | [0007](decisions/0007-permission-sandbox-engine.md) |
+| AQ-9 | Monotonic config layers; TOML vs markdown; one signed pack envelope | [0008](decisions/0008-configuration-layering.md) |
+| AQ-10 | Local parallelism: worktree isolation, artifact-returning subagents, one orchestrator | [0011](decisions/0011-local-parallelism.md) |
+| AQ-11 | One artifact many faces; no single-surface capability; one writer + N observers | [0009](decisions/0009-surfaces.md) |
+| AQ-12 | Rust kernel/servers, TypeScript web client (`ratatui`, `wasmtime`) | [0013](decisions/0013-implementation-language.md) |
+| T-14 | Team collaboration = git-shared knowledge, **not** shared live sessions | [0010](decisions/0010-team-collaboration-knowledge-not-sessions.md) |
+| — | Session export/import: file-based continuity, never sync | [0014](decisions/0014-session-export-import.md) |
+
+---
+
+## 5. The guarantees, and what enforces them
+
+| Promise | Enforced by |
+|---|---|
+| **Nothing hidden** — every token, decision, and cost is inspectable | Context ledger (ADR-0006) + "the rule that fired" (ADR-0007) + everything is an event (ADR-0003) |
+| **Cost is visible before it is spent** | Per-category token counts + the request's token floor (ADR-0006), fed to routing (ADR-0005); cost-affecting changes are breaking (ADR-0009) |
+| **Prompts are not permissions** | Decision in the kernel, enforcement at the OS; a sandbox bug cannot be talked away (ADR-0007) |
+| **Shared knowledge cannot escalate privilege** | Content keys are add-only; permissions, budgets, and autonomy are narrow-only and org-owned (ADR-0008, ADR-0010) |
+| **Offline is never dead** | Cached packs; the local brain decides every live call (ADR-0005, ADR-0008, ADR-0012) |
+| **Private by default** | Uplink is an allow-list; session content is not in the contract; approvals, policy, and credentials never travel (ADR-0012, ADR-0014) |
+| **Parallel work is verifiable** | Write-capable subagents run in their own git worktree, so "it passed" reflects their own tree (ADR-0011) |
+| **You can change your mind cheaply** | Sessions are trees; branches are the unit of accept/reject; compaction is visible and the log is lossless (ADR-0003, ADR-0006) |
+
+---
+
+## 6. What we deliberately do **not** do
+
+Each of these was decided, not forgotten:
+
+- **No multi-user live sessions** — no co-watching, co-steering, or cross-user
+  session viewing. Collaboration is git-shared rules and knowledge (ADR-0010).
+- **No session sync service** — the backend never holds session state.
+  Continuity is a **file you move**: export/import (ADR-0012 §6, ADR-0014).
+- **No scheduler, no cross-user or scheduled orchestration, no cloud runners** —
+  no use case yet. Local orchestration is the parent agent's visible plan
+  (ADR-0011).
+- **No desktop app and no CI surface** — dropped as product surfaces; a headless
+  mode may exist internally (ADR-0009).
+- **No editor fork** — be the agent other editors talk to, via ACP (ADR-0009).
+- **No vector DB in v1** — structural retrieval first: grep/symbols → repo map →
+  explore subagent, all entering through the ledger (ADR-0006).
+- **No hidden injections, ever** — if it cannot be described as a ledger entry,
+  it cannot reach the model (ADR-0006).
+- **No merge** — with no sync, there is nothing to merge, so there is no merge
+  to get wrong (ADR-0014).
+
+---
+
+## 7. Trust, in one paragraph
+
+Nothing leaves your machine except three things: **commits you make**, the
+**opt-in, allow-listed** event/statistics uplink, and **model calls that were
+going to a provider anyway**. Configuration resolution, permission decisions,
+context assembly, and the session log all live locally; the server cannot see
+your code, and the PDP re-decides every action on every machine — an imported
+session file carries no approvals, no policy, and no credentials (ADR-0007,
+ADR-0008, ADR-0012, ADR-0014). The one residual concentration point is the
+**model gateway** (centralized keys, metering, shared cache), which is visible
+and avoidable by self-hosting (T-03).
+
+---
+
+## 8. Portability and continuity
+
+- **Sessions are files** (JSONL + derived index), so moving one is a file copy,
+  not a service call.
+- **`loongagent session export/import`** carries the event log, the tree
+  lineage, a manifest (workspace path, git revision, profiles, plugin/MCP
+  inventory), and optionally file-history snapshots — then **re-binds** the
+  workspace on import and reports mismatches instead of enforcing them
+  (ADR-0014).
+- **Roaming is per machine** across that machine's surfaces (ADR-0009);
+  cross-machine continuity is explicit export/import, never automatic.
+- **The code travels through git**, not through session bundles.
+- **Team knowledge travels through git too** — rules, skills, specs, ADRs, and
+  signed org packs (ADR-0008, ADR-0010).
+
+---
+
+## 9. Where to read what
+
+| Doc | Role |
+|---|---|
+| [00-vision.md](00-vision.md) | Mission, ambition, principles |
+| [01-landscape-synthesis.md](01-landscape-synthesis.md) | Cross-tool synthesis and the T1–T10 design tensions |
+| [02-topics.md](02-topics.md) | Idea backlog (T-01…T-21) and the owner's coverage map |
+| [03-architecture.md](03-architecture.md) | The question-by-question decision record (AQ-1…AQ-12) |
+| **04-system-overview.md** | **This document — the current picture** |
+| [`decisions/`](decisions/) | ADRs 0001–0014: the authoritative answers |
+| [`research/`](research/) | 14 cited deep dives on existing tools and categories |
+
+**Rule of the docs:** they describe the *current* shared understanding; history
+lives in git. Nothing is "Agreed" until the owner signs off in conversation.
+
+---
+
+## 10. Status and next step
+
+**Design: complete.** All twelve architecture questions are decided and recorded
+in fourteen ADRs; the topics backlog remains open as product-level work.
+
+**Implementation: not started.** The natural first slice, in build order
+(ADR-0009), is:
+
+1. **Scaffolding** — cargo workspace; the protocol schema (source of truth for
+   both Rust and the generated TypeScript types, ADR-0002/0013).
+2. **Kernel skeleton** — the minimal model+tool loop, the JSONL event log with
+   its derived index, and the context ledger (ADR-0003/0004/0006).
+3. **The first vertical slice** — TUI + local server + one provider adapter +
+   the sandbox and PDP boundary (ADR-0007), end to end.

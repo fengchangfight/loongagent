@@ -198,15 +198,18 @@ WASM**, not as core patches.
 
 **Constrains:** AQ-12 (language) most strongly; T-09/T-15/T-16/T-18 all land here.
 
-### AQ-5 · Backend control plane — shape and scope — `Open` (deferred per owner, 2026-09-30 — team-collaboration shape not yet clear; revisit after local-side AQs settle)
+### AQ-5 · Backend control plane — shape and scope — `Open` (deferred per owner, 2026-09-30; **scope narrowed 2026-10-04 by [ADR-0010](decisions/0010-team-collaboration-knowledge-not-sessions.md)** — no shared live sessions, so the backend is identity + packs + gateway + opt-in stats; revisit after the remaining local-side AQs)
 
 **Question:** what exactly lives server-side, and as what deployment shape?
 
-Per T-05 (direction agreed): backend owns auth (T-08), profile/routing brain
-(T-07/T-01), model gateway (keys, metering, shared cache), audit/stats
-aggregation (T-02), team sharing (T-14), async runner orchestration (T8).
-Agent core + tool execution + sandbox always local near the code; offline =
-degraded, never dead.
+Per T-05 (direction agreed) and narrowed by ADR-0010: the backend owns auth
+(T-08), profile/routing **policy packs** (T-07/T-01/ADR-0008), the model gateway
+(keys, metering, shared cache), and **opt-in aggregated** audit/statistics
+(T-02). It is **not** a session bus, a collaboration server, or a document
+server — team knowledge moves through git and signed packs (ADR-0010). Async
+runner orchestration is deferred along with the cloud half of AQ-10. Agent core
++ tool execution + sandbox always stay local near the code; offline = degraded,
+never dead.
 
 Sub-questions to decide:
 - **Monolith or services?** Lean: one backend binary, modular inside (module
@@ -217,6 +220,9 @@ Sub-questions to decide:
 - **Sync protocol:** clients push event batches (delta, resumable); server
   pushes policy/profile updates. Every byte user-visible and opt-in per
   feature (local-first promise).
+- **Personal cross-device session sync** (Codex's identity-based model): in
+  scope for the control plane, or deferred with the rest? This is personal
+  continuity, not multi-user collaboration (ADR-0010 open sub-question).
 
 **Constrains:** T-03 deployment shapes, T-05, T-08, enterprise/self-host story.
 
@@ -377,20 +383,34 @@ normalization.
 **Constrains:** T-07, T-21 (what seniors can open), enterprise managed-config
 story (Codex `requirements.toml` precedent).
 
-### AQ-10 · Team/async runtime — `Open`
+### AQ-10 · Team/async runtime — `Open` (split 2026-10-04 by [ADR-0010](decisions/0010-team-collaboration-knowledge-not-sessions.md): local half decidable now, cloud half deferred)
 
 **Question:** how do parallel agents, worktrees, and cloud runners compose?
 
-- Local parallelism: worktree-per-agent (Cursor/Amp pattern), subagents as
-  visible session-tree branches (T6/T-17), artifact-based reports.
-- Coordination: artifact bus (typed docs, MetaGPT's real innovation) over chat
-  protocols; orchestration logic lives in the control plane (round-2 lesson),
-  not hardcoded inside agents.
-- Human ceiling: 3–5 parallel agents — tiered review (LLM pre-review + human
-  sign-off) is our differentiator; design the review surface early.
-- v1 scope question: local worktrees + subagents only, runners v2? Lean: yes.
+ADR-0010 removed the collaboration driver from the cloud half: with no shared
+live sessions, async runners need their own justification (long-running
+scheduled or org-wide batch work, a *personal* capability), not co-watching. The
+local half stands alone. Proposed lean, **pending owner sign-off**:
 
-**Constrains:** T-14, T-17, T-20 (PR-as-deliverable).
+- **Write isolation:** any write-capable subagent runs in its own **git
+  worktree**; read-only research subagents share the workspace. Isolation is
+  spent only where conflicts are real.
+- **Subagents are session-tree branches:** each is a branch linked by its
+  parent tool call; results return as a **structured artifact** (files plus a
+  structured summary), not as long transcripts re-entering the parent context —
+  which is also ADR-0006 token discipline.
+- **Two layers of orchestration, kept distinct:** *local* orchestration is the
+  parent agent's plan, visible and steerable in the session tree — **no separate
+  scheduler**; firm-wide or scheduled orchestration belongs to the control
+  plane, if it ever exists.
+- **Human ceiling 3–5 parallel agents**, with **tiered review** (LLM pre-review
+  + human sign-off) reviewing **the user's own** agents (rescoped by ADR-0010).
+  Review-relevant data is first-class in the event stream from v1; the rich
+  review UI arrives with the web surface.
+- **v1 scope:** local worktrees + subagents only; cloud runners deferred.
+
+**Constrains:** T-17, T-20 (PR-as-deliverable); T-14 now resolved as
+knowledge-sharing rather than session-sharing (ADR-0010).
 
 ### AQ-11 · Surfaces — thin-client rule, build order, installation — `Decided` → [ADR-0009](decisions/0009-surfaces.md)
 
@@ -587,3 +607,18 @@ ADR-0008 pack envelope, treats token-cost-affecting changes as breaking
 (major bump + visible changelog, protecting T-04), and lets the org layer pin
 version/channel as a narrow-only key while the unmanaged default is stable +
 auto-update on (flagged reversible by the owner).
+
+### 2026-10-04 — Team collaboration rescoped (knowledge via git, no shared sessions)
+Owner reconsidered "team collaboration" and set a narrower direction → ADR-0010:
+**no multi-person real-time shared agent sessions for now.** Collaboration is
+**shared context and a shared knowledge base through git**, AGENTS.md-style —
+repo-committed rules/commands/skills/knowledge plus signed org knowledge packs
+(ADR-0008), reviewed and committed by humans. Shared knowledge is *content*,
+never policy (ADR-0007), so it cannot widen permissions or budgets. Sessions and
+personal memory stay personal; sharing is always an explicit human act. This
+narrows **AQ-5** to identity + packs + gateway + opt-in aggregate stats (not a
+session bus or document server) and **removes the collaboration driver from
+AQ-10's cloud half**, leaving local parallelism (worktrees, subagents, tiered
+review) decidable on its own — lean recorded there, pending sign-off. Open
+sub-questions: personal cross-device session sync, knowledge artifact
+granularity/attribution, and org knowledge delivery (pack vs mirrored git repo).

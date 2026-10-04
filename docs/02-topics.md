@@ -2,7 +2,7 @@
 
 - **Status:** Living document — append ideas as they come; promote to numbered
   design docs or ADRs when discussed.
-- **Last updated:** 2026-10-04 (T-07/T-09/T-10/T-11/T-19 updated by ADR-0006…0009)
+- **Last updated:** 2026-10-04 (T-07/T-09/T-10/T-11/T-14/T-19 updated by ADR-0006…0010)
 How this works: the owner drops raw ideas in conversation; they land here as
 topics with a one-line seed connecting them to what the research already knows
 (`research/`, `01-landscape-synthesis.md`). When a topic gets discussed in
@@ -145,7 +145,12 @@ through subscription billing" (BYOK users get burned — budgets are the fix).
 
 ## T-05 · Rich backend / control plane (not a local-only tool) — `Seed`
 
-Seeded 2026-09-26.
+Seeded 2026-09-26. **Scope narrowed 2026-10-04 (ADR-0010):** the backend owns
+identity/auth, policy & profile packs, the model gateway (keys/metering/shared
+cache), and **opt-in aggregated** audit/statistics. It is **not** a session bus,
+collaboration server, or document server — team knowledge moves through git and
+signed packs (ADR-0008/0010). Async runner orchestration deferred with AQ-10's
+cloud half. AQ-5 stays open with this smaller scope.
 
 Owner's idea: loongagent is **not a local-only tool**. There should be a rich
 backend that local clients *smartly* communicate with — handling audit,
@@ -403,9 +408,19 @@ every injected token surfaced in the UI; the event log (T-02) answers "why did
 it do that" — tool call, reasoning, cost, policy decision. Observability is
 also T-21's teaching tool: juniors learn by watching a legible agent.
 
-## T-14 · Teamwork & sharing — `Seed`
+## T-14 · Teamwork & sharing — `Promoted → ADR-0010`
 
-Seeded 2026-09-30. Extends T-03.
+Seeded 2026-09-30. Extends T-03. **Rescoped 2026-10-04 (ADR-0010):**
+collaboration = **shared context and knowledge via git** (AGENTS.md-style,
+PR-reviewed, plus signed org knowledge packs per ADR-0008) — **not** shared live
+sessions. No multi-user co-watching, co-steering, or cross-user session viewing
+for now; persona handoffs travel as repo artifacts (a spec doc, not a live
+session). Shared knowledge is content, never policy, so it cannot widen
+permissions or budgets (ADR-0007). Sessions, personal memory, and raw
+transcripts stay personal; sharing is an explicit human act. Still open:
+knowledge artifact granularity and attribution, personal cross-device session
+sync, org knowledge delivery (pack vs mirrored git repo), and whether any
+read-only session viewing ever returns.
 
 Session/thread sharing as durable artifacts (Amp threads: shareable URLs,
 "show how the agent reached the result"); team rules/skills/memory via git;

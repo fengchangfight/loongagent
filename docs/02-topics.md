@@ -2,7 +2,7 @@
 
 - **Status:** Living document — append ideas as they come; promote to numbered
   design docs or ADRs when discussed.
-- **Last updated:** 2026-10-04 (T-07/T-09/T-10/T-11 updated by ADR-0006/0007/0008)
+- **Last updated:** 2026-10-04 (T-07/T-09/T-10/T-11/T-19 updated by ADR-0006…0009)
 How this works: the owner drops raw ideas in conversation; they land here as
 topics with a one-line seed connecting them to what the research already knows
 (`research/`, `01-landscape-synthesis.md`). When a topic gets discussed in
@@ -461,7 +461,12 @@ registry later. Trust: skills can carry code → same trust gating as hooks
 
 ## T-19 · IDE integration via ACP — `Seed` (direction agreed in round-2 research)
 
-Seeded 2026-09-30.
+Seeded 2026-09-30. **Surface decision recorded 2026-10-04 (ADR-0009):** ACP is
+the third build target (after TUI and web), served by `loongagent acp` as a
+dialect of our own JSON-RPC protocol (ADR-0002); editor-side plugins are thin
+wrappers, never parallel products, and no capability may be implemented
+IDE-side only (exposure may lag, visibly). Still open: the branded VS Code
+extension's scope and the relay/editor context-source details.
 
 **ACP server-side from day one; no editor fork, no per-editor plugins.**
 Zed, JetBrains, Neovim, Emacs + 25 agents adopted ACP; Void died, Continue

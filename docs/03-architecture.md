@@ -392,55 +392,45 @@ story (Codex `requirements.toml` precedent).
 
 **Constrains:** T-14, T-17, T-20 (PR-as-deliverable).
 
-### AQ-11 · Surfaces — thin-client rule, build order, installation — `Discussing`
+### AQ-11 · Surfaces — thin-client rule, build order, installation — `Decided` → [ADR-0009](decisions/0009-surfaces.md)
 
 **Question:** what does each surface contain, how do users install it, and in
 what order do we build?
 
-- **Thin-client rule:** surfaces render the event stream and send intents;
-  zero agent logic client-side. This is what makes "same brain, many faces"
-  true rather than aspirational.
-- Build order lean: **TUI first** (dogfood, senior-engineer beachhead, fastest
-  iteration loop) → **web** (newbie/manager/PM personas) → **ACP adapter**
-  (IDEs come free). **Desktop app and CI surface: dropped** (owner,
-  2026-09-30) — not surfaces we build; a headless mode may still exist
-  internally for scripting, but it is not a product surface.
-- TUI framework depends on AQ-12 (ratatui vs OpenTUI vs ...); web stack is
-  independent (backend serves it).
-- Per-role UX (T-06) is a *surface+profile* composition, not a fork.
+**Decision (owner sign-off, 2026-10-04).** Authoritative detail in ADR-0009.
 
-**Installation & distribution (owner's prompt, 2026-09-30).**
-Principle: **one artifact, many faces.** The single `loongagent` binary
-*contains* the local agent server; every surface is either a client of it or
-a mode of it. Installing loongagent = getting that binary — no separate
-install per surface (IDE-side ACP plugins are thin wrappers, not parallel
-products).
+- **One artifact, many faces:** the single static binary *contains* the local
+  agent server; TUI/web/IDE are clients of it or modes of it (`loongagent web`,
+  `loongagent acp`); no per-surface install; IDE plugins are thin wrappers.
+  Install paths: curl script / brew / npm / firm mirror (TUI); localhost web
+  with zero extra install; team web via control-plane relay; IDE via the
+  editor's own ACP client. **Desktop and CI dropped** (owner, 2026-09-30) — a
+  headless mode may exist internally but is not a product surface.
+- **Thin-client rule (hard):** surfaces render the event stream and send
+  intents — **zero agent logic client-side**; presentation only (diff
+  rendering, syntax highlighting, pickers, keybindings).
+- **No single-surface capability:** implemented once in the server and
+  *exposed* per surface; a surface may lag in exposing (visible unsupported
+  marker), never diverge locally. No surface-only features, ever.
+- **Build order:** TUI first → web → ACP adapter. TUI framework falls out of
+  AQ-12; the web stack is independent (served by the binary).
+- **Attach semantics:** **one writer + N observers** per session; takeover is
+  explicit and is an event (ADR-0003), so roaming never means two fronts
+  steering the same session.
+- **Distribution & updates:** stable/LTS + canary; **token-cost-affecting
+  changes are breaking** (major bump + visible changelog, protecting T-04);
+  updates are signature-verified like config packs (ADR-0008); unmanaged
+  default = stable channel + auto-update on (flagged reversible), while managed
+  installs update from the firm mirror and the org layer may pin
+  version/channel as a narrow-only key.
+- **Browser-only users (owner, 2026-09-30): code is always local** — both the
+  localhost web path and team web drive the user's own local agent server and
+  code; runner-hosted workspaces stay out of scope and return with AQ-5 if ever
+  needed.
+- Per-role UX (T-06) is a *surface + profile* composition, not a fork.
 
-| Surface | Install path | How it connects |
-|---|---|---|
-| TUI (default) | `curl` install script / brew / npm / firm-internal package mirror | spawns or attaches to the local server (unix socket) |
-| Web — local | zero extra install: `loongagent web` serves the UI from the binary on localhost | same machine, same server |
-| Web — team | zero install: browser → firm control-plane URL | relays to the user's own local server (see below) |
-| IDE | the editor's own ACP client (Zed built-in; JetBrains/Neovim/Emacs plugins) pointed at `loongagent acp`; optional thin loongagent-branded VS Code extension later | ACP/JSON-RPC over stdio to the local binary |
-| ~~Desktop~~ / ~~CI~~ | dropped (owner, 2026-09-30) | — |
-
-Distribution principles:
-- Single static binary per OS; firm-internal mirror (Artifactory-style) for
-  managed rollouts.
-- Update channels: **stable/LTS + canary**; token-cost-affecting changes are
-  treated as breaking changes (01 §D — daily-release churn is a known
-  ecosystem failure mode).
-- The firm control plane ships from the **same codebase** (ideally the same
-  binary, different mode) — one artifact story end-to-end; sub-question for
-  AQ-5.
-
-**Sub-question — where does code live for a browser-only user? — RESOLVED
-(owner, 2026-09-30): code is always local.** The web experience works like the
-DeepSeek-style local harness: the web UI — whether served by the user's own
-binary (`loongagent web`) or reached via the firm control plane — always
-operates against the user's **local agent server and local code**. No
-runner-hosted workspaces in scope; if the firm-wide story ever needs them, it
-comes back with the AQ-5 team-collaboration discussion (deferred by owner).
+Deferred: TUI framework (AQ-12), control-plane relay protocol (AQ-5), update
+cadence and rollback, branded VS Code extension scope, observer write-token UX.
 
 **Constrains:** T-06 wow moments, beachhead sequencing, AQ-12.
 
@@ -582,3 +572,18 @@ explicitly once rather than merged live. One **signed pack envelope** now
 carries profiles, policy packs, and role/context packs; unsigned artifacts are
 limited to project/user layers. Every key is explainable layer-by-layer, and
 secrets are references rather than values (§ADR-0008).
+
+### 2026-10-04 — AQ-11 surfaces decided
+Owner accepted the closeout lean → ADR-0009. Build order locked as **TUI → web
+→ ACP adapter**; the thin-client rule hardened to "zero agent logic in a
+surface, presentation only"; and a new rule added on top of it — **no
+single-surface capability**: a capability is implemented once in the server and
+merely *exposed* per surface, lag is allowed but must be visibly marked, local
+divergence never. Multi-surface attach is defined as **one writer + N
+observers**, with takeover an explicit event (ADR-0003), so session roaming
+cannot produce two fronts steering at once. Distribution keeps the
+single-static-binary story, adds signature-verified updates matching the
+ADR-0008 pack envelope, treats token-cost-affecting changes as breaking
+(major bump + visible changelog, protecting T-04), and lets the org layer pin
+version/channel as a narrow-only key while the unmanaged default is stable +
+auto-update on (flagged reversible by the owner).

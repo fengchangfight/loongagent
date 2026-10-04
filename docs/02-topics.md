@@ -2,7 +2,7 @@
 
 - **Status:** Living document — append ideas as they come; promote to numbered
   design docs or ADRs when discussed.
-- **Last updated:** 2026-10-04 (T-10 write path resolved by ADR-0006)
+- **Last updated:** 2026-10-04 (T-09/T-10/T-11 updated by ADR-0006/0007)
 How this works: the owner drops raw ideas in conversation; they land here as
 topics with a one-line seed connecting them to what the research already knows
 (`research/`, `01-landscape-synthesis.md`). When a topic gets discussed in
@@ -317,7 +317,11 @@ Design shape (to discuss):
 
 ## T-09 · Hooks & deterministic enforcement — `Seed`
 
-Seeded 2026-09-30.
+Seeded 2026-09-30. **Veto + trust gate decided 2026-10-04 (ADR-0007):** hooks
+advise/veto at the PDP (never *are* the decider), their reasons feed back to the
+model, and repo-shipped hooks are untrusted content requiring explicit,
+content-bound per-repo trust opt-in. Still open: hook language (shell vs
+in-process), sync vs async, and the trust UX.
 
 The guarantee layer where markdown rules are only advisory (synthesis T5).
 Lifecycle events (session start/end, pre/post tool use, compaction, permission
@@ -346,11 +350,18 @@ nothing hidden), scoped (user/project/org), and git-native where team-shared
 (WrenAI lesson: org context as PR-reviewable artifacts). Open: what earns
 memory, decay/TTL, cross-session memory for cloud workers.
 
-## T-11 · Permissions & sandbox — `Seed`
+## T-11 · Permissions & sandbox — `Promoted → ADR-0007`
 
-Seeded 2026-09-30.
+Seeded 2026-09-30. **Engine decided 2026-10-04 (ADR-0007):** PDP inside the
+fixed kernel at the single tool chokepoint (allow/ask/deny + the rule that
+fired), structural PEPs (OS sandbox, tool runner, network egress), layered
+policy with org packs winning, per-action-class autonomy ladder, sandbox
+default-on with approval policy orthogonal and YOLO a visible opt-out,
+approvals as first-class events with scope + structured reasons, Guardian-style
+LLM pre-review deferred to v2. Still open: rule/policy language and pack schema
+(AQ-9), hook trust UX, network allow-list granularity, micro-VM tier.
 
-Per synthesis T3 (direction agreed): OS sandbox default-on
+Original seed — per synthesis T3 (direction agreed): OS sandbox default-on
 (seatbelt/bubblewrap/micro-VM), approval policy as a separate axis, YOLO as
 opt-out. Extras from research: Codex's `sandbox self-test` command;
 Guardian-style semantic approval reviewer (later); OpenCode's doom-loop and

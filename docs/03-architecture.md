@@ -289,20 +289,49 @@ exact auto-accept rule set for low-risk project facts.
 
 **Constrains:** T-10, T-13, T-06 role packs; token cost floor (T-04).
 
-### AQ-8 · Permission & sandbox engine — `Open`
+### AQ-8 · Permission & sandbox engine — `Decided` → [ADR-0007](decisions/0007-permission-sandbox-engine.md)
 
 **Question:** where do policy decisions happen, and what enforces them?
 
-- **Policy decision point (PDP):** middleware on the tool boundary inside the
-  core (foundation #2's guarantee layer, T5/T-09). Inputs: action, role
-  profile, session policy, org policy (server-distributed), approval mode.
-  Per-action autonomy ladder: investigate free, write gated, vary by role.
-- **Enforcement:** OS sandbox per platform — seatbelt (macOS), Landlock/
-  bubblewrap (Linux), Job Objects/restricted tokens (Windows); micro-VM as a
-  later tier for async runners. `sandbox self-test` command (Codex).
-- Hooks can veto at the PDP; hook reasons feed back to the model (exit-code-2
-  pattern).
-- Open: Guardian-style LLM pre-review of planned actions (Codex) — v1 or v2?
+**Decision (owner sign-off, 2026-10-04): the decision lives in the kernel, the
+enforcement lives at the OS.** Terminology (XACML/NIST zero-trust): **PDP** =
+policy decision point, **PEP** = policy enforcement point, **PIP** = policy
+information point.
+
+- **PDP inside the fixed kernel**, at the single tool chokepoint — built-in
+  tools exactly like plugin/MCP tools (ADR-0004). Returns allow / ask / deny
+  and always records **the rule that fired**. Hooks may advise or veto (T-09);
+  they never *are* the decider.
+- **PEPs are structural:** OS sandbox (seatbelt / Landlock+bubblewrap /
+  Job Objects), the tool runner (file writes, spawns, path resolution), and
+  network egress. A PDP bug grants nothing by itself; a PEP bug still leaves
+  the intended decision on record.
+- **Policy layering (PIP):** built-in defaults < org policy packs (ADR-0005)
+  < project < user < session. Org outranks project/user, and **org hard caps
+  are enforced as `deny`** — this is the "forbid rather than advise" edge
+  ADR-0005 flagged.
+- **Autonomy per action class, not per tool:** investigate = allow;
+  write-in-workspace = allow by default, profile-gateable; out-of-bounds
+  (network egress, paths outside the workspace, destructive/irreversible
+  commands, credential access) = ask, always explicit. Defaults are
+  junior-proof; role profiles shift the ladder as data (T-06).
+- **Sandbox default-on; approval policy is an orthogonal axis; YOLO is a
+  visible opt-out** (the opt-out is itself an event, and it travels in audit).
+  `sandbox self-test` before the first tool call. v1 scope: the file-write
+  boundary and network egress; micro-VM deferred to async runners (AQ-10).
+- **Approvals are first-class events:** request, decision, granted scope
+  (once / this class for this session / persistent for this project), and
+  reason — all in the JSONL stream (ADR-0003), replayable in the session tree.
+  **Denials are structured and fed back to the model with a reason**, never a
+  silent failure. Approval UX belongs to the surfaces (AQ-11).
+- **Hook trust gate is absolute:** repo-shipped hooks are untrusted content and
+  run only after explicit, content-bound per-repo trust opt-in (T-09).
+- **Guardian-style LLM pre-review is v2**, plugged in behind the same decision
+  interface; v1 is deterministic rules + approval modes.
+
+Deferred: rule/policy language and pack schema (AQ-9), hook trust UX, network
+allow-list granularity, micro-VM tier for async runners (AQ-10), Guardian
+model/budget policy.
 
 **Constrains:** T-11, T-09, role autonomy (T-06), async runner safety (T8).
 
@@ -496,3 +525,17 @@ preferences/feedback require explicit confirmation. Per-role context packs
 (T-06) are versioned ledger entries. Session was resumed from a Kimi Code CLI
 transcript (see `docs/handoff/kimi-session-49a7c44c/`); no design content
 changed in the transfer.
+
+### 2026-10-04 — AQ-8 permission & sandbox engine decided
+Owner accepted the lean → ADR-0007. The PDP (policy decision point) sits inside
+the fixed kernel at the single tool chokepoint and records the rule that fired;
+the PEPs are structural (OS sandbox, tool runner, network egress) so a decision
+bug grants nothing by itself. Policy layers build-in < org packs < project <
+user < session, with org outranking project/user and org hard caps enforced as
+`deny` (closing ADR-0005's open edge). Autonomy is allocated per action class
+(investigate / write-in-workspace / out-of-bounds), junior-proof by default and
+shifted by role profiles as data. Sandbox default-on with approval policy as an
+orthogonal axis, YOLO as a visible auditable opt-out; v1 covers file writes and
+network egress, micro-VM deferred to async runners. Approvals are first-class
+events with granted scope and structured reasons fed back to the model; the
+repo-hook trust gate is absolute; Guardian-style LLM pre-review deferred to v2.

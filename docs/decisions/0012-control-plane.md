@@ -74,14 +74,15 @@ orchestration (2026-10-04, no use case); **session-state sync service** (§6).
 local event stream** (ADR-0003). Consequences and alternatives, recorded so this
 is a decision rather than an omission:
 
-- A second machine starts with fresh sessions; cross-device continuity is not a
-  feature. Session "roaming" (ADR-0009) remains **per machine**, across that
-  machine's surfaces.
-- Alternative paths if a user needs continuity now: **manual export/import** of
-  session files, or the user's own file-sync tooling. Note that **git is a poor
-  fit** for a high-frequency append-only log (constant conflicts), so we do not
-  recommend it for live sessions; it remains right for *knowledge* artifacts.
-- It returns only with a concrete need, and it would be the one item that adds
+- A second machine starts with fresh sessions **unless the user moves a session
+  bundle**: cross-device *continuity* exists via first-class **export/import**
+  (ADR-0014); cross-device *sync* does not. Session "roaming" (ADR-0009) remains
+  **per machine**, across that machine's surfaces.
+- **Export/import (ADR-0014) is the continuity path** — a file the user moves,
+  not a service. Git remains a poor fit for a high-frequency append-only log
+  (constant conflicts); the bundle format exists for exactly this, and git stays
+  right for *knowledge* artifacts.
+- Sync returns only with a concrete need, and it would be the one item that adds
   session state to the backend's responsibility.
 
 ## Consequences
@@ -96,8 +97,9 @@ is a decision rather than an omission:
 - **v1 is not blocked on the backend.** A solo install runs with an empty org
   layer (ADR-0008); the control plane can ship later without changing the
   client.
-- **Documented limitation:** no cross-device session continuity. Stated plainly
-  rather than discovered later.
+- **Cross-device continuity is file-based, never automatic:** export/import
+  (ADR-0014) covers moving a session between machines; there is no sync, so the
+  backend still holds no session state.
 - **Deferred:** concrete auth protocol (T-08), rollup schema and retention
   policy, cache-sharing policy details, managed-vs-self-hosted packaging, and
   gateway failover/quotas.

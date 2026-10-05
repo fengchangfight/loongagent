@@ -1,0 +1,11 @@
+[package]
+name = "loong-eventlog"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Append-only JSONL event log with the ignorable envelope, plus a derived index (ADR-0003)"
+
+[dependencies]
+loong-schema.workspace = true
+serde.workspace = true
+serde_json.workspace = true

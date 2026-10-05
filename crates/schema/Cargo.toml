@@ -1,0 +1,9 @@
+[package]
+name = "loong-schema"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Protocol schema and generated types — the single source of truth (ADR-0002, ADR-0013)"
+
+[dependencies]
+serde.workspace = true

@@ -1,0 +1,11 @@
+[package]
+name = "loong-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "JSON-RPC 2.0 envelopes and method names (ADR-0002)"
+
+[dependencies]
+loong-schema.workspace = true
+serde.workspace = true
+serde_json.workspace = true

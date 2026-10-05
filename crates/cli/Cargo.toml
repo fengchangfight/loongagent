@@ -1,0 +1,18 @@
+[package]
+name = "loongagent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The loongagent binary: server, TUI and (later) web/ACP surfaces in one artifact (ADR-0009)"
+
+[[bin]]
+name = "loongagent"
+path = "src/main.rs"
+
+[dependencies]
+loong-schema.workspace = true
+loong-protocol.workspace = true
+loong-eventlog.workspace = true
+loong-kernel.workspace = true
+loong-server.workspace = true
+loong-tui.workspace = true

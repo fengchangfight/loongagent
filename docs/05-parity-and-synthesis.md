@@ -72,8 +72,8 @@ rows below are what "not losing" means concretely.
 
 | CC feature | Our status | Where | Next |
 |---|---|---|---|
-| Lifecycle hook events (SessionStart/End, **UserPromptSubmit**, Pre/PostToolUse, **PermissionRequest/Denied**, SubagentStart/Stop, **Pre/PostCompact**, FileChanged, CwdChanged) | ⚠️ | T-09, ADR-0007 (session, tool, approval, compaction) | pending amendment **E2** (adopt the full event list) |
-| **Hook kinds: shell / HTTP / MCP tool / LLM / subagent** | ⚠️ | ADR-0004 (shell only) | pending amendment **E2** |
+| Lifecycle hook events (session start/end, **user-prompt submit**, pre/post tool use, **permission requested/denied**, subagent start/stop, **pre/post compaction**, file changed, cwd changed) | ✅ | ADR-0007 §7 (event set fixed 2026-10-05) | — |
+| **Hook kinds: shell / HTTP / MCP tool** (LLM and subagent kinds deferred to v2) | ✅ | ADR-0007 §7, ADR-0004 | build the three transports |
 | Exit-code-2 blocks and feeds stderr back to the model | ✅ | ADR-0007 | — |
 | Repo-shipped hooks are untrusted | ✅ | ADR-0007 (explicit trust) | — |
 
@@ -126,7 +126,7 @@ rows below are what "not losing" means concretely.
 
 | # | Item | From | Our status | Where it lands |
 |---|---|---|---|---|
-| B1 | Hook kinds: shell / HTTP / MCP tool / LLM / subagent + full event list | CC | ⚠️ shell only | **E2** (ADR-0007/T-09) |
+| B1 | Hook kinds **shell / HTTP / MCP tool** + full lifecycle event set (LLM and subagent kinds → v2) | CC | ✅ applied 2026-10-05 | ADR-0007 §7, ADR-0004 |
 | B2 | Commands merged into skills | CC | ⚠️ two concepts | **E3** (T-16/T-18) |
 | B3 | Auto-compaction heuristic (clear tool outputs → summarize; keep newest ~20k) | CC, Pi | ⚠️ | **E1** (ADR-0006) |
 | B4 | `/goal` persistent completion + evaluator + turn-end gating | CC | ❌ | **T-23** |
@@ -138,7 +138,7 @@ rows below are what "not losing" means concretely.
 | B10 | Monotonic denial (`guard`) | DSH, CC | ✅ | ADR-0008 |
 | B11 | `/btw`, Monitor, cache-hit stats, `/init`, `/doctor`, `@path` imports, description budgets | CC | ❌ | **T-25** |
 | B12 | Skills/commands hot reload for skills authors | Pi | ❌ | **T-24** |
-| B13 | Multi-kind hooks + deterministic-enforcement framing | CC | ⚠️ | **E2** |
+| B13 | Multi-kind hooks + deterministic-enforcement framing | CC | ✅ (3 kinds) | ADR-0007 §7 |
 | B14 | Sandbox self-test before first tool call | Codex | ✅ | ADR-0007 |
 | B15 | Capability dial instead of model picker; silent re-route as frontier moves | Amp | ✅ | ADR-0005 + ADR-0008 profiles |
 | B16 | Context ring from ledger data | Cursor | ✅ | ADR-0006 |
@@ -179,15 +179,25 @@ rows below are what "not losing" means concretely.
 
 ---
 
-## E. Pending amendments (need owner sign-off before the ADR changes)
+## E. Amendments
+
+### Applied
+
+- **E2 · ADR-0007 §7 / ADR-0004** — ✅ **2026-10-05, narrowed**: hooks now have
+  **three v1 kinds** (shell / HTTP / MCP tool) behind one verdict contract, plus
+  a fixed lifecycle event set (session start/end, user-prompt submit, pre/post
+  tool use, permission requested/denied, subagent start/stop, pre/post
+  compaction, file changed, cwd changed). **LLM and subagent hooks are deferred
+  to v2** — both spend tokens and the second recurses, so they belong with the
+  Guardian reviewer and the goal evaluator (T-23). HTTP hooks are the one
+  explicit exception to "nothing leaves the machine": opt-in, org-pinnable, a
+  network action class under the PDP.
+
+### Pending (need owner sign-off)
 
 - **E1 · ADR-0006**: add the compaction heuristic — clear stale tool outputs
   first, then summarize; keep the newest ~20k tokens verbatim; compaction stays
   a visible event.
-- **E2 · ADR-0007 / T-09**: expand hooks from "shell executables" to **five
-  kinds** (shell / HTTP / MCP tool / LLM prompt / subagent) and adopt CC's full
-  lifecycle event list, including `UserPromptSubmit`, `PermissionRequest/Denied`,
-  `Pre/PostCompact`, `SubagentStart/Stop`, `FileChanged`, `CwdChanged`.
 - **E3 · T-16/T-18**: **merge commands into skills** (one concept, one loader,
   one frontmatter) — CC already did this; carrying two concepts costs more than
   it buys.

@@ -100,7 +100,26 @@ Hooks (T-09) fire on lifecycle events and can block, mutate, or enrich; their
 reasons are fed back to the model like any denial. The trust gate is absolute:
 **hooks shipped inside a repository are untrusted content** and run only after
 explicit, per-repo trust opt-in (bound to content, so a changed hook re-asks).
-Hook language stays shell-executable per ADR-0004.
+
+**Hook kinds (narrowed 2026-10-05).** v1 supports three transports for the same
+verdict contract (allow / ask / deny + reason):
+
+- **shell** — a command; exit code + stderr per the exit-code-2 protocol;
+- **HTTP** — an endpoint returning the verdict (the firm's existing policy or
+  scanning services plug in as configuration, not as hand-written `curl`
+  plumbing). Because event payloads leave the machine, this is the one place the
+  local-first promise has an explicit exception: it is a network action class
+  under the PDP, org-pinnable, and off by default;
+- **MCP tool** — reuses the T-15 server registry, scopes and org allow-lists.
+
+**Deferred to v2:** *LLM* and *subagent* hooks. Both spend tokens and the second
+recurses, so they belong with the Guardian reviewer (§8) and the goal evaluator
+(T-23), not in v1.
+
+**Event set.** The lifecycle events must at least cover: session start/end,
+**user-prompt submit**, pre/post tool use, **permission requested/denied**,
+subagent start/stop, **pre/post compaction**, file changed, and working-directory
+changed. (Baseline adopted from Claude Code's hook surface; names are ours.)
 
 ### 8. Guardian-style LLM pre-review is v2, not v1
 Deterministic rules plus approval modes are the floor. A semantic reviewer is

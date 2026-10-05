@@ -2,7 +2,7 @@
 
 - **Status:** Living document — append ideas as they come; promote to numbered
   design docs or ADRs when discussed.
-- **Last updated:** 2026-10-05 (T-22…T-25 added from [05-parity-and-synthesis](05-parity-and-synthesis.md); T-09/T-16 pending expansions noted; earlier: T-12/T-17 by ADR-0015, T-05…T-19 by ADR-0006…0012)
+- **Last updated:** 2026-10-05 (T-09 hook kinds & event set decided, 3 kinds in v1; T-22…T-25 added from [05-parity-and-synthesis](05-parity-and-synthesis.md); T-16 pending merge; earlier: T-12/T-17 by ADR-0015, T-05…T-19 by ADR-0006…0012)
 How this works: the owner drops raw ideas in conversation; they land here as
 topics with a one-line seed connecting them to what the research already knows
 (`research/`, `01-landscape-synthesis.md`). When a topic gets discussed in
@@ -341,11 +341,16 @@ model, and repo-shipped hooks are untrusted content requiring explicit,
 content-bound per-repo trust opt-in. Still open: hook language (shell vs
 in-process), sync vs async, and the trust UX.
 
-**Pending expansion (2026-10-05, §E2 of [05-parity-and-synthesis](05-parity-and-synthesis.md)):**
-hooks should support **five kinds** — shell, HTTP, MCP tool, LLM prompt,
-subagent — and adopt Claude Code's full lifecycle event list (`UserPromptSubmit`,
-`PermissionRequest/Denied`, `Pre/PostCompact`, `SubagentStart/Stop`,
-`FileChanged`, `CwdChanged`, …). ADR-0004 currently pins shell only.
+**Decided 2026-10-05 (ADR-0007 §7, narrowed):** hooks support **three kinds** in
+v1 — **shell / HTTP / MCP tool** — behind one verdict contract (allow / ask /
+deny + reason), over a fixed lifecycle event set (session start/end,
+user-prompt submit, pre/post tool use, permission requested/denied, subagent
+start/stop, pre/post compaction, file changed, cwd changed). **HTTP hooks are
+the one explicit exception to "nothing leaves the machine"**: opt-in,
+org-pinnable, and a network action class under the PDP. **LLM and subagent hook
+kinds are deferred to v2** (they spend tokens / recurse — they belong with the
+Guardian reviewer and the T-23 goal evaluator). Still open: hook language for
+repo-shipped hooks in practice, sync vs async, and the trust UX.
 
 The guarantee layer where markdown rules are only advisory (synthesis T5).
 Lifecycle events (session start/end, pre/post tool use, compaction, permission

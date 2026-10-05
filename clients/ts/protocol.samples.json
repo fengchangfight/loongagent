@@ -1,0 +1,144 @@
+{
+  "schema_version": "0.1.0",
+  "types": {
+    "EventEnvelope": {
+      "seq": 1,
+      "id": "<string>",
+      "parent_id": "<string>",
+      "kind": "<string>",
+      "ignorable": true,
+      "time_ms": 1,
+      "data": {}
+    },
+    "MessageAppended": {
+      "role": "user",
+      "text": "<string>"
+    },
+    "ToolCall": {
+      "call_id": "<string>",
+      "tool": "<string>",
+      "args": {},
+      "action_class": "investigate"
+    },
+    "ToolResult": {
+      "call_id": "<string>",
+      "ok": true,
+      "output": "<string>"
+    },
+    "ApprovalRequested": {
+      "request_id": "<string>",
+      "action_class": "investigate",
+      "reason": "<string>"
+    },
+    "ApprovalDecided": {
+      "request_id": "<string>",
+      "granted": true,
+      "scope": "once",
+      "reason": "<string>"
+    },
+    "PolicyDecided": {
+      "action_class": "investigate",
+      "verdict": "allow",
+      "rule": "<string>"
+    },
+    "CostRecorded": {
+      "profile": "<string>",
+      "tokens_in": 1,
+      "tokens_out": 1,
+      "usd_micros": 1
+    },
+    "CompactionApplied": {
+      "dropped_events": 1,
+      "kept_tokens": 1,
+      "summary": "<string>"
+    },
+    "SessionAttachParams": {
+      "cwd": "<string>",
+      "client": "<string>"
+    },
+    "SessionAttachResult": {
+      "session_id": "<string>",
+      "schema_version": "<string>",
+      "existing_events": 1
+    },
+    "PromptSubmitParams": {
+      "session_id": "<string>",
+      "text": "<string>"
+    },
+    "PromptSubmitResult": {
+      "turn_id": 1,
+      "accepted": true
+    },
+    "ApprovalRespondParams": {
+      "session_id": "<string>",
+      "request_id": "<string>",
+      "granted": true,
+      "scope": "once",
+      "reason": "<string>"
+    },
+    "RpcError": {
+      "code": 1,
+      "message": "<string>",
+      "data": {}
+    }
+  },
+  "methods": [
+    {
+      "name": "session.attach",
+      "params": "SessionAttachParams",
+      "result": "SessionAttachResult"
+    },
+    {
+      "name": "prompt.submit",
+      "params": "PromptSubmitParams",
+      "result": "PromptSubmitResult"
+    },
+    {
+      "name": "approval.respond",
+      "params": "ApprovalRespondParams",
+      "result": "PromptSubmitResult"
+    }
+  ],
+  "events": [
+    {
+      "name": "message.appended",
+      "payload": "MessageAppended",
+      "ignorable": false
+    },
+    {
+      "name": "tool.call",
+      "payload": "ToolCall",
+      "ignorable": false
+    },
+    {
+      "name": "tool.result",
+      "payload": "ToolResult",
+      "ignorable": false
+    },
+    {
+      "name": "approval.requested",
+      "payload": "ApprovalRequested",
+      "ignorable": false
+    },
+    {
+      "name": "approval.decided",
+      "payload": "ApprovalDecided",
+      "ignorable": false
+    },
+    {
+      "name": "policy.decided",
+      "payload": "PolicyDecided",
+      "ignorable": false
+    },
+    {
+      "name": "cost.recorded",
+      "payload": "CostRecorded",
+      "ignorable": false
+    },
+    {
+      "name": "compaction.applied",
+      "payload": "CompactionApplied",
+      "ignorable": false
+    }
+  ]
+}

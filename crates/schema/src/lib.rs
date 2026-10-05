@@ -4,8 +4,11 @@
 //! ADR-0013: Rust types and the TypeScript client's types are both *generated*
 //! from this schema (`scripts/gen-schema.py`), so the two sides cannot drift.
 
+/// Generated from `protocol.toml` — the wire types, method names and event kinds.
+pub mod generated;
+
 /// Version of the protocol schema. Breaking schema changes bump this.
-pub const SCHEMA_VERSION: &str = "0.1.0";
+pub use generated::SCHEMA_VERSION;
 
 #[cfg(test)]
 mod tests {

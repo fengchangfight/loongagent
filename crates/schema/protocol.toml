@@ -1,0 +1,288 @@
+# Protocol schema — the single source of truth (ADR-0002, ADR-0013).
+#
+# `scripts/gen-schema.py` reads this file and generates:
+#   - crates/schema/src/generated.rs            (Rust types, serde derives)
+#   - crates/schema/tests/generated_roundtrip.rs (generated conformance test)
+#   - clients/ts/protocol.generated.ts          (TypeScript types for the web client)
+#   - clients/ts/protocol.samples.json          (example payloads, generated)
+#
+# Never edit the generated files by hand. Adding a type is one entry here.
+#
+# Field `type` accepts: string | bool | i64 | u64 | json | <TypeName>
+# (`list = true` wraps it in an array, `optional = true` makes it optional.)
+
+schema_version = "0.1.0"
+
+# ---------------------------------------------------------------- primitives
+
+[[types]]
+name = "Seq"
+kind = "alias"
+doc = "Monotonic event sequence within a session."
+rust = "u64"
+ts = "number"
+
+[[types]]
+name = "Millis"
+kind = "alias"
+doc = "Unix epoch milliseconds."
+rust = "i64"
+ts = "number"
+
+[[types]]
+name = "Json"
+kind = "alias"
+doc = "Opaque JSON payload (contents are schema-versioned by the event kind)."
+rust = "serde_json::Value"
+ts = "JsonValue"
+
+# --------------------------------------------------------------------- enums
+
+[[types]]
+name = "ActionClass"
+kind = "enum"
+doc = "Autonomy classes — allocated per action, not per tool (ADR-0007 §4)."
+variants = [
+  { name = "Investigate", wire = "investigate", doc = "read-only; no prompt" },
+  { name = "WriteWorkspace", wire = "write_workspace", doc = "edits inside the workspace" },
+  { name = "OutOfBounds", wire = "out_of_bounds", doc = "network, outside the workspace, destructive, credentials" },
+]
+
+[[types]]
+name = "Verdict"
+kind = "enum"
+doc = "PDP verdict, always accompanied by the rule that fired (ADR-0007 §1)."
+variants = [
+  { name = "Allow", wire = "allow" },
+  { name = "Ask", wire = "ask" },
+  { name = "Deny", wire = "deny" },
+]
+
+[[types]]
+name = "ApprovalScope"
+kind = "enum"
+doc = "How far a granted approval reaches (ADR-0007 §6)."
+variants = [
+  { name = "Once", wire = "once" },
+  { name = "ActionClass", wire = "action_class" },
+  { name = "Project", wire = "project" },
+]
+
+[[types]]
+name = "Role"
+kind = "enum"
+doc = "Who produced a conversation message."
+variants = [
+  { name = "User", wire = "user" },
+  { name = "Assistant", wire = "assistant" },
+  { name = "Tool", wire = "tool" },
+  { name = "System", wire = "system" },
+]
+
+# ------------------------------------------------------------------- structs
+
+[[types]]
+name = "EventEnvelope"
+kind = "struct"
+doc = "One JSONL record (ADR-0003). `ignorable` is the forward-compatibility envelope: a reader that does not understand `kind` may skip the record when true, and MUST fail loudly when false."
+fields = [
+  { name = "seq", type = "Seq" },
+  { name = "id", type = "string" },
+  { name = "parent_id", type = "string", optional = true, doc = "event-tree parent (ADR-0015)" },
+  { name = "kind", type = "string", doc = "event kind, e.g. message.appended" },
+  { name = "ignorable", type = "bool" },
+  { name = "time_ms", type = "Millis" },
+  { name = "data", type = "Json" },
+]
+
+[[types]]
+name = "MessageAppended"
+kind = "struct"
+fields = [
+  { name = "role", type = "Role" },
+  { name = "text", type = "string" },
+]
+
+[[types]]
+name = "ToolCall"
+kind = "struct"
+fields = [
+  { name = "call_id", type = "string" },
+  { name = "tool", type = "string" },
+  { name = "args", type = "Json" },
+  { name = "action_class", type = "ActionClass" },
+]
+
+[[types]]
+name = "ToolResult"
+kind = "struct"
+fields = [
+  { name = "call_id", type = "string" },
+  { name = "ok", type = "bool" },
+  { name = "output", type = "string" },
+]
+
+[[types]]
+name = "ApprovalRequested"
+kind = "struct"
+fields = [
+  { name = "request_id", type = "string" },
+  { name = "action_class", type = "ActionClass" },
+  { name = "reason", type = "string", doc = "why the PDP asked; shown to the human" },
+]
+
+[[types]]
+name = "ApprovalDecided"
+kind = "struct"
+fields = [
+  { name = "request_id", type = "string" },
+  { name = "granted", type = "bool" },
+  { name = "scope", type = "ApprovalScope" },
+  { name = "reason", type = "string", optional = true, doc = "fed back to the model (ADR-0007 §6)" },
+]
+
+[[types]]
+name = "PolicyDecided"
+kind = "struct"
+doc = "Every PDP verdict is an event, with the rule that fired (ADR-0007 §1, §9)."
+fields = [
+  { name = "action_class", type = "ActionClass" },
+  { name = "verdict", type = "Verdict" },
+  { name = "rule", type = "string" },
+]
+
+[[types]]
+name = "CostRecorded"
+kind = "struct"
+fields = [
+  { name = "profile", type = "string" },
+  { name = "tokens_in", type = "u64" },
+  { name = "tokens_out", type = "u64" },
+  { name = "usd_micros", type = "u64" },
+]
+
+[[types]]
+name = "CompactionApplied"
+kind = "struct"
+doc = "Visible, reversible compaction (ADR-0006 §4)."
+fields = [
+  { name = "dropped_events", type = "u64" },
+  { name = "kept_tokens", type = "u64" },
+  { name = "summary", type = "string" },
+]
+
+[[types]]
+name = "SessionAttachParams"
+kind = "struct"
+fields = [
+  { name = "cwd", type = "string" },
+  { name = "client", type = "string", doc = "tui | web | acp" },
+]
+
+[[types]]
+name = "SessionAttachResult"
+kind = "struct"
+fields = [
+  { name = "session_id", type = "string" },
+  { name = "schema_version", type = "string" },
+  { name = "existing_events", type = "u64" },
+]
+
+[[types]]
+name = "PromptSubmitParams"
+kind = "struct"
+fields = [
+  { name = "session_id", type = "string" },
+  { name = "text", type = "string" },
+]
+
+[[types]]
+name = "PromptSubmitResult"
+kind = "struct"
+fields = [
+  { name = "turn_id", type = "u64" },
+  { name = "accepted", type = "bool" },
+]
+
+[[types]]
+name = "ApprovalRespondParams"
+kind = "struct"
+fields = [
+  { name = "session_id", type = "string" },
+  { name = "request_id", type = "string" },
+  { name = "granted", type = "bool" },
+  { name = "scope", type = "ApprovalScope" },
+  { name = "reason", type = "string", optional = true },
+]
+
+[[types]]
+name = "RpcError"
+kind = "struct"
+doc = "JSON-RPC 2.0 error object."
+fields = [
+  { name = "code", type = "i64" },
+  { name = "message", type = "string" },
+  { name = "data", type = "Json", optional = true },
+]
+
+# ------------------------------------------------------------------- methods
+
+[[methods]]
+name = "session.attach"
+doc = "Attach a thin client to the local agent server (ADR-0009)."
+params = "SessionAttachParams"
+result = "SessionAttachResult"
+
+[[methods]]
+name = "prompt.submit"
+doc = "Submit a user turn."
+params = "PromptSubmitParams"
+result = "PromptSubmitResult"
+
+[[methods]]
+name = "approval.respond"
+doc = "Answer a pending approval request; recorded as an event either way (ADR-0007 §6)."
+params = "ApprovalRespondParams"
+result = "PromptSubmitResult"
+
+# -------------------------------------------------------------------- events
+
+[[events]]
+name = "message.appended"
+payload = "MessageAppended"
+ignorable = false
+
+[[events]]
+name = "tool.call"
+payload = "ToolCall"
+ignorable = false
+
+[[events]]
+name = "tool.result"
+payload = "ToolResult"
+ignorable = false
+
+[[events]]
+name = "approval.requested"
+payload = "ApprovalRequested"
+ignorable = false
+
+[[events]]
+name = "approval.decided"
+payload = "ApprovalDecided"
+ignorable = false
+
+[[events]]
+name = "policy.decided"
+payload = "PolicyDecided"
+ignorable = false
+
+[[events]]
+name = "cost.recorded"
+payload = "CostRecorded"
+ignorable = false
+
+[[events]]
+name = "compaction.applied"
+payload = "CompactionApplied"
+ignorable = false

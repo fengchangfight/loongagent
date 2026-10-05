@@ -7,3 +7,4 @@ description = "Protocol schema and generated types — the single source of trut
 
 [dependencies]
 serde.workspace = true
+serde_json.workspace = true

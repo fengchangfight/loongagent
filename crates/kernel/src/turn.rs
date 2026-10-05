@@ -29,6 +29,8 @@ pub enum KernelError {
     /// The caller used the API out of order (e.g. resumed with nothing pending).
     OutOfOrder(String),
     Encode(serde_json::Error),
+    /// The derived index could not be built or queried (the log is unaffected).
+    Index(loong_index::IndexError),
 }
 
 impl std::fmt::Display for KernelError {
@@ -38,6 +40,7 @@ impl std::fmt::Display for KernelError {
             KernelError::Model(e) => write!(f, "model: {e}"),
             KernelError::OutOfOrder(m) => write!(f, "out of order: {m}"),
             KernelError::Encode(e) => write!(f, "encode: {e}"),
+            KernelError::Index(e) => write!(f, "index: {e}"),
         }
     }
 }
@@ -53,6 +56,12 @@ impl From<LogError> for KernelError {
 impl From<serde_json::Error> for KernelError {
     fn from(e: serde_json::Error) -> Self {
         KernelError::Encode(e)
+    }
+}
+
+impl From<loong_index::IndexError> for KernelError {
+    fn from(e: loong_index::IndexError) -> Self {
+        KernelError::Index(e)
     }
 }
 
@@ -114,6 +123,12 @@ pub struct Kernel {
     messages: Vec<ChatMessage>,
     pending: Option<PendingCall>,
     approvals: u64,
+    /// Derived, disposable SQLite view of the log (ADR-0003). It trails the log
+    /// by design: the log is the truth, this only makes queries fast. A failure
+    /// to index never loses an event — it marks the index stale instead.
+    index: loong_index::Index,
+    index_path: PathBuf,
+    index_stale: Option<String>,
 }
 
 impl Kernel {
@@ -122,7 +137,7 @@ impl Kernel {
         config: KernelConfig,
         model: Box<dyn Model>,
     ) -> Result<Self, KernelError> {
-        Ok(Self::build(SessionLog::create(log_path)?, config, model))
+        Self::build(SessionLog::create(log_path)?, config, model)
     }
 
     pub fn open(
@@ -130,12 +145,21 @@ impl Kernel {
         config: KernelConfig,
         model: Box<dyn Model>,
     ) -> Result<Self, KernelError> {
-        Ok(Self::build(SessionLog::open(log_path)?, config, model))
+        Self::build(SessionLog::open(log_path)?, config, model)
     }
 
-    fn build(log: SessionLog, config: KernelConfig, model: Box<dyn Model>) -> Self {
+    fn build(
+        log: SessionLog,
+        config: KernelConfig,
+        model: Box<dyn Model>,
+    ) -> Result<Self, KernelError> {
         let ledger = Ledger::new(config.budget_tokens);
-        Self {
+        let index_path = log.path().with_extension("sqlite");
+        // Rebuild rather than attach incrementally: the index is disposable, and
+        // a stale index that silently disagrees with the log is worse than a
+        // few milliseconds of replay.
+        let index = loong_index::Index::rebuild_into(&index_path, log.path())?;
+        Ok(Self {
             log,
             ledger,
             tools: Registry::with_builtins(),
@@ -145,7 +169,10 @@ impl Kernel {
             messages: Vec::new(),
             pending: None,
             approvals: 0,
-        }
+            index,
+            index_path,
+            index_stale: None,
+        })
     }
 
     pub fn ledger(&self) -> &Ledger {
@@ -162,6 +189,44 @@ impl Kernel {
 
     pub fn pending(&self) -> Option<&PendingCall> {
         self.pending.as_ref()
+    }
+
+    pub fn index_path(&self) -> &Path {
+        &self.index_path
+    }
+
+    /// `Some(reason)` when an index write failed and the index no longer mirrors
+    /// the log. Queries then refuse rather than answer from a stale view.
+    pub fn index_stale(&self) -> Option<&str> {
+        self.index_stale.as_deref()
+    }
+
+    /// Substring search over event payloads (ADR-0003: the convenience path).
+    pub fn search(&self, needle: &str) -> Result<Vec<loong_index::EventRow>, KernelError> {
+        self.require_fresh_index()?;
+        Ok(self.index.search(needle)?)
+    }
+
+    /// Children of an event — the event tree inside a session (ADR-0015).
+    pub fn event_children(&self, parent_id: &str) -> Result<Vec<loong_index::EventRow>, KernelError> {
+        self.require_fresh_index()?;
+        Ok(self.index.children(parent_id)?)
+    }
+
+    /// Rebuild the derived index from the log and clear the stale marker.
+    pub fn rebuild_index(&mut self) -> Result<(), KernelError> {
+        self.index = loong_index::Index::rebuild_into(&self.index_path, self.log.path())?;
+        self.index_stale = None;
+        Ok(())
+    }
+
+    fn require_fresh_index(&self) -> Result<(), KernelError> {
+        match &self.index_stale {
+            None => Ok(()),
+            Some(reason) => Err(KernelError::OutOfOrder(format!(
+                "the derived index is stale ({reason}); call rebuild_index() first"
+            ))),
+        }
     }
 
     pub fn last_seq(&self) -> u64 {
@@ -374,7 +439,15 @@ impl Kernel {
 
     fn append<T: serde::Serialize>(&mut self, kind: &str, payload: &T) -> Result<u64, KernelError> {
         let data = serde_json::to_value(payload)?;
-        Ok(self.log.append(kind, data)?.seq)
+        let envelope = self.log.append(kind, data)?;
+        // The event is already durable; an index failure must not fail the turn,
+        // but it must not pass silently either.
+        if self.index_stale.is_none() {
+            if let Err(e) = self.index.insert(&envelope) {
+                self.index_stale = Some(e.to_string());
+            }
+        }
+        Ok(envelope.seq)
     }
 
     fn record_user(&mut self, text: &str) -> Result<u64, KernelError> {
@@ -667,6 +740,57 @@ mod tests {
             .count();
         assert_eq!(history, k.messages().len(), "every message is a ledger entry");
         assert!(k.ledger().explain().iter().any(|r| r.source == "user"));
+    }
+
+    #[test]
+    fn the_derived_index_answers_queries_over_the_session() {
+        let t = Temp::new();
+        std::fs::write(t.dir.join("a.txt"), "needle in the workspace").unwrap();
+        let model = ScriptedModel::new(vec![
+            response(vec![call("c1", "read_file", json!({"path": "a.txt"}))], None),
+            response(vec![], Some("read it")),
+        ]);
+        let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        k.submit("read a.txt").unwrap();
+
+        assert!(k.index_stale().is_none(), "a healthy session keeps a fresh index");
+        assert!(t.log.with_extension("sqlite").exists(), "the index sits beside the log");
+        let hits = k.search("needle in the workspace").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].kind, "tool.result");
+        assert!(k.search("nothing like this").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_stale_index_refuses_to_answer_instead_of_lying() {
+        let t = Temp::new();
+        let model = ScriptedModel::saying("hi");
+        let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        k.submit("hello").unwrap();
+        // Simulate the index going bad (a write failure on a locked or full disk).
+        k.index_stale = Some("disk full".to_string());
+        assert!(matches!(k.search("hello"), Err(KernelError::OutOfOrder(_))));
+        k.rebuild_index().unwrap();
+        assert!(k.index_stale().is_none());
+        assert!(!k.search("hello").unwrap().is_empty(), "rebuilt from the log alone");
+    }
+
+    #[test]
+    fn reopening_a_session_rebuilds_the_index_from_the_log() {
+        let t = Temp::new();
+        {
+            let model = ScriptedModel::saying("first");
+            let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+            k.submit("one").unwrap();
+        }
+        // Delete the index: it is derived, so the session must still work.
+        std::fs::remove_file(t.log.with_extension("sqlite")).unwrap();
+        let model = ScriptedModel::saying("second");
+        let mut k = Kernel::open(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        assert!(k.index_stale().is_none());
+        assert!(!k.search("one").unwrap().is_empty(), "the old turn is indexed again");
+        let out = k.submit("two").unwrap();
+        assert_eq!(out.final_text.as_deref(), Some("second"));
     }
 
     #[test]

@@ -213,9 +213,12 @@ dependencies = [
  "loong-eventlog",
  "loong-kernel",
  "loong-protocol",
+ "loong-providers",
  "loong-schema",
  "loong-server",
  "loong-tui",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

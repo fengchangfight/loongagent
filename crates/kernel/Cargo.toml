@@ -10,5 +10,6 @@ loong-schema.workspace = true
 loong-eventlog.workspace = true
 loong-providers.workspace = true
 loong-sandbox.workspace = true
+loong-tools.workspace = true
 serde.workspace = true
 serde_json.workspace = true

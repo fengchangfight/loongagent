@@ -25,6 +25,7 @@ dependencies = [
  "loong-providers",
  "loong-sandbox",
  "loong-schema",
+ "loong-tools",
  "serde",
  "serde_json",
 ]
@@ -44,6 +45,7 @@ version = "0.0.1"
 dependencies = [
  "loong-schema",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -69,6 +71,15 @@ dependencies = [
  "loong-eventlog",
  "loong-kernel",
  "loong-protocol",
+ "loong-schema",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "loong-tools"
+version = "0.0.1"
+dependencies = [
  "loong-schema",
  "serde",
  "serde_json",

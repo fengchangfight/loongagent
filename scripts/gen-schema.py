@@ -181,6 +181,12 @@ class Schema:
             out.append(f'    pub const {m["name"].replace(".", "_").upper()}: &str = "{m["name"]}";')
         out.append("}")
         out.append("")
+        out.append("/// Event kind names (ADR-0003).")
+        out.append("pub mod event {")
+        for e in self.events:
+            out.append(f'    pub const {e["name"].replace(".", "_").upper()}: &str = "{e["name"]}";')
+        out.append("}")
+        out.append("")
         out.append("/// Event kinds. The bool is the `ignorable` envelope marker (ADR-0003).")
         out.append("pub const EVENT_KINDS: &[(&str, bool)] = &[")
         for e in self.events:

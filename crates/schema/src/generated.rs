@@ -192,6 +192,18 @@ pub mod method {
     pub const APPROVAL_RESPOND: &str = "approval.respond";
 }
 
+/// Event kind names (ADR-0003).
+pub mod event {
+    pub const MESSAGE_APPENDED: &str = "message.appended";
+    pub const TOOL_CALL: &str = "tool.call";
+    pub const TOOL_RESULT: &str = "tool.result";
+    pub const APPROVAL_REQUESTED: &str = "approval.requested";
+    pub const APPROVAL_DECIDED: &str = "approval.decided";
+    pub const POLICY_DECIDED: &str = "policy.decided";
+    pub const COST_RECORDED: &str = "cost.recorded";
+    pub const COMPACTION_APPLIED: &str = "compaction.applied";
+}
+
 /// Event kinds. The bool is the `ignorable` envelope marker (ADR-0003).
 pub const EVENT_KINDS: &[(&str, bool)] = &[
     ("message.appended", false),

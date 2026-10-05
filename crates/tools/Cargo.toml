@@ -1,0 +1,11 @@
+[package]
+name = "loong-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Tools behind one uniform MCP-shaped interface, built-ins included (ADR-0004)"
+
+[dependencies]
+loong-schema.workspace = true
+serde.workspace = true
+serde_json.workspace = true

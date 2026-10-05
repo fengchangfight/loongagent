@@ -17,15 +17,16 @@ ALLOWED = {
     "loong-eventlog": {"loong-schema"},
     "loong-providers": {"loong-schema"},
     "loong-sandbox": {"loong-schema"},
+    "loong-tools": {"loong-schema"},
     # the fixed kernel calls its edges through traits; it never knows adapters
-    "loong-kernel": {"loong-schema", "loong-eventlog", "loong-providers", "loong-sandbox"},
+    "loong-kernel": {"loong-schema", "loong-eventlog", "loong-providers", "loong-sandbox", "loong-tools"},
     # surfaces
     "loong-server": {"loong-schema", "loong-protocol", "loong-eventlog", "loong-kernel"},
     "loong-tui": {"loong-schema", "loong-protocol"},
     # the one binary that ties faces together
     "loongagent": {
         "loong-schema", "loong-protocol", "loong-eventlog", "loong-providers",
-        "loong-sandbox", "loong-kernel", "loong-server", "loong-tui",
+        "loong-sandbox", "loong-tools", "loong-kernel", "loong-server", "loong-tui",
     },
 }
 

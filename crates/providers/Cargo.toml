@@ -8,3 +8,4 @@ description = "Model provider adapters behind one Model interface (ADR-0004)"
 [dependencies]
 loong-schema.workspace = true
 serde.workspace = true
+serde_json.workspace = true

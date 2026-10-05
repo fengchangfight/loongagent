@@ -18,6 +18,7 @@ loong-protocol = { path = "crates/protocol" }
 loong-eventlog = { path = "crates/eventlog" }
 loong-providers = { path = "crates/providers" }
 loong-sandbox = { path = "crates/sandbox" }
+loong-tools = { path = "crates/tools" }
 loong-kernel = { path = "crates/kernel" }
 loong-server = { path = "crates/server" }
 loong-tui = { path = "crates/tui" }

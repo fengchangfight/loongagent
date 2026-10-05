@@ -32,13 +32,13 @@ able to carry authority with it.
 ### 1. Export is a first-class command
 `loongagent session export <id>` produces **one self-describing bundle**:
 
-- the **session's event log**, always **complete** — the session's internal
-  node history (retry/steer branches) travels in full, because that history *is*
-  the session. Trimming it is a different feature (pruning), not an export
-  option;
-- the **ancestor sessions** needed to make the exported session meaningful
-  (the fork/delegation lineage that explains where it came from and what
-  context it inherited);
+- the **session's event tree**, always **complete** — the `id`/`parentId`
+  history *inside* the session (paths, retry branches) travels in full, because
+  that history *is* the session. Trimming it is a different feature (pruning),
+  not an export option;
+- the **ancestor sessions**, which are **structurally required**, not merely
+  explanatory: a child session references its parent's prefix rather than
+  copying it (ADR-0015), so without the chain it cannot assemble its context;
 - a **manifest**: bundle schema version, session id(s), export time, source
   workspace path, **git revision + dirty state**, profile names used, and an
   inventory of the plugins/MCP servers/skills the session depended on;
@@ -131,16 +131,13 @@ of the target tree.
 - **Default export is the working unit:** the session plus its ancestors,
   without descendants — so "export and continue elsewhere" carries what
   continuation needs and nothing whose absence would be noticed only later.
-- **Open dependency — node-level vs session-level tree.** This ADR is written in
-  **session-level** terms (a session has ancestor and descendant *sessions*),
-  which is how forks and subagent delegation are described in ADR-0011 and how
-  DSH/Kimi model them. ADR-0003/T-12 describe the tree **inside** a session
-  (`id`/`parentId` in one JSONL). Both can hold at once — node tree *within* a
-  session, session lineage *between* sessions — but the docs currently mix the
-  two vocabularies, and the export default above presumes the session level is
-  real. **Resolve this explicitly** (session boundaries for fork/delegation vs
-  node-only branching within one file); it affects ADR-0003, ADR-0009's
-  "one writer" granularity, ADR-0011's worktree/GC unit, and this ADR.
+- **Vocabulary resolved (ADR-0015).** The two tree levels are now named and
+  separated: a session **contains** an event tree (`id`/`parentId`, paths and a
+  head), and sessions relate to each other by **session lineage** (fork,
+  delegation). "Branch" means a child session, never a path. This ADR's
+  session-level wording is therefore exact, and ancestor sessions are
+  **structurally required** — a child session references its parent's prefix
+  instead of copying it, so without the chain it cannot even assemble context.
 - **Deferred:** the concrete container format (compression, single file),
   redaction UX, schema-version migration policy, and whether an org may forbid
   export (a narrow-only policy key, ADR-0008).

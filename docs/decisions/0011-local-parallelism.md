@@ -56,13 +56,15 @@ installs.
   the model to be careful. "Prompts are not permission systems" applies to
   concurrency too.
 
-### 2. Subagents are session-tree branches returning artifacts
-Each subagent is a **branch in the session tree**, linked by the parent tool
-call that spawned it, inheriting the parent's sandbox and permission policy. It
+### 2. Subagents are child sessions returning artifacts
+Each subagent is a **child session** (delegation — ADR-0015), linked by the
+parent tool call that spawned it and recording the point in the parent's event
+tree it came from; it inherits the parent's sandbox and permission policy. It
 returns a **structured artifact** — the files it wrote plus a structured
 summary — and **not** a long transcript. The parent's context receives the
-summary; the full record stays in the tree, inspectable (T-12/T-13) and
-lossless (ADR-0003).
+summary; the full record stays in the child session, inspectable (T-12/T-13) and
+lossless (ADR-0003). A child session **references** its parent's prefix rather
+than copying it (ADR-0015), so the parent is never duplicated.
 
 Subagents participate in routing like any other call site (ADR-0005): a read-only
 explore subagent may run on a cheap profile, a build subagent on a strong one —
@@ -109,8 +111,9 @@ driver.
 - **"It verified" becomes a trustworthy sentence.** Each writer's test run
   reflects its own tree, so verification conclusions, diffs, and failure
   attribution all hold — this is the point of the decision, not disk layout.
-- **Review becomes a diff, and abandonment becomes free.** A branch is the unit
-  of accept/reject; discarding a bad attempt costs one worktree.
+- **Review becomes a diff, and abandonment becomes free.** A child session (a
+  *branch*, ADR-0015) is the unit of accept/reject; discarding a bad attempt
+  costs one worktree.
 - **Parallelism has a visible price.** Per-worktree dependency installs and disk
   are real costs; worktree lifecycle and garbage collection are now product
   surface, not plumbing detail. The default UX must make "accept this branch"

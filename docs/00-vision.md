@@ -66,8 +66,9 @@ impossible merge.
 - **Be careful and *mean* with context.** Frontier models are RL-trained to
   be coding agents — they don't need 10k-token system prompts. Spend context
   on the user's work, not on explaining the agent to itself.
-- **The session tree is a killer feature.** Branch, fork, retry, rewind —
-  sessions are trees, not linear logs (T-12).
+- **Branching history is a killer feature.** Fork, retry, rewind — history is a
+  tree, not a linear log: an **event tree** inside each session, and **lineage**
+  between sessions (ADR-0015; T-12).
 - **Steer, don't just watch.** Mid-run steering and structured picks are
   first-class interactions (T-12).
 - **Junior-proof defaults, senior-proof depth.** Safe guided defaults for

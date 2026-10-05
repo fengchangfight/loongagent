@@ -20,8 +20,15 @@ do not want to scan JSONL files.
 
 - **JSONL is the source of truth.** One append-only file per session; every
   entry is a typed event (message, tool call, approval, cost, policy decision,
-  compaction, …) with `id`/`parentId`. The file is human-readable, diffable,
-  exportable, and its format is **documented and versioned**.
+  compaction, …) with `id`/`parentId`, forming that session's **event tree**.
+  The file is human-readable, diffable, exportable, and its format is
+  **documented and versioned**.
+- **Two tree levels, never conflated** (ADR-0015): the `id`/`parentId`
+  structure lives **inside** a session (paths, and the current head), while
+  relations **between** sessions (fork and delegation lineage) are a separate
+  level. A child session **references** its parent's prefix rather than copying
+  it, so a session file is not self-contained — its ancestor chain is part of
+  what it needs, and that chain is immutable by construction.
 - **SQLite is a derived index** — rebuildable and disposable — powering tree
   queries, search, and local statistics. It may be deleted at any time; it
   rebuilds from the JSONL.
@@ -40,7 +47,7 @@ do not want to scan JSONL files.
 
 ## Consequences
 
-- The session-tree UI (T-12), the statistics engine (T-02), and the context
+- The event-tree UI (T-12), the statistics engine (T-02), and the context
   inspector (T-13) all read the same event vocabulary — define the event
   schema early and treat it as a public, versioned contract.
 - Sync to the firm control plane (AQ-5) is batched event upload of an already

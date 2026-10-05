@@ -89,7 +89,7 @@ answerable scope.
 ### 8. Consequences for AQ-10 (cloud/async)
 The cloud-runner half of AQ-10 loses its main near-term justification: with no
 shared live sessions, "async" is no longer pulling collaboration along with it.
-Local parallelism — worktree isolation, subagents as session-tree branches,
+Local parallelism — worktree isolation, subagents as child sessions,
 artifact reports, the 3–5 agent human ceiling, tiered review — stands on its own
 and can be decided now. Runners return only if a fresh driver appears
 (long-running scheduled jobs, org-wide batch work), and they are a *personal*

@@ -68,11 +68,14 @@ the binary).
 
 ### 5. Attach semantics: one writer, many observers
 A session may be attached from several surfaces at once, but **exactly one holds
-the write token** at a time. Observers receive the live stream read-only.
+the write token** at a time — the token belongs to the **session**, and the
+**head** is simply where its writer currently is (ADR-0015). Observers receive
+the live stream read-only.
 Acquiring the token (takeover) is **explicit and is an event** (ADR-0003), so
 handing a session from TUI to web — or a colleague watching a run — never
 produces two fronts issuing steering or forking in parallel. This is what makes
-session roaming (T-12's tree plus multi-surface attach) safe rather than racy.
+session roaming (the session's event tree plus multi-surface attach — ADR-0015)
+safe rather than racy.
 
 ### 6. Distribution & updates
 - Single static binary per OS; firm-internal mirror (Artifactory-style) for

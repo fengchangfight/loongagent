@@ -26,7 +26,7 @@ is tracked here so decisions survive context windows and sessions.
 | [02-topics.md](02-topics.md) | Idea backlog — raw topics, waiting to be discussed | Living |
 | [03-architecture.md](03-architecture.md) | Architecture, question-driven (AQ-1…AQ-12 decision map) | Agreed |
 | [04-system-overview.md](04-system-overview.md) | The architecture as decided — one-read end-to-end picture | Agreed |
-| decisions/ | ADRs — one per locked decision (0001: runtime topology; 0002: wire protocol; 0003: session/event storage; 0004: extension model; 0005: routing philosophy; 0006: context engine; 0007: permission & sandbox engine; 0008: configuration & profile layering; 0009: surfaces; 0010: team collaboration as shared knowledge; 0011: local parallelism; 0012: control plane; 0013: implementation language; 0014: session export/import) | — |
+| decisions/ | ADRs — one per locked decision (0001: runtime topology; 0002: wire protocol; 0003: session/event storage; 0004: extension model; 0005: routing philosophy; 0006: context engine; 0007: permission & sandbox engine; 0008: configuration & profile layering; 0009: surfaces; 0010: team collaboration as shared knowledge; 0011: local parallelism; 0012: control plane; 0013: implementation language; 0014: session export/import; 0015: session vs event tree) | — |
 | research/ | Per-tool deep dives (round 1: major agents; round 2: categories) | — |
 
 **Round 1:** claude-code, codex, opencode, cursor, pi, deepseek-harness, other-agents

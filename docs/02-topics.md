@@ -2,7 +2,7 @@
 
 - **Status:** Living document — append ideas as they come; promote to numbered
   design docs or ADRs when discussed.
-- **Last updated:** 2026-10-04 (T-05/T-07/T-09/T-10/T-11/T-14/T-17/T-19 updated by ADR-0006…0012)
+- **Last updated:** 2026-10-05 (T-12/T-17 vocabulary fixed by ADR-0015; earlier: T-05…T-19 by ADR-0006…0012)
 How this works: the owner drops raw ideas in conversation; they land here as
 topics with a one-line seed connecting them to what the research already knows
 (`research/`, `01-landscape-synthesis.md`). When a topic gets discussed in
@@ -32,7 +32,7 @@ Legend: `Seed` (captured, not yet discussed) · `Discussing` · `Promoted → <d
 | opencode-style server (client/server) | Strawman #1 / synthesis T2 + T-05 |
 | context engineering paramount, nothing hidden | Vision principles + T-13 |
 | core = minimal "model + tool loop" | Vision principles + synthesis T1 |
-| session tree (Pi's killer feature — "I want this") | T-12 |
+| branching history — event tree in a session + lineage between sessions (Pi's killer feature — "I want this") | T-12 |
 | models don't need much harness | Vision principles |
 | harness cheap to change, pluggable with good defaults | Vision principles + T-21 |
 | be careful and mean with context | Vision principles |
@@ -392,13 +392,15 @@ prompts are not permission systems; safety must be structural.
 
 Seeded 2026-09-30. Owner: **"Session tree is the killer feature — I want this."**
 
-Pi's design, adopted: sessions as a **tree** in one JSONL file
-(id/parentId); `/tree` navigation, `/fork`, branch summaries of abandoned
-paths, lossless compaction (full history survives). **Retry** = fork from the
-failure point with a new approach instead of polluting the linear history.
+Pi's design, adopted, with the two tree levels now named (ADR-0015): **inside**
+a session, events carry `id`/`parentId` forming an **event tree** — `/tree`
+navigation over paths, **retry** = a new path from the failure point with the
+abandoned path retained and summarized (no pollution of the linear history),
+lossless compaction (full history survives). **Between** sessions, a **fork**
+creates a **child session** with lineage back to the point it came from.
 **Steer vs follow-up** queues (Pi): deliver-after-current-tool vs
 deliver-when-idle. **Pick**: the agent presents structured options and the
-user picks (AskUserQuestion pattern). Combined with T-13, the session tree is
+user picks (AskUserQuestion pattern). Combined with T-13, the event tree is
 the user's x-ray into agent behavior — and with shadow git snapshots
 (synthesis T9), rewind covers both conversation and code.
 
@@ -461,16 +463,16 @@ custom commands merged into skills — decide whether our commands and skills
 
 Seeded 2026-09-30. **Execution model decided 2026-10-04 (ADR-0011):**
 write-capable subagents run in their own **git worktree** (read-only ones share
-the workspace); each is a **session-tree branch** returning a **structured
-artifact** (files + summary), not a transcript; there is **one orchestrator —
-the parent's visible plan**, no scheduler; concurrency is bounded by human
-review attention (**3–5**, tiered review over the user's own agents). Still
-open: artifact/summary schema, worktree lifecycle & GC, external-resource
-declaration.
+the workspace); each is a **child session** (delegation — ADR-0015) returning a
+**structured artifact** (files + summary), not a transcript; there is **one
+orchestrator — the parent's visible plan**, no scheduler; concurrency is bounded
+by human review attention (**3–5**, tiered review over the user's own agents).
+Still open: artifact/summary schema, worktree lifecycle & GC,
+external-resource declaration.
 
 Per synthesis T6 (direction agreed): first-class but **observable and
-artifact-based** — each subagent is a visible branch in the session tree
-(T-12), writes a structured report artifact, returns only a summary, inherits
+artifact-based** — each subagent is a visible **child session** (T-12/ADR-0015),
+writes a structured report artifact, returns only a summary, inherits
 the parent sandbox. Built-ins: explore (read-only, fast model), plan,
 general. Per-subagent model routing (T-01: cheap explore, strong build).
 OpenCode trick: denied subagents are removed from the task tool's description

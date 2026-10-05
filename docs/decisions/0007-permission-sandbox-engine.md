@@ -90,7 +90,7 @@ the code is not the user's own machine.
 An approval is not a modal dialog that disappears: the request, the decision,
 the **scope granted** (once / this action class for this session / persistent
 for this project), and the reason are all events in the JSONL stream
-(ADR-0003), replayable in the session tree. **Denials are structured and fed
+(ADR-0003), replayable in the session's event tree (ADR-0015). **Denials are structured and fed
 back to the model with a reason** (the exit-code-2 spirit) — a silent failure
 teaches the model nothing and produces doom loops. Approval *UX* belongs to the
 surfaces (AQ-11); the decision and its record belong to the kernel.

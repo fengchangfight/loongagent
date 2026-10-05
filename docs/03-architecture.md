@@ -67,7 +67,7 @@ then marked:
                    │ JSON-RPC — unix socket locally, WebSocket remotely (AQ-2)
           ┌────────▼─────────┐
           │ LOCAL AGENT      │  per-user, on the engineer's machine, next to
-          │ SERVER           │  the code: session trees, tool loop, sandbox,
+          │ SERVER           │  the code: session logs, tool loop, sandbox,
           │ (data plane)     │  JSONL truth, retrieval. AQ-1 … AQ-4.
           └────────┬─────────┘
                    │ smart sync — events/stats up, policy & profiles down
@@ -137,7 +137,7 @@ the transport isn't HTTP). Steer-don't-watch (T-12) and live event streaming
 
 ### AQ-3 · Session & event storage — `Decided` → [ADR-0003](decisions/0003-jsonl-truth-sqlite-index.md)
 
-**Question:** how are session trees, events, and audit data persisted?
+**Question:** how are sessions, their event trees, events, and audit data persisted?
 
 - **A) JSONL event log as source of truth** (Pi): one file per session, entries
   carry `id`/`parentId` so the tree is inherent. Append-only, crash-safe,
@@ -301,7 +301,7 @@ entry.**
   eviction order, and the request's token floor — the floor is what AQ-6's
   routing reads before deciding.
 - **Compaction is a visible event**, with what was summarized and why; the
-  session tree (AQ-3) keeps the lossless record, so it is reversible in
+  event tree (AQ-3/ADR-0015) keeps the lossless record, so it is reversible in
   principle.
 - **Retrieval is a kernel service writing through the ledger** — grep →
   repo map → explore subagent results compete for budget like everything else.
@@ -353,7 +353,8 @@ information point.
   driver (async runners) is out of scope for now (AQ-10).
 - **Approvals are first-class events:** request, decision, granted scope
   (once / this class for this session / persistent for this project), and
-  reason — all in the JSONL stream (ADR-0003), replayable in the session tree.
+  reason — all in the JSONL stream (ADR-0003), replayable in the session's
+  event tree (ADR-0015).
   **Denials are structured and fed back to the model with a reason**, never a
   silent failure. Approval UX belongs to the surfaces (AQ-11).
 - **Hook trust gate is absolute:** repo-shipped hooks are untrusted content and
@@ -428,12 +429,13 @@ sign-off, 2026-10-04)** — authoritative detail in ADR-0011:
     or the concurrent-write count is capped.
   - *Boundary:* in a **non-git workspace** the fallback is a temporary copy or
     serialization — never shared concurrent writes.
-- **Subagents are session-tree branches:** each is a branch linked by its
+- **Subagents are child sessions** (delegation — ADR-0015): each is linked by its
   parent tool call; results return as a **structured artifact** (files plus a
   structured summary), not as long transcripts re-entering the parent context —
   which is also ADR-0006 token discipline.
 - **One orchestrator: the parent agent's plan.** Local orchestration *is* the
-  parent's visible, steerable plan in the session tree — there is **no separate
+  parent's visible, steerable plan, recorded in the session's event tree — there
+  is **no separate
   scheduler and no second decision-maker**. This keeps orchestration
   explainable and steerable (T-13/T-12), keeps cost attribution on a visible
   decision (T-04), and avoids a component whose lifetime outlives the session.
@@ -770,3 +772,18 @@ open dependency** instead of being left implicit: the two can coexist (node tree
 *within* a session, session lineage *between* sessions), but the vocabulary must
 be fixed, and it decides the granularity of ADR-0009's one-writer rule,
 ADR-0011's worktree/GC unit, and this ADR's wording.
+
+### 2026-10-05 — Vocabulary fixed: two tree levels (ADR-0015)
+Owner: "区分好这两个概念不要有歧义". → **ADR-0015** names and separates the two
+levels: a **session** *contains* an **event tree** (`id`/`parentId`; paths, and
+the current **head**), while sessions relate to each other by **session
+lineage** (fork, delegation). **"Branch" is reserved for a child session** and
+is never used for a path; "tree" unqualified is retired from the docs. The
+boundary rule: **a new session is created when the new work needs its own
+lifecycle** (write token, worktree, export/GC unit, cost and permission
+attribution) — retry, steer, follow-up, compaction, and profile changes do not.
+Child sessions **reference** their parent's prefix instead of copying it
+(immutable parent history makes the reference stable), which is the structural
+reason ADR-0014 must carry ancestor sessions. Wording aligned in ADR-0003,
+ADR-0009 (one writer is per session; the head is where its writer is),
+ADR-0011 (subagents are child sessions), ADR-0014, T-12, T-17, and the overview.

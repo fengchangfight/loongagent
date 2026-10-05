@@ -44,7 +44,8 @@ outside a typed, visible, token-counted ledger entry.**
    budget, not only by its model set.
 4. **Compaction is a visible event, not a silent lossy step.** When budget
    pressure triggers compaction, it appears in the ledger and the event stream
-   with what was summarized and why; the session tree (ADR-0003) retains the
+   with what was summarized and why; the session's **event tree** (ADR-0003,
+   ADR-0015) retains the
    lossless record, so compaction is reversible in principle.
 5. **Retrieval is a kernel service that writes through the ledger.** The
    layered pipeline (grep/symbols → token-budgeted repo map → explore

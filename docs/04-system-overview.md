@@ -44,7 +44,7 @@ collaboration platform (see §6).
              ┌─────────▼──────────┐
              │  LOCAL AGENT       │  per user, on the engineer's machine, next to the
              │  SERVER (kernel)   │  code: model+tool loop, event log, context ledger,
-             │  Rust              │  PDP, sandbox, retrieval, session trees
+             │  Rust              │  PDP, sandbox, retrieval, session logs
              └───┬────────────┬───┘
                  │            │
    events/stats  │            │  model calls (metered)
@@ -81,8 +81,11 @@ swapped can hide (ADR-0004):
 1. **The model + tool loop** — minimal, Pi-grade: few tools, tiny prompt, no
    hidden context.
 2. **The event log** — JSONL is the source of truth; SQLite is a derived,
-   rebuildable index; sessions are trees; every tool call, approval, policy
-   decision, and cost is an event (ADR-0003).
+   rebuildable index. Two tree levels, never conflated: a session **contains**
+   an event tree (`id`/`parentId`, paths, a head), and sessions relate to each
+   other by **lineage** (fork, delegation); "branch" means a child session
+   (ADR-0003, ADR-0015). Every tool call, approval, policy decision, and cost is
+   an event.
 3. **Context assembly** — the **context ledger is the only write path** to the
    model. Plugins, MCP servers, skills, and subagents may *propose* entries;
    none may append directly (ADR-0006).
@@ -115,6 +118,7 @@ markdown skills and commands, and configuration packs (ADR-0004).
 | AQ-12 | Rust kernel/servers, TypeScript web client (`ratatui`, `wasmtime`) | [0013](decisions/0013-implementation-language.md) |
 | T-14 | Team collaboration = git-shared knowledge, **not** shared live sessions | [0010](decisions/0010-team-collaboration-knowledge-not-sessions.md) |
 | — | Session export/import: file-based continuity, never sync | [0014](decisions/0014-session-export-import.md) |
+| — | Two tree levels: a session contains an event tree; sessions have lineage | [0015](decisions/0015-two-tree-levels.md) |
 
 ---
 

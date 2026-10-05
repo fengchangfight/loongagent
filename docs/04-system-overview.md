@@ -17,8 +17,8 @@ Code, Codex, OpenCode, Cursor, Pi, and the DeepSeek-style open-model harnesses �
 combining what can be combined, and making **explicit trade-offs** where the
 sources contradict.
 
-- **Firm-internal first.** Profiles and policy are org-managed; self-hosted and
-  managed deployments are the same code.
+- **Firm-internal first.** Profiles and policy are org-managed; the control
+  plane runs the **same code** whether managed or self-hosted.
 - **All surfaces, one brain.** TUI, web, and IDE (via ACP) are thin clients of a
   single local agent server. Build order: TUI → web → ACP.
 - **All engineering roles.** Frontend, backend, DevOps, QA, data — plus the
@@ -52,9 +52,9 @@ collaboration platform (see §6).
    allow-listed) │            │
        ┌─────────▼──────────┐ │
        │  CONTROL PLANE     │ │      identity/auth; policy & profile packs;
-       │  Rust, same code   │ │      model gateway (keys, metering, shared cache);
-       │  managed or self-  │ │      opt-in aggregate audit/statistics (ADR-0012)
-       │  hosted (T-03)     │ │
+       │  Rust, shared      │ │      model gateway (keys, metering, shared cache);
+       │  crates, own bin   │ │      opt-in aggregate audit/statistics (ADR-0012)
+       │  (ADR-0012)        │ │
        └─────────┬──────────┘ │
                  │            │
                  └───────┬────┘
@@ -66,6 +66,14 @@ collaboration platform (see §6).
 **One artifact, many faces:** the single `loongagent` binary *contains* the
 local agent server. `loongagent web` serves the web UI; `loongagent acp` speaks
 ACP to editors. Installing loongagent means getting that binary (ADR-0009).
+
+**Two binaries, one repository** (ADR-0012). The local agent and the control
+plane are **separate binaries** with genuinely different jobs and deployment —
+they are *not* one binary under two flags. What they **share** is the code where
+disagreement would be a bug: the protocol/event schema, the pack envelope and
+its sign/verify path, policy and config resolution, provider adapters, and token
+cost math. Managed and self-hosted control planes are, by contrast, *literally
+the same code* — that is a different claim, and the two are easy to conflate.
 
 **Two properties worth remembering:** code never transits the control plane,
 and the local server is fully functional offline — the control plane only makes

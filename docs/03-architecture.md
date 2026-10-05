@@ -77,7 +77,8 @@ then marked:
           │ PLANE            │  & policy packs (ADR-0008), model gateway (keys,
           │ (control plane)  │  metering, shared cache), opt-in aggregate stats.
           │                  │  ~~team sharing~~ (ADR-0010) ~~orchestration~~ (AQ-10)
-          └────────┬─────────┘  Self-hosted or managed, same code (T-03).
+          └────────┬─────────┘  Self-hosted or managed — identical control-plane
+                   │             code either way; its own binary (ADR-0012).
                    │ metered model calls only
           ┌────────▼─────────┐
           │ MODEL PROVIDERS  │
@@ -217,8 +218,9 @@ cross-device sync) had already removed most of T-05's original wish list.
 
 - **Shape:** one backend binary, modular inside where scaling differs (model
   gateway / dashboards & statistics / pack distribution); no microservices;
-  same codebase as the local agent, deployable **managed or self-hosted**
-  (T-03).
+  same **repository** as the local agent with shared correctness-critical crates,
+  built as a **separate binary**, deployable **managed or self-hosted** with
+  literally the same code either way (ADR-0012).
 - **Data:** Postgres (users, policies, event rollups) + object storage (shared
   prompt-cache blobs, signed packs).
 - **Uplink is an allow-list, opt-in by category:** clients push event batches
@@ -378,7 +380,7 @@ kind, so no lower layer can loosen a higher one.**
 - **Layers/ownership:** built-in defaults < org managed < project
   (repo-committed) < user < session. The **org layer** is admin-authored in the
   control plane (T-05) and reaches the install as a versioned pack; project is
-  committed; user/session stay local; a solo install is the same code with an
+  committed; user/session stay local; a solo install is the same binary with an
   empty org layer. Offline = older pack, never a dead system, and **live
   decisions stay local** (ADR-0005).
 - **Merge kinds (monotonicity):** *free-override* (UX prefs, profile choice
@@ -517,7 +519,7 @@ TypeScript for the web client.**
 | Performance floor (event sourcing, retrieval, repo map) | AQ-3, AQ-7 | Rust: append + SQLite index + repo map at 10M+ LOC scale |
 | Signed packs | ADR-0008 | Mature Rust crypto libraries for signature verification |
 | Concurrency for sessions/tools/subagents | AQ-1, AQ-10 | Rust async + cheap subprocesses + worktree orchestration |
-| Small control plane, same codebase | ADR-0012 | Same Rust codebase, one binary in another mode |
+| Small control plane, shared crates | ADR-0012 | Same Rust workspace, **two binaries**: schema, pack sign/verify, policy resolution, provider adapters and cost math are shared; deployment code is not |
 | TUI ecosystem quality | AQ-11 | `ratatui` (consequence of this decision) |
 | JSON-RPC/ACP library maturity | AQ-2 | Schema-first protocol (ADR-0002) generates the TS client's types |
 | Contributor pool & self-modification | AQ-4, T-21 | Addressed by ADR-0004: extensions are WASM/markdown/hooks, so behavior changes need no Rust; self-modification targets the extension surface, not the kernel |
@@ -529,8 +531,8 @@ hand-maintained. Rust's smaller contributor pool is the accepted cost, mitigated
 by keeping the kernel tiny and fixed and pushing iteration to the edges.
 
 Deferred: workspace/toolchain layout (cargo workspace; Bun vs Node for the web
-build), whether the control-plane backend is the same binary in another mode or
-a sibling binary, and the concrete WASM host API surface.
+build), how the local-agent and control-plane binaries are versioned and
+released together, and the concrete WASM host API surface.
 
 ---
 
@@ -787,3 +789,20 @@ Child sessions **reference** their parent's prefix instead of copying it
 reason ADR-0014 must carry ancestor sessions. Wording aligned in ADR-0003,
 ADR-0009 (one writer is per session; the head is where its writer is),
 ADR-0011 (subagents are child sessions), ADR-0014, T-12, T-17, and the overview.
+
+### 2026-10-05 — "Same code" disambiguated (two binaries, shared crates)
+Owner: "这怎么能是同一份代码?" — the phrase was conflating two different claims →
+**ADR-0012 §1 rewritten**. **Claim A:** the control plane managed vs self-hosted
+is **literally the same code** (T-03) — that one is exact. **Claim B:** the
+control plane and the local agent live in **one repository/workspace** and share
+only the crates where disagreement is a bug — protocol/event schema
+(ADR-0002/0003), pack envelope + sign/verify (ADR-0008), policy and config
+resolution (ADR-0005/0008), provider adapters + transformers (ADR-0004), and
+token/cost math (ADR-0006) — while being **two separate binaries** with different
+deployment code (kernel/sandbox/tools/surfaces vs
+identity/Postgres/pack-issuance/quotas/dashboards). Rationale recorded: the two
+sides ship on **independent channels** (canary vs stable, ADR-0009), so
+duplicated implementations *will* diverge — and a divergent verifier, cost meter,
+or policy resolver silently breaks packs, billing, or an org hard cap.
+**"Same binary in another mode" is retired as an over-reading.** Wording fixed in
+ADR-0008/0009/0013, AQ-5, AQ-12, the topology diagram, and the overview.

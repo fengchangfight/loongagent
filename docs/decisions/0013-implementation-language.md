@@ -19,7 +19,7 @@ answered, the requirements are concrete rather than speculative:
 | Retrieval floor at enterprise scale | T7 / enterprise research | grep, parsing, repo map and indexing that hold up on 10M+ LOC repos |
 | Signed packs | ADR-0008 | Mature crypto libraries and signature verification on the client |
 | Local parallelism | ADR-0011 | Cheap subprocesses, git-worktree orchestration, many concurrent sessions |
-| Small control plane, same codebase | ADR-0012 | The backend shares the codebase and can be the same binary in another mode |
+| Small control plane, shared crates | ADR-0012 | One workspace, **two binaries**; shared schema, pack sign/verify, policy resolution, provider adapters, cost math |
 
 Ecosystem evidence points three ways: **Codex is Rust** (robustness, single
 binary, sandbox FFI), **Pi / OpenCode / Claude Code are TypeScript** (iteration
@@ -91,6 +91,6 @@ Recorded so they don't get re-litigated as architecture:
 - **The protocol schema becomes a build artifact for both sides**, which makes
   AQ-2's schema-first choice pay off a second time.
 - **Deferred:** workspace/toolchain specifics (cargo workspace layout; Bun vs
-  Node for building the web client), whether the control-plane backend ships as
-  the same binary in another mode or a sibling binary (ADR-0012 allows either),
-  and the concrete WASM host API surface (ADR-0004).
+  Node for building the web client), how the two binaries (local agent, control
+  plane) are versioned and released together, and the concrete WASM host API
+  surface (ADR-0004).

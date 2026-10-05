@@ -31,9 +31,32 @@ smaller trust surface and a shorter security review.
 ### 1. Shape: one backend binary, modular inside
 A single backend binary with internal module boundaries where scaling actually
 differs — **model gateway / dashboards & statistics / pack distribution**.
-Microservices are an ops tax not yet earned. It ships from the **same codebase**
-as the local agent (T-03) and is deployable **managed or self-hosted**, same
-code either way.
+Microservices are an ops tax not yet earned.
+
+**Two different "same code" claims, kept apart** (they were previously conflated,
+which is misleading):
+
+- **Managed vs self-hosted control plane: literally the same code.** One backend
+  binary, deployed as a managed service or on the firm's own hardware. This is
+  T-03's claim, and it is exact.
+- **Control plane vs local agent: the same repository, not the same binary.**
+  Both live in one crate workspace and **share the crates where agreement is
+  correctness-critical** — the protocol/event schema (ADR-0002/0003), the pack
+  envelope and its sign/verify path (ADR-0008), policy and config resolution
+  incl. merge kinds (ADR-0005/0008), provider adapters and the transformer chain
+  (ADR-0004), and token counting / cost math (ADR-0006). They are then built as
+  **two binaries** with genuinely different deployment code: the local agent
+  adds the kernel loop, sandbox, tools, and surfaces; the control plane adds
+  identity/SSO, Postgres rollups, pack issuance, quotas, and dashboards.
+
+Why the sharing is not optional: the two sides are **deployed independently**
+(canary and stable channels, ADR-0009), so a duplicated implementation *will*
+diverge. A divergent pack verifier rejects valid packs or accepts invalid ones;
+divergent cost math makes the local meter disagree with the bill; a divergent
+policy resolver makes an org hard cap silently unenforced (ADR-0005). Sharing a
+crate turns "client and server agree" into a compiler-enforced property instead
+of a test-suite hope. **"Same binary in another mode" is explicitly not
+required** — that reading of "same code" was an over-reach and is retired here.
 
 ### 2. Data: Postgres + object storage
 Postgres for users, policies, and event rollups; object storage for shared

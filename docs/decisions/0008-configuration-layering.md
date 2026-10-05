@@ -40,7 +40,7 @@ Lowest to highest precedence: **built-in defaults < org managed < project
 Ownership follows the layer: the **org layer** lives in the firm control plane
 (T-05), is authored by admins, and reaches the local install as a **versioned
 pack**; the **project layer** is committed in the repository; the **user and
-session layers** stay local. A solo install is the same code with an empty org
+session layers** stay local. A solo install is the same binary with an empty org
 layer — built-in defaults simply become the top.
 
 Distribution is **not** a live dependency: the local install caches the last

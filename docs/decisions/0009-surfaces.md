@@ -79,7 +79,8 @@ safe rather than racy.
 
 ### 6. Distribution & updates
 - Single static binary per OS; firm-internal mirror (Artifactory-style) for
-  managed rollouts; the control plane ships from the same codebase (AQ-5).
+  managed rollouts; the control plane ships from the **same repository as its
+  own binary**, sharing the correctness-critical crates (ADR-0012).
 - Channels: **stable/LTS + canary**.
 - **Token-cost-affecting changes are breaking changes**: major version bump plus
   a visible changelog note. Cost governance (T-04) must not be silently

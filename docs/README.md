@@ -32,3 +32,4 @@ is tracked here so decisions survive context windows and sessions.
 **Round 1:** claude-code, codex, opencode, cursor, pi, deepseek-harness, other-agents
 **Round 2:** kiro-spec-driven, role-specialized, multi-agent-orchestration,
 web-app-builders, ide-ecosystem, china-ecosystem, enterprise-context-review
+**Ecosystem assessment:** [dsh-plugin-ecosystem](research/dsh-plugin-ecosystem.md) — can our extension model host DSH-style plugins? (input to an ADR-0004 revision)

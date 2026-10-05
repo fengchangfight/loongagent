@@ -174,11 +174,14 @@ and avoidable by self-hosting (T-03).
 
 - **Sessions are files** (JSONL + derived index), so moving one is a file copy,
   not a service call.
-- **`loongagent session export/import`** carries the event log, the tree
-  lineage, a manifest (workspace path, git revision, profiles, plugin/MCP
-  inventory), and optionally file-history snapshots — then **re-binds** the
-  workspace on import and reports mismatches instead of enforcing them
-  (ADR-0014).
+- **`loongagent session export/import`** carries one session's **complete**
+  event log, its **ancestor** sessions (the lineage that makes it meaningful), a
+  manifest (workspace path, git revision, profiles, plugin/MCP inventory), and
+  optionally file-history snapshots — then **re-binds** the workspace on import
+  and reports mismatches instead of enforcing them. **Descendant sessions are
+  not included by default**; `--with-branches` adds the whole subtree. The
+  parent's context already holds each subagent's summary, which is what
+  continuation needs (ADR-0014).
 - **Roaming is per machine** across that machine's surfaces (ADR-0009);
   cross-machine continuity is explicit export/import, never automatic.
 - **The code travels through git**, not through session bundles.

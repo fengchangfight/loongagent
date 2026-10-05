@@ -32,15 +32,35 @@ able to carry authority with it.
 ### 1. Export is a first-class command
 `loongagent session export <id>` produces **one self-describing bundle**:
 
-- the **event log(s)**, including the tree lineage needed to make a branch
-  meaningful (ancestors; descendants optional);
+- the **session's event log**, always **complete** — the session's internal
+  node history (retry/steer branches) travels in full, because that history *is*
+  the session. Trimming it is a different feature (pruning), not an export
+  option;
+- the **ancestor sessions** needed to make the exported session meaningful
+  (the fork/delegation lineage that explains where it came from and what
+  context it inherited);
 - a **manifest**: bundle schema version, session id(s), export time, source
   workspace path, **git revision + dirty state**, profile names used, and an
   inventory of the plugins/MCP servers/skills the session depended on;
 - **optionally** the file-history snapshots.
 
-The bundle is checksummed. A size and contents summary is shown **before**
-writing, because the bundle contains conversation content.
+**Descendant sessions are not included by default** (owner decision,
+2026-10-05). `--with-branches` adds the **whole subtree** or nothing at all — a
+half-included tree would break lineage, which is worse than excluding it.
+Rationale, recorded so the default is not mistaken for an oversight:
+
+- **Continuation does not need them.** The parent's context already holds each
+  subagent's structured artifact and summary (ADR-0006/ADR-0011); that is what
+  the trunk needs to keep working.
+- **They are the archival/review material**, not the working unit — the full
+  record stays on the machine that produced it, inspectable there.
+- **They are expensive to carry.** In the reference session imported during
+  design, the main session was ~1,400 events while its 14 subagent branches were
+  ~2,700 — including them roughly tripled the bundle.
+
+The bundle is checksummed. A size and contents summary — **how many sessions,
+how many events, how large** — is shown **before** writing, because the bundle
+contains conversation content.
 
 ### 2. Import is a first-class command, and it re-binds rather than assumes
 `loongagent session import <bundle>` verifies the checksum, rebuilds the index,
@@ -108,6 +128,19 @@ of the target tree.
   ("send me the session"), and archival.
 - **Bundle size is user-visible** because file-history inclusion is optional and
   the contents summary precedes the write.
+- **Default export is the working unit:** the session plus its ancestors,
+  without descendants — so "export and continue elsewhere" carries what
+  continuation needs and nothing whose absence would be noticed only later.
+- **Open dependency — node-level vs session-level tree.** This ADR is written in
+  **session-level** terms (a session has ancestor and descendant *sessions*),
+  which is how forks and subagent delegation are described in ADR-0011 and how
+  DSH/Kimi model them. ADR-0003/T-12 describe the tree **inside** a session
+  (`id`/`parentId` in one JSONL). Both can hold at once — node tree *within* a
+  session, session lineage *between* sessions — but the docs currently mix the
+  two vocabularies, and the export default above presumes the session level is
+  real. **Resolve this explicitly** (session boundaries for fork/delegation vs
+  node-only branching within one file); it affects ADR-0003, ADR-0009's
+  "one writer" granularity, ADR-0011's worktree/GC unit, and this ADR.
 - **Deferred:** the concrete container format (compression, single file),
-  optional descendant inclusion, redaction UX, schema-version migration policy,
-  and whether an org may forbid export (a narrow-only policy key, ADR-0008).
+  redaction UX, schema-version migration policy, and whether an org may forbid
+  export (a narrow-only policy key, ADR-0008).

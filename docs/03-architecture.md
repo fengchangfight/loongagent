@@ -753,3 +753,20 @@ were restructured route B** — Part 1 of this document is now historical framin
 with an ADR mapping table, the canonical topology diagram moved to the new
 [04-system-overview.md](04-system-overview.md), and the Kimi handoff bundle was
 deleted (its content is fully absorbed; the ADRs are the record).
+
+### 2026-10-05 — Export default fixed: no descendant sessions
+Owner decision → folded into **ADR-0014 §1**: `session export <id>` carries the
+session's **complete** event log (its internal node history always travels in
+full — trimming that is pruning, a different feature) plus its **ancestor
+sessions**, and **excludes descendant sessions by default**; `--with-branches`
+adds the whole subtree or nothing (a half-included tree breaks lineage). Recorded
+rationale: continuation needs only the parent, whose context already holds each
+subagent's structured summary (ADR-0006/0011); descendants are archival/review
+material; and in the reference session they were ~2,700 events against the
+trunk's ~1,400, roughly tripling the bundle. The question that surfaced this —
+**is a "session tree" a node tree inside one file (ADR-0003/T-12) or a tree of
+sessions (ADR-0011/ADR-0014)?** — is now recorded in ADR-0014 as an **explicit
+open dependency** instead of being left implicit: the two can coexist (node tree
+*within* a session, session lineage *between* sessions), but the vocabulary must
+be fixed, and it decides the granularity of ADR-0009's one-writer rule,
+ADR-0011's worktree/GC unit, and this ADR's wording.

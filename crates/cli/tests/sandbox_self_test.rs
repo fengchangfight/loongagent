@@ -40,6 +40,29 @@ fn the_os_boundary_is_proven_not_assumed() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Regression: when the workspace *is* the temp directory, the probe target must
+/// not be picked inside it — that made an allowed write look like an escape.
+#[test]
+fn a_workspace_at_the_temp_root_is_still_probed_honestly() {
+    let dir = std::env::temp_dir();
+    let out = Command::new(env!("CARGO_BIN_EXE_loongagent"))
+        .arg("sandbox")
+        .arg("self-test")
+        .arg("--cwd")
+        .arg(&dir)
+        .output()
+        .expect("the binary runs");
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        !stderr.contains("OUTSIDE the workspace succeeded"),
+        "the probe target was chosen inside the workspace:\n{stdout}\n{stderr}"
+    );
+    // On this platform an outside candidate exists (/var/tmp), so it must prove enforcement.
+    assert_eq!(out.status.code(), Some(0), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(stdout.contains("enforced"), "stdout: {stdout}");
+}
+
 #[test]
 fn a_broken_boundary_would_be_reported_not_hidden() {
     // The probe refuses to run without its contract, and that is an

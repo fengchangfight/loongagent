@@ -93,7 +93,21 @@ pub fn self_test(probe_exe: &Path, workspace: &Path) -> SelfTestReport {
         };
     }
 
-    let outside = std::env::temp_dir().join(format!("loong-sandbox-probe-{}", std::process::id()));
+    // The probe path must be *genuinely* outside the workspace. When the
+    // workspace is the temp directory itself (or an ancestor of it), the obvious
+    // candidate is inside it and a successful write there would look like an
+    // escape. Pick the first candidate that is really outside.
+    let Some(outside) = outside_candidate(workspace) else {
+        return SelfTestReport {
+            capabilities,
+            result: SelfTest::Unavailable {
+                detail: format!(
+                    "no path outside {} is available to probe with (the workspace is the whole filesystem)",
+                    workspace.display()
+                ),
+            },
+        };
+    };
     let _ = std::fs::remove_file(&outside);
     let child = Command::new(probe_exe)
         .arg("sandbox")
@@ -113,6 +127,32 @@ pub fn self_test(probe_exe: &Path, workspace: &Path) -> SelfTestReport {
             SelfTestReport { capabilities, result }
         }
     }
+}
+
+/// A probe target that is definitely not inside `workspace`.
+pub fn outside_candidate(workspace: &Path) -> Option<PathBuf> {
+    let name = format!("loong-sandbox-probe-{}", std::process::id());
+    let mut candidates = vec![
+        std::env::temp_dir().join(&name),
+        PathBuf::from("/var/tmp").join(&name),
+    ];
+    if let Some(parent) = workspace.parent() {
+        candidates.push(parent.join(&name));
+    }
+    candidates.into_iter().find(|c| is_outside(workspace, c))
+}
+
+/// Lexical containment on canonicalised ancestors: `/tmpfoo` is not inside
+/// `/tmp`, and a path whose parent does not exist yet still answers correctly.
+pub fn is_outside(workspace: &Path, candidate: &Path) -> bool {
+    let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let ws = canonical(workspace);
+    let parent = candidate.parent().map(canonical).unwrap_or_default();
+    let full = match candidate.file_name() {
+        Some(name) if !parent.as_os_str().is_empty() => parent.join(name),
+        _ => candidate.to_path_buf(),
+    };
+    !full.starts_with(&ws)
 }
 
 /// The exit-code contract, isolated so it can be tested without a child.
@@ -235,6 +275,23 @@ mod tests {
             other => panic!("expected Broken, got {other:?}"),
         }
         assert!(matches!(interpret(&c, None, "killed", ws), SelfTest::Broken { .. }));
+    }
+
+    #[test]
+    fn the_probe_target_is_chosen_outside_the_workspace() {
+        let temp = std::env::temp_dir();
+        // A workspace inside the temp directory: its own temp sibling is outside.
+        let nested = temp.join("loongagent-ws-test");
+        assert!(is_outside(&nested, &temp.join("loong-sandbox-probe-1")));
+        // A workspace that *is* the temp directory: the candidate inside it is
+        // not acceptable, and a real alternative must be found.
+        assert!(!is_outside(&temp, &temp.join("loong-sandbox-probe-1")));
+        let chosen = outside_candidate(&temp).expect("somewhere outside the temp dir exists");
+        assert!(is_outside(&temp, &chosen), "{} should be outside {}", chosen.display(), temp.display());
+        // Prefix traps: `/tmpfoo` is a different directory from `/tmp`.
+        assert!(is_outside(Path::new("/tmp"), Path::new("/tmpfoo/x")));
+        assert!(!is_outside(Path::new("/tmp"), Path::new("/tmp/x")));
+        assert!(is_outside(Path::new("/tmp"), Path::new("/etc/x")));
     }
 
     #[test]

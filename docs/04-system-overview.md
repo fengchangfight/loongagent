@@ -103,8 +103,9 @@ swapped can hide (ADR-0004):
    (ADR-0007).
 
 **Everything else is an edge:** provider adapters, protocol transformers, tools
-(built-ins included), hooks, routing strategies, WASM extensions,
-markdown skills and commands, and configuration packs (ADR-0004).
+(built-ins included), hooks (shell / HTTP / MCP), routing strategies, WASM
+extensions, markdown **skills** — commands are manually-invoked skills, one
+concept and one loader — and configuration packs (ADR-0004).
 
 ---
 

@@ -165,8 +165,8 @@ Four distinct extension kinds demand different answers:
 
 | Kind | Examples | Execution options |
 |---|---|---|
-| Hooks (T-09) | pre/post-tool guards, blockers | shell executables, exit-code protocol (Claude Code pattern) — language-neutral, sandboxable |
-| Commands & skills (T-16/T-18) | prompt templates, bundled scripts | markdown + frontmatter; scripts run as subprocesses |
+| Hooks (T-09) | pre/post-tool guards, blockers | shell / HTTP / MCP tool, one verdict contract (ADR-0007 §7); language-neutral, sandboxable, HTTP is an opt-in network action class |
+| Skills (T-18; commands merged in) | prompt templates, bundled scripts | markdown + frontmatter, one loader; a *command* is a manually-invoked skill; scripts run as subprocesses |
 | External tools (T-15) | MCP servers | subprocess, JSON-RPC — already the standard |
 | **Deep extensions** | custom tools in the loop, UI contributions, behavior overrides | **in-process** (Pi's TS extensions — maximal power, couples to impl. language) vs **subprocess** (language-neutral, slower, isolated) vs **WASM** (in-process-ish, sandboxed, language-neutral, more build complexity) |
 

@@ -2,7 +2,7 @@
 
 - **Status:** Living document — append ideas as they come; promote to numbered
   design docs or ADRs when discussed.
-- **Last updated:** 2026-10-05 (T-09 hook kinds & event set decided, 3 kinds in v1; T-22…T-25 added from [05-parity-and-synthesis](05-parity-and-synthesis.md); T-16 pending merge; earlier: T-12/T-17 by ADR-0015, T-05…T-19 by ADR-0006…0012)
+- **Last updated:** 2026-10-05 (E1–E4 applied: compaction heuristic §ADR-0006, hook kinds+events §ADR-0007, commands merged into skills §T-18, `ignorable` envelope §ADR-0003; T-22…T-25 added from [05-parity-and-synthesis](05-parity-and-synthesis.md))
 How this works: the owner drops raw ideas in conversation; they land here as
 topics with a one-line seed connecting them to what the research already knows
 (`research/`, `01-landscape-synthesis.md`). When a topic gets discussed in
@@ -24,7 +24,7 @@ Legend: `Seed` (captured, not yet discussed) · `Discussing` · `Promoted → <d
 | pi-style "understand why the agent is doing X" | T-13 |
 | team work & sharing | T-14 (extends T-03) |
 | MCP | T-15 |
-| commands | T-16 |
+| commands | T-16 → merged into T-18 |
 | subagents | T-17 |
 | skills marketplace | T-18 |
 | IDE integration | T-19 |
@@ -460,13 +460,15 @@ Goose's orthogonality: even built-in tools as MCP servers. Org angle (T-05):
 an approved-server gateway/registry; prompt injection via MCP content is the
 dominant attack class — pinning, scanning, and trust levels required.
 
-## T-16 · Commands — `Seed`
+## T-16 · Commands — `Merged → T-18` (2026-10-05)
 
-Seeded 2026-09-30. **Pending merge with T-18 (§E3 of
-[05-parity-and-synthesis](05-parity-and-synthesis.md)):** Claude Code merged
-custom slash commands into skills (`.claude/commands/*.md` still work, but they
-are one concept). Carrying two loaders and two frontmatter contracts costs more
-than it buys — commands should become "manually-invoked skills".
+Seeded 2026-09-30. **Decision (2026-10-05, §E3 of
+[05-parity-and-synthesis](05-parity-and-synthesis.md)): commands are not a
+separate concept — a command *is* a manually-invoked skill.** Claude Code
+already merged them (`.claude/commands/*.md` still load, as skills). One loader,
+one frontmatter contract, one directory convention; a legacy commands directory
+is read as skills for compatibility. The merge contract lives in **T-18**; this
+entry is kept only as the record of the merge.
 
 Slash commands as markdown prompt templates with frontmatter (Pi/OpenCode):
 `$ARGUMENTS`, shell-output injection, `@file` inclusion, `subtask: true` to
@@ -495,7 +497,13 @@ so the model never attempts them.
 
 ## T-18 · Skills & marketplace — `Seed`
 
-Seeded 2026-09-30.
+Seeded 2026-09-30. **Commands merged in (2026-10-05, T-16 → here):** a
+**command is a manually-invoked skill**, not a separate concept — one loader,
+one frontmatter contract (`name` / `description` / `whenToUse` +
+invocation flags such as model-invocable vs user-only), one directory
+convention; a legacy `commands/` directory is read as skills for
+compatibility. Two loaders and two frontmatter contracts cost more than they
+buy, and Claude Code already converged on the single concept.
 
 Agent Skills open standard (Anthropic): description-only in context until
 invoked; skills bundle files/scripts and (Amp-style) their own MCP config.

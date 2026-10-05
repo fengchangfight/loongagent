@@ -56,7 +56,7 @@ behavior cannot hide inside a replaced core.
 | Tools, incl. built-ins | one uniform interface (Goose pattern: MCP-shaped) | single chokepoint for permissions, hooks, cost metering |
 | Routing strategies | plugin | feeds T-01 cascading |
 | Hooks (T-09) | **shell / HTTP / MCP tool** (same verdict contract); LLM and subagent kinds deferred to v2 | language-neutral; HTTP hooks are an opt-in, org-pinnable network action class; repo-shipped hooks require explicit trust opt-in (ADR-0007 §7) |
-| Commands & skills (T-16/T-18) | markdown + frontmatter | bundled scripts run as subprocesses |
+| Skills (T-18; commands merged in 2026-10-05) | markdown + frontmatter, one loader | a *command* is a manually-invoked skill; bundled scripts run as subprocesses |
 | Third-party deep extensions | **WASM**, sandboxed, capability-gated, versioned host API | any source language; no full process trust. **Future tier** — see Context |
 | First-party batteries | in-process | trusted (it's us): plan mode, subagents, skills runtime |
 | Our own modules behind edges | in-process (or subprocess where it fits) | the normal case: we write plugins too, for our own replaceability |

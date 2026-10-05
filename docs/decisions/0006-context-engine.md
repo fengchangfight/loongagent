@@ -47,6 +47,13 @@ outside a typed, visible, token-counted ledger entry.**
    with what was summarized and why; the session's **event tree** (ADR-0003,
    ADR-0015) retains the
    lossless record, so compaction is reversible in principle.
+   - **Ordering heuristic** (added 2026-10-05): compaction **first clears stale
+     tool outputs** — usually the largest and least-referenced blocks — and only
+     then summarizes the remainder. It **keeps the newest window verbatim**
+     (default ≈20k tokens; a profile parameter, so the org may cap it and the
+     user may tighten it, per ADR-0008's merge kinds). Both Claude Code and Pi
+     converge on this order; dropping tool output before prose preserves working
+     state at the lowest semantic cost.
 5. **Retrieval is a kernel service that writes through the ledger.** The
    layered pipeline (grep/symbols → token-budgeted repo map → explore
    subagent) produces ordinary ledger entries. A retrieval result has no

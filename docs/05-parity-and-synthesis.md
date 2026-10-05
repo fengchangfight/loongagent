@@ -30,7 +30,7 @@ rows below are what "not losing" means concretely.
 |---|---|---|---|
 | Built-in Read / Write / Edit / Bash / Glob / Grep / WebFetch / WebSearch | ✅ | ADR-0004 (uniform tool interface) | ship in the first slice |
 | **LSP-backed code intelligence** (go-to-def, type errors after edits) | ❌ | — | new **T-22** |
-| Agent/Task (subagent spawn), AskUserQuestion, todo tracking | ✅ | ADR-0011, T-17, T-16 | — |
+| Agent/Task (subagent spawn), AskUserQuestion, todo tracking | ✅ | ADR-0011, T-17, T-18 | — |
 | **Monitor** (background script output surfaced as events) | ❌ | — | new **T-25** |
 | Interrupt / mid-run steer / queue-follow-up | ✅ | T-12, ADR-0009 | — |
 | Verification loop ("give it a check it can run") | ✅ | ADR-0006 retrieval + tools | make it a first-class pattern in prompts |
@@ -39,7 +39,7 @@ rows below are what "not losing" means concretely.
 
 | CC feature | Our status | Where | Next |
 |---|---|---|---|
-| Auto-compaction: **clear old tool outputs first, then summarize**; keep newest ~20k verbatim | ⚠️ | ADR-0006 (compaction visible) | pending amendment **E1** |
+| Auto-compaction: **clear old tool outputs first, then summarize**; keep newest ~20k verbatim | ✅ | ADR-0006 §4 (applied 2026-10-05; window is a tunable profile parameter) | — |
 | `/compact <focus>`, partial summarization, `/rewind` (summarize from/up to here) | ⚠️ | ADR-0015 + T-12 give the substrate | define the command surface |
 | `/context` — what occupies the window | ✅ | ADR-0006 (ledger) | render it |
 | **Prompt-cache hit rate** in usage | ❌ | T-02 | new **T-25** |
@@ -82,7 +82,7 @@ rows below are what "not losing" means concretely.
 | CC feature | Our status | Where | Next |
 |---|---|---|---|
 | `SKILL.md` + frontmatter, description-only in context, body on invoke | ✅ | T-18, ADR-0006 (progressive disclosure) | — |
-| **Commands merged into skills** (one concept) | ⚠️ | T-16 vs T-18 separated | pending amendment **E3** |
+| **Commands merged into skills** (one concept) | ✅ | T-18 (T-16 merged in, 2026-10-05) | — |
 | Bundled workflow skills (`/code-review`, `/batch` fan-out to worktree agents opening PRs, `/verify`, `/run`) | ⚠️ | ADR-0011 + T-20 + T-17 | define the `/batch`-style workflow explicitly |
 | Plugins = bundles of skills + hooks + subagents + MCP servers | ✅ | ADR-0004 + ADR-0008 packs | same shape; content bundles |
 | Git-based plugin marketplaces | ⏸ | ADR-0008 signed packs | internal catalog later (not v1) |
@@ -127,13 +127,13 @@ rows below are what "not losing" means concretely.
 | # | Item | From | Our status | Where it lands |
 |---|---|---|---|---|
 | B1 | Hook kinds **shell / HTTP / MCP tool** + full lifecycle event set (LLM and subagent kinds → v2) | CC | ✅ applied 2026-10-05 | ADR-0007 §7, ADR-0004 |
-| B2 | Commands merged into skills | CC | ⚠️ two concepts | **E3** (T-16/T-18) |
-| B3 | Auto-compaction heuristic (clear tool outputs → summarize; keep newest ~20k) | CC, Pi | ⚠️ | **E1** (ADR-0006) |
+| B2 | Commands merged into skills | CC | ✅ applied 2026-10-05 | T-18 (T-16 merged in) |
+| B3 | Auto-compaction heuristic (clear tool outputs → summarize; keep newest ~20k) | CC, Pi | ✅ applied 2026-10-05 | ADR-0006 §4 |
 | B4 | `/goal` persistent completion + evaluator + turn-end gating | CC | ❌ | **T-23** |
 | B5 | LSP code intelligence tools | CC, OpenCode | ❌ | **T-22** |
 | B6 | Module declares its config schema; shells render the settings UI | DSH | ❌ | **T-24** |
 | B7 | Module hot reload (authoring loop) | DSH, Pi | ❌ | **T-24** |
-| B8 | `ignorable` event envelope (unknown event types are safe to ignore) | DSH | ❌ | **E4** (ADR-0003) |
+| B8 | `ignorable` event envelope (unknown event types are safe to ignore) | DSH | ✅ applied 2026-10-05 | ADR-0003 |
 | B9 | Capability-seam naming discipline (Service Definition pkg + provider pkgs) | DSH | ✅ concept | ADR-0004 wording |
 | B10 | Monotonic denial (`guard`) | DSH, CC | ✅ | ADR-0008 |
 | B11 | `/btw`, Monitor, cache-hit stats, `/init`, `/doctor`, `@path` imports, description budgets | CC | ❌ | **T-25** |
@@ -183,6 +183,10 @@ rows below are what "not losing" means concretely.
 
 ### Applied
 
+- **E1 · ADR-0006 §4** — ✅ **2026-10-05**: compaction **clears stale tool outputs
+  first, then summarizes**, and **keeps the newest window verbatim** (default
+  ≈20k tokens; a profile parameter, so the org may cap it and the user may
+  tighten it). Compaction stays a visible event.
 - **E2 · ADR-0007 §7 / ADR-0004** — ✅ **2026-10-05, narrowed**: hooks now have
   **three v1 kinds** (shell / HTTP / MCP tool) behind one verdict contract, plus
   a fixed lifecycle event set (session start/end, user-prompt submit, pre/post
@@ -192,19 +196,14 @@ rows below are what "not losing" means concretely.
   Guardian reviewer and the goal evaluator (T-23). HTTP hooks are the one
   explicit exception to "nothing leaves the machine": opt-in, org-pinnable, a
   network action class under the PDP.
-
-### Pending (need owner sign-off)
-
-- **E1 · ADR-0006**: add the compaction heuristic — clear stale tool outputs
-  first, then summarize; keep the newest ~20k tokens verbatim; compaction stays
-  a visible event.
-- **E3 · T-16/T-18**: **merge commands into skills** (one concept, one loader,
-  one frontmatter) — CC already did this; carrying two concepts costs more than
-  it buys.
-- **E4 · ADR-0003**: add the **forward-compatibility envelope** — an explicit
-  `ignorable` marker so a reader can safely skip unknown event types. DSH
-  plugins failed closed without it, and our own modules will version
-  independently too.
+- **E3 · T-18 (T-16 merged in)** — ✅ **2026-10-05**: a **command is a
+  manually-invoked skill** — one loader, one frontmatter contract, one directory
+  convention; a legacy `commands/` directory is read as skills.
+- **E4 · ADR-0003** — ✅ **2026-10-05**: every event carries a
+  **forward-compatibility envelope** with an explicit `ignorable` marker;
+  readers skip unknown ignorable types, writers classify every type, and core
+  conversation events are **not** ignorable (fail loudly rather than render a
+  wrong session). This is what lets our own modules version independently.
 
 ---
 

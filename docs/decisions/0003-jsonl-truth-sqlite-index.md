@@ -29,6 +29,19 @@ do not want to scan JSONL files.
   level. A child session **references** its parent's prefix rather than copying
   it, so a session file is not self-contained — its ancestor chain is part of
   what it needs, and that chain is immutable by construction.
+- **Every event carries a forward-compatibility envelope** (added 2026-10-05).
+  Each record declares whether it is **`ignorable`** — whether a reader that
+  does not understand its `type` may safely skip it. The rule is two-sided:
+  **readers skip unknown ignorable types** (never fail, never mis-render), and
+  **writers classify every event type**. Core conversation events (message, tool
+  call/result, approval, policy decision, compaction, cost) are **not**
+  ignorable: a reader that cannot understand one must fail loudly rather than
+  silently display a wrong session. This is what lets modules version
+  independently and add event types without breaking older readers — the same
+  "add-only" discipline ADR-0008 applies to content layers. Why it is not
+  optional: in the DeepSeek-Harness ecosystem the missing marker forced two real
+  plugins to keep their audit writes disabled/fail-closed
+  ([research/dsh-plugin-ecosystem.md](../research/dsh-plugin-ecosystem.md) §5, G8).
 - **SQLite is a derived index** — rebuildable and disposable — powering tree
   queries, search, and local statistics. It may be deleted at any time; it
   rebuilds from the JSONL.

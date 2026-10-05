@@ -107,7 +107,8 @@ impl KernelConfig {
 }
 
 enum Dispatch {
-    Done(u64),
+    /// The call finished; every sequence it appended is already in `events`.
+    Done,
     Pending(PendingCall),
 }
 
@@ -331,7 +332,7 @@ impl Kernel {
             events.push(self.record_assistant(response.text.as_deref(), &response.tool_calls)?);
             for call in &response.tool_calls {
                 match self.dispatch(call, &mut events)? {
-                    Dispatch::Done(_) => {}
+                    Dispatch::Done => {}
                     Dispatch::Pending(pending) => {
                         self.pending = Some(pending.clone());
                         return Ok(TurnOutcome {
@@ -363,7 +364,7 @@ impl Kernel {
                 false,
                 &format!("unknown tool {:?}", call.tool),
             )?);
-            return Ok(Dispatch::Done(0));
+            return Ok(Dispatch::Done);
         };
         let tool_name = tool.name().to_string();
         let class = tool.action_class(&call.args, &self.config.cwd);
@@ -392,7 +393,7 @@ impl Kernel {
             Verdict::Allow => {
                 let (ok, output) = self.execute(&call.tool, &call.args);
                 events.push(self.record_tool_result(&call.call_id, ok, &output)?);
-                Ok(Dispatch::Done(0))
+                Ok(Dispatch::Done)
             }
             Verdict::Ask => {
                 let request_id = format!("appr-{}", self.approvals + 1);
@@ -418,7 +419,7 @@ impl Kernel {
             Verdict::Deny => {
                 let output = format!("denied by policy ({}): {}", ruling.rule, ruling.reason);
                 events.push(self.record_tool_result(&call.call_id, false, &output)?);
-                Ok(Dispatch::Done(0))
+                Ok(Dispatch::Done)
             }
         }
     }

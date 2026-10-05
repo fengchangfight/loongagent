@@ -13,8 +13,8 @@
 
 use loong_kernel::{Kernel, KernelConfig};
 use loong_providers::{
-    ChatMessage, CompletionRequest, CompletionResponse, Model, ModelError, ScriptedModel,
-    ToolCallRequest, Usage,
+    ChatMessage, CompletionRequest, CompletionResponse, Model, ModelError, OpenAiCompat,
+    ScriptedModel, ToolCallRequest, Usage,
 };
 use loong_schema::generated::ApprovalScope;
 use loong_server::Server;
@@ -37,6 +37,8 @@ MODELS (provider doubles, for a first run without keys):
   echo         answers \"echo: <your prompt>\"
   demo-write   calls write_file inside the workspace, then finishes
   demo-escape  tries to write outside the workspace — the PDP will ask
+  openai-compat  a real endpoint: set LOONGAGENT_BASE_URL (http://…), and
+                 LOONGAGENT_MODEL / LOONGAGENT_API_KEY as needed
 ";
 
 fn main() {
@@ -162,6 +164,7 @@ fn serve(args: Args) -> Result<(), String> {
 fn build_model(name: &str) -> Result<Box<dyn Model>, String> {
     match name {
         "echo" => Ok(Box::new(EchoModel)),
+        "openai-compat" => Ok(Box::new(OpenAiCompat::from_env().map_err(|e| e.to_string())?)),
         "demo-write" => Ok(Box::new(ScriptedModel::new(vec![
             CompletionResponse {
                 text: None,

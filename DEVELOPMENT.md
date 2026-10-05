@@ -69,7 +69,16 @@ cargo build
 
 # the server alone, for scripting
 ./target/debug/loongagent server --stdio --session /tmp/s.jsonl --cwd /tmp --model echo
+
+# a real provider: any OpenAI-compatible Chat Completions endpoint over http://
+# (vLLM, LM Studio, llama.cpp --server, Ollama /v1, an intranet gateway)
+LOONGAGENT_BASE_URL=http://127.0.0.1:8000/v1 LOONGAGENT_MODEL=qwen2.5-coder \
+  ./target/debug/loongagent run "summarise README.md" --session /tmp/r.jsonl --cwd . --model openai-compat
 ```
+
+`https://` endpoints are refused with a clear message for now: TLS is a
+dependency decision that has not been made, and self-hosted `http://` endpoints
+are the firm-internal case this adapter was built for.
 
 Sessions are plain JSONL — `cat` them. `LOONGAGENT_SERVER_BIN` overrides which
 binary the TUI spawns as its server (used by the end-to-end test).
@@ -90,25 +99,33 @@ binary the TUI spawns as its server (used by the end-to-end test).
   never touches pinned entries; `explain()` answers "why is this in my context?".
 - **Two enforcement points**: the PDP decides, the tool runner refuses to write
   outside the workspace even if a call is allowed.
+- **The derived index is wired into the session**: every append feeds it, a
+  failure marks it stale (and queries then refuse rather than lie), and reopening
+  rebuilds it from the log — deleting it is always safe.
+- **One real provider adapter**: `openai-compat` translates our `Model` interface
+  to the Chat Completions wire protocol (messages, tools, tool-call arguments as
+  JSON strings, usage) and back. Six tests drive it against a local HTTP server,
+  including the error paths.
 - **The vertical slice**, covered by three end-to-end tests against the real
   binary: a tool writes inside the workspace and the streamed events equal the
   log; an out-of-bounds write asks first and a denial is recorded without
-  touching anything; the TUI client drives a real server.
+  touching anything; the TUI client drives a real server. A manual run against a
+  fake OpenAI-compatible server exercises the whole chain — CLI → server → kernel
+  → adapter → HTTP → tool → PDP → back — and the log holds all eight events.
 
 ## What is not done yet (honest list)
 
-1. **The derived index is implemented and tested but not yet wired into a
-   session** — nothing calls `loong-index` from the kernel/server yet, so search
-   and tree queries are not exposed.
-2. **No real provider adapter** — only `EchoModel` and the scripted doubles;
-   cost is recorded as `usd_micros: 0` until pricing/profiles land.
-3. **No OS sandbox PEP** — the PDP and the tool-level refusal are the only
-   enforcement; seatbelt / Landlock+bubblewrap / Job Objects are not started.
-4. **Compaction is not implemented** — the ledger can evict, but nothing drives
+1. **The adapter is HTTP-only** — there is no TLS client and no streaming;
+   cost is recorded as `usd_micros: 0` until pricing/profiles land, and there is
+   no tokenizer (the ledger estimates tokens at ~4 chars).
+2. **No OS sandbox PEP** — the PDP decides and the tool runner refuses to leave
+   the workspace, but nothing yet confines a spawned process (Landlock /
+   bubblewrap / seatbelt), and ADR-0007's `sandbox self-test` does not exist.
+3. **Compaction is not implemented** — the ledger can evict, but nothing drives
    the ADR-0006 §4 heuristic (clear tool output → summarize, keep the newest
    window verbatim) yet.
-5. **The TUI is a line REPL** — ADR-0013 expects `ratatui` for the real surface.
-6. **Not started**: hooks (three kinds + the event set), skills/commands, MCP,
+4. **The TUI is a line REPL** — ADR-0013 expects `ratatui` for the real surface.
+5. **Not started**: hooks (three kinds + the event set), skills/commands, MCP,
    profiles/config packs, session export/import, WASM extensions, the web
    client, the control plane.
 

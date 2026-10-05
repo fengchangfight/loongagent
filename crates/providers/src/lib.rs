@@ -8,6 +8,10 @@
 use loong_schema::generated::Json;
 use serde::{Deserialize, Serialize};
 
+pub mod openai_compat;
+
+pub use openai_compat::OpenAiCompat;
+
 /// A tool as the model sees it (name + description + JSON Schema parameters).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolSpec {

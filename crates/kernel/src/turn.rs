@@ -168,6 +168,22 @@ impl Kernel {
         self.log.last_seq()
     }
 
+    pub fn log_path(&self) -> &std::path::Path {
+        self.log.path()
+    }
+
+    /// Every event appended after `seq` — what the server streams to clients.
+    /// Reads the log rather than keeping a mirror, so the stream cannot drift
+    /// from the truth. Unknown *ignorable* kinds are relayed too (a newer client
+    /// may understand them); an unknown non-ignorable kind fails loudly.
+    pub fn events_since(&self, seq: u64) -> Result<Vec<gen::EventEnvelope>, KernelError> {
+        Ok(loong_eventlog::replay(self.log.path())?
+            .events
+            .into_iter()
+            .filter(|e| e.seq > seq)
+            .collect())
+    }
+
     pub fn messages(&self) -> &[ChatMessage] {
         &self.messages
     }

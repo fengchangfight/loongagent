@@ -18,15 +18,17 @@ ALLOWED = {
     "loong-providers": {"loong-schema"},
     "loong-sandbox": {"loong-schema"},
     "loong-tools": {"loong-schema"},
+    # the derived index reads the log; it is disposable and rebuildable
+    "loong-index": {"loong-schema", "loong-eventlog"},
     # the fixed kernel calls its edges through traits; it never knows adapters
-    "loong-kernel": {"loong-schema", "loong-eventlog", "loong-providers", "loong-sandbox", "loong-tools"},
+    "loong-kernel": {"loong-schema", "loong-eventlog", "loong-index", "loong-providers", "loong-sandbox", "loong-tools"},
     # surfaces
     "loong-server": {"loong-schema", "loong-protocol", "loong-eventlog", "loong-kernel"},
     "loong-tui": {"loong-schema", "loong-protocol"},
     # the one binary that ties faces together
     "loongagent": {
         "loong-schema", "loong-protocol", "loong-eventlog", "loong-providers",
-        "loong-sandbox", "loong-tools", "loong-kernel", "loong-server", "loong-tui",
+        "loong-sandbox", "loong-tools", "loong-index", "loong-kernel", "loong-server", "loong-tui",
     },
 }
 
@@ -39,10 +41,13 @@ def main() -> int:
         if name not in ALLOWED:
             problems.append(f"{name}: not classified in scripts/layering_rules.py")
             continue
+        # Only normal dependencies are governed: a dev-dependency is a test
+        # affordance (a kernel test may reach for a scripted model), not part of
+        # the shipped dependency direction.
         internal = {
             d["name"]
             for d in pkg.get("dependencies", [])
-            if d["name"] in members
+            if d["name"] in members and d.get("kind") in (None, "normal")
         }
         extra = internal - ALLOWED[name]
         for dep in sorted(extra):

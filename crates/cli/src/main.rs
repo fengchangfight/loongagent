@@ -39,6 +39,8 @@ MODELS (provider doubles, for a first run without keys):
   demo-escape  tries to write outside the workspace — the PDP will ask
   openai-compat  a real endpoint: set LOONGAGENT_BASE_URL (http://…), and
                  LOONGAGENT_MODEL / LOONGAGENT_API_KEY as needed
+
+  loongagent sandbox self-test [--cwd DIR]   prove the OS boundary actually denies
 ";
 
 fn main() {
@@ -120,6 +122,11 @@ fn run() -> Result<(), String> {
             }
             serve(args)
         }
+        "sandbox" => match rest.first().map(String::as_str) {
+            Some("self-test") => sandbox_self_test(Args::parse(&rest[1..])?),
+            Some("probe") => std::process::exit(loong_sandbox::sandbox::probe_main()),
+            _ => Err(format!("sandbox self-test | probe\n\n{USAGE}")),
+        },
         "tui" => repl(Args::parse(rest)?),
         "run" => {
             let args = Args::parse(rest)?;
@@ -149,6 +156,21 @@ fn run() -> Result<(), String> {
 
 fn serve(args: Args) -> Result<(), String> {
     args.ensure_parent()?;
+    // ADR-0007: the boundary is proven before the first tool call. A mechanism
+    // that fails to deny is fatal; a platform without one is a loud degradation.
+    if let Ok(exe) = std::env::current_exe() {
+        match loong_sandbox::sandbox::self_test(&exe, &args.cwd).result {
+            loong_sandbox::SelfTest::Enforced { mechanism, .. } => {
+                eprintln!("[sandbox] filesystem boundary enforced by {mechanism}");
+            }
+            loong_sandbox::SelfTest::Unavailable { detail } => {
+                eprintln!("[sandbox] WARNING: unconfined — {detail}");
+            }
+            loong_sandbox::SelfTest::Broken { detail } => {
+                return Err(format!("refusing to start: the sandbox self-test is broken — {detail}"));
+            }
+        }
+    }
     let model = build_model(&args.model)?;
     let mut config = KernelConfig::new(&args.cwd);
     config.max_steps = 8;
@@ -328,6 +350,31 @@ fn repl(args: Args) -> Result<(), String> {
                 }
             }
             Err(e) => eprintln!("error: {e}"),
+        }
+    }
+}
+
+/// ADR-0007: prove the boundary before the first tool call. "Available" is not
+/// good enough — the probe must demonstrate that a forbidden write is denied.
+fn sandbox_self_test(args: Args) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let report = loong_sandbox::sandbox::self_test(&exe, &args.cwd);
+    println!("os:        {}", report.capabilities.os);
+    println!("mechanism: {} — {}", report.capabilities.strongest(), report.capabilities.note);
+    match &report.result {
+        loong_sandbox::SelfTest::Enforced { mechanism, detail } => {
+            println!("result:    enforced by {mechanism}");
+            println!("           {detail}");
+            Ok(())
+        }
+        loong_sandbox::SelfTest::Unavailable { detail } => {
+            eprintln!("result:    UNAVAILABLE — {detail}");
+            eprintln!("           tool execution is not confined on this platform");
+            std::process::exit(1)
+        }
+        loong_sandbox::SelfTest::Broken { detail } => {
+            eprintln!("result:    BROKEN — {detail}");
+            std::process::exit(2)
         }
     }
 }

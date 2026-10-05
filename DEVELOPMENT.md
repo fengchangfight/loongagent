@@ -99,6 +99,13 @@ binary the TUI spawns as its server (used by the end-to-end test).
   never touches pinned entries; `explain()` answers "why is this in my context?".
 - **Two enforcement points**: the PDP decides, the tool runner refuses to write
   outside the workspace even if a call is allowed.
+- **A real OS-level PEP**: Landlock (ABI probe + a ruleset that allows reads
+  everywhere and writes only under the workspace). It needs no privileges and is
+  inherited by child processes. `loongagent sandbox self-test` *proves* it by
+  running a confined child that must fail to write outside and succeed inside —
+  it never reports "available" without demonstrating denial. The server runs that
+  self-test before its first tool call: a broken mechanism refuses startup, a
+  missing one is a loud warning.
 - **The derived index is wired into the session**: every append feeds it, a
   failure marks it stale (and queries then refuse rather than lie), and reopening
   rebuilds it from the log — deleting it is always safe.
@@ -118,9 +125,11 @@ binary the TUI spawns as its server (used by the end-to-end test).
 1. **The adapter is HTTP-only** — there is no TLS client and no streaming;
    cost is recorded as `usd_micros: 0` until pricing/profiles land, and there is
    no tokenizer (the ledger estimates tokens at ~4 chars).
-2. **No OS sandbox PEP** — the PDP decides and the tool runner refuses to leave
-   the workspace, but nothing yet confines a spawned process (Landlock /
-   bubblewrap / seatbelt), and ADR-0007's `sandbox self-test` does not exist.
+2. **The PEP is proven but not yet applied around tool execution** — no tool
+   spawns a subprocess yet, so `confine_workspace()` is only exercised by the
+   self-test. The moment a shell/subprocess tool lands it must run its child
+   under it. Network egress is outside Landlock's scope (that needs seccomp or
+   namespaces), and macOS seatbelt is not implemented on this platform.
 3. **Compaction is not implemented** — the ledger can evict, but nothing drives
    the ADR-0006 §4 heuristic (clear tool output → summarize, keep the newest
    window verbatim) yet.

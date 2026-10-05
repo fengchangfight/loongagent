@@ -12,6 +12,11 @@
 
 use loong_schema::generated::{ActionClass, Verdict};
 
+pub mod landlock;
+pub mod sandbox;
+
+pub use sandbox::{Capabilities, SelfTest, SelfTestReport};
+
 /// Severity order used by the monotonic rule: allow < ask < deny.
 fn rank(v: Verdict) -> u8 {
     match v {

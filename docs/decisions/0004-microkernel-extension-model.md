@@ -6,14 +6,35 @@
 
 ## Context
 
-loongagent must be "pluggable but with strong defaults" (owner's requirement):
-cheap to change because nobody knows the right harness shape yet, open to a
-third-party ecosystem, but without sacrificing the "nothing hidden, everything
+**This is primarily an iteration architecture, and only secondarily a
+security architecture.** The owner clarified the intent on 2026-10-05: the
+extension model is not built so that outsiders can extend loongagent — it is the
+architecture **we** develop in, chosen because it makes iteration easier.
+Modules behind seams can be versioned, enabled, replaced and *deleted*
+independently; inlined code cannot. "Cheap to change" is the first requirement;
+"safe to open to third parties" is a later one.
+
+That ordering matters, because it decides who runs where:
+
+- **Our own modules are in-process.** They are inside our trust boundary by
+  definition — the "first-party batteries" row below. Seams give us the
+  replaceability, not a sandbox.
+- **Third-party code is the case the sandbox exists for**, and it is a *future*
+  case. The WASM/capability machinery, the trust tiers, signing and any
+  marketplace are therefore **backlog, not v1 critical path** (see
+  [05-parity-and-synthesis.md](../05-parity-and-synthesis.md) §D).
+
+Beyond iteration speed, loongagent must still be "pluggable but with strong
+defaults" (owner's requirement): cheap to change because nobody knows the right
+harness shape yet, without sacrificing the "nothing hidden, everything
 inspectable" promise (T-13) or the sandbox-first security posture (T-11).
 Ecosystem evidence pulls two ways: Pi's in-process TS extensions are beloved
 but couple the ecosystem to one language and grant full process trust;
 the DeepSeek-harness ecosystem (CCR, Aider, Goose) shows "everything is a
-plugin" working well — at provider, transformer, and tool boundaries.
+plugin" working well — at provider, transformer, and tool boundaries. Claude
+Code — the most-adopted enterprise agent — sits at the same shape as our edges:
+markdown content, subprocess/HTTP hooks, MCP servers, subagent definitions;
+**no in-process third-party host code and no third-party client UI**.
 
 ## Decision
 
@@ -36,8 +57,9 @@ behavior cannot hide inside a replaced core.
 | Routing strategies | plugin | feeds T-01 cascading |
 | Hooks (T-09) | shell executables, exit-code protocol | language-neutral; repo-shipped hooks require explicit trust opt-in |
 | Commands & skills (T-16/T-18) | markdown + frontmatter | bundled scripts run as subprocesses |
-| Third-party deep extensions | **WASM**, sandboxed, capability-gated, versioned host API | any source language; no full process trust |
+| Third-party deep extensions | **WASM**, sandboxed, capability-gated, versioned host API | any source language; no full process trust. **Future tier** — see Context |
 | First-party batteries | in-process | trusted (it's us): plan mode, subagents, skills runtime |
+| Our own modules behind edges | in-process (or subprocess where it fits) | the normal case: we write plugins too, for our own replaceability |
 
 ## Alternatives considered
 

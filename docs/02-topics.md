@@ -2,7 +2,7 @@
 
 - **Status:** Living document — append ideas as they come; promote to numbered
   design docs or ADRs when discussed.
-- **Last updated:** 2026-10-05 (T-12/T-17 vocabulary fixed by ADR-0015; earlier: T-05…T-19 by ADR-0006…0012)
+- **Last updated:** 2026-10-05 (T-22…T-25 added from [05-parity-and-synthesis](05-parity-and-synthesis.md); T-09/T-16 pending expansions noted; earlier: T-12/T-17 by ADR-0015, T-05…T-19 by ADR-0006…0012)
 How this works: the owner drops raw ideas in conversation; they land here as
 topics with a one-line seed connecting them to what the research already knows
 (`research/`, `01-landscape-synthesis.md`). When a topic gets discussed in
@@ -341,6 +341,12 @@ model, and repo-shipped hooks are untrusted content requiring explicit,
 content-bound per-repo trust opt-in. Still open: hook language (shell vs
 in-process), sync vs async, and the trust UX.
 
+**Pending expansion (2026-10-05, §E2 of [05-parity-and-synthesis](05-parity-and-synthesis.md)):**
+hooks should support **five kinds** — shell, HTTP, MCP tool, LLM prompt,
+subagent — and adopt Claude Code's full lifecycle event list (`UserPromptSubmit`,
+`PermissionRequest/Denied`, `Pre/PostCompact`, `SubagentStart/Stop`,
+`FileChanged`, `CwdChanged`, …). ADR-0004 currently pins shell only.
+
 The guarantee layer where markdown rules are only advisory (synthesis T5).
 Lifecycle events (session start/end, pre/post tool use, compaction, permission
 decisions) fire hooks that can block, mutate, or enrich — Claude Code's
@@ -451,7 +457,11 @@ dominant attack class — pinning, scanning, and trust levels required.
 
 ## T-16 · Commands — `Seed`
 
-Seeded 2026-09-30.
+Seeded 2026-09-30. **Pending merge with T-18 (§E3 of
+[05-parity-and-synthesis](05-parity-and-synthesis.md)):** Claude Code merged
+custom slash commands into skills (`.claude/commands/*.md` still work, but they
+are one concept). Carrying two loaders and two frontmatter contracts costs more
+than it buys — commands should become "manually-invoked skills".
 
 Slash commands as markdown prompt templates with frontmatter (Pi/OpenCode):
 `$ARGUMENTS`, shell-output injection, `@file` inclusion, `subtask: true` to
@@ -529,6 +539,53 @@ raw config, self-modification à la Pi's `/reload`). The harness is pluggable
 with good defaults — "nobody knows the right shape yet," so both we and our
 users must be able to re-shape it cheaply. Onboarding is a designed
 progression, not a cliff.
+
+---
+
+## T-22 · LSP-backed code intelligence — `Seed`
+
+Seeded 2026-10-05 (from [05-parity-and-synthesis](05-parity-and-synthesis.md)
+§A1/§B5). Claude Code (via LSP plugins) and OpenCode give the model
+go-to-definition, find-references, and **type errors after an edit** — the
+cheapest possible input to the verification loop, and what stops an agent
+guessing at symbol names. Our backlog had **no entry for this**. Design
+questions: which language servers to bundle, detection, context cost of
+diagnostics, how it composes with grep/repo-map retrieval (ADR-0006), and
+whether diagnostics enter context automatically after a write (CC's behaviour)
+or only on request.
+
+## T-23 · Persistent goal with evaluator — `Seed`
+
+Seeded 2026-10-05 (§A8/§B4). Claude Code's `/goal`: a completion condition that
+survives across turns, re-checked by an **evaluator** after every turn, with
+Stop hooks gating turn end and an 8-block circuit breaker so the agent cannot
+spin forever. Worth absorbing because it turns "keep going until X" from prompt
+text into a mechanism — and it exercises seams already decided: goals as events
+(ADR-0003), goal state visible (T-13), turn-end gating as a hook (T-09), and the
+evaluator's cost metered (ADR-0006).
+
+## T-24 · Module metadata & lifecycle — `Seed`
+
+Seeded 2026-10-05 (§B6/B7/B12, §D2). With the extension architecture reframed as
+**our own iteration architecture** (ADR-0004 Context), module metadata becomes
+product surface we need regardless: each module **declares its config schema**
+and the surfaces render the settings UI from it (DSH's
+`installSection`/`describe`); **hot reload** for skills, commands and modules so
+authors iterate without restarting (Pi's `/reload`); and **declarative panels** —
+a module declares "render this server-side projection as a panel/tab/column" and
+the shell owns the components, so TUI, web and IDE all render it with no
+third-party client code. That keeps ADR-0009's thin-client rule and "no
+single-surface capability", while letting **us** add panels without forking a
+surface.
+
+## T-25 · Interaction smalls — `Seed`
+
+Seeded 2026-10-05 (§A2/§A3/§A7/§B11): `/btw` (side question that never enters
+history), `Monitor` (background script output surfaced as events), prompt-**cache
+hit rate** in usage, `/init` and `/doctor` (generate / trim instruction files),
+`@path` imports in instruction files (depth-limited, approval-gated), and the
+description token-budget warning for skills/subagents. Individually small;
+collectively the difference between "feature-complete" and "feels finished".
 
 ---
 

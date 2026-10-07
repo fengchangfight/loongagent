@@ -17,7 +17,14 @@ use loong_proc::RunSpec;
 use loong_schema::generated::Verdict;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
+
+/// Calling a tool on an MCP server, without the hook engine knowing anything about
+/// MCP: the kernel owns the servers and supplies this.
+pub trait McpCaller: Send + Sync {
+    fn call(&self, server: &str, tool: &str, args: &Value) -> Result<String, String>;
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookOutcome {
@@ -69,11 +76,19 @@ impl HookReport {
 pub struct HookRunner {
     workspace: PathBuf,
     specs: Vec<HookSpec>,
+    /// `None` when the session has no MCP servers: an `mcp` hook then fails
+    /// closed with a reason that says so, rather than silently passing.
+    mcp: Option<Arc<dyn McpCaller>>,
 }
 
 impl HookRunner {
     pub fn new(workspace: impl Into<PathBuf>, specs: Vec<HookSpec>) -> Self {
-        Self { workspace: workspace.into(), specs }
+        Self { workspace: workspace.into(), specs, mcp: None }
+    }
+
+    pub fn with_mcp(mut self, caller: Option<Arc<dyn McpCaller>>) -> Self {
+        self.mcp = caller;
+        self
     }
 
     pub fn is_empty(&self) -> bool {
@@ -106,6 +121,7 @@ impl HookRunner {
         match &spec.kind {
             HookKind::Shell { script } => self.run_shell(spec, script, payload),
             HookKind::Http { url } => self.run_http(spec, url, payload),
+            HookKind::Mcp { server, tool } => self.run_mcp(spec, server, tool, payload),
         }
     }
 
@@ -140,9 +156,27 @@ impl HookRunner {
                 started,
             ),
             Ok(response) => {
-                let answer = parse_http_answer(&response.body, spec.on_error);
+                let answer = parse_verdict_body(&response.body, spec.on_error);
                 outcome(spec, answer, started)
             }
+        }
+    }
+
+    /// An `mcp` hook: call the tool, and expect the same verdict JSON an HTTP hook
+    /// returns. One contract across all three kinds, so a policy service can move
+    /// from a script to an endpoint to an MCP tool without a rewrite.
+    fn run_mcp(&self, spec: &HookSpec, server: &str, tool: &str, payload: &Value) -> HookOutcome {
+        let started = Instant::now();
+        let Some(caller) = &self.mcp else {
+            return outcome(
+                spec,
+                self.fallback(spec, format!("no MCP servers are running, so {server}/{tool} could not be asked")),
+                started,
+            );
+        };
+        match caller.call(server, tool, payload) {
+            Err(e) => outcome(spec, self.fallback(spec, format!("calling {server}/{tool}: {e}")), started),
+            Ok(body) => outcome(spec, parse_verdict_body(&body, spec.on_error), started),
         }
     }
 
@@ -209,8 +243,9 @@ fn parse_shell_answer(stdout: &str, stderr: &str, code: Option<i32>, on_error: O
     }
 }
 
-/// The HTTP hook contract: the response body must carry a verdict.
-fn parse_http_answer(body: &str, on_error: OnError) -> Answer {
+/// The contract for hook kinds that answer over a wire (HTTP, MCP): the body must
+/// carry a verdict.
+fn parse_verdict_body(body: &str, on_error: OnError) -> Answer {
     json_verdict(body).unwrap_or_else(|| Answer {
         verdict: fallback_verdict(on_error),
         reason: format!(
@@ -520,6 +555,77 @@ mod tests {
         assert_eq!(report.verdict, Verdict::Allow);
         assert!(report.failures()[0].reason.contains("no verdict"));
         server.join().unwrap();
+    }
+
+    struct FakeMcp {
+        answer: Result<String, String>,
+    }
+
+    impl McpCaller for FakeMcp {
+        fn call(&self, _server: &str, _tool: &str, _args: &Value) -> Result<String, String> {
+            self.answer.clone()
+        }
+    }
+
+    #[test]
+    fn an_mcp_hook_uses_the_same_verdict_contract() {
+        let ws = workspace();
+        let hook = HookSpec {
+            id: "policy".to_string(),
+            event: HookEvent::PreTool,
+            kind: HookKind::Mcp { server: "policy".to_string(), tool: "decide".to_string() },
+            on_error: OnError::Deny,
+            timeout: Duration::from_secs(5),
+        };
+        let deny = HookRunner::new(&ws, vec![hook.clone()]).with_mcp(Some(Arc::new(FakeMcp {
+            answer: Ok("{\"verdict\":\"deny\",\"reason\":\"no shell here\"}".to_string()),
+        })));
+        let report = deny.fire(HookEvent::PreTool, &payload(HookEvent::PreTool, json!({"tool": "shell"})));
+        assert_eq!(report.verdict, Verdict::Deny);
+        assert!(report.reason().contains("no shell here"), "{}", report.reason());
+        assert!(!report.outcomes[0].failed);
+
+        let ask = HookRunner::new(&ws, vec![hook.clone()]).with_mcp(Some(Arc::new(FakeMcp {
+            answer: Ok("{\"verdict\":\"ask\"}".to_string()),
+        })));
+        assert_eq!(
+            ask.fire(HookEvent::PreTool, &payload(HookEvent::PreTool, json!({}))).verdict,
+            Verdict::Ask
+        );
+    }
+
+    #[test]
+    fn an_mcp_hook_fails_closed_when_the_server_is_missing_or_broken() {
+        let ws = workspace();
+        let hook = HookSpec {
+            id: "policy".to_string(),
+            event: HookEvent::PreTool,
+            kind: HookKind::Mcp { server: "policy".to_string(), tool: "decide".to_string() },
+            on_error: OnError::Deny,
+            timeout: Duration::from_secs(5),
+        };
+        // No MCP servers in this session at all.
+        let none = HookRunner::new(&ws, vec![hook.clone()])
+            .fire(HookEvent::PreTool, &payload(HookEvent::PreTool, json!({})));
+        assert_eq!(none.verdict, Verdict::Deny);
+        assert!(none.failures()[0].reason.contains("no MCP servers are running"));
+        assert!(none.failures()[0].reason.contains("on_error = deny"));
+
+        // A server that answers with something that is not a verdict.
+        let garbage = HookRunner::new(&ws, vec![hook.clone()]).with_mcp(Some(Arc::new(FakeMcp {
+            answer: Ok("I am not JSON".to_string()),
+        })));
+        let report = garbage.fire(HookEvent::PreTool, &payload(HookEvent::PreTool, json!({})));
+        assert_eq!(report.verdict, Verdict::Deny);
+        assert!(report.failures()[0].reason.contains("carried no verdict"));
+
+        // A call that errored.
+        let broken = HookRunner::new(&ws, vec![hook]).with_mcp(Some(Arc::new(FakeMcp {
+            answer: Err("the tool reported an error".to_string()),
+        })));
+        let report = broken.fire(HookEvent::PreTool, &payload(HookEvent::PreTool, json!({})));
+        assert_eq!(report.verdict, Verdict::Deny);
+        assert!(report.failures()[0].reason.contains("the tool reported an error"));
     }
 
     #[test]

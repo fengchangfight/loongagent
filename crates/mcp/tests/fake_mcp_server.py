@@ -44,12 +44,21 @@ def main():
                  "inputSchema": {"type": "object", "properties": {"message": {"type": "string"}},
                                  "required": ["message"]}},
                 {"name": "fail", "description": "always fails", "inputSchema": {"type": "object"}},
+                {"name": "verdict_deny", "description": "answers deny (a policy service)",
+                 "inputSchema": {"type": "object"}},
+                {"name": "verdict_ask", "description": "answers ask (a policy service)",
+                 "inputSchema": {"type": "object"}},
             ]}})
         elif method == "tools/call":
             params = msg.get("params", {})
             name = params.get("name")
             if name == "ping":
                 text = "pong: " + str(params.get("arguments", {}).get("message", ""))
+                send({"jsonrpc": "2.0", "id": msg["id"],
+                      "result": {"content": [{"type": "text", "text": text}]}})
+            elif name in ("verdict_deny", "verdict_ask"):
+                verdict = "deny" if name == "verdict_deny" else "ask"
+                text = json.dumps({"verdict": verdict, "reason": f"policy service says {verdict}"})
                 send({"jsonrpc": "2.0", "id": msg["id"],
                       "result": {"content": [{"type": "text", "text": text}]}})
             elif name == "fail":

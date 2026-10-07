@@ -20,4 +20,4 @@ pub use config::{
     ConfigError, HookEvent, HookKind, HookSet, HookSpec, OnError, TrustStatus, HOOKS_DIR,
     HOOKS_FILE, TRUST_FILE,
 };
-pub use run::{payload, HookOutcome, HookReport, HookRunner};
+pub use run::{payload, HookOutcome, HookReport, HookRunner, McpCaller};

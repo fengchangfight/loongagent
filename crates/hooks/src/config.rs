@@ -72,6 +72,9 @@ pub enum HookKind {
     Shell { script: PathBuf },
     /// An endpoint returning a verdict. Off unless the manifest opts in.
     Http { url: String },
+    /// A tool on an MCP server (which has its own trust gate in `mcp.toml`),
+    /// returning the same verdict JSON as an HTTP hook.
+    Mcp { server: String, tool: String },
 }
 
 impl HookKind {
@@ -79,6 +82,16 @@ impl HookKind {
         match self {
             HookKind::Shell { .. } => "shell",
             HookKind::Http { .. } => "http",
+            HookKind::Mcp { .. } => "mcp",
+        }
+    }
+
+    /// What to show a human in `hooks list`.
+    pub fn target(&self) -> String {
+        match self {
+            HookKind::Shell { script } => script.display().to_string(),
+            HookKind::Http { url } => url.clone(),
+            HookKind::Mcp { server, tool } => format!("{server}/{tool}"),
         }
     }
 }
@@ -205,14 +218,19 @@ impl HookSet {
                     HookKind::Http { url }
                 }
                 "mcp" => {
-                    return Err(ConfigError::Invalid(format!(
-                        "{where_}: the mcp hook kind needs the MCP client (T-15), which is not \
-                         built yet — use a shell or http hook for now"
-                    )))
+                    let server = raw.server.clone().ok_or_else(|| {
+                        ConfigError::Invalid(format!(
+                            "{where_}: an mcp hook needs `server` (a name from mcp.toml)"
+                        ))
+                    })?;
+                    let tool = raw.tool.clone().ok_or_else(|| {
+                        ConfigError::Invalid(format!("{where_}: an mcp hook needs `tool`"))
+                    })?;
+                    HookKind::Mcp { server, tool }
                 }
                 other => {
                     return Err(ConfigError::Invalid(format!(
-                        "{where_}: unknown kind {other:?} (shell | http)"
+                        "{where_}: unknown kind {other:?} (shell | http | mcp)"
                     )))
                 }
             };
@@ -339,6 +357,8 @@ struct RawHook {
     kind: String,
     script: Option<String>,
     url: Option<String>,
+    server: Option<String>,
+    tool: Option<String>,
     on_error: Option<String>,
     timeout_ms: Option<u64>,
 }
@@ -459,7 +479,18 @@ mod tests {
         assert!(HookSet::load(&ws).unwrap_err().to_string().contains("unknown event"));
 
         write_manifest(&ws, "[[hook]]\nevent = \"pre_tool\"\nkind = \"mcp\"\n");
-        assert!(HookSet::load(&ws).unwrap_err().to_string().contains("MCP client"));
+        assert!(HookSet::load(&ws).unwrap_err().to_string().contains("needs `server`"));
+
+        write_manifest(&ws, "[[hook]]\nevent = \"pre_tool\"\nkind = \"mcp\"\nserver = \"policy\"\n");
+        assert!(HookSet::load(&ws).unwrap_err().to_string().contains("needs `tool`"));
+
+        write_manifest(
+            &ws,
+            "[[hook]]\nevent = \"pre_tool\"\nkind = \"mcp\"\nserver = \"policy\"\ntool = \"decide\"\n",
+        );
+        let set = HookSet::load(&ws).unwrap();
+        assert_eq!(set.specs[0].kind.label(), "mcp");
+        assert_eq!(set.specs[0].kind.target(), "policy/decide");
 
         write_manifest(&ws, "[[hook]]\nevent = \"pre_tool\"\nkind = \"shell\"\nscript = \"ok.sh\"\non_error = \"maybe\"\n");
         assert!(HookSet::load(&ws).unwrap_err().to_string().contains("on_error"));

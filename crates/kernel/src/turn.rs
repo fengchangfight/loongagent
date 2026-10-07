@@ -20,6 +20,7 @@ use loong_sandbox::Pdp;
 use loong_schema::generated as gen;
 use loong_schema::generated::{ActionClass, ApprovalScope, Json, Role, Verdict};
 use loong_hooks::{payload, HookEvent, HookReport, HookRunner, HookSet};
+use loong_hooks::McpCaller;
 use loong_mcp::{McpClient, McpSet, McpTool};
 use std::sync::{Arc, Mutex};
 use loong_sandbox::landlock::WorkspacePolicy;
@@ -144,6 +145,24 @@ impl Confinement for LandlockConfinement {
         }
         #[cfg(not(unix))]
         let _ = command;
+    }
+}
+
+/// The bridge from `mcp` hooks to this session's servers. The hook engine stays
+/// ignorant of MCP; the kernel, which owns the servers, supplies the capability.
+struct KernelMcp {
+    clients: Vec<Arc<Mutex<McpClient>>>,
+}
+
+impl McpCaller for KernelMcp {
+    fn call(&self, server: &str, tool: &str, args: &Json) -> Result<String, String> {
+        let client = self
+            .clients
+            .iter()
+            .find(|c| c.lock().map(|c| c.name() == server).unwrap_or(false))
+            .ok_or_else(|| format!("no MCP server named {server:?} is running"))?;
+        let mut client = client.lock().map_err(|_| format!("the {server} client is poisoned"))?;
+        client.call_tool(tool, args).map_err(|e| e.to_string())
     }
 }
 
@@ -309,7 +328,13 @@ impl Kernel {
         // a warning. Untrusted hooks load but do not run (see `HookSet::active`).
         let hook_set = HookSet::load(&config.cwd).map_err(|e| KernelError::Hooks(e.to_string()))?;
         let hooks_note = hook_set.summary();
-        let hooks = HookRunner::new(&config.cwd, hook_set.active().to_vec());
+        // `mcp` hooks reach the servers this session started; without any, they
+        // fail closed and say why.
+        let caller: Option<Arc<dyn McpCaller>> = (!mcp_clients.is_empty()).then(|| {
+            Arc::new(KernelMcp { clients: mcp_clients.clone() }) as Arc<dyn McpCaller>
+        });
+        let hooks =
+            HookRunner::new(&config.cwd, hook_set.active().to_vec()).with_mcp(caller);
         let session_start_fields = json!({"cwd": config.cwd, "profile": config.profile});
         kernel = Self {
             log,
@@ -1202,6 +1227,66 @@ mod tests {
         let result = events.iter().find(|e| e.kind == ev::TOOL_RESULT).unwrap();
         assert_eq!(result.data["ok"], true, "{:?}", result.data["output"]);
         assert!(result.data["output"].as_str().unwrap().contains("pong: hi"));
+    }
+
+    #[test]
+    fn an_mcp_hook_can_gate_a_builtin_tool() {
+        let t = Temp::new();
+        if !install_mcp(&t.dir, "investigate", true) {
+            return;
+        }
+        install_hooks(
+            &t.dir,
+            "[[hook]]\nid = \"policy-svc\"\nevent = \"pre_tool\"\nkind = \"mcp\"\n\
+             server = \"fake\"\ntool = \"verdict_deny\"\n",
+            &[],
+            true,
+        );
+        let model = ScriptedModel::new(vec![
+            response(vec![call("c1", "shell", json!({"command": "touch gated.txt"}))], None),
+            response(vec![], Some("understood")),
+        ]);
+        let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        k.submit("go").unwrap();
+
+        let events = loong_eventlog::replay(&t.log).unwrap().events;
+        let fired = events.iter().find(|e| e.kind == ev::HOOK_FIRED).expect("the hook answered");
+        assert_eq!(fired.data["kind"], "mcp");
+        assert_eq!(fired.data["hook_id"], "policy-svc");
+        assert_eq!(fired.data["verdict"], "deny");
+        assert_eq!(fired.data["failed"], false);
+        assert!(fired.data["reason"].as_str().unwrap().contains("policy service says deny"));
+
+        // A built-in tool, classified as an ordinary workspace write, stopped by an
+        // external service — and the log says which one.
+        let policy = events.iter().find(|e| e.kind == ev::POLICY_DECIDED).unwrap();
+        assert_eq!(policy.data["verdict"], "deny");
+        assert_eq!(policy.data["rule"], "hook:policy-svc");
+        assert!(!t.dir.join("gated.txt").exists(), "the gated tool never ran");
+    }
+
+    #[test]
+    fn an_mcp_hook_without_a_server_fails_closed() {
+        let t = Temp::new();
+        // A hook that names a server the session does not have.
+        install_hooks(
+            &t.dir,
+            "[[hook]]\nid = \"policy-svc\"\nevent = \"pre_tool\"\nkind = \"mcp\"\n\
+             server = \"absent\"\ntool = \"decide\"\n",
+            &[],
+            true,
+        );
+        let model = ScriptedModel::new(vec![
+            response(vec![call("c1", "shell", json!({"command": "touch nope.txt"}))], None),
+            response(vec![], Some("understood")),
+        ]);
+        let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        k.submit("go").unwrap();
+        let events = loong_eventlog::replay(&t.log).unwrap().events;
+        let fired = events.iter().find(|e| e.kind == ev::HOOK_FIRED).unwrap();
+        assert_eq!(fired.data["verdict"], "deny");
+        assert_eq!(fired.data["failed"], true);
+        assert!(!t.dir.join("nope.txt").exists());
     }
 
     #[test]

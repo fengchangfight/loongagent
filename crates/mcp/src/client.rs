@@ -375,7 +375,7 @@ mod tests {
         };
         let mut client = McpClient::start(&spec(&script, "normal")).expect("the server starts");
         let tools = client.list_tools().unwrap();
-        assert_eq!(tools.len(), 2, "{tools:?}");
+        assert_eq!(tools.len(), 4, "the fixture exposes ping, fail and two verdict tools: {tools:?}");
         assert_eq!(tools[0].name, "ping");
         assert!(tools[0].description.contains("round-trip"));
         assert_eq!(tools[0].input_schema["type"], "object");

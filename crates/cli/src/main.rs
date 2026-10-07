@@ -425,10 +425,7 @@ fn hooks_list(args: Args) -> Result<(), String> {
         return Ok(());
     }
     for spec in &set.specs {
-        let target = match &spec.kind {
-            loong_hooks::HookKind::Shell { script } => script.display().to_string(),
-            loong_hooks::HookKind::Http { url } => url.clone(),
-        };
+        let target = spec.kind.target();
         println!(
             "  {:<20} {:<20} {:<6} on_error={:<5} timeout={}ms  {}",
             spec.id,

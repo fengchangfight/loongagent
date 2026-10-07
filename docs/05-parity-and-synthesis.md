@@ -73,7 +73,7 @@ rows below are what "not losing" means concretely.
 | CC feature | Our status | Where | Next |
 |---|---|---|---|
 | Lifecycle hook events (session start/end, **user-prompt submit**, pre/post tool use, **permission requested/denied**, subagent start/stop, **pre/post compaction**, file changed, cwd changed) | ⚠️ | ADR-0007 §7 (event set fixed 2026-10-05) | six fire today (`session_start`, `user_prompt_submit`, `pre_tool`, `post_tool`, `permission_requested`, `permission_decided`, 2026-10-07); the rest arrive with subagents and compaction |
-| **Hook kinds: shell / HTTP / MCP tool** (LLM and subagent kinds deferred to v2) | ⚠️ | ADR-0007 §7, `loong-hooks` (2026-10-07) | shell and HTTP ship; MCP is refused with the reason (needs T-15) rather than accepted and ignored |
+| **Hook kinds: shell / HTTP / MCP tool** (LLM and subagent kinds deferred to v2) | ✅ | ADR-0007 §7: all three ship (2026-10-08) behind **one verdict contract** — a JSON verdict on stdout / in the response body, or exit 0/2 for a script. An external policy service can gate a built-in tool without the kernel knowing it is external | LLM and subagent kinds are v2 by decision |
 | Exit-code-2 blocks and feeds stderr back to the model | ✅ | `loong-hooks::run` — exit 2 denies with stderr as the reason; a JSON verdict on stdout reaches ask; anything else falls back to `on_error` (default **deny**) | — |
 | Repo-shipped hooks are untrusted | ✅ | the trust gate (2026-10-07): a per-file change-detection hash, so editing either the manifest or a script re-arms the question | signatures arrive with ADR-0008 pack signing |
 | Hooks can only tighten | ✅ | `strictest` (deny > ask > allow), applied where the hook verdict meets the PDP's | — |

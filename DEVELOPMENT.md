@@ -129,10 +129,12 @@ binary the TUI spawns as its server (used by the end-to-end test).
 - **Lifecycle hooks** (`loong-hooks`): a hook answers one question at one moment
   — allow, ask, or deny — and nothing else. Six moments fire today:
   `session_start`, `user_prompt_submit`, `pre_tool`, `post_tool`,
-  `permission_requested`, `permission_decided`. Two kinds: `shell` (a script
-  receiving the event as JSON on stdin; exit 2 denies with stderr as the reason,
-  or print `{"verdict":"ask","reason":"…"}`) and `http` (an endpoint, **off**
-  until the manifest sets `allow_http_hooks = true`). Verdicts aggregate
+  `permission_requested`, `permission_decided`. Three kinds behind **one verdict
+  contract**: `shell` (a script receiving the event as JSON on stdin; exit 2
+  denies with stderr as the reason, or print `{"verdict":"ask","reason":"…"}`),
+  `http` (an endpoint, **off** until the manifest sets `allow_http_hooks = true`),
+  and `mcp` (a tool on a trusted MCP server, answering with the same JSON — so an
+  external policy service can gate a built-in tool). Verdicts aggregate
   monotonically — deny > ask > allow — so hooks can only tighten what the session
   may do, and a hook that cannot answer fails **closed** by default. Every answer
   is a `hook.fired` event, whether or not it changed the outcome.
@@ -180,9 +182,7 @@ binary the TUI spawns as its server (used by the end-to-end test).
    `grep` reads whole files (no streaming) under a 4 MiB per-file cap.
 6. **MCP is stdio-only and eager**: no HTTP transport, no resources/prompts, no
    sampling, and server-initiated requests are refused rather than served. Tools
-   are listed at session start and every schema is handed to the model. The `mcp`
-   *hook kind* is still refused at load time — the client now exists, so wiring it
-   into `HookRunner` is the next step rather than a blocker.
+   are listed at session start and every schema is handed to the model.
 7. **Post-tool hook verdicts are recorded but cannot undo anything**, and hooks
    deliberately cannot rewrite a tool call — the moment they could, the loop would
    stop being small enough to audit.

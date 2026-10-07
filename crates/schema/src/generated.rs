@@ -131,6 +131,21 @@ pub struct CostRecorded {
     pub usd_micros: u64,
 }
 
+/// One hook answered at one lifecycle moment (ADR-0007 §7). Recorded whether or not it changed the outcome, so the guard's behaviour is auditable.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HookFired {
+    /// the lifecycle moment: session_start, user_prompt_submit, pre_tool, post_tool, permission_requested, permission_decided
+    pub event: String,
+    pub hook_id: String,
+    /// shell | http
+    pub kind: String,
+    pub verdict: Verdict,
+    pub reason: String,
+    pub duration_ms: Millis,
+    /// the hook could not answer; the verdict came from its on_error policy
+    pub failed: bool,
+}
+
 /// Visible, reversible compaction (ADR-0006 §4).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CompactionApplied {
@@ -202,6 +217,7 @@ pub mod event {
     pub const POLICY_DECIDED: &str = "policy.decided";
     pub const COST_RECORDED: &str = "cost.recorded";
     pub const COMPACTION_APPLIED: &str = "compaction.applied";
+    pub const HOOK_FIRED: &str = "hook.fired";
 }
 
 /// Event kinds. The bool is the `ignorable` envelope marker (ADR-0003).
@@ -214,6 +230,7 @@ pub const EVENT_KINDS: &[(&str, bool)] = &[
     ("policy.decided", false),
     ("cost.recorded", false),
     ("compaction.applied", false),
+    ("hook.fired", false),
 ];
 
 /// `Some(ignorable)` for a known event kind, `None` for an unknown one.

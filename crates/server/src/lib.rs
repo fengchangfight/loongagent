@@ -86,9 +86,17 @@ impl Server {
                     return vec![bad];
                 }
                 self.turns += 1;
-                let result = gen::PromptSubmitResult { turn_id: self.turns, accepted: true };
                 match self.kernel.submit(&params.text) {
-                    Ok(_) => self.respond(id, result, "prompt.submit"),
+                    Ok(outcome) => {
+                        // A `user_prompt_submit` hook can refuse the turn before
+                        // the model runs; the reason travels as hook.fired events
+                        // in the same stream, so the client can show why.
+                        let result = gen::PromptSubmitResult {
+                            turn_id: self.turns,
+                            accepted: outcome.refused.is_none(),
+                        };
+                        self.respond(id, result, "prompt.submit")
+                    }
                     Err(e) => self.fail(id, e),
                 }
             }
@@ -339,6 +347,43 @@ mod tests {
         assert!(kinds.contains(&"tool.result"));
         assert_eq!(out.last().unwrap()["result"]["accepted"], false);
         assert!(!escape.exists());
+    }
+
+    #[test]
+    fn a_hook_refusal_is_reported_as_not_accepted() {
+        let t = Temp::new();
+        let hooks = t.0.join(".loongagent");
+        std::fs::create_dir_all(&hooks).unwrap();
+        std::fs::write(hooks.join("gate.sh"), "cat > /dev/null\necho 'not today' >&2\nexit 2\n").unwrap();
+        std::fs::write(
+            hooks.join("hooks.toml"),
+            "[[hook]]\nid = \"gate\"\nevent = \"user_prompt_submit\"\nkind = \"shell\"\nscript = \"gate.sh\"\n",
+        )
+        .unwrap();
+        loong_hooks::HookSet::load(&t.0).unwrap().trust_now().unwrap();
+
+        // An empty script: if the model were called the turn would fail instead.
+        let kernel = Kernel::create(
+            t.0.join("s.jsonl"),
+            KernelConfig::new(&t.0),
+            Box::new(ScriptedModel::new(vec![])),
+        )
+        .unwrap();
+        let mut server = Server::new(kernel, "s-hooks");
+        assert_eq!(lines_of(&mut server, &attach_line())[0]["result"]["session_id"], "s-hooks");
+
+        let out = lines_of(
+            &mut server,
+            &Request::new(2, gen::method::PROMPT_SUBMIT, json!({"session_id": "s-hooks", "text": "refactor everything"})).to_line(),
+        );
+        let kinds: Vec<&str> = out
+            .iter()
+            .filter(|line| line["method"] == "event")
+            .map(|line| line["params"]["kind"].as_str().unwrap_or(""))
+            .collect();
+        assert!(kinds.contains(&"hook.fired"), "the reason travels in the stream: {kinds:?}");
+        assert_eq!(out.last().unwrap()["result"]["accepted"], false, "{out:?}");
+        assert_eq!(out.last().unwrap()["result"]["turn_id"], 1);
     }
 
     #[test]

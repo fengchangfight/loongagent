@@ -10,6 +10,7 @@ loong-schema.workspace = true
 loong-eventlog.workspace = true
 loong-providers.workspace = true
 loong-sandbox.workspace = true
+loong-hooks.workspace = true
 loong-tools.workspace = true
 loong-index.workspace = true
 serde.workspace = true

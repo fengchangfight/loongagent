@@ -53,6 +53,11 @@ fn roundtrip_cost_recorded() {
 }
 
 #[test]
+fn roundtrip_hook_fired() {
+    roundtrip::<g::HookFired>(r#"{"event": "<string>","hook_id": "<string>","kind": "<string>","verdict": "allow","reason": "<string>","duration_ms": 1,"failed": true}"#);
+}
+
+#[test]
 fn roundtrip_compaction_applied() {
     roundtrip::<g::CompactionApplied>(r#"{"dropped_events": 1,"kept_tokens": 1,"summary": "<string>"}"#);
 }
@@ -97,6 +102,7 @@ fn declared_events_match_the_envelope_table() {
     assert_eq!(g::is_ignorable_event("policy.decided"), Some(false));
     assert_eq!(g::is_ignorable_event("cost.recorded"), Some(false));
     assert_eq!(g::is_ignorable_event("compaction.applied"), Some(false));
+    assert_eq!(g::is_ignorable_event("hook.fired"), Some(false));
     assert_eq!(g::is_ignorable_event("not.a.real.event"), None);
 }
 
@@ -110,4 +116,5 @@ fn every_event_payload_roundtrips() {
     roundtrip::<g::PolicyDecided>(r#"{"action_class": "investigate","verdict": "allow","rule": "<string>"}"#);
     roundtrip::<g::CostRecorded>(r#"{"profile": "<string>","tokens_in": 1,"tokens_out": 1,"usd_micros": 1}"#);
     roundtrip::<g::CompactionApplied>(r#"{"dropped_events": 1,"kept_tokens": 1,"summary": "<string>"}"#);
+    roundtrip::<g::HookFired>(r#"{"event": "<string>","hook_id": "<string>","kind": "<string>","verdict": "allow","reason": "<string>","duration_ms": 1,"failed": true}"#);
 }

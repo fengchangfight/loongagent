@@ -41,6 +41,8 @@ MODELS (provider doubles, for a first run without keys):
                  LOONGAGENT_MODEL / LOONGAGENT_API_KEY as needed
 
   loongagent sandbox self-test [--cwd DIR]   prove the OS boundary actually denies
+  loongagent hooks list        [--cwd DIR]   show the effective hook set and its trust
+  loongagent hooks trust       [--cwd DIR]   trust the current hook bytes (per repository)
 ";
 
 fn main() {
@@ -127,6 +129,11 @@ fn run() -> Result<(), String> {
             Some("probe") => std::process::exit(loong_sandbox::sandbox::probe_main()),
             _ => Err(format!("sandbox self-test | probe\n\n{USAGE}")),
         },
+        "hooks" => match rest.first().map(String::as_str) {
+            Some("list") => hooks_list(Args::parse(&rest[1..])?),
+            Some("trust") => hooks_trust(Args::parse(&rest[1..])?),
+            _ => Err(format!("hooks list | hooks trust\n\n{USAGE}")),
+        },
         "tui" => repl(Args::parse(rest)?),
         "run" => {
             let args = Args::parse(rest)?;
@@ -158,6 +165,10 @@ fn serve(args: Args) -> Result<(), String> {
     args.ensure_parent()?;
     // ADR-0007: the boundary is proven before the first tool call. A mechanism
     // that fails to deny is fatal; a platform without one is a loud degradation.
+    match loong_hooks::HookSet::load(&args.cwd) {
+        Ok(set) => eprintln!("[hooks] {}", set.summary()),
+        Err(e) => return Err(format!("hooks.toml is broken: {e}")),
+    }
     if let Ok(exe) = std::env::current_exe() {
         match loong_sandbox::sandbox::self_test(&exe, &args.cwd).result {
             loong_sandbox::SelfTest::Enforced { mechanism, .. } => {
@@ -354,6 +365,63 @@ fn repl(args: Args) -> Result<(), String> {
     }
 }
 
+/// Show what would run, and whether it is trusted to.
+fn hooks_list(args: Args) -> Result<(), String> {
+    let set = loong_hooks::HookSet::load(&args.cwd).map_err(|e| e.to_string())?;
+    println!("workspace: {}", args.cwd.display());
+    println!("manifest:  {}", set.hooks_dir.join(loong_hooks::HOOKS_FILE).display());
+    println!("status:    {}", set.summary());
+    if set.specs.is_empty() {
+        return Ok(());
+    }
+    for spec in &set.specs {
+        let target = match &spec.kind {
+            loong_hooks::HookKind::Shell { script } => script.display().to_string(),
+            loong_hooks::HookKind::Http { url } => url.clone(),
+        };
+        println!(
+            "  {:<20} {:<20} {:<6} on_error={:<5} timeout={}ms  {}",
+            spec.id,
+            spec.event.wire(),
+            spec.kind.label(),
+            match spec.on_error {
+                loong_hooks::OnError::Deny => "deny",
+                loong_hooks::OnError::Allow => "allow",
+            },
+            spec.timeout.as_millis(),
+            target
+        );
+    }
+    match &set.trust {
+        loong_hooks::TrustStatus::Trusted => {}
+        loong_hooks::TrustStatus::Untrusted { changed } => {
+            println!();
+            println!("INERT until trusted — new or changed: {}", changed.join(", "));
+            println!("These hooks ship inside this repository, so they are content from it.");
+            println!("Run `loongagent hooks trust --cwd {}` once you have read them.", args.cwd.display());
+        }
+        loong_hooks::TrustStatus::NoHooks => {}
+    }
+    Ok(())
+}
+
+/// The explicit, per-repository opt-in. Bound to bytes: editing a hook re-arms it.
+fn hooks_trust(args: Args) -> Result<(), String> {
+    let set = loong_hooks::HookSet::load(&args.cwd).map_err(|e| e.to_string())?;
+    if set.specs.is_empty() {
+        return Err("no hooks.toml in this workspace — nothing to trust".to_string());
+    }
+    let fingerprints = set.fingerprints().map_err(|e| e.to_string())?;
+    let path = set.trust_now().map_err(|e| e.to_string())?;
+    println!("trusted {} file(s) in {}", fingerprints.len(), args.cwd.display());
+    for (name, hash) in &fingerprints {
+        println!("  {hash} {name}");
+    }
+    println!("recorded in {}", path.display());
+    println!("Editing any of these files re-arms the question on the next session.");
+    Ok(())
+}
+
 /// ADR-0007: prove the boundary before the first tool call. "Available" is not
 /// good enough — the probe must demonstrate that a forbidden write is denied.
 fn sandbox_self_test(args: Args) -> Result<(), String> {
@@ -386,6 +454,10 @@ fn headless(args: Args, prompt: &str) -> Result<(), String> {
     client.attach(&args.cwd.to_string_lossy(), "headless")?;
     for line in client.submit(prompt)? {
         println!("{line}");
+    }
+    if !client.last_accepted() {
+        eprintln!("the turn was refused by a hook; see the hook.fired event above");
+        std::process::exit(3);
     }
     if let Some(request_id) = client.pending_approval().map(|s| s.to_string()) {
         eprintln!("approval required for {request_id}; rerun with `tui` to answer");

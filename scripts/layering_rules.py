@@ -24,7 +24,7 @@ ALLOWED = {
     # the derived index reads the log; it is disposable and rebuildable
     "loong-index": {"loong-schema", "loong-eventlog"},
     # the fixed kernel calls its edges through traits; it never knows adapters
-    "loong-kernel": {"loong-schema", "loong-eventlog", "loong-index", "loong-providers", "loong-sandbox", "loong-tools"},
+    "loong-kernel": {"loong-schema", "loong-eventlog", "loong-index", "loong-providers", "loong-sandbox", "loong-tools", "loong-hooks"},
     # surfaces
     "loong-server": {"loong-schema", "loong-protocol", "loong-eventlog", "loong-kernel"},
     "loong-tui": {"loong-schema", "loong-protocol"},

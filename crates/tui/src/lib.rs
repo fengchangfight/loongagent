@@ -22,11 +22,19 @@ pub struct Client<T: Transport> {
     session_id: String,
     next_id: u64,
     pending_approval: Option<String>,
+    /// Whether the last submitted prompt was accepted (a hook can refuse one).
+    last_accepted: bool,
 }
 
 impl<T: Transport> Client<T> {
     pub fn new(transport: T, session_id: impl Into<String>) -> Self {
-        Self { transport, session_id: session_id.into(), next_id: 1, pending_approval: None }
+        Self {
+            transport,
+            session_id: session_id.into(),
+            next_id: 1,
+            pending_approval: None,
+            last_accepted: true,
+        }
     }
 
     pub fn session_id(&self) -> &str {
@@ -35,6 +43,12 @@ impl<T: Transport> Client<T> {
 
     pub fn pending_approval(&self) -> Option<&str> {
         self.pending_approval.as_deref()
+    }
+
+    /// False when a `user_prompt_submit` hook refused the turn. The reason
+    /// arrived as a `hook.fired` event in the same stream.
+    pub fn last_accepted(&self) -> bool {
+        self.last_accepted
     }
 
     pub fn into_transport(self) -> T {
@@ -56,8 +70,13 @@ impl<T: Transport> Client<T> {
     pub fn submit(&mut self, text: &str) -> Result<Vec<String>, String> {
         let params =
             gen::PromptSubmitParams { session_id: self.session_id.clone(), text: text.to_string() };
-        let (lines, _) =
+        let (lines, result) =
             self.call(gen::method::PROMPT_SUBMIT, serde_json::to_value(params).unwrap())?;
+        // A refused turn is a fact the surface must show, not swallow.
+        self.last_accepted = result
+            .get("accepted")
+            .and_then(|a| a.as_bool())
+            .unwrap_or(true);
         Ok(lines)
     }
 
@@ -166,6 +185,20 @@ impl<T: Transport> Client<T> {
                 },
                 data.get("scope").and_then(|v| v.as_str()).unwrap_or("?")
             )),
+            gen::event::HOOK_FIRED => {
+                let id = data.get("hook_id").and_then(|v| v.as_str()).unwrap_or("?");
+                let fired = data.get("event").and_then(|v| v.as_str()).unwrap_or("?");
+                let verdict = data.get("verdict").and_then(|v| v.as_str()).unwrap_or("allow");
+                let reason = data.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+                let failed = data.get("failed").and_then(|v| v.as_bool()).unwrap_or(false);
+                match verdict {
+                    "allow" => Some(format!("· hook {id} allowed ({fired})")),
+                    _ => Some(format!(
+                        "! hook {id} {verdict}{} on {fired}: {reason}",
+                        if failed { " (could not answer)" } else { "" }
+                    )),
+                }
+            }
             gen::event::COST_RECORDED => Some(format!(
                 "· tokens {} in / {} out ({})",
                 data.get("tokens_in").and_then(|v| v.as_u64()).unwrap_or(0),
@@ -287,6 +320,31 @@ mod tests {
         let lines = client.submit("go").unwrap();
         assert!(lines[0].starts_with("! approval required (out_of_bounds)"));
         assert_eq!(client.pending_approval(), Some("appr-1"));
+    }
+
+    #[test]
+    fn a_hook_refusal_is_visible_and_marks_the_turn_unaccepted() {
+        let fake = Fake::with(vec![
+            event(1, "hook.fired", json!({"event": "user_prompt_submit", "hook_id": "gate", "kind": "shell", "verdict": "deny", "reason": "this repository is read-only today", "duration_ms": 3, "failed": false})),
+            response(2, json!({"turn_id": 1, "accepted": false})),
+        ]);
+        let mut client = Client::new(fake, "s-1");
+        let lines = client.submit("refactor everything").unwrap();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].starts_with("! hook gate deny on user_prompt_submit"), "{}", lines[0]);
+        assert!(lines[0].contains("read-only today"));
+        assert!(!client.last_accepted());
+    }
+
+    #[test]
+    fn a_hook_that_could_not_answer_says_so() {
+        let fake = Fake::with(vec![
+            event(1, "hook.fired", json!({"event": "pre_tool", "hook_id": "flaky", "kind": "http", "verdict": "deny", "reason": "request failed (on_error = deny)", "duration_ms": 1, "failed": true})),
+            response(2, json!({"turn_id": 1, "accepted": true})),
+        ]);
+        let mut client = Client::new(fake, "s-1");
+        let lines = client.submit("go").unwrap();
+        assert!(lines[0].contains("could not answer"), "{}", lines[0]);
     }
 
     #[test]

@@ -19,10 +19,12 @@ use loong_providers::{
 use loong_sandbox::Pdp;
 use loong_schema::generated as gen;
 use loong_schema::generated::{ActionClass, ApprovalScope, Json, Role, Verdict};
+use loong_hooks::{payload, HookEvent, HookReport, HookRunner, HookSet};
 use loong_sandbox::landlock::WorkspacePolicy;
 use loong_tools::{Confinement, ExecContext, NoConfinement, Registry};
-use std::process::Command;
+use serde_json::json;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 #[derive(Debug)]
 pub enum KernelError {
@@ -33,6 +35,8 @@ pub enum KernelError {
     Encode(serde_json::Error),
     /// The derived index could not be built or queried (the log is unaffected).
     Index(loong_index::IndexError),
+    /// The hook manifest is malformed. Refusing beats silently dropping a guard.
+    Hooks(String),
 }
 
 impl std::fmt::Display for KernelError {
@@ -43,6 +47,7 @@ impl std::fmt::Display for KernelError {
             KernelError::OutOfOrder(m) => write!(f, "out of order: {m}"),
             KernelError::Encode(e) => write!(f, "encode: {e}"),
             KernelError::Index(e) => write!(f, "index: {e}"),
+            KernelError::Hooks(m) => write!(f, "hooks: {m}"),
         }
     }
 }
@@ -85,6 +90,8 @@ pub struct TurnOutcome {
     pub steps: usize,
     pub final_text: Option<String>,
     pub pending_approval: Option<PendingCall>,
+    /// Set when a `user_prompt_submit` hook refused the turn before it started.
+    pub refused: Option<String>,
     /// Sequences appended by this turn, in order.
     pub events: Vec<u64>,
 }
@@ -135,6 +142,33 @@ impl Confinement for LandlockConfinement {
     }
 }
 
+/// A hook verdict replaces the policy's only when it is stricter (hooks tighten,
+/// never widen). The rule records which hook objected, so the log says why.
+fn tighten(ruling: &loong_sandbox::Ruling, report: &HookReport) -> Option<loong_sandbox::Ruling> {
+    if !report.tightening() {
+        return None;
+    }
+    let rank = |v: &Verdict| match v {
+        Verdict::Allow => 0,
+        Verdict::Ask => 1,
+        Verdict::Deny => 2,
+    };
+    if rank(&report.verdict) <= rank(&ruling.verdict) {
+        return None;
+    }
+    let ids: Vec<&str> = report
+        .outcomes
+        .iter()
+        .filter(|o| rank(&o.verdict) == rank(&report.verdict))
+        .map(|o| o.id.as_str())
+        .collect();
+    Some(loong_sandbox::Ruling {
+        verdict: report.verdict,
+        rule: format!("hook:{}", ids.join(",")),
+        reason: report.reason(),
+    })
+}
+
 enum Dispatch {
     /// The call finished; every sequence it appended is already in `events`.
     Done,
@@ -159,6 +193,10 @@ pub struct Kernel {
     /// What confinement is actually in force, for diagnostics and the startup
     /// warning. Never silent: "unconfined" is a fact the operator should see.
     confinement_note: String,
+    /// The lifecycle hooks this session runs (empty until the manifest is
+    /// trusted). Hooks can tighten a decision, never widen one.
+    hooks: HookRunner,
+    hooks_note: String,
     /// Derived, disposable SQLite view of the log (ADR-0003). It trails the log
     /// by design: the log is the truth, this only makes queries fast. A failure
     /// to index never loses an event — it marks the index stale instead.
@@ -195,6 +233,7 @@ impl Kernel {
         // a stale index that silently disagrees with the log is worse than a
         // few milliseconds of replay.
         let index = loong_index::Index::rebuild_into(&index_path, log.path())?;
+        let mut kernel;
         // The PEP is chosen here, once, and handed to every tool call.
         let (confinement, confinement_note): (Box<dyn Confinement>, String) =
             match WorkspacePolicy::new(&config.cwd) {
@@ -207,7 +246,13 @@ impl Kernel {
                     format!("unconfined: {e}"),
                 ),
             };
-        Ok(Self {
+        // A malformed manifest stopped a guard from existing: that is fatal, not
+        // a warning. Untrusted hooks load but do not run (see `HookSet::active`).
+        let hook_set = HookSet::load(&config.cwd).map_err(|e| KernelError::Hooks(e.to_string()))?;
+        let hooks_note = hook_set.summary();
+        let hooks = HookRunner::new(&config.cwd, hook_set.active().to_vec());
+        let session_start_fields = json!({"cwd": config.cwd, "profile": config.profile});
+        kernel = Self {
             log,
             ledger,
             tools: Registry::with_builtins(),
@@ -219,10 +264,17 @@ impl Kernel {
             approvals: 0,
             confinement,
             confinement_note,
+            hooks,
+            hooks_note,
             index,
             index_path,
             index_stale: None,
-        })
+        };
+        // The session's first moment (ADR-0007 §7): what a guard sees before any
+        // work happens.
+        let mut startup = Vec::new();
+        kernel.fire_hooks(HookEvent::SessionStart, session_start_fields, &mut startup)?;
+        Ok(kernel)
     }
 
     pub fn ledger(&self) -> &Ledger {
@@ -244,6 +296,45 @@ impl Kernel {
     /// What confinement is in force for spawned processes.
     pub fn confinement_note(&self) -> &str {
         &self.confinement_note
+    }
+
+    /// The hook set's status, for the startup log and `hooks list`.
+    pub fn hooks_note(&self) -> &str {
+        &self.hooks_note
+    }
+
+    pub fn hooks(&self) -> &HookRunner {
+        &self.hooks
+    }
+
+    /// Fire the hooks registered for `event`, record every answer, and report the
+    /// aggregate verdict (deny > ask > allow).
+    fn fire_hooks(
+        &mut self,
+        event: HookEvent,
+        fields: Json,
+        events: &mut Vec<u64>,
+    ) -> Result<HookReport, KernelError> {
+        if self.hooks.registered_for(event) == 0 {
+            return Ok(HookReport::allow());
+        }
+        let payload = payload(event, fields);
+        let report = self.hooks.fire(event, &payload);
+        for outcome in &report.outcomes {
+            events.push(self.append(
+                gen::event::HOOK_FIRED,
+                &gen::HookFired {
+                    event: outcome.event.wire().to_string(),
+                    hook_id: outcome.id.clone(),
+                    kind: outcome.kind.to_string(),
+                    verdict: outcome.verdict,
+                    reason: outcome.reason.clone(),
+                    duration_ms: outcome.duration_ms as i64,
+                    failed: outcome.failed,
+                },
+            )?);
+        }
+        Ok(report)
     }
 
     pub fn index_path(&self) -> &Path {
@@ -317,7 +408,25 @@ impl Kernel {
                 p.request_id
             )));
         }
-        let events = vec![self.record_user(text)?];
+        let mut events = vec![self.record_user(text)?];
+        let report = self.fire_hooks(
+            HookEvent::UserPromptSubmit,
+            json!({"text": text, "profile": self.config.profile}),
+            &mut events,
+        )?;
+        if report.tightening() {
+            // There is no approval seam for a prompt, so "ask" has no answerer
+            // here and must not be read as consent (ADR-0007: unanswered asks
+            // fail closed).
+            let why = report.reason();
+            return Ok(TurnOutcome {
+                steps: 0,
+                final_text: None,
+                pending_approval: None,
+                refused: Some(format!("refused by hook: {why}")),
+                events,
+            });
+        }
         self.run(events)
     }
 
@@ -348,9 +457,28 @@ impl Kernel {
                 reason: reason.map(|r| r.to_string()),
             },
         )?];
+        self.fire_hooks(
+            HookEvent::PermissionDecided,
+            json!({
+                "request_id": request_id,
+                "tool": pending.tool,
+                "granted": granted,
+                "scope": scope,
+            }),
+            &mut events,
+        )?;
         if granted {
             let (ok, output) = self.execute(&pending.tool, &pending.args);
             events.push(self.record_tool_result(&pending.call_id, ok, &output)?);
+            let tool_name = pending.tool.clone();
+            let call_id = pending.call_id.clone();
+            // The same seam as the un-gated path: a tool that ran after an
+            // approval is still a tool that ran.
+            self.fire_hooks(
+                HookEvent::PostTool,
+                json!({"tool": tool_name, "call_id": call_id, "ok": ok, "output": output}),
+                &mut events,
+            )?;
         } else {
             let output = match reason {
                 Some(r) => format!("denied by the user: {r}"),
@@ -379,6 +507,7 @@ impl Kernel {
                     steps: step,
                     final_text: Some(text),
                     pending_approval: None,
+                    refused: None,
                     events,
                 });
             }
@@ -393,6 +522,7 @@ impl Kernel {
                             steps: step,
                             final_text: None,
                             pending_approval: Some(pending),
+                            refused: None,
                             events,
                         });
                     }
@@ -404,7 +534,13 @@ impl Kernel {
             self.config.max_steps
         );
         events.push(self.record_assistant(Some(&note), &[])?);
-        Ok(TurnOutcome { steps: self.config.max_steps, final_text: Some(note), pending_approval: None, events })
+        Ok(TurnOutcome {
+            steps: self.config.max_steps,
+            final_text: Some(note),
+            pending_approval: None,
+            refused: None,
+            events,
+        })
     }
 
     fn dispatch(
@@ -422,9 +558,10 @@ impl Kernel {
         };
         let tool_name = tool.name().to_string();
         let class = tool.action_class(&call.args, &self.config.cwd);
-        let ruling = self.pdp.decide(class, &tool_name);
+        let mut ruling = self.pdp.decide(class, &tool_name);
 
-        // The attempted call, then the verdict, then whatever happened.
+        // The attempted call, then the hooks' answers, then the verdict, then
+        // whatever happened.
         events.push(self.append(
             gen::event::TOOL_CALL,
             &gen::ToolCall {
@@ -434,6 +571,23 @@ impl Kernel {
                 action_class: class,
             },
         )?);
+        let report = self.fire_hooks(
+            HookEvent::PreTool,
+            json!({
+                "tool": tool_name,
+                "call_id": call.call_id,
+                "args": call.args,
+                "action_class": class,
+                "policy_verdict": ruling.verdict,
+                "policy_rule": ruling.rule,
+            }),
+            events,
+        )?;
+        // Hooks tighten, never widen (ADR-0008): their verdict replaces the
+        // policy's only when it is stricter.
+        if let Some(tighter) = tighten(&ruling, &report) {
+            ruling = tighter;
+        }
         events.push(self.append(
             gen::event::POLICY_DECIDED,
             &gen::PolicyDecided {
@@ -447,11 +601,28 @@ impl Kernel {
             Verdict::Allow => {
                 let (ok, output) = self.execute(&call.tool, &call.args);
                 events.push(self.record_tool_result(&call.call_id, ok, &output)?);
+                // Post hooks cannot undo anything; their answers are recorded so
+                // the guard's behaviour stays auditable.
+                self.fire_hooks(
+                    HookEvent::PostTool,
+                    json!({"tool": tool_name, "call_id": call.call_id, "ok": ok, "output": output}),
+                    events,
+                )?;
                 Ok(Dispatch::Done)
             }
             Verdict::Ask => {
                 let request_id = format!("appr-{}", self.approvals + 1);
                 self.approvals += 1;
+                self.fire_hooks(
+                    HookEvent::PermissionRequested,
+                    json!({
+                        "request_id": request_id,
+                        "tool": tool_name,
+                        "action_class": class,
+                        "reason": ruling.reason,
+                    }),
+                    events,
+                )?;
                 events.push(self.append(
                     gen::event::APPROVAL_REQUESTED,
                     &gen::ApprovalRequested {
@@ -627,6 +798,20 @@ mod tests {
     impl Drop for Temp {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// Install a hook manifest (and its scripts) in the workspace. `trust`
+    /// decides whether the hooks are allowed to run at all.
+    fn install_hooks(dir: &Path, manifest: &str, scripts: &[(&str, &str)], trust: bool) {
+        let hooks = dir.join(".loongagent");
+        std::fs::create_dir_all(&hooks).unwrap();
+        for (name, body) in scripts {
+            std::fs::write(hooks.join(name), body).unwrap();
+        }
+        std::fs::write(hooks.join("hooks.toml"), manifest).unwrap();
+        if trust {
+            loong_hooks::HookSet::load(dir).unwrap().trust_now().unwrap();
         }
     }
 
@@ -869,6 +1054,178 @@ mod tests {
         assert_eq!(policy.data["verdict"], "allow");
         let result = events.iter().find(|e| e.kind == ev::TOOL_RESULT).unwrap();
         assert!(result.data["output"].as_str().unwrap().contains("content here"));
+    }
+
+    #[test]
+    fn a_pre_tool_hook_can_deny_what_the_policy_would_allow() {
+        let t = Temp::new();
+        install_hooks(
+            &t.dir,
+            "[[hook]]\nid = \"guard\"\nevent = \"pre_tool\"\nkind = \"shell\"\nscript = \"deny.sh\"\n",
+            &[("deny.sh", "cat > /dev/null\necho 'no shell commands in this repo' >&2\nexit 2\n")],
+            true,
+        );
+        let model = ScriptedModel::new(vec![
+            response(vec![call("c1", "shell", json!({"command": "touch made.txt"}))], None),
+            response(vec![], Some("understood")),
+        ]);
+        let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        assert!(k.hooks_note().contains("trusted"), "{}", k.hooks_note());
+        k.submit("go").unwrap();
+
+        let events = loong_eventlog::replay(&t.log).unwrap().events;
+        let fired = events.iter().find(|e| e.kind == ev::HOOK_FIRED).expect("a hook.fired event");
+        assert_eq!(fired.data["hook_id"], "guard");
+        assert_eq!(fired.data["verdict"], "deny");
+        assert_eq!(fired.data["failed"], false);
+        assert!(fired.data["reason"].as_str().unwrap().contains("no shell commands"));
+
+        // The classifier said write_workspace and the PDP would have allowed it:
+        // the hook is what changed the outcome, and the rule names it.
+        let policy = events.iter().find(|e| e.kind == ev::POLICY_DECIDED).unwrap();
+        assert_eq!(policy.data["verdict"], "deny");
+        assert_eq!(policy.data["rule"], "hook:guard");
+        let result = events.iter().find(|e| e.kind == ev::TOOL_RESULT).unwrap();
+        assert_eq!(result.data["ok"], false);
+        assert!(!t.dir.join("made.txt").exists(), "the denied tool must never run");
+    }
+
+    #[test]
+    fn a_hook_that_asks_stops_the_turn_for_a_human() {
+        let t = Temp::new();
+        install_hooks(
+            &t.dir,
+            "[[hook]]\nid = \"checker\"\nevent = \"pre_tool\"\nkind = \"shell\"\nscript = \"ask.sh\"\n\n\
+             [[hook]]\nid = \"seam-req\"\nevent = \"permission_requested\"\nkind = \"shell\"\nscript = \"ok.sh\"\n\n\
+             [[hook]]\nid = \"seam-dec\"\nevent = \"permission_decided\"\nkind = \"shell\"\nscript = \"ok.sh\"\n\n\
+             [[hook]]\nid = \"after\"\nevent = \"post_tool\"\nkind = \"shell\"\nscript = \"ok.sh\"\n",
+            &[
+                ("ask.sh", "cat > /dev/null\nprintf '{\"verdict\":\"ask\",\"reason\":\"double-check this\"}'\n"),
+                ("ok.sh", "cat > /dev/null\nexit 0\n"),
+            ],
+            true,
+        );
+        let model = ScriptedModel::new(vec![
+            response(vec![call("c1", "shell", json!({"command": "touch asked.txt"}))], None),
+            response(vec![], Some("done")),
+        ]);
+        let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        let outcome = k.submit("go").unwrap();
+
+        let pending = outcome.pending_approval.expect("the hook asked, so the turn stops");
+        assert!(pending.reason.contains("double-check"), "{}", pending.reason);
+        assert_eq!(pending.rule, "hook:checker");
+        assert!(!t.dir.join("asked.txt").exists(), "nothing runs before the answer");
+
+        // The approval path is the same one the PDP uses, so answering resumes.
+        let request_id = pending.request_id.clone();
+        let resumed = k.respond_to_approval(&request_id, true, ApprovalScope::Once, None).unwrap();
+        assert!(resumed.pending_approval.is_none());
+        assert!(t.dir.join("asked.txt").exists(), "the granted call ran");
+
+        let events = loong_eventlog::replay(&t.log).unwrap().events;
+        let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
+        assert!(kinds.contains(&ev::APPROVAL_REQUESTED));
+        assert!(kinds.contains(&ev::APPROVAL_DECIDED));
+        // Every seam fired once: pre_tool, permission_requested, permission_decided,
+        // post_tool — the guards see the whole shape of the episode.
+        let fired: Vec<&str> = events
+            .iter()
+            .filter(|e| e.kind == ev::HOOK_FIRED)
+            .map(|e| e.data["event"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            fired,
+            vec!["pre_tool", "permission_requested", "permission_decided", "post_tool"]
+        );
+    }
+
+    #[test]
+    fn an_untrusted_hook_is_inert() {
+        let t = Temp::new();
+        install_hooks(
+            &t.dir,
+            "[[hook]]\nid = \"guard\"\nevent = \"pre_tool\"\nkind = \"shell\"\nscript = \"deny.sh\"\n",
+            &[("deny.sh", "cat > /dev/null\nexit 2\n")],
+            false,
+        );
+        let model = ScriptedModel::new(vec![
+            response(vec![call("c1", "shell", json!({"command": "touch ran.txt"}))], None),
+            response(vec![], Some("ok")),
+        ]);
+        let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        assert!(k.hooks_note().contains("INERT"), "{}", k.hooks_note());
+        k.submit("go").unwrap();
+
+        let events = loong_eventlog::replay(&t.log).unwrap().events;
+        assert!(
+            !events.iter().any(|e| e.kind == ev::HOOK_FIRED),
+            "an untrusted hook must not even be asked"
+        );
+        assert!(t.dir.join("ran.txt").exists(), "the call proceeded");
+    }
+
+    #[test]
+    fn a_prompt_hook_refuses_the_turn_before_the_model_is_called() {
+        let t = Temp::new();
+        install_hooks(
+            &t.dir,
+            "[[hook]]\nid = \"gate\"\nevent = \"user_prompt_submit\"\nkind = \"shell\"\nscript = \"gate.sh\"\n",
+            &[("gate.sh", "cat > /dev/null\necho 'this repository is read-only today' >&2\nexit 2\n")],
+            true,
+        );
+        // An empty script: if the model were called, the turn would fail instead.
+        let model = ScriptedModel::new(vec![]);
+        let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        let outcome = k.submit("please refactor everything").unwrap();
+
+        let refused = outcome.refused.expect("the hook refused the turn");
+        assert!(refused.contains("read-only today"), "{refused}");
+        assert_eq!(outcome.steps, 0);
+        assert!(outcome.final_text.is_none());
+
+        let events = loong_eventlog::replay(&t.log).unwrap().events;
+        let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
+        assert!(kinds.contains(&ev::HOOK_FIRED));
+        assert!(
+            !kinds.contains(&ev::COST_RECORDED),
+            "the model was never called: no cost, no assistant message"
+        );
+        let user_turns = events
+            .iter()
+            .filter(|e| e.kind == ev::MESSAGE_APPENDED && e.data["role"] == "user")
+            .count();
+        assert_eq!(user_turns, 1, "the prompt itself is still recorded as the truth");
+    }
+
+    #[test]
+    fn session_start_hooks_fire_when_the_session_opens() {
+        let t = Temp::new();
+        install_hooks(
+            &t.dir,
+            "[[hook]]\nid = \"boot\"\nevent = \"session_start\"\nkind = \"shell\"\nscript = \"boot.sh\"\n",
+            &[("boot.sh", "cat > /dev/null\necho '{\"verdict\":\"allow\"}'\n")],
+            true,
+        );
+        let model = ScriptedModel::saying("hi");
+        let _k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        let events = loong_eventlog::replay(&t.log).unwrap().events;
+        let fired = events.iter().find(|e| e.kind == ev::HOOK_FIRED).expect("session_start fired");
+        assert_eq!(fired.data["event"], "session_start");
+        assert_eq!(fired.data["verdict"], "allow");
+    }
+
+    #[test]
+    fn a_malformed_manifest_refuses_to_open_a_session() {
+        let t = Temp::new();
+        install_hooks(&t.dir, "not toml at all {{{", &[], false);
+        let model = ScriptedModel::saying("hi");
+        let err = match Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)) {
+            Ok(_) => panic!("a malformed manifest must be fatal, not silently dropped"),
+            Err(e) => e,
+        };
+        assert!(matches!(err, KernelError::Hooks(_)), "{err}");
+        assert!(err.to_string().contains("hooks.toml"));
     }
 
     #[test]

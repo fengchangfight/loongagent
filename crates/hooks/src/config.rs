@@ -248,6 +248,7 @@ impl HookSet {
             }
         }
         out.sort();
+        out.dedup_by(|a, b| a.0 == b.0);
         Ok(out)
     }
 
@@ -275,6 +276,7 @@ impl HookSet {
             }
         }
         expected.sort();
+        expected.dedup_by(|a, b| a.0 == b.0);
 
         let mut changed = Vec::new();
         for (name, hash) in &expected {
@@ -497,6 +499,28 @@ mod tests {
         let names: Vec<String> =
             HookSet::load(&ws).unwrap().fingerprints().unwrap().into_iter().map(|(n, _)| n).collect();
         assert_eq!(names, vec!["a.sh", "b.sh", "hooks.toml"]);
+    }
+
+    #[test]
+    fn one_script_used_by_two_hooks_is_fingerprinted_once() {
+        let ws = workspace();
+        write_script(&ws, "shared.sh", "exit 0\n");
+        write_manifest(
+            &ws,
+            "[[hook]]\nid = \"a\"\nevent = \"pre_tool\"\nkind = \"shell\"\nscript = \"shared.sh\"\n\n\
+             [[hook]]\nid = \"b\"\nevent = \"post_tool\"\nkind = \"shell\"\nscript = \"shared.sh\"\n",
+        );
+        let set = HookSet::load(&ws).unwrap();
+        let names: Vec<String> =
+            set.fingerprints().unwrap().into_iter().map(|(n, _)| n).collect();
+        assert_eq!(names, vec!["hooks.toml", "shared.sh"]);
+
+        set.trust_now().unwrap();
+        assert_eq!(HookSet::load(&ws).unwrap().trust, TrustStatus::Trusted);
+        match &HookSet::load(&ws).unwrap().trust {
+            TrustStatus::Trusted => {}
+            other => panic!("duplicate entries must not leave it looking untrusted: {other:?}"),
+        }
     }
 
     #[test]

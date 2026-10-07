@@ -162,6 +162,20 @@ fields = [
 ]
 
 [[types]]
+name = "HookFired"
+kind = "struct"
+doc = "One hook answered at one lifecycle moment (ADR-0007 §7). Recorded whether or not it changed the outcome, so the guard's behaviour is auditable."
+fields = [
+  { name = "event", type = "string", doc = "the lifecycle moment: session_start, user_prompt_submit, pre_tool, post_tool, permission_requested, permission_decided" },
+  { name = "hook_id", type = "string" },
+  { name = "kind", type = "string", doc = "shell | http" },
+  { name = "verdict", type = "Verdict" },
+  { name = "reason", type = "string" },
+  { name = "duration_ms", type = "Millis" },
+  { name = "failed", type = "bool", doc = "the hook could not answer; the verdict came from its on_error policy" },
+]
+
+[[types]]
 name = "CompactionApplied"
 kind = "struct"
 doc = "Visible, reversible compaction (ADR-0006 §4)."
@@ -285,4 +299,9 @@ ignorable = false
 [[events]]
 name = "compaction.applied"
 payload = "CompactionApplied"
+ignorable = false
+
+[[events]]
+name = "hook.fired"
+payload = "HookFired"
 ignorable = false

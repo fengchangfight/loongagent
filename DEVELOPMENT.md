@@ -109,6 +109,19 @@ binary the TUI spawns as its server (used by the end-to-end test).
   outside and succeed inside — it never reports "available" without
   demonstrating denial. The server runs that self-test before its first tool
   call: a broken mechanism refuses startup, a missing one is a loud warning.
+- **Lifecycle hooks** (`loong-hooks`): a hook answers one question at one moment
+  — allow, ask, or deny — and nothing else. Six moments fire today:
+  `session_start`, `user_prompt_submit`, `pre_tool`, `post_tool`,
+  `permission_requested`, `permission_decided`. Two kinds: `shell` (a script
+  receiving the event as JSON on stdin; exit 2 denies with stderr as the reason,
+  or print `{"verdict":"ask","reason":"…"}`) and `http` (an endpoint, **off**
+  until the manifest sets `allow_http_hooks = true`). Verdicts aggregate
+  monotonically — deny > ask > allow — so hooks can only tighten what the session
+  may do, and a hook that cannot answer fails **closed** by default. Every answer
+  is a `hook.fired` event, whether or not it changed the outcome.
+  Repo-shipped hooks are treated as repository content: they stay inert until
+  `loongagent hooks trust` records the exact bytes, and editing the manifest or a
+  script re-arms the question (`loongagent hooks list` shows the state).
 - **A shell tool with a process-tree teardown**: `shell` runs a command in the
   workspace, bounds each output stream (default 64 KiB), and kills the whole
   process group on timeout (killing only `sh` would leave `sleep 30` running and
@@ -145,9 +158,12 @@ binary the TUI spawns as its server (used by the end-to-end test).
    the ADR-0006 §4 heuristic (clear tool output → summarize, keep the newest
    window verbatim) yet.
 4. **The TUI is a line REPL** — ADR-0013 expects `ratatui` for the real surface.
-5. **Not started**: hooks (three kinds + the event set), skills/commands, MCP,
-   profiles/config packs, session export/import, WASM extensions, the web
-   client, the control plane.
+5. **The MCP hook kind** is refused with its reason (it needs the MCP client,
+   T-15). Post-tool verdicts are recorded but cannot undo anything, and hooks
+   deliberately cannot rewrite a tool call — the moment they could, the loop would
+   stop being small enough to audit.
+6. **Not started**: skills/commands, MCP, profiles/config packs, session
+   export/import, WASM extensions, the web client, compaction, the control plane.
 
 ## Commits
 

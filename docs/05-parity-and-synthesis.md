@@ -72,10 +72,11 @@ rows below are what "not losing" means concretely.
 
 | CC feature | Our status | Where | Next |
 |---|---|---|---|
-| Lifecycle hook events (session start/end, **user-prompt submit**, pre/post tool use, **permission requested/denied**, subagent start/stop, **pre/post compaction**, file changed, cwd changed) | ✅ | ADR-0007 §7 (event set fixed 2026-10-05) | — |
-| **Hook kinds: shell / HTTP / MCP tool** (LLM and subagent kinds deferred to v2) | ✅ | ADR-0007 §7, ADR-0004 | build the three transports |
-| Exit-code-2 blocks and feeds stderr back to the model | ✅ | ADR-0007 | — |
-| Repo-shipped hooks are untrusted | ✅ | ADR-0007 (explicit trust) | — |
+| Lifecycle hook events (session start/end, **user-prompt submit**, pre/post tool use, **permission requested/denied**, subagent start/stop, **pre/post compaction**, file changed, cwd changed) | ⚠️ | ADR-0007 §7 (event set fixed 2026-10-05) | six fire today (`session_start`, `user_prompt_submit`, `pre_tool`, `post_tool`, `permission_requested`, `permission_decided`, 2026-10-07); the rest arrive with subagents and compaction |
+| **Hook kinds: shell / HTTP / MCP tool** (LLM and subagent kinds deferred to v2) | ⚠️ | ADR-0007 §7, `loong-hooks` (2026-10-07) | shell and HTTP ship; MCP is refused with the reason (needs T-15) rather than accepted and ignored |
+| Exit-code-2 blocks and feeds stderr back to the model | ✅ | `loong-hooks::run` — exit 2 denies with stderr as the reason; a JSON verdict on stdout reaches ask; anything else falls back to `on_error` (default **deny**) | — |
+| Repo-shipped hooks are untrusted | ✅ | the trust gate (2026-10-07): a per-file change-detection hash, so editing either the manifest or a script re-arms the question | signatures arrive with ADR-0008 pack signing |
+| Hooks can only tighten | ✅ | `strictest` (deny > ask > allow), applied where the hook verdict meets the PDP's | — |
 
 ### A6 · Skills, commands, plugins
 
@@ -138,7 +139,7 @@ rows below are what "not losing" means concretely.
 | B10 | Monotonic denial (`guard`) | DSH, CC | ✅ | ADR-0008 |
 | B11 | `/btw`, Monitor, cache-hit stats, `/init`, `/doctor`, `@path` imports, description budgets | CC | ❌ | **T-25** |
 | B12 | Skills/commands hot reload for skills authors | Pi | ❌ | **T-24** |
-| B13 | Multi-kind hooks + deterministic-enforcement framing | CC | ✅ (3 kinds) | ADR-0007 §7 |
+| B13 | Multi-kind hooks + deterministic-enforcement framing | CC | ✅ (shell + HTTP shipped 2026-10-07; MCP pending T-15) | ADR-0007 §7, `loong-hooks` |
 | B14 | Sandbox self-test before first tool call | Codex | ✅ | ADR-0007 |
 | B15 | Capability dial instead of model picker; silent re-route as frontier moves | Amp | ✅ | ADR-0005 + ADR-0008 profiles |
 | B16 | Context ring from ledger data | Cursor | ✅ | ADR-0006 |

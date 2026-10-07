@@ -86,6 +86,20 @@ export interface CostRecorded {
   usd_micros: number;
 }
 
+/** One hook answered at one lifecycle moment (ADR-0007 §7). Recorded whether or not it changed the outcome, so the guard's behaviour is auditable. */
+export interface HookFired {
+  /** the lifecycle moment: session_start, user_prompt_submit, pre_tool, post_tool, permission_requested, permission_decided */
+  event: string;
+  hook_id: string;
+  /** shell | http */
+  kind: string;
+  verdict: Verdict;
+  reason: string;
+  duration_ms: Millis;
+  /** the hook could not answer; the verdict came from its on_error policy */
+  failed: boolean;
+}
+
 /** Visible, reversible compaction (ADR-0006 §4). */
 export interface CompactionApplied {
   dropped_events: number;
@@ -145,6 +159,7 @@ export const EVENTS = {
   policyDecided: "policy.decided",
   costRecorded: "cost.recorded",
   compactionApplied: "compaction.applied",
+  hookFired: "hook.fired",
 } as const;
 
 export type MethodName = (typeof METHODS)[keyof typeof METHODS];

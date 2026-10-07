@@ -8,8 +8,11 @@
 //! to leave the workspace, and every subprocess a tool spawns is confined by the
 //! policy the kernel hands in through [`ExecContext`].
 
+pub mod search;
+
 use loong_schema::generated::{ActionClass, Json};
 use serde_json::json;
+use search::{Glob, Grep};
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -89,6 +92,9 @@ impl Registry {
         let mut r = Self::new();
         r.register(ReadFile);
         r.register(WriteFile);
+        r.register(Edit);
+        r.register(Grep);
+        r.register(Glob);
         r.register(Shell::default());
         r
     }
@@ -146,7 +152,7 @@ pub fn classify_path(cwd: &Path, target: &str) -> ActionClass {
     }
 }
 
-fn arg_str(args: &Json, key: &str) -> Result<String, ToolError> {
+pub(crate) fn arg_str(args: &Json, key: &str) -> Result<String, ToolError> {
     args.get(key)
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
@@ -217,6 +223,118 @@ impl Tool for WriteFile {
         std::fs::write(&path, &content).map_err(|e| ToolError::Failed(e.to_string()))?;
         Ok(format!("wrote {} bytes to {}", content.len(), path.display()))
     }
+}
+
+/// Replace an exact string in a file — the tool that makes an agent edit rather
+/// than rewrite.
+///
+/// Its refusals are the feature: a missing or ambiguous `old_string` must not be
+/// guessed at, because a wrong guess silently corrupts a file. So it fails with
+/// the counts and the line numbers and lets the model look again.
+pub struct Edit;
+
+impl Tool for Edit {
+    fn name(&self) -> &str {
+        "edit"
+    }
+    fn description(&self) -> &str {
+        "Replace an exact string in a file inside the workspace. Fails unless          `old_string` occurs exactly once, so pass more context (or set          `replace_all`) rather than guessing. Returns a summary, not the file."
+    }
+    fn parameters(&self) -> Json {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "old_string": {"type": "string", "description": "exact text to replace"},
+                "new_string": {"type": "string", "description": "replacement text"},
+                "replace_all": {"type": "boolean", "description": "replace every occurrence"}
+            },
+            "required": ["path", "old_string", "new_string"]
+        })
+    }
+    fn action_class(&self, args: &Json, cwd: &Path) -> ActionClass {
+        match args.get("path").and_then(|v| v.as_str()) {
+            Some(p) => classify_path(cwd, p),
+            None => ActionClass::OutOfBounds,
+        }
+    }
+    fn execute(&self, args: &Json, ctx: &ExecContext<'_>) -> Result<String, ToolError> {
+        let path = resolve(ctx.cwd, &arg_str(args, "path")?);
+        if classify_path(ctx.cwd, &path.to_string_lossy()) != ActionClass::WriteWorkspace {
+            return Err(ToolError::Refused(format!(
+                "{} is outside the workspace — this tool only edits inside it",
+                path.display()
+            )));
+        }
+        let old = arg_str(args, "old_string")?;
+        let new = arg_str(args, "new_string")?;
+        if old.is_empty() {
+            return Err(ToolError::Refused("old_string is empty".into()));
+        }
+        if old == new {
+            return Err(ToolError::Refused(
+                "old_string and new_string are identical — there is nothing to do".into(),
+            ));
+        }
+        let replace_all = args.get("replace_all").and_then(|v| v.as_bool()).unwrap_or(false);
+
+        let original = std::fs::read_to_string(&path).map_err(|e| {
+            ToolError::Failed(format!("reading {}: {e}", path.display()))
+        })?;
+        let occurrences = original.matches(&old).count();
+        if occurrences == 0 {
+            return Err(ToolError::Refused(format!(
+                "old_string was not found in {} — read the file and copy the text exactly                  (whitespace and line endings included)",
+                path.display()
+            )));
+        }
+        if occurrences > 1 && !replace_all {
+            let lines: Vec<usize> = line_numbers(&original, &old);
+            return Err(ToolError::Refused(format!(
+                "old_string occurs {occurrences} times in {} (lines {}); add surrounding context                  to make it unique, or set replace_all",
+                path.display(),
+                lines.iter().map(|l| l.to_string()).collect::<Vec<_>>().join(", ")
+            )));
+        }
+
+        let replaced = if replace_all {
+            original.replace(&old, &new)
+        } else {
+            original.replacen(&old, &new, 1)
+        };
+        let lines_before = original.lines().count();
+        let lines_after = replaced.lines().count();
+        std::fs::write(&path, &replaced).map_err(|e| {
+            ToolError::Failed(format!("writing {}: {e}", path.display()))
+        })?;
+
+        let at = line_numbers(&original, &old);
+        Ok(format!(
+            "edited {}: replaced {} of {} occurrence(s){}; {} lines -> {} lines",
+            path.display(),
+            if replace_all { occurrences } else { 1 },
+            occurrences,
+            if at.is_empty() {
+                String::new()
+            } else {
+                format!(" at line {}", at.iter().map(|l| l.to_string()).collect::<Vec<_>>().join(", "))
+            },
+            lines_before,
+            lines_after
+        ))
+    }
+}
+
+/// 1-based line numbers where `needle` starts.
+fn line_numbers(haystack: &str, needle: &str) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut offset = 0;
+    while let Some(found) = haystack[offset..].find(needle) {
+        let absolute = offset + found;
+        out.push(haystack[..absolute].matches('\n').count() + 1);
+        offset = absolute + needle.len().max(1);
+    }
+    out
 }
 
 // -------------------------------------------------------------------- shell
@@ -474,12 +592,105 @@ mod tests {
     }
 
     #[test]
+    fn edit_replaces_a_unique_string_and_says_where() {
+        let cwd = tempdir();
+        std::fs::write(cwd.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        let c = NoConfinement;
+        let out = Edit
+            .execute(
+                &json!({"path": "a.txt", "old_string": "two", "new_string": "TWO"}),
+                &ctx(&cwd, &c),
+            )
+            .unwrap();
+        assert!(out.contains("replaced 1 of 1"), "{out}");
+        assert!(out.contains("line 2"), "{out}");
+        assert_eq!(std::fs::read_to_string(cwd.join("a.txt")).unwrap(), "one\nTWO\nthree\n");
+    }
+
+    #[test]
+    fn edit_refuses_a_missing_string_and_leaves_the_file_alone() {
+        let cwd = tempdir();
+        std::fs::write(cwd.join("a.txt"), "content\n").unwrap();
+        let c = NoConfinement;
+        let err = Edit
+            .execute(
+                &json!({"path": "a.txt", "old_string": "absent", "new_string": "x"}),
+                &ctx(&cwd, &c),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("was not found"), "{err}");
+        assert_eq!(std::fs::read_to_string(cwd.join("a.txt")).unwrap(), "content\n");
+    }
+
+    #[test]
+    fn edit_refuses_an_ambiguous_string_and_names_the_lines() {
+        let cwd = tempdir();
+        std::fs::write(cwd.join("a.txt"), "dup\nmid\ndup\n").unwrap();
+        let c = NoConfinement;
+        let err = Edit
+            .execute(&json!({"path": "a.txt", "old_string": "dup", "new_string": "x"}), &ctx(&cwd, &c))
+            .unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("occurs 2 times"), "{message}");
+        assert!(message.contains("lines 1, 3"), "{message}");
+        assert_eq!(std::fs::read_to_string(cwd.join("a.txt")).unwrap(), "dup\nmid\ndup\n");
+    }
+
+    #[test]
+    fn edit_with_replace_all_touches_every_occurrence() {
+        let cwd = tempdir();
+        std::fs::write(cwd.join("a.txt"), "dup\nmid\ndup\n").unwrap();
+        let c = NoConfinement;
+        let out = Edit
+            .execute(
+                &json!({"path": "a.txt", "old_string": "dup", "new_string": "x", "replace_all": true}),
+                &ctx(&cwd, &c),
+            )
+            .unwrap();
+        assert!(out.contains("replaced 2 of 2"), "{out}");
+        assert_eq!(std::fs::read_to_string(cwd.join("a.txt")).unwrap(), "x\nmid\nx\n");
+    }
+
+    #[test]
+    fn edit_refuses_outside_the_workspace_and_pointless_calls() {
+        let cwd = tempdir();
+        let c = NoConfinement;
+        assert!(matches!(
+            Edit.execute(
+                &json!({"path": "/etc/hosts", "old_string": "a", "new_string": "b"}),
+                &ctx(&cwd, &c)
+            ),
+            Err(ToolError::Refused(_))
+        ));
+        std::fs::write(cwd.join("a.txt"), "same\n").unwrap();
+        assert!(matches!(
+            Edit.execute(&json!({"path": "a.txt", "old_string": "same", "new_string": "same"}), &ctx(&cwd, &c)),
+            Err(ToolError::Refused(_))
+        ));
+        assert!(matches!(Edit.execute(&json!({}), &ctx(&cwd, &c)), Err(ToolError::Refused(_))));
+    }
+
+    #[test]
+    fn edit_handles_multiline_replacements() {
+        let cwd = tempdir();
+        std::fs::write(cwd.join("a.rs"), "fn a() {\n    1\n}\n").unwrap();
+        let c = NoConfinement;
+        Edit.execute(
+            &json!({"path": "a.rs", "old_string": "fn a() {\n    1\n}", "new_string": "fn a() -> i32 {\n    1\n}"}),
+            &ctx(&cwd, &c),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(cwd.join("a.rs")).unwrap(), "fn a() -> i32 {\n    1\n}\n");
+    }
+
+    #[test]
     fn registry_exposes_specs_for_the_model() {
         let r = Registry::with_builtins();
-        assert_eq!(r.names(), vec!["read_file", "shell", "write_file"]);
+        assert_eq!(r.names(), vec!["edit", "glob", "grep", "read_file", "shell", "write_file"]);
         let specs = r.specs();
-        assert_eq!(specs.len(), 3);
+        assert_eq!(specs.len(), 6);
         assert!(specs.iter().any(|(n, d, _)| n == "read_file" && !d.is_empty()));
+        assert!(specs.iter().all(|(_, d, p)| !d.is_empty() && p["type"] == "object"));
     }
 
     // ------------------------------------------------------- the classifier

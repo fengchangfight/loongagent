@@ -28,7 +28,7 @@ rows below are what "not losing" means concretely.
 
 | CC feature | Our status | Where | Next |
 |---|---|---|---|
-| Built-in Read / Write / Edit / Bash / Glob / Grep / WebFetch / WebSearch | ⚠️ | read_file, write_file and **shell** shipped; glob/grep/edit/web still to come | next: grep/glob, then an edit tool |
+| Built-in Read / Write / Edit / Bash / Glob / Grep / WebFetch / WebSearch | ⚠️ | read_file, write_file, **edit, grep, glob, shell** shipped (2026-10-07); web tools and an LSP-backed code tool still to come | next: web_fetch/web_search (needs the egress decision), then T-22 LSP |
 | **LSP-backed code intelligence** (go-to-def, type errors after edits) | ❌ | — | new **T-22** |
 | Agent/Task (subagent spawn), AskUserQuestion, todo tracking | ✅ | ADR-0011, T-17, T-18 | — |
 | **Monitor** (background script output surfaced as events) | ❌ | — | new **T-25** |

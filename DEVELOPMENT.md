@@ -97,6 +97,14 @@ binary the TUI spawns as its server (used by the end-to-end test).
 - **The ledger**: every block that reaches the model is an entry with category,
   source, tokens and lifetime; eviction drops stale tool output before prose and
   never touches pinned entries; `explain()` answers "why is this in my context?".
+- **Six built-in tools**, all behind one interface: `read_file`, `write_file`,
+  **`edit`**, **`grep`**, **`glob`**, `shell`. `edit` refuses a missing or
+  ambiguous `old_string` (with the counts and line numbers) instead of guessing —
+  a wrong guess silently corrupts a file. `grep` and `glob` are read-only by
+  construction, so they classify as investigate actions and cost no approval;
+  both bound their own output, skip `.git` / `target` / `node_modules` and binary
+  files, because an agent that reads 40 MB of matches has spent its context on
+  noise.
 - **Two enforcement points**: the PDP decides, the tool runner refuses to write
   outside the workspace even if a call is allowed.
 - **A real OS-level PEP, applied to tool children**: Landlock (ABI probe + a
@@ -158,11 +166,14 @@ binary the TUI spawns as its server (used by the end-to-end test).
    the ADR-0006 §4 heuristic (clear tool output → summarize, keep the newest
    window verbatim) yet.
 4. **The TUI is a line REPL** — ADR-0013 expects `ratatui` for the real surface.
-5. **The MCP hook kind** is refused with its reason (it needs the MCP client,
+5. **`grep`/`glob` do not honour `.gitignore` yet** — they use a small explicit
+   skip list instead. Web tools (`web_fetch`, `web_search`) are not built, and
+   `grep` reads whole files (no streaming) under a 4 MiB per-file cap.
+6. **The MCP hook kind** is refused with its reason (it needs the MCP client,
    T-15). Post-tool verdicts are recorded but cannot undo anything, and hooks
    deliberately cannot rewrite a tool call — the moment they could, the loop would
    stop being small enough to audit.
-6. **Not started**: skills/commands, MCP, profiles/config packs, session
+7. **Not started**: skills/commands, MCP, profiles/config packs, session
    export/import, WASM extensions, the web client, compaction, the control plane.
 
 ## Commits

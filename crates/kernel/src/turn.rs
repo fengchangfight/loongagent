@@ -19,7 +19,9 @@ use loong_providers::{
 use loong_sandbox::Pdp;
 use loong_schema::generated as gen;
 use loong_schema::generated::{ActionClass, ApprovalScope, Json, Role, Verdict};
-use loong_tools::Registry;
+use loong_sandbox::landlock::WorkspacePolicy;
+use loong_tools::{Confinement, ExecContext, NoConfinement, Registry};
+use std::process::Command;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug)]
@@ -106,6 +108,33 @@ impl KernelConfig {
     }
 }
 
+/// The Landlock PEP, installed with `pre_exec` so the restriction lands in the
+/// forked child and can never leak into the server (or into a sibling tool).
+struct LandlockConfinement {
+    policy: WorkspacePolicy,
+}
+
+impl Confinement for LandlockConfinement {
+    fn confine(&self, command: &mut Command) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            let policy = self.policy.clone();
+            // SAFETY: `apply` is documented to do no allocation on its success
+            // path, which is what makes it safe between fork and exec.
+            unsafe {
+                command.pre_exec(move || {
+                    policy.apply().map_err(|e| {
+                        std::io::Error::new(std::io::ErrorKind::PermissionDenied, e.to_string())
+                    })
+                });
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = command;
+    }
+}
+
 enum Dispatch {
     /// The call finished; every sequence it appended is already in `events`.
     Done,
@@ -124,6 +153,12 @@ pub struct Kernel {
     messages: Vec<ChatMessage>,
     pending: Option<PendingCall>,
     approvals: u64,
+    /// The PEP's policy for anything a tool spawns (ADR-0007). The kernel owns
+    /// the policy; the tool only applies it, in the child.
+    confinement: Box<dyn Confinement>,
+    /// What confinement is actually in force, for diagnostics and the startup
+    /// warning. Never silent: "unconfined" is a fact the operator should see.
+    confinement_note: String,
     /// Derived, disposable SQLite view of the log (ADR-0003). It trails the log
     /// by design: the log is the truth, this only makes queries fast. A failure
     /// to index never loses an event — it marks the index stale instead.
@@ -160,6 +195,18 @@ impl Kernel {
         // a stale index that silently disagrees with the log is worse than a
         // few milliseconds of replay.
         let index = loong_index::Index::rebuild_into(&index_path, log.path())?;
+        // The PEP is chosen here, once, and handed to every tool call.
+        let (confinement, confinement_note): (Box<dyn Confinement>, String) =
+            match WorkspacePolicy::new(&config.cwd) {
+                Ok(policy) => (
+                    Box::new(LandlockConfinement { policy }),
+                    "landlock: writes are confined to the workspace".to_string(),
+                ),
+                Err(e) => (
+                    Box::new(NoConfinement),
+                    format!("unconfined: {e}"),
+                ),
+            };
         Ok(Self {
             log,
             ledger,
@@ -170,6 +217,8 @@ impl Kernel {
             messages: Vec::new(),
             pending: None,
             approvals: 0,
+            confinement,
+            confinement_note,
             index,
             index_path,
             index_stale: None,
@@ -190,6 +239,11 @@ impl Kernel {
 
     pub fn pending(&self) -> Option<&PendingCall> {
         self.pending.as_ref()
+    }
+
+    /// What confinement is in force for spawned processes.
+    pub fn confinement_note(&self) -> &str {
+        &self.confinement_note
     }
 
     pub fn index_path(&self) -> &Path {
@@ -424,14 +478,22 @@ impl Kernel {
         }
     }
 
-    /// The PEP we have today: the tool runner. (The OS sandbox plugs in at the
-    /// same boundary; `Registry`'s write tool refuses to leave the workspace.)
+    /// Replace the confinement policy applied to every process a tool spawns.
+    pub fn set_confinement(&mut self, confinement: Box<dyn Confinement>) {
+        self.confinement = confinement;
+    }
+
+    /// The PEPs: the tool runner (which refuses to write outside the workspace)
+    /// and whatever confinement the kernel was given, applied to each child.
     fn execute(&self, tool: &str, args: &Json) -> (bool, String) {
         match self.tools.get(tool) {
-            Some(t) => match t.execute(args, &self.config.cwd) {
-                Ok(out) => (true, out),
-                Err(e) => (false, e.to_string()),
-            },
+            Some(t) => {
+                let ctx = ExecContext::new(&self.config.cwd, self.confinement.as_ref());
+                match t.execute(args, &ctx) {
+                    Ok(out) => (true, out),
+                    Err(e) => (false, e.to_string()),
+                }
+            }
             None => (false, format!("unknown tool {tool:?}")),
         }
     }
@@ -741,6 +803,72 @@ mod tests {
             .count();
         assert_eq!(history, k.messages().len(), "every message is a ledger entry");
         assert!(k.ledger().explain().iter().any(|r| r.source == "user"));
+    }
+
+    #[test]
+    fn the_pep_stops_an_escape_the_classifier_cannot_see() {
+        let t = Temp::new();
+        let escaped_name = format!("{}-escaped.txt", t.dir.file_name().unwrap().to_string_lossy());
+        let escape = t.dir.parent().unwrap().join(&escaped_name);
+        let _ = std::fs::remove_file(&escape);
+
+        // `touch ../<file>`: the classifier cannot see through `..` here, so it
+        // says write_workspace and the PDP allows it. The OS is what stops it.
+        let command = format!("touch ../{escaped_name}");
+        let model = ScriptedModel::new(vec![
+            response(vec![call("c1", "shell", json!({"command": command}))], None),
+            response(vec![], Some("blocked")),
+        ]);
+        let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        assert!(
+            k.confinement_note().contains("landlock"),
+            "the kernel must confine tool children: {}",
+            k.confinement_note()
+        );
+        k.submit("try to write outside").unwrap();
+
+        let events = loong_eventlog::replay(&t.log).unwrap().events;
+        let policy = events.iter().find(|e| e.kind == ev::POLICY_DECIDED).unwrap();
+        assert_eq!(policy.data["verdict"], "allow", "the classifier allowed it");
+        assert_eq!(policy.data["action_class"], "write_workspace");
+        let result = events.iter().find(|e| e.kind == ev::TOOL_RESULT).unwrap();
+        assert_eq!(result.data["ok"], false, "the OS refused it");
+        let output = result.data["output"].as_str().unwrap();
+        assert!(output.contains("Permission denied"), "output was: {output}");
+        assert!(!escape.exists(), "the escaped file must not exist");
+    }
+
+    #[test]
+    fn the_pep_still_allows_a_workspace_write_through_the_shell() {
+        let t = Temp::new();
+        let model = ScriptedModel::new(vec![
+            response(vec![call("c1", "shell", json!({"command": "touch inside-control.txt"}))], None),
+            response(vec![], Some("done")),
+        ]);
+        let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        k.submit("write a file inside").unwrap();
+        assert!(t.dir.join("inside-control.txt").exists(), "the allowed write happened");
+        let events = loong_eventlog::replay(&t.log).unwrap().events;
+        let result = events.iter().find(|e| e.kind == ev::TOOL_RESULT).unwrap();
+        assert_eq!(result.data["ok"], true, "{:?}", result.data["output"]);
+    }
+
+    #[test]
+    fn a_read_only_shell_command_is_an_investigate_action() {
+        let t = Temp::new();
+        std::fs::write(t.dir.join("a.txt"), "content here").unwrap();
+        let model = ScriptedModel::new(vec![
+            response(vec![call("c1", "shell", json!({"command": "cat a.txt"}))], None),
+            response(vec![], Some("read")),
+        ]);
+        let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        k.submit("show me a.txt").unwrap();
+        let events = loong_eventlog::replay(&t.log).unwrap().events;
+        let policy = events.iter().find(|e| e.kind == ev::POLICY_DECIDED).unwrap();
+        assert_eq!(policy.data["action_class"], "investigate");
+        assert_eq!(policy.data["verdict"], "allow");
+        let result = events.iter().find(|e| e.kind == ev::TOOL_RESULT).unwrap();
+        assert!(result.data["output"].as_str().unwrap().contains("content here"));
     }
 
     #[test]

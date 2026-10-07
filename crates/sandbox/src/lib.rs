@@ -15,6 +15,7 @@ use loong_schema::generated::{ActionClass, Verdict};
 pub mod landlock;
 pub mod sandbox;
 
+pub use landlock::WorkspacePolicy;
 pub use sandbox::{Capabilities, SelfTest, SelfTestReport};
 
 /// Severity order used by the monotonic rule: allow < ask < deny.

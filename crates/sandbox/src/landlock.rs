@@ -19,6 +19,14 @@ const SYS_LANDLOCK_CREATE_RULESET: c_long = 444;
 const SYS_LANDLOCK_ADD_RULE: c_long = 445;
 const SYS_LANDLOCK_RESTRICT_SELF: c_long = 446;
 const SYS_CLOSE: c_long = 3;
+/// `openat` is the one arch-dependent number we need; the two arches we target
+/// are covered, and anywhere else the policy reports `Unsupported` rather than
+/// guessing.
+#[cfg(target_arch = "x86_64")]
+const SYS_OPENAT: c_long = 257;
+#[cfg(target_arch = "aarch64")]
+const SYS_OPENAT: c_long = 56;
+const AT_FDCWD: i32 = -100;
 const PR_SET_NO_NEW_PRIVS: std::ffi::c_int = 38;
 
 const LANDLOCK_CREATE_RULESET_VERSION: u32 = 1;
@@ -162,6 +170,115 @@ pub fn read_write_mask(abi: u32) -> u64 {
     m
 }
 
+/// A workspace policy **prepared in the parent** so a forked child can apply it
+/// without allocating (only async-signal-safe work may happen between `fork` and
+/// `exec`, and `malloc` after a fork in a threaded process can deadlock).
+#[derive(Clone)]
+pub struct WorkspacePolicy {
+    root: std::ffi::CString,
+}
+
+impl WorkspacePolicy {
+    pub fn new(workspace: &Path) -> Result<Self, LandlockError> {
+        if abi_version().is_none() {
+            return Err(LandlockError::Unsupported);
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        {
+            return Err(LandlockError::Failed(
+                "no openat syscall number for this architecture".to_string(),
+            ));
+        }
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        {
+            if !workspace.is_dir() {
+                return Err(LandlockError::Failed(format!(
+                    "workspace {} is not a directory",
+                    workspace.display()
+                )));
+            }
+            use std::os::unix::ffi::OsStrExt;
+            let root = std::ffi::CString::new(workspace.as_os_str().as_bytes())
+                .map_err(|_| LandlockError::Failed("workspace path contains a NUL".to_string()))?;
+            Ok(Self { root })
+        }
+    }
+
+    /// Apply the policy to the calling process. Intended for `pre_exec`: the
+    /// success path performs no allocation.
+    pub fn apply(&self) -> Result<(), LandlockError> {
+        let abi = abi_version().ok_or(LandlockError::Unsupported)?;
+        let attr = RulesetAttr { handled_access_fs: handled_mask(abi) };
+        let ruleset = unsafe {
+            syscall(
+                SYS_LANDLOCK_CREATE_RULESET,
+                &attr as *const RulesetAttr,
+                std::mem::size_of::<RulesetAttr>(),
+                0u32,
+            )
+        };
+        if ruleset < 0 {
+            return Err(errno("landlock_create_ruleset"));
+        }
+        let result = (|| {
+            add_path_rule_raw(ruleset as i32, c"/", read_only_mask(abi))?;
+            add_path_rule_raw(ruleset as i32, &self.root, read_write_mask(abi))?;
+            if unsafe { prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
+                return Err(errno("prctl(PR_SET_NO_NEW_PRIVS)"));
+            }
+            if unsafe { syscall(SYS_LANDLOCK_RESTRICT_SELF, ruleset, 0u32) } != 0 {
+                return Err(errno("landlock_restrict_self"));
+            }
+            Ok(())
+        })();
+        unsafe {
+            syscall(SYS_CLOSE, ruleset as i32);
+        }
+        result
+    }
+}
+
+/// Add a path-beneath rule using raw syscalls only.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn add_path_rule_raw(ruleset_fd: i32, path: &std::ffi::CStr, allowed: u64) -> Result<(), LandlockError> {
+    let fd = unsafe {
+        syscall(
+            SYS_OPENAT,
+            AT_FDCWD,
+            path.as_ptr(),
+            O_PATH | O_CLOEXEC,
+            0u32,
+        )
+    };
+    if fd < 0 {
+        return Err(errno("openat"));
+    }
+    let attr = PathBeneathAttr { allowed_access: allowed, parent_fd: fd as i32 };
+    let result = unsafe {
+        syscall(
+            SYS_LANDLOCK_ADD_RULE,
+            ruleset_fd,
+            LANDLOCK_RULE_PATH_BENEATH,
+            &attr as *const PathBeneathAttr,
+            0u32,
+        )
+    };
+    unsafe {
+        syscall(SYS_CLOSE, fd as i32);
+    }
+    if result != 0 {
+        return Err(errno("landlock_add_rule"));
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+fn add_path_rule_raw(_ruleset_fd: i32, _path: &std::ffi::CStr, _allowed: u64) -> Result<(), LandlockError> {
+    Err(LandlockError::Failed(
+        "no openat syscall number for this architecture".to_string(),
+    ))
+}
+
 /// Confine **this process** (and, by inheritance, every child it spawns) to
 /// read/execute everywhere and write only under `workspace`.
 ///
@@ -271,6 +388,28 @@ mod tests {
         assert_eq!(rw & REFER, REFER, "renames inside the workspace must work");
         assert_eq!(ro & READ_FILE, READ_FILE, "reading stays allowed everywhere");
         assert_eq!(rw & EXECUTE, EXECUTE);
+    }
+
+    #[test]
+    fn a_policy_is_prepared_in_the_parent() {
+        let dir = std::env::temp_dir();
+        match WorkspacePolicy::new(&dir) {
+            Ok(policy) => {
+                // Cloning must be allocation-safe in the parent (it is), and the
+                // clone must be usable in the child.
+                let _clone = policy.clone();
+            }
+            Err(LandlockError::Unsupported) => { /* older kernels: reported elsewhere */ }
+            Err(e) => panic!("unexpected failure preparing a policy for {}: {e}", dir.display()),
+        }
+    }
+
+    #[test]
+    fn a_policy_for_a_missing_directory_is_refused() {
+        assert!(matches!(
+            WorkspacePolicy::new(Path::new("/definitely/not/here")),
+            Err(LandlockError::Failed(_)) | Err(LandlockError::Unsupported)
+        ));
     }
 
     #[test]

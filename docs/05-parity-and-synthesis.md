@@ -28,7 +28,7 @@ rows below are what "not losing" means concretely.
 
 | CC feature | Our status | Where | Next |
 |---|---|---|---|
-| Built-in Read / Write / Edit / Bash / Glob / Grep / WebFetch / WebSearch | ✅ | ADR-0004 (uniform tool interface) | ship in the first slice |
+| Built-in Read / Write / Edit / Bash / Glob / Grep / WebFetch / WebSearch | ⚠️ | read_file, write_file and **shell** shipped; glob/grep/edit/web still to come | next: grep/glob, then an edit tool |
 | **LSP-backed code intelligence** (go-to-def, type errors after edits) | ❌ | — | new **T-22** |
 | Agent/Task (subagent spawn), AskUserQuestion, todo tracking | ✅ | ADR-0011, T-17, T-18 | — |
 | **Monitor** (background script output surfaced as events) | ❌ | — | new **T-25** |
@@ -63,7 +63,7 @@ rows below are what "not losing" means concretely.
 |---|---|---|---|
 | Permission modes (plan / manual / accept-edits / auto-classifier / bypass) | ✅ | ADR-0007 | auto-classifier = our Guardian, deferred to v2 |
 | allow / ask / deny rule system + durable "don't ask again" | ✅ | ADR-0007/0008 | ship it |
-| **Static analysis of shell commands against rules** | ❌ | ADR-0007 (rule-based PDP) | add to **T-11** amendments |
+| **Static analysis of shell commands against rules** | ✅ | ADR-0007 §4 + `tools::classify_command` (implemented 2026-10-07 as an autonomy heuristic) | extend the pattern table as real usage shows gaps |
 | OS sandbox: Seatbelt / Bubblewrap (+ network per-domain approval) | ✅ | ADR-0007 | — |
 | Org-managed deny rules + managed instruction file | ✅ | ADR-0008 (org layer, signed packs) | — |
 | Feedback on a denied approval ("comment on the decision") | ✅ | ADR-0007 (structured reason fed back) | — |

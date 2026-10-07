@@ -99,13 +99,23 @@ binary the TUI spawns as its server (used by the end-to-end test).
   never touches pinned entries; `explain()` answers "why is this in my context?".
 - **Two enforcement points**: the PDP decides, the tool runner refuses to write
   outside the workspace even if a call is allowed.
-- **A real OS-level PEP**: Landlock (ABI probe + a ruleset that allows reads
-  everywhere and writes only under the workspace). It needs no privileges and is
-  inherited by child processes. `loongagent sandbox self-test` *proves* it by
-  running a confined child that must fail to write outside and succeed inside —
-  it never reports "available" without demonstrating denial. The server runs that
-  self-test before its first tool call: a broken mechanism refuses startup, a
-  missing one is a loud warning.
+- **A real OS-level PEP, applied to tool children**: Landlock (ABI probe + a
+  ruleset that allows reads everywhere and writes only under the workspace). It
+  needs no privileges and is inherited by child processes. The kernel prepares
+  the policy in the parent (`WorkspacePolicy`, allocation-free on the child's
+  success path) and installs it with `pre_exec`, so the restriction lands in the
+  forked child and can never leak into the server. `loongagent sandbox
+  self-test` *proves* it by running a confined child that must fail to write
+  outside and succeed inside — it never reports "available" without
+  demonstrating denial. The server runs that self-test before its first tool
+  call: a broken mechanism refuses startup, a missing one is a loud warning.
+- **A shell tool with a process-tree teardown**: `shell` runs a command in the
+  workspace, bounds each output stream (default 64 KiB), and kills the whole
+  process group on timeout (killing only `sh` would leave `sleep 30` running and
+  hold the output open). Its action class is computed from the *command*, so the
+  same tool is investigate for `cat`, a workspace write for `touch`, and out of
+  bounds for `curl` or `sudo` — the classifier is an autonomy heuristic, never a
+  security boundary; the PEP is the boundary.
 - **The derived index is wired into the session**: every append feeds it, a
   failure marks it stale (and queries then refuse rather than lie), and reopening
   rebuilds it from the log — deleting it is always safe.
@@ -125,11 +135,12 @@ binary the TUI spawns as its server (used by the end-to-end test).
 1. **The adapter is HTTP-only** — there is no TLS client and no streaming;
    cost is recorded as `usd_micros: 0` until pricing/profiles land, and there is
    no tokenizer (the ledger estimates tokens at ~4 chars).
-2. **The PEP is proven but not yet applied around tool execution** — no tool
-   spawns a subprocess yet, so `confine_workspace()` is only exercised by the
-   self-test. The moment a shell/subprocess tool lands it must run its child
-   under it. Network egress is outside Landlock's scope (that needs seccomp or
-   namespaces), and macOS seatbelt is not implemented on this platform.
+2. **Network egress is not confined** — Landlock covers the filesystem only;
+   blocking egress needs seccomp or a network namespace (neither is available
+   unprivileged in this container: `unshare -Urn` is refused). The `shell`
+   tool's classifier scores network commands as out-of-bounds, which is an
+   autonomy decision, not enforcement. macOS seatbelt is not implemented.
+   Caveat: a hardened deployment must not treat the classifier as a boundary.
 3. **Compaction is not implemented** — the ledger can evict, but nothing drives
    the ADR-0006 §4 heuristic (clear tool output → summarize, keep the newest
    window verbatim) yet.

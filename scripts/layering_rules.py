@@ -15,9 +15,12 @@ ALLOWED = {
     # edges (pluggable, language-neutral, no kernel knowledge)
     "loong-protocol": {"loong-schema"},
     "loong-eventlog": {"loong-schema"},
-    "loong-providers": {"loong-schema"},
+    "loong-http": set(),
+    "loong-proc": set(),
+    "loong-providers": {"loong-schema", "loong-http"},
     "loong-sandbox": {"loong-schema"},
-    "loong-tools": {"loong-schema"},
+    "loong-tools": {"loong-schema", "loong-proc"},
+    "loong-hooks": {"loong-schema", "loong-http", "loong-proc"},
     # the derived index reads the log; it is disposable and rebuildable
     "loong-index": {"loong-schema", "loong-eventlog"},
     # the fixed kernel calls its edges through traits; it never knows adapters
@@ -27,8 +30,8 @@ ALLOWED = {
     "loong-tui": {"loong-schema", "loong-protocol"},
     # the one binary that ties faces together
     "loongagent": {
-        "loong-schema", "loong-protocol", "loong-eventlog", "loong-providers",
-        "loong-sandbox", "loong-tools", "loong-index", "loong-kernel", "loong-server", "loong-tui",
+        "loong-schema", "loong-protocol", "loong-eventlog", "loong-http", "loong-proc", "loong-providers",
+        "loong-sandbox", "loong-tools", "loong-hooks", "loong-index", "loong-kernel", "loong-server", "loong-tui",
     },
 }
 

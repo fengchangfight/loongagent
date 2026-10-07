@@ -14,12 +14,10 @@
 
 use crate::{ChatMessage, CompletionRequest, CompletionResponse, Model, ModelError, ToolCallRequest, Usage};
 use loong_schema::generated::Json;
+use loong_http::{self as http, HttpError};
 use serde_json::{json, Value};
-use std::io::{Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const IO_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub struct OpenAiCompat {
@@ -46,21 +44,10 @@ impl OpenAiCompat {
         Ok(Self::new(base, model, std::env::var("LOONGAGENT_API_KEY").ok()))
     }
 
-    fn endpoint(&self) -> Result<String, ModelError> {
-        if self.base.starts_with("https://") {
-            return Err(ModelError::Transport(format!(
-                "{} uses https, and TLS is not wired into this adapter yet — point at an http:// \
-                 endpoint (a local vLLM / LM Studio / llama.cpp / Ollama server), or add a TLS backend",
-                self.base
-            )));
-        }
-        if !self.base.starts_with("http://") {
-            return Err(ModelError::Transport(format!(
-                "{} is not an http:// URL",
-                self.base
-            )));
-        }
-        Ok(format!("{}/chat/completions", self.base))
+    fn endpoint(&self) -> String {
+        // Scheme, host, port and TLS policy belong to the shared client; this
+        // adapter only knows the path its protocol lives at.
+        format!("{}/chat/completions", self.base)
     }
 
     /// Our messages → the wire's messages.
@@ -187,9 +174,10 @@ impl OpenAiCompat {
 
 impl Model for OpenAiCompat {
     fn complete(&mut self, request: &CompletionRequest) -> Result<CompletionResponse, ModelError> {
-        let endpoint = self.endpoint()?;
+        let endpoint = self.endpoint();
         let body = self.body(request);
-        let response = http_post(&endpoint, &body, self.api_key.as_deref())?;
+        let response = http::post_json(&endpoint, &body, self.api_key.as_deref(), IO_TIMEOUT)
+            .map_err(|HttpError(message)| ModelError::Transport(message))?;
         if response.status != 200 {
             let snippet: String = response.body.chars().take(400).collect();
             return Err(ModelError::Transport(format!(
@@ -201,115 +189,11 @@ impl Model for OpenAiCompat {
     }
 }
 
-struct HttpResponse {
-    status: u16,
-    body: String,
-}
-
-/// The smallest HTTP/1.1 client that can carry a JSON POST, kept here so the
-/// adapter has no transport dependency of its own.
-fn http_post(url: &str, body: &str, api_key: Option<&str>) -> Result<HttpResponse, ModelError> {
-    let rest = url
-        .strip_prefix("http://")
-        .ok_or_else(|| ModelError::Transport(format!("{url} is not an http:// URL")))?;
-    let (authority, path) = match rest.find('/') {
-        Some(i) => (&rest[..i], &rest[i..]),
-        None => (rest, "/"),
-    };
-    let (host, port) = match authority.rsplit_once(':') {
-        Some((h, p)) => (
-            h,
-            p.parse::<u16>()
-                .map_err(|_| ModelError::Transport(format!("bad port in {url}")))?,
-        ),
-        None => (authority, 80),
-    };
-
-    let addr = (host, port)
-        .to_socket_addrs()
-        .map_err(|e| ModelError::Transport(format!("resolving {host}:{port}: {e}")))?
-        .next()
-        .ok_or_else(|| ModelError::Transport(format!("no address for {host}:{port}")))?;
-
-    let mut stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT)
-        .map_err(|e| ModelError::Transport(format!("connecting to {host}:{port}: {e}")))?;
-    stream.set_read_timeout(Some(IO_TIMEOUT)).ok();
-    stream.set_write_timeout(Some(IO_TIMEOUT)).ok();
-
-    let mut head = format!(
-        "POST {path} HTTP/1.1\r\nHost: {authority}\r\nContent-Type: application/json\r\n\
-         Content-Length: {}\r\nAccept: application/json\r\nConnection: close\r\n",
-        body.len()
-    );
-    if let Some(key) = api_key {
-        head.push_str(&format!("Authorization: Bearer {key}\r\n"));
-    }
-    head.push_str("\r\n");
-
-    stream
-        .write_all(head.as_bytes())
-        .and_then(|_| stream.write_all(body.as_bytes()))
-        .and_then(|_| stream.flush())
-        .map_err(|e| ModelError::Transport(format!("sending the request: {e}")))?;
-
-    let mut raw = Vec::new();
-    stream
-        .read_to_end(&mut raw)
-        .map_err(|e| ModelError::Transport(format!("reading the response: {e}")))?;
-    let text = String::from_utf8_lossy(&raw).to_string();
-
-    let (head, body) = text
-        .split_once("\r\n\r\n")
-        .ok_or_else(|| ModelError::Transport("the response has no header/body separator".into()))?;
-    let status = head
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|code| code.parse::<u16>().ok())
-        .ok_or_else(|| ModelError::Transport("the response has no status line".into()))?;
-
-    Ok(HttpResponse { status, body: body.to_string() })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ToolSpec;
-    use std::net::TcpListener;
-    use std::thread::JoinHandle;
-
-    /// Serve exactly one request and hand back what the client sent.
-    fn fake_server(response: &'static str) -> (String, JoinHandle<String>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let handle = std::thread::spawn(move || {
-            let (mut sock, _) = listener.accept().unwrap();
-            let mut raw = Vec::new();
-            let mut buf = [0u8; 4096];
-            loop {
-                let n = sock.read(&mut buf).unwrap();
-                if n == 0 {
-                    break;
-                }
-                raw.extend_from_slice(&buf[..n]);
-                let text = String::from_utf8_lossy(&raw).to_string();
-                if let Some((head, body)) = text.split_once("\r\n\r\n") {
-                    let want = head
-                        .lines()
-                        .find_map(|l| l.strip_prefix("Content-Length: "))
-                        .and_then(|v| v.trim().parse::<usize>().ok())
-                        .unwrap_or(0);
-                    if body.len() >= want {
-                        break;
-                    }
-                }
-            }
-            sock.write_all(response.as_bytes()).unwrap();
-            sock.flush().unwrap();
-            String::from_utf8_lossy(&raw).to_string()
-        });
-        (format!("http://127.0.0.1:{}/v1", addr.port()), handle)
-    }
+    use loong_http::testing::fake_server;
 
     fn split(request: &str) -> (String, Value) {
         let (head, body) = request.split_once("\r\n\r\n").expect("headers and body");

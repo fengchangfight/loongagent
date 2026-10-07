@@ -11,10 +11,9 @@
 use loong_schema::generated::{ActionClass, Json};
 use serde_json::json;
 use std::collections::BTreeMap;
-use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
-use std::time::{Duration, Instant};
+use std::process::Command;
+use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolError {
@@ -373,55 +372,38 @@ impl Tool for Shell {
     }
     fn execute(&self, args: &Json, ctx: &ExecContext<'_>) -> Result<String, ToolError> {
         let command = arg_str(args, "command")?;
-        let scratch = Scratch::new()?;
-
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c")
-            .arg(&command)
-            .current_dir(ctx.cwd)
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(scratch.stdout_file()?))
-            .stderr(Stdio::from(scratch.stderr_file()?));
-        // The child leads its own process group so a timeout can tear down the
-        // whole tree: killing only `sh` leaves `sleep 30` running.
-        prepare_process_group(&mut cmd);
+        let sh_args = vec!["-c".to_string(), command.clone()];
         // The PEP is applied to the child, never to us: the restriction is
         // irreversible and must not leak into the server.
-        ctx.confinement.confine(&mut cmd);
+        let confine = |cmd: &mut Command| ctx.confinement.confine(cmd);
+        let spec = loong_proc::RunSpec::new("sh", &sh_args, ctx.cwd, self.timeout)
+            .output_limit(self.output_limit)
+            .confine(&confine);
 
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| ToolError::Failed(format!("spawning {command:?}: {e}")))?;
+        let out = loong_proc::run(&spec).map_err(|e| ToolError::Failed(e.to_string()))?;
+        if out.timed_out {
+            return Err(ToolError::Failed(format!(
+                "timed out after {:?}: {command}",
+                self.timeout
+            )));
+        }
 
-        let status = match wait_with_timeout(&mut child, self.timeout) {
-            Ok(status) => status,
-            Err(TimedOut) => {
-                kill_process_group(&mut child);
-                return Err(ToolError::Failed(format!(
-                    "timed out after {:?}: {command}",
-                    self.timeout
-                )));
-            }
-        };
-
-        let out = scratch.read_stdout(self.output_limit)?;
-        let err = scratch.read_stderr(self.output_limit)?;
-        let mut report = format!("exit {}", describe(&status));
-        if !out.text.is_empty() {
+        let mut report = out.describe_exit();
+        if !out.stdout.is_empty() {
             report.push_str("\n--- stdout ---\n");
-            report.push_str(&out.text);
+            report.push_str(&out.stdout);
         }
-        if !err.text.is_empty() {
+        if !out.stderr.is_empty() {
             report.push_str("\n--- stderr ---\n");
-            report.push_str(&err.text);
+            report.push_str(&out.stderr);
         }
-        if out.truncated || err.truncated {
+        if out.stdout_truncated || out.stderr_truncated {
             report.push_str(&format!(
                 "\n[output truncated at {} bytes per stream]",
                 self.output_limit
             ));
         }
-        if status.success() {
+        if out.success() {
             Ok(report)
         } else {
             Err(ToolError::Failed(report))
@@ -429,147 +411,11 @@ impl Tool for Shell {
     }
 }
 
-/// Two scratch files standing in for pipes: a timeout cannot deadlock a reader
-/// when nobody is reading, and a grandchild that outlives the shell cannot keep
-/// a reader alive either.
-struct Scratch {
-    dir: PathBuf,
-}
-
-impl Scratch {
-    fn new() -> Result<Self, ToolError> {
-        let dir = std::env::temp_dir().join(format!(
-            "loong-shell-{}-{}",
-            std::process::id(),
-            SCRATCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-        ));
-        std::fs::create_dir_all(&dir).map_err(|e| ToolError::Failed(e.to_string()))?;
-        Ok(Self { dir })
-    }
-    fn stdout_path(&self) -> PathBuf {
-        self.dir.join("stdout")
-    }
-    fn stderr_path(&self) -> PathBuf {
-        self.dir.join("stderr")
-    }
-    fn stdout_file(&self) -> Result<std::fs::File, ToolError> {
-        std::fs::File::create(self.stdout_path()).map_err(|e| ToolError::Failed(e.to_string()))
-    }
-    fn stderr_file(&self) -> Result<std::fs::File, ToolError> {
-        std::fs::File::create(self.stderr_path()).map_err(|e| ToolError::Failed(e.to_string()))
-    }
-    fn read_stdout(&self, limit: usize) -> Result<Bounded, ToolError> {
-        read_bounded(&self.stdout_path(), limit)
-    }
-    fn read_stderr(&self, limit: usize) -> Result<Bounded, ToolError> {
-        read_bounded(&self.stderr_path(), limit)
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
-    }
-}
-
-static SCRATCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-struct Bounded {
-    text: String,
-    truncated: bool,
-}
-
-fn read_bounded(path: &Path, limit: usize) -> Result<Bounded, ToolError> {
-    let file = std::fs::File::open(path).map_err(|e| ToolError::Failed(e.to_string()))?;
-    let mut reader = std::io::BufReader::new(file);
-    let mut collected = Vec::new();
-    let mut buf = [0u8; 8192];
-    let mut truncated = false;
-    loop {
-        match reader.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                if collected.len() < limit {
-                    let room = limit - collected.len();
-                    collected.extend_from_slice(&buf[..n.min(room)]);
-                    if n > room {
-                        truncated = true;
-                    }
-                } else {
-                    truncated = true;
-                }
-            }
-            Err(_) => break,
-        }
-    }
-    // The child is gone; anything past the limit was never needed.
-    if !truncated {
-        let on_disk = std::fs::metadata(path).map(|m| m.len() as usize).unwrap_or(0);
-        truncated = on_disk > limit;
-    }
-    Ok(Bounded { text: String::from_utf8_lossy(&collected).to_string(), truncated })
-}
-
-struct TimedOut;
-
-fn wait_with_timeout(
-    child: &mut std::process::Child,
-    timeout: Duration,
-) -> Result<ExitStatus, TimedOut> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return Ok(status),
-            Ok(None) => {}
-            Err(_) => {}
-        }
-        if Instant::now() >= deadline {
-            return Err(TimedOut);
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
-#[cfg(unix)]
-fn prepare_process_group(cmd: &mut Command) {
-    use std::os::unix::process::CommandExt;
-    cmd.process_group(0);
-}
-
-#[cfg(not(unix))]
-fn prepare_process_group(_cmd: &mut Command) {}
-
-/// Kill the child **and everything it spawned**.
-#[cfg(unix)]
-fn kill_process_group(child: &mut std::process::Child) {
-    extern "C" {
-        fn syscall(num: std::ffi::c_long, ...) -> std::ffi::c_long;
-    }
-    const SYS_KILL: std::ffi::c_long = 62; // x86_64 and aarch64
-    const SIGKILL: i32 = 9;
-    let pid = child.id() as i64;
-    unsafe {
-        syscall(SYS_KILL, -pid, SIGKILL);
-    }
-    let _ = child.kill();
-}
-
-#[cfg(not(unix))]
-fn kill_process_group(child: &mut std::process::Child) {
-    let _ = child.kill();
-}
-
-fn describe(status: &ExitStatus) -> String {
-    match status.code() {
-        Some(code) => code.to_string(),
-        None => "killed by a signal".to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Instant;
 
     static N: AtomicU64 = AtomicU64::new(0);
     fn tempdir() -> PathBuf {

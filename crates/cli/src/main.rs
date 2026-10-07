@@ -43,6 +43,8 @@ MODELS (provider doubles, for a first run without keys):
   loongagent sandbox self-test [--cwd DIR]   prove the OS boundary actually denies
   loongagent hooks list        [--cwd DIR]   show the effective hook set and its trust
   loongagent hooks trust       [--cwd DIR]   trust the current hook bytes (per repository)
+  loongagent mcp list          [--cwd DIR]   show the configured MCP servers and their trust
+  loongagent mcp trust         [--cwd DIR]   trust the current mcp.toml (per repository)
 ";
 
 fn main() {
@@ -134,6 +136,11 @@ fn run() -> Result<(), String> {
             Some("trust") => hooks_trust(Args::parse(&rest[1..])?),
             _ => Err(format!("hooks list | hooks trust\n\n{USAGE}")),
         },
+        "mcp" => match rest.first().map(String::as_str) {
+            Some("list") => mcp_list(Args::parse(&rest[1..])?),
+            Some("trust") => mcp_trust(Args::parse(&rest[1..])?),
+            _ => Err(format!("mcp list | mcp trust\n\n{USAGE}")),
+        },
         "tui" => repl(Args::parse(rest)?),
         "run" => {
             let args = Args::parse(rest)?;
@@ -168,6 +175,10 @@ fn serve(args: Args) -> Result<(), String> {
     match loong_hooks::HookSet::load(&args.cwd) {
         Ok(set) => eprintln!("[hooks] {}", set.summary()),
         Err(e) => return Err(format!("hooks.toml is broken: {e}")),
+    }
+    match loong_mcp::McpSet::load(&args.cwd) {
+        Ok(set) => eprintln!("[mcp]   {}", set.summary()),
+        Err(e) => return Err(format!("mcp.toml is broken: {e}")),
     }
     if let Ok(exe) = std::env::current_exe() {
         match loong_sandbox::sandbox::self_test(&exe, &args.cwd).result {
@@ -363,6 +374,45 @@ fn repl(args: Args) -> Result<(), String> {
             Err(e) => eprintln!("error: {e}"),
         }
     }
+}
+
+/// Show which external tools would join the session.
+fn mcp_list(args: Args) -> Result<(), String> {
+    let set = loong_mcp::McpSet::load(&args.cwd).map_err(|e| e.to_string())?;
+    println!("manifest: {}", set.dir.join(loong_mcp::MCP_FILE).display());
+    println!("status:   {}", set.summary());
+    for spec in &set.servers {
+        println!();
+        println!("  {} — {}", spec.name, spec.command);
+        if !spec.args.is_empty() {
+            println!("    args:        {}", spec.args.join(" "));
+        }
+        println!("    action class: {:?}", spec.action_class);
+        for (tool, class) in &spec.tools {
+            println!("    override:     {tool} -> {class:?}");
+        }
+        println!("    timeout:      {}ms", spec.timeout.as_millis());
+        println!("    required:     {}", spec.required);
+    }
+    if let loong_mcp::TrustStatus::Untrusted { changed } = &set.trust {
+        println!();
+        println!("INERT until trusted — new or changed: {}", changed.join(", "));
+        println!("A server entry names a command to run, so read it first, then:");
+        println!("  loongagent mcp trust --cwd {}", args.cwd.display());
+    }
+    Ok(())
+}
+
+fn mcp_trust(args: Args) -> Result<(), String> {
+    let set = loong_mcp::McpSet::load(&args.cwd).map_err(|e| e.to_string())?;
+    if set.servers.is_empty() {
+        return Err("no mcp.toml in this workspace — nothing to trust".to_string());
+    }
+    let path = set.trust_now().map_err(|e| e.to_string())?;
+    println!("trusted {} server(s) in {}", set.servers.len(), args.cwd.display());
+    println!("recorded in {}", path.display());
+    println!("Editing mcp.toml re-arms the question on the next session.");
+    Ok(())
 }
 
 /// Show what would run, and whether it is trusted to.

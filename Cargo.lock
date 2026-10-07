@@ -153,6 +153,7 @@ name = "loong-hooks"
 version = "0.0.1"
 dependencies = [
  "loong-http",
+ "loong-manifest",
  "loong-proc",
  "loong-schema",
  "serde",
@@ -181,12 +182,30 @@ dependencies = [
  "loong-eventlog",
  "loong-hooks",
  "loong-index",
+ "loong-mcp",
  "loong-providers",
  "loong-sandbox",
  "loong-schema",
  "loong-tools",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "loong-manifest"
+version = "0.0.1"
+
+[[package]]
+name = "loong-mcp"
+version = "0.0.1"
+dependencies = [
+ "loong-manifest",
+ "loong-protocol",
+ "loong-schema",
+ "loong-tools",
+ "serde",
+ "serde_json",
+ "toml",
 ]
 
 [[package]]
@@ -270,6 +289,7 @@ dependencies = [
  "loong-eventlog",
  "loong-hooks",
  "loong-kernel",
+ "loong-mcp",
  "loong-protocol",
  "loong-providers",
  "loong-sandbox",

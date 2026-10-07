@@ -44,7 +44,7 @@ rows below are what "not losing" means concretely.
 | `/context` — what occupies the window | ✅ | ADR-0006 (ledger) | render it |
 | **Prompt-cache hit rate** in usage | ❌ | T-02 | new **T-25** |
 | **`/btw`** — side question that never enters history | ❌ | — | new **T-25** |
-| MCP tool deferral: names eagerly, schemas on demand | ✅ | T-15 | ship it |
+| MCP tool deferral: names eagerly, schemas on demand | ✅ | T-15 | design intent kept; the implementation is eager for now (see A7) |
 | System-prompt discipline ("delete scaffolding every model generation") | ✅ | ADR-0004/vision | keep the deletion pass as a ritual |
 
 ### A3 · Memory and instructions
@@ -92,11 +92,12 @@ rows below are what "not losing" means concretely.
 
 | CC feature | Our status | Where | Next |
 |---|---|---|---|
-| stdio + HTTP servers, user/project/local scopes | ✅ | T-15 | ship it |
-| **Org allow/deny lists for MCP servers** | ⚠️ | T-05/T-15 (approved-server gateway) | make it a first-class org policy key |
-| MCP prompts surface as slash commands | ❌ | T-15 | small; fold into T-15 |
-| Lazy tool loading (names first, schemas on demand) | ✅ | T-15 | ship it |
-| Injection defence on MCP content | ✅ | ADR-0007 + T-15 | — |
+| stdio + HTTP servers, user/project/local scopes | ⚠️ | `loong-mcp` (2026-10-07): **stdio shipped**, one project scope (`.loongagent/mcp.toml`); HTTP/SSE transport and user/local scopes to come | HTTP transport reuses `loong-http`; scopes need the config layering of ADR-0008 |
+| **Org allow/deny lists for MCP servers** | ⚠️ | T-05/T-15 (approved-server gateway) | make it a first-class org policy key; today the trust gate is per repository |
+| MCP prompts surface as slash commands | ❌ | T-15 | needs skills/commands first (T-18) |
+| Lazy tool loading (names first, schemas on demand) | ❌ | T-15 | we list tools at session start and hand the model every schema; lazy loading is worth it once a server exposes dozens |
+| Injection defence on MCP content | ⚠️ | tool output is data, not instructions, and every call is an audited event; but there is no content-level scrubbing yet | T-15 |
+| Declared action classes for external tools (default: ask every time) | ✅ | `loong-mcp::config` — per-server `action_class` with per-tool overrides, defaulting to `out_of_bounds` | org-pinnable in T-05 |
 
 ### A8 · Subagents and workflow modes
 

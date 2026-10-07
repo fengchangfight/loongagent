@@ -1,0 +1,8 @@
+[package]
+name = "loong-manifest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Manifest trust: repo-supplied configuration stays inert until its exact bytes are trusted"
+
+[dependencies]

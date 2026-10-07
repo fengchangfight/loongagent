@@ -1,0 +1,15 @@
+[package]
+name = "loong-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MCP client: external tools behind the same interface, PDP and audit trail (T-15)"
+
+[dependencies]
+loong-schema.workspace = true
+loong-protocol.workspace = true
+loong-tools.workspace = true
+loong-manifest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true

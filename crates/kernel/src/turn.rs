@@ -20,6 +20,8 @@ use loong_sandbox::Pdp;
 use loong_schema::generated as gen;
 use loong_schema::generated::{ActionClass, ApprovalScope, Json, Role, Verdict};
 use loong_hooks::{payload, HookEvent, HookReport, HookRunner, HookSet};
+use loong_mcp::{McpClient, McpSet, McpTool};
+use std::sync::{Arc, Mutex};
 use loong_sandbox::landlock::WorkspacePolicy;
 use loong_tools::{Confinement, ExecContext, NoConfinement, Registry};
 use serde_json::json;
@@ -37,6 +39,8 @@ pub enum KernelError {
     Index(loong_index::IndexError),
     /// The hook manifest is malformed. Refusing beats silently dropping a guard.
     Hooks(String),
+    /// A required MCP server could not be used.
+    Mcp(String),
 }
 
 impl std::fmt::Display for KernelError {
@@ -48,6 +52,7 @@ impl std::fmt::Display for KernelError {
             KernelError::Encode(e) => write!(f, "encode: {e}"),
             KernelError::Index(e) => write!(f, "index: {e}"),
             KernelError::Hooks(m) => write!(f, "hooks: {m}"),
+            KernelError::Mcp(m) => write!(f, "mcp: {m}"),
         }
     }
 }
@@ -142,6 +147,51 @@ impl Confinement for LandlockConfinement {
     }
 }
 
+/// Start the trusted MCP servers and register their tools.
+///
+/// A server that is `required` (the default) and cannot be used is fatal: the
+/// operator asked for it, and quietly running without a guard rail they believe is
+/// present would be the worst outcome. `required = false` opts into a note.
+fn attach_mcp(
+    workspace: &Path,
+    tools: &mut Registry,
+) -> Result<(String, Vec<Arc<Mutex<McpClient>>>), KernelError> {
+    let set = McpSet::load(workspace).map_err(|e| KernelError::Mcp(e.to_string()))?;
+    let mut note = set.summary();
+    let mut clients = Vec::new();
+    for spec in set.active() {
+        let mut client = match McpClient::start(spec) {
+            Ok(client) => client,
+            Err(e) if spec.required => {
+                return Err(KernelError::Mcp(format!("server {:?}: {e}", spec.name)))
+            }
+            Err(e) => {
+                note.push_str(&format!("; {} unavailable: {e}", spec.name));
+                continue;
+            }
+        };
+        let listed = match client.list_tools() {
+            Ok(listed) => listed,
+            Err(e) if spec.required => {
+                return Err(KernelError::Mcp(format!("server {:?}: {e}", spec.name)))
+            }
+            Err(e) => {
+                note.push_str(&format!("; {} unavailable: {e}", spec.name));
+                continue;
+            }
+        };
+        let count = listed.len();
+        let client = Arc::new(Mutex::new(client));
+        for info in listed {
+            let class = spec.class_for(&info.name);
+            tools.register(McpTool::new(&spec.name, info, class, Arc::clone(&client)));
+        }
+        clients.push(client);
+        note.push_str(&format!("; {} exposed {count} tool(s)", spec.name));
+    }
+    Ok((note, clients))
+}
+
 /// A hook verdict replaces the policy's only when it is stricter (hooks tighten,
 /// never widen). The rule records which hook objected, so the log says why.
 fn tighten(ruling: &loong_sandbox::Ruling, report: &HookReport) -> Option<loong_sandbox::Ruling> {
@@ -197,6 +247,10 @@ pub struct Kernel {
     /// trusted). Hooks can tighten a decision, never widen one.
     hooks: HookRunner,
     hooks_note: String,
+    /// Live MCP servers, kept for the session's lifetime: dropping the kernel
+    /// kills them (the client's `Drop` tears down the process group).
+    mcp_clients: Vec<Arc<Mutex<McpClient>>>,
+    mcp_note: String,
     /// Derived, disposable SQLite view of the log (ADR-0003). It trails the log
     /// by design: the log is the truth, this only makes queries fast. A failure
     /// to index never loses an event — it marks the index stale instead.
@@ -233,6 +287,11 @@ impl Kernel {
         // a stale index that silently disagrees with the log is worse than a
         // few milliseconds of replay.
         let index = loong_index::Index::rebuild_into(&index_path, log.path())?;
+        // External tools join the same registry as the built-ins (T-15): one
+        // interface, one PDP, one event stream, one audit trail.
+        let mut tools = Registry::with_builtins();
+        let (mcp_note, mcp_clients) = attach_mcp(&config.cwd, &mut tools)?;
+
         let mut kernel;
         // The PEP is chosen here, once, and handed to every tool call.
         let (confinement, confinement_note): (Box<dyn Confinement>, String) =
@@ -255,7 +314,7 @@ impl Kernel {
         kernel = Self {
             log,
             ledger,
-            tools: Registry::with_builtins(),
+            tools,
             pdp: Pdp::new(),
             model,
             config,
@@ -266,6 +325,8 @@ impl Kernel {
             confinement_note,
             hooks,
             hooks_note,
+            mcp_clients,
+            mcp_note,
             index,
             index_path,
             index_stale: None,
@@ -305,6 +366,15 @@ impl Kernel {
 
     pub fn hooks(&self) -> &HookRunner {
         &self.hooks
+    }
+
+    /// What MCP servers are in play, for the startup log and `mcp list`.
+    pub fn mcp_note(&self) -> &str {
+        &self.mcp_note
+    }
+
+    pub fn mcp_servers(&self) -> usize {
+        self.mcp_clients.len()
     }
 
     /// Fire the hooks registered for `event`, record every answer, and report the
@@ -1054,6 +1124,133 @@ mod tests {
         assert_eq!(policy.data["verdict"], "allow");
         let result = events.iter().find(|e| e.kind == ev::TOOL_RESULT).unwrap();
         assert!(result.data["output"].as_str().unwrap().contains("content here"));
+    }
+
+    fn fake_mcp() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../mcp/tests/fake_mcp_server.py")
+    }
+
+    fn install_mcp(dir: &Path, action_class: &str, trust: bool) -> bool {
+        let script = fake_mcp();
+        if !script.exists() || std::process::Command::new("python3").arg("--version").output().is_err()
+        {
+            return false;
+        }
+        let hooks = dir.join(".loongagent");
+        std::fs::create_dir_all(&hooks).unwrap();
+        std::fs::write(
+            hooks.join("mcp.toml"),
+            format!(
+                "[[server]]\nname = \"fake\"\ncommand = \"python3\"\nargs = [\"{}\", \"normal\"]\n\
+                 action_class = \"{action_class}\"\n",
+                script.display()
+            ),
+        )
+        .unwrap();
+        if trust {
+            loong_mcp::McpSet::load(dir).unwrap().trust_now().unwrap();
+        }
+        true
+    }
+
+    #[test]
+    fn an_mcp_tool_is_just_another_tool() {
+        let t = Temp::new();
+        if !install_mcp(&t.dir, "investigate", true) {
+            eprintln!("skipping: no python3 or no fixture");
+            return;
+        }
+        let model = ScriptedModel::new(vec![
+            response(vec![call("c1", "mcp__fake__ping", json!({"message": "hello"}))], None),
+            response(vec![], Some("done")),
+        ]);
+        let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        assert!(k.mcp_note().contains("trusted"), "{}", k.mcp_note());
+        assert_eq!(k.mcp_servers(), 1);
+        assert!(k.tools_mut().names().contains(&"mcp__fake__ping"));
+
+        k.submit("ping the server").unwrap();
+        let events = loong_eventlog::replay(&t.log).unwrap().events;
+        // Same events as any other tool: call, decision by declared class, result.
+        let call_event = events.iter().find(|e| e.kind == ev::TOOL_CALL).unwrap();
+        assert_eq!(call_event.data["tool"], "mcp__fake__ping");
+        assert_eq!(call_event.data["action_class"], "investigate");
+        let policy = events.iter().find(|e| e.kind == ev::POLICY_DECIDED).unwrap();
+        assert_eq!(policy.data["verdict"], "allow");
+        let result = events.iter().find(|e| e.kind == ev::TOOL_RESULT).unwrap();
+        assert_eq!(result.data["ok"], true, "{:?}", result.data["output"]);
+        assert!(result.data["output"].as_str().unwrap().contains("pong: hello"));
+    }
+
+    #[test]
+    fn an_mcp_tool_with_the_default_class_asks_first() {
+        let t = Temp::new();
+        if !install_mcp(&t.dir, "out_of_bounds", true) {
+            return;
+        }
+        let model = ScriptedModel::new(vec![
+            response(vec![call("c1", "mcp__fake__ping", json!({"message": "hi"}))], None),
+        ]);
+        let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        let outcome = k.submit("ping").unwrap();
+        let pending = outcome.pending_approval.expect("the cautious default asks");
+        assert!(pending.reason.contains("out_of_bounds"), "{}", pending.reason);
+
+        // Answering resumes through the same seam as any built-in tool.
+        k.respond_to_approval(&pending.request_id, true, ApprovalScope::Once, None).unwrap();
+        let events = loong_eventlog::replay(&t.log).unwrap().events;
+        let result = events.iter().find(|e| e.kind == ev::TOOL_RESULT).unwrap();
+        assert_eq!(result.data["ok"], true, "{:?}", result.data["output"]);
+        assert!(result.data["output"].as_str().unwrap().contains("pong: hi"));
+    }
+
+    #[test]
+    fn an_untrusted_mcp_manifest_starts_nothing() {
+        let t = Temp::new();
+        if !install_mcp(&t.dir, "investigate", false) {
+            return;
+        }
+        let model = ScriptedModel::saying("hi");
+        let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        assert_eq!(k.mcp_servers(), 0, "untrusted servers are never started");
+        assert!(k.mcp_note().contains("INERT"), "{}", k.mcp_note());
+        assert!(!k.tools_mut().names().iter().any(|n| n.starts_with("mcp__")));
+    }
+
+    #[test]
+    fn a_required_server_that_cannot_start_is_fatal() {
+        let t = Temp::new();
+        let hooks = t.dir.join(".loongagent");
+        std::fs::create_dir_all(&hooks).unwrap();
+        std::fs::write(
+            hooks.join("mcp.toml"),
+            "[[server]]\nname = \"broken\"\ncommand = \"definitely-not-a-program\"\n",
+        )
+        .unwrap();
+        loong_mcp::McpSet::load(&t.dir).unwrap().trust_now().unwrap();
+        let model = ScriptedModel::saying("hi");
+        let err = match Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)) {
+            Ok(_) => panic!("a required server that cannot start must be fatal"),
+            Err(e) => e,
+        };
+        assert!(matches!(err, KernelError::Mcp(_)), "{err}");
+    }
+
+    #[test]
+    fn an_optional_server_is_only_a_note() {
+        let t = Temp::new();
+        let hooks = t.dir.join(".loongagent");
+        std::fs::create_dir_all(&hooks).unwrap();
+        std::fs::write(
+            hooks.join("mcp.toml"),
+            "[[server]]\nname = \"broken\"\ncommand = \"definitely-not-a-program\"\nrequired = false\n",
+        )
+        .unwrap();
+        loong_mcp::McpSet::load(&t.dir).unwrap().trust_now().unwrap();
+        let model = ScriptedModel::saying("hi");
+        let k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        assert_eq!(k.mcp_servers(), 0);
+        assert!(k.mcp_note().contains("unavailable"), "{}", k.mcp_note());
     }
 
     #[test]

@@ -16,6 +16,9 @@ serde_json = "1"
 loong-schema = { path = "crates/schema" }
 loong-http = { path = "crates/http" }
 loong-proc = { path = "crates/proc" }
+loong-manifest = { path = "crates/manifest" }
+loong-mcp = { path = "crates/mcp" }
+toml = "1.1.6"
 loong-hooks = { path = "crates/hooks" }
 loong-protocol = { path = "crates/protocol" }
 loong-eventlog = { path = "crates/eventlog" }

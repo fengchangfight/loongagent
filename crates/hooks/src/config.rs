@@ -232,24 +232,16 @@ impl HookSet {
 
     /// Every file whose bytes must be trusted, with a change-detection hash.
     pub fn fingerprints(&self) -> Result<Vec<(String, String)>, ConfigError> {
-        let mut out = Vec::new();
-        let manifest = self.hooks_dir.join(HOOKS_FILE);
-        if manifest.exists() {
-            out.push((HOOKS_FILE.to_string(), hash_file(&manifest)?));
-        }
-        for spec in &self.specs {
-            if let HookKind::Shell { script } = &spec.kind {
-                let name = script
-                    .strip_prefix(&self.hooks_dir)
-                    .unwrap_or(script)
-                    .to_string_lossy()
-                    .to_string();
-                out.push((name, hash_file(script)?));
-            }
-        }
-        out.sort();
-        out.dedup_by(|a, b| a.0 == b.0);
-        Ok(out)
+        let sources =
+            sources_of(&self.hooks_dir, &self.specs, &self.hooks_dir.join(HOOKS_FILE))?;
+        sources
+            .iter()
+            .map(|(name, path)| {
+                loong_manifest::hash_file(path)
+                    .map(|hash| (name.clone(), hash))
+                    .map_err(ConfigError::Io)
+            })
+            .collect()
     }
 
     fn read_trust(
@@ -257,48 +249,29 @@ impl HookSet {
         specs: &[HookSpec],
         manifest: &Path,
     ) -> Result<TrustStatus, ConfigError> {
-        let recorded = std::fs::read_to_string(hooks_dir.join(TRUST_FILE)).unwrap_or_default();
-        let recorded: Vec<&str> = recorded
-            .lines()
-            .map(|l| l.trim())
-            .filter(|l| !l.is_empty() && !l.starts_with('#'))
-            .collect();
-
-        let mut expected = vec![(HOOKS_FILE.to_string(), hash_file(manifest)?)];
-        for spec in specs {
-            if let HookKind::Shell { script } = &spec.kind {
-                let name = script
-                    .strip_prefix(hooks_dir)
-                    .unwrap_or(script)
-                    .to_string_lossy()
-                    .to_string();
-                expected.push((name, hash_file(script)?));
+        let sources = sources_of(hooks_dir, specs, manifest)?;
+        match loong_manifest::check(&hooks_dir.join(TRUST_FILE), &sources)
+            .map_err(ConfigError::Io)?
+        {
+            loong_manifest::TrustStatus::Trusted => Ok(TrustStatus::Trusted),
+            // Nothing recorded yet counts as changed, not as consent.
+            loong_manifest::TrustStatus::Absent | loong_manifest::TrustStatus::Untrusted { .. } => {
+                let changed = match loong_manifest::check(&hooks_dir.join(TRUST_FILE), &sources)
+                    .map_err(ConfigError::Io)?
+                {
+                    loong_manifest::TrustStatus::Untrusted { changed } => changed,
+                    _ => sources.iter().map(|(n, _)| n.clone()).collect(),
+                };
+                Ok(TrustStatus::Untrusted { changed })
             }
         }
-        expected.sort();
-        expected.dedup_by(|a, b| a.0 == b.0);
-
-        let mut changed = Vec::new();
-        for (name, hash) in &expected {
-            let line = format!("{hash} {name}");
-            if !recorded.contains(&line.as_str()) {
-                changed.push(name.clone());
-            }
-        }
-        Ok(if changed.is_empty() { TrustStatus::Trusted } else { TrustStatus::Untrusted { changed } })
     }
 
     /// Record the current bytes as trusted — the explicit, per-repository opt-in.
     pub fn trust_now(&self) -> Result<PathBuf, ConfigError> {
-        let mut text = String::from(
-            "# loongagent hook trust\n\
-             # A change detector, not a signature: editing a listed file re-arms the question.\n",
-        );
-        for (name, hash) in self.fingerprints()? {
-            text.push_str(&format!("{hash} {name}\n"));
-        }
+        let sources = sources_of(&self.hooks_dir, &self.specs, &self.hooks_dir.join(HOOKS_FILE))?;
         let path = self.hooks_dir.join(TRUST_FILE);
-        std::fs::write(&path, text).map_err(|e| ConfigError::Io(format!("{}: {e}", path.display())))?;
+        loong_manifest::record(&path, &sources).map_err(ConfigError::Io)?;
         Ok(path)
     }
 
@@ -324,23 +297,32 @@ impl HookSet {
     }
 }
 
-fn hash_file(path: &Path) -> Result<String, ConfigError> {
-    let bytes =
-        std::fs::read(path).map_err(|e| ConfigError::Io(format!("{}: {e}", path.display())))?;
-    Ok(format!("{:016x}", fingerprint(&bytes)))
+/// The files a hook set's behaviour depends on: the manifest, then every script
+/// it names (deduplicated: one script used by two hooks is trusted once).
+fn sources_of(
+    hooks_dir: &Path,
+    specs: &[HookSpec],
+    manifest: &Path,
+) -> Result<loong_manifest::Sources, ConfigError> {
+    let mut sources: loong_manifest::Sources =
+        vec![(HOOKS_FILE.to_string(), manifest.to_path_buf())];
+    for spec in specs {
+        if let HookKind::Shell { script } = &spec.kind {
+            let name = script
+                .strip_prefix(hooks_dir)
+                .unwrap_or(script)
+                .to_string_lossy()
+                .to_string();
+            sources.push((name, script.clone()));
+        }
+    }
+    sources.sort();
+    sources.dedup_by(|a, b| a.0 == b.0);
+    Ok(sources)
 }
 
-/// FNV-1a over the bytes. A change detector, **not** a cryptographic digest: it
-/// answers "did this change since a human looked?", which is all the trust gate
-/// needs. Signatures arrive with ADR-0008's pack signing.
-pub fn fingerprint(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325u64;
-    for byte in bytes {
-        hash ^= *byte as u64;
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    hash
-}
+/// Re-exported so callers keep one name for "the change detector".
+pub use loong_manifest::fingerprint;
 
 #[derive(Deserialize)]
 struct RawFile {

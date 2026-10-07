@@ -117,6 +117,15 @@ binary the TUI spawns as its server (used by the end-to-end test).
   outside and succeed inside — it never reports "available" without
   demonstrating denial. The server runs that self-test before its first tool
   call: a broken mechanism refuses startup, a missing one is a loud warning.
+- **MCP servers** (`loong-mcp`, T-15): a trusted `.loongagent/mcp.toml` names
+  stdio servers to start; their tools join the **same registry** as the built-ins
+  (`mcp__<server>__<tool>`), so they go through the same PDP verdict, emit the
+  same `tool.call`/`tool.result` events, and appear in the same audit trail. Every
+  read has a deadline (a reader thread plus a timeout, so a wedged server fails the
+  call instead of hanging the session), and each tool's **action class is declared**
+  in the manifest — per server, with per-tool overrides, defaulting to the cautious
+  `out_of_bounds` (asks every time). A server entry names a command to run, so it
+  sits behind the same trust gate as hooks: inert until `loongagent mcp trust`.
 - **Lifecycle hooks** (`loong-hooks`): a hook answers one question at one moment
   — allow, ask, or deny — and nothing else. Six moments fire today:
   `session_start`, `user_prompt_submit`, `pre_tool`, `post_tool`,
@@ -169,11 +178,15 @@ binary the TUI spawns as its server (used by the end-to-end test).
 5. **`grep`/`glob` do not honour `.gitignore` yet** — they use a small explicit
    skip list instead. Web tools (`web_fetch`, `web_search`) are not built, and
    `grep` reads whole files (no streaming) under a 4 MiB per-file cap.
-6. **The MCP hook kind** is refused with its reason (it needs the MCP client,
-   T-15). Post-tool verdicts are recorded but cannot undo anything, and hooks
+6. **MCP is stdio-only and eager**: no HTTP transport, no resources/prompts, no
+   sampling, and server-initiated requests are refused rather than served. Tools
+   are listed at session start and every schema is handed to the model. The `mcp`
+   *hook kind* is still refused at load time — the client now exists, so wiring it
+   into `HookRunner` is the next step rather than a blocker.
+7. **Post-tool hook verdicts are recorded but cannot undo anything**, and hooks
    deliberately cannot rewrite a tool call — the moment they could, the loop would
    stop being small enough to audit.
-7. **Not started**: skills/commands, MCP, profiles/config packs, session
+8. **Not started**: skills/commands, profiles/config packs, session
    export/import, WASM extensions, the web client, compaction, the control plane.
 
 ## Commits

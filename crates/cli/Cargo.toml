@@ -19,6 +19,7 @@ loong-server.workspace = true
 loong-tui.workspace = true
 loong-sandbox.workspace = true
 loong-hooks.workspace = true
+loong-mcp.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 

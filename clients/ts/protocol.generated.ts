@@ -100,10 +100,14 @@ export interface HookFired {
   failed: boolean;
 }
 
-/** Visible, reversible compaction (ADR-0006 §4). */
+/** Visible compaction (ADR-0006 §4): stale tool output is cleared first, then the oldest exchanges are dropped. The newest window stays verbatim. */
 export interface CompactionApplied {
-  dropped_events: number;
+  tokens_before: number;
+  tokens_after: number;
+  /** the newest window left verbatim */
   kept_tokens: number;
+  cleared_tool_outputs: number;
+  dropped_messages: number;
   summary: string;
 }
 

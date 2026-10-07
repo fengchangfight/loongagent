@@ -146,11 +146,15 @@ pub struct HookFired {
     pub failed: bool,
 }
 
-/// Visible, reversible compaction (ADR-0006 §4).
+/// Visible compaction (ADR-0006 §4): stale tool output is cleared first, then the oldest exchanges are dropped. The newest window stays verbatim.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CompactionApplied {
-    pub dropped_events: u64,
+    pub tokens_before: u64,
+    pub tokens_after: u64,
+    /// the newest window left verbatim
     pub kept_tokens: u64,
+    pub cleared_tool_outputs: u64,
+    pub dropped_messages: u64,
     pub summary: String,
 }
 

@@ -30,7 +30,7 @@ loongagent — a firm-internal coding agent
 USAGE:
   loongagent server --stdio [--session PATH] [--cwd DIR] [--model NAME]
   loongagent tui            [--session PATH] [--cwd DIR] [--model NAME]
-  loongagent run \"PROMPT\"   [--session PATH] [--cwd DIR] [--model NAME]
+  loongagent run \"PROMPT\"   [--session PATH] [--cwd DIR] [--model NAME] [--budget N] [--keep-newest N]
   loongagent --version
 
 MODELS (provider doubles, for a first run without keys):
@@ -60,6 +60,10 @@ struct Args {
     cwd: PathBuf,
     model: String,
     stdio: bool,
+    /// Context budget in tokens; 0 means unbounded (compaction then never runs).
+    budget: u64,
+    /// Newest context left verbatim when compaction runs.
+    keep_newest: u64,
     positional: Vec<String>,
 }
 
@@ -71,6 +75,10 @@ impl Args {
             cwd: cwd.clone(),
             model: "echo".to_string(),
             stdio: false,
+            // A profile will supply these once profiles exist (ADR-0008); until
+            // then the session gets a sane budget so compaction actually runs.
+            budget: 128_000,
+            keep_newest: 20_000,
             positional: Vec::new(),
         };
         let mut i = 0;
@@ -89,6 +97,22 @@ impl Args {
                     args.model = rest.get(i).ok_or("--model needs a name")?.clone();
                 }
                 "--stdio" => args.stdio = true,
+                "--budget" => {
+                    i += 1;
+                    args.budget = rest
+                        .get(i)
+                        .ok_or("--budget needs a token count")?
+                        .parse()
+                        .map_err(|_| "--budget must be a number".to_string())?;
+                }
+                "--keep-newest" => {
+                    i += 1;
+                    args.keep_newest = rest
+                        .get(i)
+                        .ok_or("--keep-newest needs a token count")?
+                        .parse()
+                        .map_err(|_| "--keep-newest must be a number".to_string())?;
+                }
                 other if other.starts_with("--") => {
                     return Err(format!("unknown flag {other:?}\n\n{USAGE}"))
                 }
@@ -172,6 +196,10 @@ fn serve(args: Args) -> Result<(), String> {
     args.ensure_parent()?;
     // ADR-0007: the boundary is proven before the first tool call. A mechanism
     // that fails to deny is fatal; a platform without one is a loud degradation.
+    match args.budget {
+        0 => eprintln!("[context] unbounded (compaction disabled)"),
+        n => eprintln!("[context] budget {n} tokens, keeping the newest {}", args.keep_newest),
+    }
     match loong_hooks::HookSet::load(&args.cwd) {
         Ok(set) => eprintln!("[hooks] {}", set.summary()),
         Err(e) => return Err(format!("hooks.toml is broken: {e}")),
@@ -196,6 +224,8 @@ fn serve(args: Args) -> Result<(), String> {
     let model = build_model(&args.model)?;
     let mut config = KernelConfig::new(&args.cwd);
     config.max_steps = 8;
+    config.budget_tokens = (args.budget > 0).then_some(args.budget);
+    config.keep_newest_tokens = args.keep_newest;
     let kernel = if args.session.exists() {
         Kernel::open(&args.session, config, model)
     } else {
@@ -295,6 +325,12 @@ impl ChildTransport {
             .arg(&args.cwd)
             .arg("--model")
             .arg(&args.model)
+            // The client's flags are the session's flags: the server child must
+            // get the same budget, or the client would be lying about the context.
+            .arg("--budget")
+            .arg(args.budget.to_string())
+            .arg("--keep-newest")
+            .arg(args.keep_newest.to_string())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())

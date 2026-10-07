@@ -206,8 +206,12 @@ impl<T: Transport> Client<T> {
                 data.get("profile").and_then(|v| v.as_str()).unwrap_or("?")
             )),
             gen::event::COMPACTION_APPLIED => Some(format!(
-                "· compacted: dropped {} events, kept {} tokens",
-                data.get("dropped_events").and_then(|v| v.as_u64()).unwrap_or(0),
+                "· compacted: {} -> {} tokens (cleared {} tool output(s), dropped {} message(s), \
+                 newest {} kept)",
+                data.get("tokens_before").and_then(|v| v.as_u64()).unwrap_or(0),
+                data.get("tokens_after").and_then(|v| v.as_u64()).unwrap_or(0),
+                data.get("cleared_tool_outputs").and_then(|v| v.as_u64()).unwrap_or(0),
+                data.get("dropped_messages").and_then(|v| v.as_u64()).unwrap_or(0),
                 data.get("kept_tokens").and_then(|v| v.as_u64()).unwrap_or(0)
             )),
             other => Some(format!("· {other}")),
@@ -345,6 +349,18 @@ mod tests {
         let mut client = Client::new(fake, "s-1");
         let lines = client.submit("go").unwrap();
         assert!(lines[0].contains("could not answer"), "{}", lines[0]);
+    }
+
+    #[test]
+    fn compaction_is_rendered_with_its_numbers() {
+        let fake = Fake::with(vec![
+            event(1, "compaction.applied", json!({"tokens_before": 90000, "tokens_after": 40000, "kept_tokens": 20000, "cleared_tool_outputs": 7, "dropped_messages": 2, "summary": "x"})),
+            response(2, json!({"turn_id": 1, "accepted": true})),
+        ]);
+        let mut client = Client::new(fake, "s-1");
+        let lines = client.submit("go").unwrap();
+        assert!(lines[0].contains("90000 -> 40000 tokens"), "{}", lines[0]);
+        assert!(lines[0].contains("cleared 7 tool output(s)"), "{}", lines[0]);
     }
 
     #[test]

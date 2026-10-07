@@ -39,7 +39,7 @@ rows below are what "not losing" means concretely.
 
 | CC feature | Our status | Where | Next |
 |---|---|---|---|
-| Auto-compaction: **clear old tool outputs first, then summarize**; keep newest ~20k verbatim | ✅ | ADR-0006 §4 (applied 2026-10-05; window is a tunable profile parameter) | — |
+| Auto-compaction: **clear old tool outputs first, then summarize**; keep newest ~20k verbatim | ⚠️ | ADR-0006 §4, implemented 2026-10-08: clearing stale tool output first, then dropping the oldest whole exchanges, newest window verbatim, never across a tool pair (`--budget` / `--keep-newest`) | the **summarize** half needs a model-made summary; today over-budget context drops the oldest turns instead |
 | `/compact <focus>`, partial summarization, `/rewind` (summarize from/up to here) | ⚠️ | ADR-0015 + T-12 give the substrate | define the command surface |
 | `/context` — what occupies the window | ✅ | ADR-0006 (ledger) | render it |
 | **Prompt-cache hit rate** in usage | ❌ | T-02 | new **T-25** |
@@ -72,7 +72,7 @@ rows below are what "not losing" means concretely.
 
 | CC feature | Our status | Where | Next |
 |---|---|---|---|
-| Lifecycle hook events (session start/end, **user-prompt submit**, pre/post tool use, **permission requested/denied**, subagent start/stop, **pre/post compaction**, file changed, cwd changed) | ⚠️ | ADR-0007 §7 (event set fixed 2026-10-05) | six fire today (`session_start`, `user_prompt_submit`, `pre_tool`, `post_tool`, `permission_requested`, `permission_decided`, 2026-10-07); the rest arrive with subagents and compaction |
+| Lifecycle hook events (session start/end, **user-prompt submit**, pre/post tool use, **permission requested/denied**, subagent start/stop, **pre/post compaction**, file changed, cwd changed) | ⚠️ | ADR-0007 §7 (event set fixed 2026-10-05) | six fire today (`session_start`, `user_prompt_submit`, `pre_tool`, `post_tool`, `permission_requested`, `permission_decided`); the rest arrive with subagents, file watching and a pre-compaction seam |
 | **Hook kinds: shell / HTTP / MCP tool** (LLM and subagent kinds deferred to v2) | ✅ | ADR-0007 §7: all three ship (2026-10-08) behind **one verdict contract** — a JSON verdict on stdout / in the response body, or exit 0/2 for a script. An external policy service can gate a built-in tool without the kernel knowing it is external | LLM and subagent kinds are v2 by decision |
 | Exit-code-2 blocks and feeds stderr back to the model | ✅ | `loong-hooks::run` — exit 2 denies with stderr as the reason; a JSON verdict on stdout reaches ask; anything else falls back to `on_error` (default **deny**) | — |
 | Repo-shipped hooks are untrusted | ✅ | the trust gate (2026-10-07): a per-file change-detection hash, so editing either the manifest or a script re-arms the question | signatures arrive with ADR-0008 pack signing |
@@ -130,7 +130,7 @@ rows below are what "not losing" means concretely.
 |---|---|---|---|---|
 | B1 | Hook kinds **shell / HTTP / MCP tool** + full lifecycle event set (LLM and subagent kinds → v2) | CC | ✅ applied 2026-10-05 | ADR-0007 §7, ADR-0004 |
 | B2 | Commands merged into skills | CC | ✅ applied 2026-10-05 | T-18 (T-16 merged in) |
-| B3 | Auto-compaction heuristic (clear tool outputs → summarize; keep newest ~20k) | CC, Pi | ✅ applied 2026-10-05 | ADR-0006 §4 |
+| B3 | Auto-compaction heuristic (clear tool outputs → summarize; keep newest ~20k) | CC, Pi | ⚠️ clearing + dropping implemented 2026-10-08; summarizing still to come | ADR-0006 §4, `Kernel::compact_if_needed` |
 | B4 | `/goal` persistent completion + evaluator + turn-end gating | CC | ❌ | **T-23** |
 | B5 | LSP code intelligence tools | CC, OpenCode | ❌ | **T-22** |
 | B6 | Module declares its config schema; shells render the settings UI | DSH | ❌ | **T-24** |

@@ -59,7 +59,7 @@ fn roundtrip_hook_fired() {
 
 #[test]
 fn roundtrip_compaction_applied() {
-    roundtrip::<g::CompactionApplied>(r#"{"dropped_events": 1,"kept_tokens": 1,"summary": "<string>"}"#);
+    roundtrip::<g::CompactionApplied>(r#"{"tokens_before": 1,"tokens_after": 1,"kept_tokens": 1,"cleared_tool_outputs": 1,"dropped_messages": 1,"summary": "<string>"}"#);
 }
 
 #[test]
@@ -115,6 +115,6 @@ fn every_event_payload_roundtrips() {
     roundtrip::<g::ApprovalDecided>(r#"{"request_id": "<string>","granted": true,"scope": "once","reason": "<string>"}"#);
     roundtrip::<g::PolicyDecided>(r#"{"action_class": "investigate","verdict": "allow","rule": "<string>"}"#);
     roundtrip::<g::CostRecorded>(r#"{"profile": "<string>","tokens_in": 1,"tokens_out": 1,"usd_micros": 1}"#);
-    roundtrip::<g::CompactionApplied>(r#"{"dropped_events": 1,"kept_tokens": 1,"summary": "<string>"}"#);
+    roundtrip::<g::CompactionApplied>(r#"{"tokens_before": 1,"tokens_after": 1,"kept_tokens": 1,"cleared_tool_outputs": 1,"dropped_messages": 1,"summary": "<string>"}"#);
     roundtrip::<g::HookFired>(r#"{"event": "<string>","hook_id": "<string>","kind": "<string>","verdict": "allow","reason": "<string>","duration_ms": 1,"failed": true}"#);
 }

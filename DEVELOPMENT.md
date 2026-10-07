@@ -97,6 +97,15 @@ binary the TUI spawns as its server (used by the end-to-end test).
 - **The ledger**: every block that reaches the model is an entry with category,
   source, tokens and lifetime; eviction drops stale tool output before prose and
   never touches pinned entries; `explain()` answers "why is this in my context?".
+- **Compaction** (ADR-0006 §4), driven before every model call: past 80% of the
+  budget, stale tool output is **cleared** first (its body replaced by a marker —
+  the model can re-run a command, it cannot re-read a decision), and only if that
+  is not enough are the oldest whole exchanges **dropped**. The newest window
+  (`--keep-newest`, default 20k) always stays verbatim, the most recent entry is
+  never cleared, and a tool result is never separated from the call that produced
+  it — a conversation that splits them is invalid to every provider. Each
+  compaction is an event with before/after tokens; a compaction that could free
+  nothing is not an event at all. `--budget N` sets the budget (0 = unbounded).
 - **Six built-in tools**, all behind one interface: `read_file`, `write_file`,
   **`edit`**, **`grep`**, **`glob`**, `shell`. `edit` refuses a missing or
   ambiguous `old_string` (with the counts and line numbers) instead of guessing —
@@ -173,9 +182,10 @@ binary the TUI spawns as its server (used by the end-to-end test).
    tool's classifier scores network commands as out-of-bounds, which is an
    autonomy decision, not enforcement. macOS seatbelt is not implemented.
    Caveat: a hardened deployment must not treat the classifier as a boundary.
-3. **Compaction is not implemented** — the ledger can evict, but nothing drives
-   the ADR-0006 §4 heuristic (clear tool output → summarize, keep the newest
-   window verbatim) yet.
+3. **Compaction does not summarize yet** — it clears and drops, but a
+   model-made summary of what it drops is the other half of ADR-0006 §4, and a
+   session that must shrink a lot currently loses the oldest turns instead.
+   Budgets come from CLI flags, not from profiles (ADR-0008 is unimplemented).
 4. **The TUI is a line REPL** — ADR-0013 expects `ratatui` for the real surface.
 5. **`grep`/`glob` do not honour `.gitignore` yet** — they use a small explicit
    skip list instead. Web tools (`web_fetch`, `web_search`) are not built, and

@@ -178,10 +178,13 @@ fields = [
 [[types]]
 name = "CompactionApplied"
 kind = "struct"
-doc = "Visible, reversible compaction (ADR-0006 §4)."
+doc = "Visible compaction (ADR-0006 §4): stale tool output is cleared first, then the oldest exchanges are dropped. The newest window stays verbatim."
 fields = [
-  { name = "dropped_events", type = "u64" },
-  { name = "kept_tokens", type = "u64" },
+  { name = "tokens_before", type = "u64" },
+  { name = "tokens_after", type = "u64" },
+  { name = "kept_tokens", type = "u64", doc = "the newest window left verbatim" },
+  { name = "cleared_tool_outputs", type = "u64" },
+  { name = "dropped_messages", type = "u64" },
   { name = "summary", type = "string" },
 ]
 

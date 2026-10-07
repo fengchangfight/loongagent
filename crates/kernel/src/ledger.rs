@@ -68,6 +68,8 @@ pub struct Entry {
     pub tokens: u64,
     pub lifetime: Lifetime,
     pub pinned: bool,
+    /// Its content was replaced by a marker to free context (ADR-0006 §4).
+    pub cleared: bool,
 }
 
 /// One row of "why is this in my context?".
@@ -84,6 +86,12 @@ pub struct ExplainRow {
 /// Deliberately conservative (rounds up) so budgets are not overshot.
 pub fn estimate_tokens(text: &str) -> u64 {
     (text.chars().count() as u64 + 3) / 4
+}
+
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct ClearReport {
+    pub cleared: Vec<Entry>,
+    pub tokens_freed: u64,
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -128,6 +136,7 @@ impl Ledger {
             tokens: estimate_tokens(text),
             lifetime,
             pinned,
+            cleared: false,
         });
         id
     }
@@ -172,6 +181,69 @@ impl Ledger {
 
     /// Drop non-pinned entries by eviction priority until the budget is met.
     /// Whole entries only — a half-evicted message is worse than a missing one.
+    /// Phase 1 of compaction (ADR-0006 §4): clear the **stale tool output** first,
+    /// because it is the bulk of a long session's context and the least valuable —
+    /// the model can re-run a command, but it cannot re-read a decision.
+    ///
+    /// The newest `keep_newest_tokens` of context is left untouched, and pinned
+    /// entries are never cleared. Nothing is removed here: a tool result stays in
+    /// the conversation (so an assistant's tool call keeps its answer), only its
+    /// body is replaced by what `marker` returns.
+    pub fn clear_tool_outputs(
+        &mut self,
+        keep_newest_tokens: u64,
+        marker: impl Fn(&Entry) -> String,
+    ) -> ClearReport {
+        // Walk backwards to find where the protected window starts.
+        let mut protected_from = 0usize;
+        let mut seen = 0u64;
+        for (index, entry) in self.entries.iter().enumerate().rev() {
+            seen += entry.tokens;
+            if seen > keep_newest_tokens {
+                protected_from = index + 1;
+                break;
+            }
+        }
+        // …but always keep the most recent entry, whatever the numbers say. A
+        // single tool output bigger than the whole window would otherwise be
+        // cleared the moment it arrived — exactly when the model needs it. A long
+        // turn still gets its older steps cleared, which is the point.
+        if !self.entries.is_empty() {
+            protected_from = protected_from.min(self.entries.len() - 1);
+        }
+
+        let mut report = ClearReport::default();
+        for entry in self.entries.iter_mut().take(protected_from) {
+            if entry.pinned || entry.cleared {
+                continue;
+            }
+            if entry.category != Category::History || !entry.source.starts_with("tool:") {
+                continue;
+            }
+            let text = marker(entry);
+            let before = entry.tokens;
+            entry.tokens = estimate_tokens(&text);
+            entry.cleared = true;
+            report.tokens_freed += before.saturating_sub(entry.tokens);
+            report.cleared.push(entry.clone());
+        }
+        report
+    }
+
+    /// Forget entries entirely (phase 2, after their messages are dropped).
+    pub fn forget(&mut self, ids: &[u64]) -> u64 {
+        let mut freed = 0;
+        self.entries.retain(|entry| {
+            if ids.contains(&entry.id) {
+                freed += entry.tokens;
+                false
+            } else {
+                true
+            }
+        });
+        freed
+    }
+
     pub fn evict_to_budget(&mut self) -> EvictionReport {
         let mut report = EvictionReport::default();
         let Some(budget) = self.budget else {

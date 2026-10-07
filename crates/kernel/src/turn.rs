@@ -107,6 +107,10 @@ pub struct KernelConfig {
     pub cwd: PathBuf,
     pub profile: String,
     pub budget_tokens: Option<u64>,
+    /// The newest context left verbatim when compaction runs (ADR-0006 §4).
+    pub keep_newest_tokens: u64,
+    /// Compact once context passes this fraction of the budget (80%).
+    pub compact_at_percent: u64,
     pub max_steps: usize,
 }
 
@@ -116,6 +120,8 @@ impl KernelConfig {
             cwd: cwd.into(),
             profile: "default".to_string(),
             budget_tokens: None,
+            keep_newest_tokens: 20_000,
+            compact_at_percent: 80,
             max_steps: 8,
         }
     }
@@ -254,6 +260,9 @@ pub struct Kernel {
     /// The typed conversation the model sees. Kept in step with the ledger by
     /// construction: every mutation goes through `record_*`.
     messages: Vec<ChatMessage>,
+    /// Ledger entry per message, in lockstep with `messages` (ADR-0006: the
+    /// ledger decides, the wire view follows).
+    entry_of: Vec<Option<u64>>,
     pending: Option<PendingCall>,
     approvals: u64,
     /// The PEP's policy for anything a tool spawns (ADR-0007). The kernel owns
@@ -344,6 +353,7 @@ impl Kernel {
             model,
             config,
             messages: Vec::new(),
+            entry_of: Vec::new(),
             pending: None,
             approvals: 0,
             confinement,
@@ -588,6 +598,7 @@ impl Kernel {
 
     fn run(&mut self, mut events: Vec<u64>) -> Result<TurnOutcome, KernelError> {
         for step in 1..=self.config.max_steps {
+            self.compact_if_needed(&mut events)?;
             let request = CompletionRequest {
                 messages: self.messages.clone(),
                 tools: self.tool_specs(),
@@ -764,6 +775,108 @@ impl Kernel {
         }
     }
 
+    /// ADR-0006 §4: compaction, in a fixed order, and visible.
+    ///
+    /// Clearing comes first because stale tool output is the bulk of a long
+    /// session's context and the least valuable part of it — the model can re-run
+    /// a command, but it cannot re-read a decision. Only then are the oldest whole
+    /// exchanges dropped, and never across a tool pair: an assistant's tool call
+    /// keeps its answer, because a conversation that splits them is invalid to
+    /// every provider.
+    fn compact_if_needed(&mut self, events: &mut Vec<u64>) -> Result<(), KernelError> {
+        let Some(budget) = self.ledger.budget() else {
+            return Ok(());
+        };
+        let threshold = budget.saturating_mul(self.config.compact_at_percent) / 100;
+        let before = self.ledger.total_tokens();
+        if before <= threshold {
+            return Ok(());
+        }
+        let keep = self.config.keep_newest_tokens.min(budget / 2);
+
+        // Phase 1: clear stale tool output, oldest first, outside the new window.
+        let cleared = self.ledger.clear_tool_outputs(keep, |entry| {
+            format!(
+                "[output of {} cleared to save context — re-run the command if you need it again]",
+                entry.source
+            )
+        });
+        for entry in &cleared.cleared {
+            if let Some(index) = self.entry_of.iter().position(|id| *id == Some(entry.id)) {
+                let call_id = match &self.messages[index] {
+                    ChatMessage::Tool { call_id, .. } => call_id.clone(),
+                    _ => continue,
+                };
+                self.messages[index] = ChatMessage::Tool {
+                    call_id,
+                    output: format!(
+                        "[output of {} cleared to save context — re-run the command if you need it again]",
+                        entry.source
+                    ),
+                };
+            }
+        }
+
+        // Phase 2: only if still over, drop the oldest whole exchanges.
+        let mut dropped_messages = 0;
+        while self.ledger.total_tokens() > threshold {
+            let removed = self.drop_oldest_exchange();
+            if removed == 0 {
+                break; // nothing safe left to drop (a single long turn)
+            }
+            dropped_messages += removed;
+        }
+
+        // A compaction that could not free anything (a single long turn, nothing
+        // stale) is not an event: `compaction.applied` means the context changed.
+        if cleared.cleared.is_empty() && dropped_messages == 0 {
+            return Ok(());
+        }
+
+        let after = self.ledger.total_tokens();
+        events.push(self.append(
+            gen::event::COMPACTION_APPLIED,
+            &gen::CompactionApplied {
+                tokens_before: before,
+                tokens_after: after,
+                kept_tokens: keep,
+                cleared_tool_outputs: cleared.cleared.len() as u64,
+                dropped_messages: dropped_messages as u64,
+                summary: format!(
+                    "cleared {} tool output(s) older than the newest {keep} tokens and dropped                      {dropped_messages} oldest message(s): {before} -> {after} tokens",
+                    cleared.cleared.len()
+                ),
+            },
+        )?);
+        Ok(())
+    }
+
+    /// Drop the oldest exchange (a user message and everything up to the next
+    /// user message) so the conversation stays well-formed. Returns how many
+    /// messages went.
+    fn drop_oldest_exchange(&mut self) -> usize {
+        if self.messages.len() < 2 {
+            return 0;
+        }
+        let end = self
+            .messages
+            .iter()
+            .enumerate()
+            .skip(1)
+            .find(|(_, m)| matches!(m, ChatMessage::User { .. }))
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+        // `end == 0` means the whole conversation is one turn: dropping it would
+        // throw away the prompt we are answering.
+        if end == 0 || end >= self.messages.len() {
+            return 0;
+        }
+        self.messages.drain(0..end);
+        let ids: Vec<u64> = self.entry_of.drain(0..end).flatten().collect();
+        let _ = self.ledger.forget(&ids);
+        end
+    }
+
     // --------------------------------------------------- recording helpers
 
     fn append<T: serde::Serialize>(&mut self, kind: &str, payload: &T) -> Result<u64, KernelError> {
@@ -785,7 +898,8 @@ impl Kernel {
             &gen::MessageAppended { role: Role::User, text: text.to_string() },
         )?;
         self.messages.push(ChatMessage::User { text: text.to_string() });
-        self.ledger.add(Category::History, "user", text, Lifetime::Session, false);
+        let entry = self.ledger.add(Category::History, "user", text, Lifetime::Session, false);
+        self.entry_of.push(Some(entry));
         Ok(seq)
     }
 
@@ -809,7 +923,9 @@ impl Kernel {
             (None, Some(_)) => serde_json::to_string(calls).unwrap_or_default(),
             (None, None) => String::new(),
         };
-        self.ledger.add(Category::History, "assistant", &accounting, Lifetime::Session, false);
+        let entry =
+            self.ledger.add(Category::History, "assistant", &accounting, Lifetime::Session, false);
+        self.entry_of.push(Some(entry));
         self.messages.push(ChatMessage::Assistant {
             text: text.map(|t| t.to_string()),
             tool_calls: calls.to_vec(),
@@ -827,14 +943,18 @@ impl Kernel {
             gen::event::TOOL_RESULT,
             &gen::ToolResult { call_id: call_id.to_string(), ok, output: output.to_string() },
         )?;
-        self.ledger.add(
+        // Tool output is the first thing compaction clears, so it carries a
+        // turn-scoped lifetime (ADR-0006 §4).
+        let entry = self.ledger.add(
             Category::History,
             format!("tool:{call_id}"),
             output,
-            Lifetime::Session,
+            Lifetime::Turn,
             false,
         );
-        self.messages.push(ChatMessage::Tool { call_id: call_id.to_string(), output: output.to_string() });
+        self.entry_of.push(Some(entry));
+        self.messages
+            .push(ChatMessage::Tool { call_id: call_id.to_string(), output: output.to_string() });
         Ok(seq)
     }
 
@@ -867,7 +987,8 @@ impl Kernel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loong_providers::{CompletionResponse, ScriptedModel};
+    use loong_providers::{CompletionRequest, CompletionResponse, Model, ModelError, ScriptedModel};
+    use std::sync::{Arc, Mutex};
     use loong_schema::generated::event as ev;
     use serde_json::json;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1336,6 +1457,183 @@ mod tests {
         let k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
         assert_eq!(k.mcp_servers(), 0);
         assert!(k.mcp_note().contains("unavailable"), "{}", k.mcp_note());
+    }
+
+    /// A model that answers from a script and records what it was shown, which is
+    /// the only way to check what compaction actually sent.
+    struct RecordingModel {
+        responses: std::collections::VecDeque<CompletionResponse>,
+        seen: Arc<Mutex<Vec<Vec<ChatMessage>>>>,
+    }
+
+    impl RecordingModel {
+        fn new(responses: Vec<CompletionResponse>) -> (Self, Arc<Mutex<Vec<Vec<ChatMessage>>>>) {
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            (
+                Self { responses: responses.into(), seen: Arc::clone(&seen) },
+                seen,
+            )
+        }
+    }
+
+    impl Model for RecordingModel {
+        fn complete(&mut self, request: &CompletionRequest) -> Result<CompletionResponse, ModelError> {
+            self.seen.lock().unwrap().push(request.messages.clone());
+            self.responses
+                .pop_front()
+                .ok_or_else(|| ModelError::Transport("the script is exhausted".into()))
+        }
+    }
+
+    /// A file big enough that its output has to be cleared.
+    fn big_file(dir: &Path, name: &str, lines: usize) -> PathBuf {
+        let body: String = (0..lines).map(|i| format!("line {i} of a large file\n")).collect();
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    #[test]
+    fn compaction_clears_stale_tool_output_before_dropping_anything() {
+        let t = Temp::new();
+        big_file(&t.dir, "big.txt", 400); // ~4000 chars ≈ 1000 tokens
+        let (model, seen) = RecordingModel::new(vec![
+            response(vec![call("c1", "read_file", json!({"path": "big.txt"}))], None),
+            response(vec![call("c2", "read_file", json!({"path": "big.txt"}))], None),
+            response(vec![call("c3", "read_file", json!({"path": "big.txt"}))], None),
+            response(vec![], Some("read three times")),
+        ]);
+        let mut config = KernelConfig::new(&t.dir);
+        config.budget_tokens = Some(3_000); // threshold 2400
+        config.keep_newest_tokens = 800;
+        let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+        k.submit("read it a few times").unwrap();
+
+        let events = loong_eventlog::replay(&t.log).unwrap().events;
+        let compaction = events
+            .iter()
+            .find(|e| e.kind == ev::COMPACTION_APPLIED)
+            .expect("a compaction event");
+        assert!(compaction.data["cleared_tool_outputs"].as_u64().unwrap() >= 1, "{:?}", compaction.data);
+        assert_eq!(compaction.data["dropped_messages"], 0, "clearing alone was enough");
+        assert!(
+            compaction.data["tokens_after"].as_u64().unwrap()
+                < compaction.data["tokens_before"].as_u64().unwrap(),
+            "compaction must reduce the context: {:?}",
+            compaction.data
+        );
+
+        // The model was shown a marker where the stale output used to be, and the
+        // newest output stayed verbatim.
+        let seen = seen.lock().unwrap();
+        let last = seen.last().unwrap();
+        let outputs: Vec<&String> = last
+            .iter()
+            .filter_map(|m| match m {
+                ChatMessage::Tool { output, .. } => Some(output),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            outputs.iter().any(|o| o.contains("cleared to save context")),
+            "a stale tool output is cleared: {outputs:?}"
+        );
+        assert!(
+            outputs.iter().any(|o| o.contains("line 399")),
+            "the newest tool output is kept verbatim: {outputs:?}"
+        );
+    }
+
+    #[test]
+    fn compaction_never_splits_a_tool_pair() {
+        let t = Temp::new();
+        big_file(&t.dir, "big.txt", 400);
+        let (model, seen) = RecordingModel::new(vec![
+            response(vec![call("c1", "read_file", json!({"path": "big.txt"}))], None),
+            response(vec![call("c2", "read_file", json!({"path": "big.txt"}))], None),
+            response(vec![call("c3", "read_file", json!({"path": "big.txt"}))], None),
+            response(vec![], Some("done")),
+        ]);
+        let mut config = KernelConfig::new(&t.dir);
+        config.budget_tokens = Some(1_200); // tiny: forces both phases
+        config.keep_newest_tokens = 200;
+        let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+        k.submit("read it a few times").unwrap();
+
+        for (turn, messages) in seen.lock().unwrap().iter().enumerate() {
+            let mut answered: Vec<String> = Vec::new();
+            for message in messages {
+                match message {
+                    ChatMessage::Assistant { tool_calls, .. } => {
+                        for call in tool_calls {
+                            assert!(
+                                !answered.contains(&call.call_id),
+                                "turn {turn}: {} was answered twice",
+                                call.call_id
+                            );
+                            answered.push(call.call_id.clone());
+                        }
+                    }
+                    ChatMessage::Tool { call_id, .. } => {
+                        assert!(
+                            answered.contains(call_id),
+                            "turn {turn}: tool result {call_id} has no preceding call — the \
+                             conversation would be invalid"
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            assert!(!messages.is_empty(), "turn {turn}: the prompt was never dropped");
+        }
+    }
+
+    #[test]
+    fn compaction_drops_the_oldest_exchange_when_clearing_is_not_enough() {
+        let t = Temp::new();
+        let filler = "x".repeat(2_000); // ~500 tokens per turn, no tool output to clear
+        let (model, seen) = RecordingModel::new(vec![
+            response(vec![], Some("first")),
+            response(vec![], Some("second")),
+            response(vec![], Some("third")),
+        ]);
+        let mut config = KernelConfig::new(&t.dir);
+        config.budget_tokens = Some(1_200); // threshold 960
+        config.keep_newest_tokens = 200;
+        let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+        k.submit(&format!("turn one {filler}")).unwrap();
+        k.submit(&format!("turn two {filler}")).unwrap();
+        k.submit(&format!("turn three {filler}")).unwrap();
+
+        let events = loong_eventlog::replay(&t.log).unwrap().events;
+        let dropped: u64 = events
+            .iter()
+            .filter(|e| e.kind == ev::COMPACTION_APPLIED)
+            .map(|e| e.data["dropped_messages"].as_u64().unwrap_or(0))
+            .sum();
+        assert!(dropped >= 1, "the oldest exchange was dropped: {dropped}");
+
+        // The prompt being answered is always still there.
+        let seen = seen.lock().unwrap();
+        assert!(seen.iter().all(|messages| !messages.is_empty()));
+        let last = seen.last().unwrap();
+        assert!(
+            last.iter().any(|m| matches!(m, ChatMessage::User { text } if text.contains("turn three"))),
+            "the current prompt survives compaction"
+        );
+    }
+
+    #[test]
+    fn a_budget_that_cannot_be_met_stops_dropping_rather_than_emptying_the_prompt() {
+        let t = Temp::new();
+        let (model, seen) = RecordingModel::new(vec![response(vec![], Some("hi"))]);
+        let mut config = KernelConfig::new(&t.dir);
+        config.budget_tokens = Some(10); // absurdly small
+        config.keep_newest_tokens = 5;
+        let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+        k.submit("a single long turn that cannot fit").unwrap();
+        let seen = seen.lock().unwrap();
+        assert!(!seen[0].is_empty(), "the prompt we are answering is never dropped");
     }
 
     #[test]

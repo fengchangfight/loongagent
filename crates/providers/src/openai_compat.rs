@@ -107,14 +107,17 @@ impl OpenAiCompat {
     }
 
     fn body(&self, request: &CompletionRequest) -> String {
-        json!({
+        let mut body = json!({
             "model": self.model,
             "messages": Self::wire_messages(&request.messages),
-            "tools": Self::wire_tools(request),
-            "tool_choice": "auto",
             "stream": false,
-        })
-        .to_string()
+        });
+        // Some servers reject an empty tools array, and none need it.
+        if !request.tools.is_empty() {
+            body["tools"] = Self::wire_tools(request);
+            body["tool_choice"] = json!("auto");
+        }
+        body.to_string()
     }
 
     /// The wire's answer → our response.
@@ -292,10 +295,40 @@ mod tests {
     }
 
     #[test]
-    fn https_is_refused_with_a_useful_message() {
-        let mut model = OpenAiCompat::new("https://api.example.com/v1", "m", None);
+    fn an_https_endpoint_is_accepted_and_a_bad_host_is_a_transport_error() {
+        // The scheme is no longer a reason to refuse: TLS is wired. A host that does
+        // not resolve proves the adapter got as far as the network.
+        let mut model = OpenAiCompat::new("https://api.example.invalid/v1", "m", None);
         let err = model.complete(&CompletionRequest { messages: vec![], tools: vec![] }).unwrap_err();
-        assert!(err.to_string().contains("TLS is not wired"), "{err}");
+        let message = err.to_string();
+        assert!(
+            message.contains("resolving") || message.contains("connecting"),
+            "a transport error, not a scheme refusal: {message}"
+        );
+        assert!(!message.contains("TLS is not wired"));
+    }
+
+    #[test]
+    fn an_empty_tool_list_is_not_sent() {
+        let model = OpenAiCompat::new("http://127.0.0.1:9/v1", "m", None);
+        let body: Value = serde_json::from_str(
+            &model.body(&CompletionRequest { messages: vec![], tools: vec![] }),
+        )
+        .unwrap();
+        assert!(body.get("tools").is_none(), "no tools, no tools key: {body}");
+        assert!(body.get("tool_choice").is_none());
+
+        let with_tools = model.body(&CompletionRequest {
+            messages: vec![],
+            tools: vec![ToolSpec {
+                name: "t".into(),
+                description: "d".into(),
+                parameters: json!({"type": "object"}),
+            }],
+        });
+        let body: Value = serde_json::from_str(&with_tools).unwrap();
+        assert_eq!(body["tools"][0]["function"]["name"], "t");
+        assert_eq!(body["tool_choice"], "auto");
     }
 
     #[test]

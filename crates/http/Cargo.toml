@@ -6,3 +6,5 @@ license.workspace = true
 description = "The smallest HTTP/1.1 JSON POST client, shared by provider adapters and HTTP hooks"
 
 [dependencies]
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+webpki-roots = "1.0.9"

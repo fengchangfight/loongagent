@@ -82,8 +82,8 @@ rows below are what "not losing" means concretely.
 
 | CC feature | Our status | Where | Next |
 |---|---|---|---|
-| `SKILL.md` + frontmatter, description-only in context, body on invoke | ✅ | T-18, ADR-0006 (progressive disclosure) | — |
-| **Commands merged into skills** (one concept) | ✅ | T-18 (T-16 merged in, 2026-10-05) | — |
+| `SKILL.md` + frontmatter, description-only in context, body on invoke | ✅ | `loong-skills` (2026-10-08): the catalogue enters context via the system prompt and the body loads on invoke — verified that the body never leaks into the system message, and that the source file is named | per-skill tool allowlists are parsed and not yet enforced |
+| **Commands merged into skills** (one concept) | ✅ | both spellings ship: `.loongagent/skills/<name>/SKILL.md` and `.loongagent/commands/<name>.md`; `/name args` expands `$ARGUMENTS` and `$1`…`$9`, and arguments are appended if the body uses no placeholder. Invocation is parsed strictly, so `/etc/hosts is wrong` stays a sentence | — |
 | Bundled workflow skills (`/code-review`, `/batch` fan-out to worktree agents opening PRs, `/verify`, `/run`) | ⚠️ | ADR-0011 + T-20 + T-17 | define the `/batch`-style workflow explicitly |
 | Plugins = bundles of skills + hooks + subagents + MCP servers | ✅ | ADR-0004 + ADR-0008 packs | same shape; content bundles |
 | Git-based plugin marketplaces | ⏸ | ADR-0008 signed packs | internal catalog later (not v1) |
@@ -94,7 +94,7 @@ rows below are what "not losing" means concretely.
 |---|---|---|---|
 | stdio + HTTP servers, user/project/local scopes | ⚠️ | `loong-mcp` (2026-10-07): **stdio shipped**, one project scope (`.loongagent/mcp.toml`); HTTP/SSE transport and user/local scopes to come | HTTP transport reuses `loong-http`; scopes need the config layering of ADR-0008 |
 | **Org allow/deny lists for MCP servers** | ⚠️ | T-05/T-15 (approved-server gateway) | make it a first-class org policy key; today the trust gate is per repository |
-| MCP prompts surface as slash commands | ❌ | T-15 | needs skills/commands first (T-18) |
+| MCP prompts surface as slash commands | ❌ | T-15 + the skill registry now exist | unblocked: `prompts/list` + `prompts/get` on the MCP client, then expose each as a skill |
 | Lazy tool loading (names first, schemas on demand) | ❌ | T-15 | we list tools at session start and hand the model every schema; lazy loading is worth it once a server exposes dozens |
 | Injection defence on MCP content | ⚠️ | tool output is data, not instructions, and every call is an audited event; but there is no content-level scrubbing yet | T-15 |
 | Declared action classes for external tools (default: ask every time) | ✅ | `loong-mcp::config` — per-server `action_class` with per-tool overrides, defaulting to `out_of_bounds` | org-pinnable in T-05 |

@@ -22,6 +22,7 @@ use loong_schema::generated::{ActionClass, ApprovalScope, Json, Role, Verdict};
 use loong_hooks::{payload, HookEvent, HookReport, HookRunner, HookSet};
 use loong_hooks::McpCaller;
 use loong_mcp::{McpClient, McpSet, McpTool};
+use loong_skills::{parse_invocation, SkillSet, SkillTool};
 use std::sync::{Arc, Mutex};
 use loong_sandbox::landlock::WorkspacePolicy;
 use loong_tools::{Confinement, ExecContext, NoConfinement, Registry};
@@ -42,6 +43,8 @@ pub enum KernelError {
     Hooks(String),
     /// A required MCP server could not be used.
     Mcp(String),
+    /// A skill or command is malformed. A workflow that stopped working must say so.
+    Skills(String),
 }
 
 impl std::fmt::Display for KernelError {
@@ -54,6 +57,7 @@ impl std::fmt::Display for KernelError {
             KernelError::Index(e) => write!(f, "index: {e}"),
             KernelError::Hooks(m) => write!(f, "hooks: {m}"),
             KernelError::Mcp(m) => write!(f, "mcp: {m}"),
+            KernelError::Skills(m) => write!(f, "skills: {m}"),
         }
     }
 }
@@ -279,6 +283,8 @@ pub struct Kernel {
     /// kills them (the client's `Drop` tears down the process group).
     mcp_clients: Vec<Arc<Mutex<McpClient>>>,
     mcp_note: String,
+    /// Skills and commands: descriptions in context, bodies on invoke (T-18).
+    skills: Arc<SkillSet>,
     /// Derived, disposable SQLite view of the log (ADR-0003). It trails the log
     /// by design: the log is the truth, this only makes queries fast. A failure
     /// to index never loses an event — it marks the index stale instead.
@@ -319,6 +325,12 @@ impl Kernel {
         // interface, one PDP, one event stream, one audit trail.
         let mut tools = Registry::with_builtins();
         let (mcp_note, mcp_clients) = attach_mcp(&config.cwd, &mut tools)?;
+        // Skills are one concept with commands (T-18): the model sees the
+        // catalogue and asks for a body by name.
+        let skills = Arc::new(
+            SkillSet::load(&config.cwd).map_err(|e| KernelError::Skills(e.to_string()))?,
+        );
+        tools.register(SkillTool::new(Arc::clone(&skills)));
 
         let mut kernel;
         // The PEP is chosen here, once, and handed to every tool call.
@@ -362,10 +374,13 @@ impl Kernel {
             hooks_note,
             mcp_clients,
             mcp_note,
+            skills,
             index,
             index_path,
             index_stale: None,
         };
+        // The catalogue enters context before any work does.
+        kernel.seat_system_prompt()?;
         // The session's first moment (ADR-0007 §7): what a guard sees before any
         // work happens.
         let mut startup = Vec::new();
@@ -410,6 +425,38 @@ impl Kernel {
 
     pub fn mcp_servers(&self) -> usize {
         self.mcp_clients.len()
+    }
+
+    /// The skills and commands this workspace offers.
+    pub fn skills(&self) -> &SkillSet {
+        &self.skills
+    }
+
+    /// The one place the system prompt is built: a short frame plus the
+    /// description-only skill catalogue (ADR-0006 progressive disclosure).
+    fn seat_system_prompt(&mut self) -> Result<(), KernelError> {
+        let body = format!(
+            "You are loongagent, a coding agent working in a user's workspace. Prefer reading \
+             over guessing, keep changes small, and say plainly when you are unsure.\n\n             Skills and commands available here are listed below as `/name — description`. They \
+             are not loaded yet: call the `skill` tool with a name to load its full instructions \
+             before doing work that matches it.\n\n{}",
+            self.skills.catalogue()
+        );
+        // Pinned and Persistent: system prompt tokens are never evicted, and
+        // compaction must not touch them (ADR-0006).
+        let entry =
+            self.ledger.add(Category::SystemPrompt, "system", &body, Lifetime::Persistent, true);
+        self.messages.insert(0, ChatMessage::System { text: body });
+        self.entry_of.insert(0, Some(entry));
+        self.append(
+            gen::event::SKILLS_LOADED,
+            &gen::SkillsLoaded {
+                count: self.skills.skills.len() as u64,
+                tokens: loong_skills::estimate_tokens(&self.skills.catalogue()),
+                names: self.skills.names().join(", "),
+            },
+        )?;
+        Ok(())
     }
 
     /// Fire the hooks registered for `event`, record every answer, and report the
@@ -513,7 +560,55 @@ impl Kernel {
                 p.request_id
             )));
         }
-        let mut events = vec![self.record_user(text)?];
+        // `/name args` is an invocation (T-18). A sentence that merely starts with
+        // a path (`/etc/hosts is wrong`) is a sentence, and `parse_invocation` is
+        // strict about the difference.
+        let (prompt, invocation) = match parse_invocation(text) {
+            Some((name, args)) => match self.skills.invoke(&name, &args) {
+                Some(expansion) => {
+                    let source = expansion.source.clone();
+                    (
+                        expansion.prompt,
+                        Some(gen::SkillInvoked {
+                            name: expansion.name,
+                            source,
+                            args,
+                            tokens: expansion.tokens,
+                            error: None,
+                        }),
+                    )
+                }
+                None => {
+                    // An unknown command is refused rather than sent to the model as
+                    // a prompt: guessing what `/reveiw` meant is not a service.
+                    let event = self.append(
+                        gen::event::SKILL_INVOKED,
+                        &gen::SkillInvoked {
+                            name: name.clone(),
+                            source: "<none>".to_string(),
+                            args,
+                            tokens: 0,
+                            error: Some(format!("no skill named {name:?}; /help lists what exists")),
+                        },
+                    )?;
+                    return Ok(TurnOutcome {
+                        steps: 0,
+                        final_text: None,
+                        pending_approval: None,
+                        refused: Some(format!(
+                            "unknown command /{name} — /help lists the skills and commands available here"
+                        )),
+                        events: vec![event],
+                    });
+                }
+            },
+            None => (text.to_string(), None),
+        };
+        let mut events = Vec::new();
+        if let Some(invocation) = invocation {
+            events.push(self.append(gen::event::SKILL_INVOKED, &invocation)?);
+        }
+        events.push(self.record_user(&prompt)?);
         let report = self.fire_hooks(
             HookEvent::UserPromptSubmit,
             json!({"text": text, "profile": self.config.profile}),
@@ -858,23 +953,25 @@ impl Kernel {
         if self.messages.len() < 2 {
             return 0;
         }
+        // The system prompt is not an exchange: it stays for the session's life.
+        let start = usize::from(matches!(self.messages.first(), Some(ChatMessage::System { .. })));
         let end = self
             .messages
             .iter()
             .enumerate()
-            .skip(1)
+            .skip(start + 1)
             .find(|(_, m)| matches!(m, ChatMessage::User { .. }))
             .map(|(index, _)| index)
             .unwrap_or(0);
         // `end == 0` means the whole conversation is one turn: dropping it would
         // throw away the prompt we are answering.
-        if end == 0 || end >= self.messages.len() {
+        if end <= start || end >= self.messages.len() {
             return 0;
         }
-        self.messages.drain(0..end);
-        let ids: Vec<u64> = self.entry_of.drain(0..end).flatten().collect();
+        self.messages.drain(start..end);
+        let ids: Vec<u64> = self.entry_of.drain(start..end).flatten().collect();
         let _ = self.ledger.forget(&ids);
-        end
+        end - start
     }
 
     // --------------------------------------------------- recording helpers
@@ -1064,6 +1161,8 @@ mod tests {
         assert_eq!(
             kinds(&t.log),
             vec![
+                // The session's own opening: what entered context before the work.
+                ev::SKILLS_LOADED,
                 ev::MESSAGE_APPENDED,
                 ev::COST_RECORDED,
                 ev::MESSAGE_APPENDED,
@@ -1196,14 +1295,18 @@ mod tests {
         ]);
         let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
         k.submit("go").unwrap();
-        let history = k
-            .ledger()
-            .entries()
-            .iter()
-            .filter(|e| e.category == Category::History)
-            .count();
-        assert_eq!(history, k.messages().len(), "every message is a ledger entry");
+        // Every message has exactly one ledger entry — the system prompt included,
+        // which is why the count is over all entries rather than History.
+        assert_eq!(
+            k.ledger().entries().len(),
+            k.messages().len(),
+            "every message is a ledger entry, and none is missing one"
+        );
         assert!(k.ledger().explain().iter().any(|r| r.source == "user"));
+        assert!(
+            k.ledger().explain().iter().any(|r| r.source == "system"),
+            "the system prompt is accounted for"
+        );
     }
 
     #[test]
@@ -1491,6 +1594,196 @@ mod tests {
         let path = dir.join(name);
         std::fs::write(&path, body).unwrap();
         path
+    }
+
+    fn install_command(dir: &Path, name: &str, body: &str) {
+        let commands = dir.join(".loongagent/commands");
+        std::fs::create_dir_all(&commands).unwrap();
+        std::fs::write(commands.join(format!("{name}.md")), body).unwrap();
+    }
+
+    #[test]
+    fn a_command_expands_into_its_body_and_the_event_names_the_file() {
+        let t = Temp::new();
+        install_command(
+            &t.dir,
+            "review",
+            "---
+description: Review a diff for real bugs
+---
+
+Look at $ARGUMENTS and report only real bugs.
+",
+        );
+        let (model, seen) = RecordingModel::new(vec![response(vec![], Some("reviewed"))]);
+        let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        k.submit("/review HEAD~1").unwrap();
+
+        let events = loong_eventlog::replay(&t.log).unwrap().events;
+        let invoked = events.iter().find(|e| e.kind == ev::SKILL_INVOKED).expect("skill.invoked");
+        assert_eq!(invoked.data["name"], "review");
+        assert_eq!(invoked.data["args"], "HEAD~1");
+        assert!(invoked.data["source"].as_str().unwrap().ends_with("review.md"));
+        assert!(invoked.data["tokens"].as_u64().unwrap() > 0);
+
+        // What the model received is the body, with the arguments substituted — and
+        // the user's own words are still recoverable from the event above.
+        let sent = seen.lock().unwrap();
+        let first = sent.first().unwrap();
+        let user = first
+            .iter()
+            .find_map(|m| match m {
+                ChatMessage::User { text } => Some(text.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(user.contains("Look at HEAD~1 and report only real bugs."), "{user}");
+    }
+
+    #[test]
+    fn an_unknown_command_is_refused_and_never_reaches_the_model() {
+        let t = Temp::new();
+        // An empty script: if the model were called, the turn would fail instead.
+        let model = ScriptedModel::new(vec![]);
+        let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        let outcome = k.submit("/reveiw HEAD~1").unwrap();
+
+        let refused = outcome.refused.expect("a typo is refused, not guessed at");
+        assert!(refused.contains("unknown command /reveiw"), "{refused}");
+        assert!(refused.contains("/help"), "the way out is named: {refused}");
+
+        let events = loong_eventlog::replay(&t.log).unwrap().events;
+        let invoked = events.iter().find(|e| e.kind == ev::SKILL_INVOKED).unwrap();
+        assert!(
+            invoked.data["error"].as_str().unwrap().contains("no skill named"),
+            "{:?}",
+            invoked.data
+        );
+        assert!(
+            !events.iter().any(|e| e.kind == ev::COST_RECORDED),
+            "the model was never called"
+        );
+    }
+
+    #[test]
+    fn a_sentence_that_starts_with_a_path_is_a_normal_prompt() {
+        let t = Temp::new();
+        let (model, seen) = RecordingModel::new(vec![response(vec![], Some("noted"))]);
+        let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        k.submit("/etc/hosts is misconfigured, please look").unwrap();
+
+        let sent = seen.lock().unwrap();
+        assert!(
+            sent[0].iter().any(|m| matches!(m, ChatMessage::User { text } if text.starts_with("/etc/hosts"))),
+            "a path sentence reaches the model as itself"
+        );
+        let events = loong_eventlog::replay(&t.log).unwrap().events;
+        assert!(!events.iter().any(|e| e.kind == ev::SKILL_INVOKED));
+    }
+
+    #[test]
+    fn the_catalogue_is_in_context_and_the_body_is_not() {
+        let t = Temp::new();
+        install_command(
+            &t.dir,
+            "release",
+            "---
+description: Cut a release
+---
+
+SECRET-BODY-STEPS
+",
+        );
+        let (model, seen) = RecordingModel::new(vec![response(vec![], Some("ok"))]);
+        let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        k.submit("say hi").unwrap();
+
+        let sent = seen.lock().unwrap();
+        let system = match sent[0].first() {
+            Some(ChatMessage::System { text }) => text.clone(),
+            other => panic!("the prompt starts with a system message, got {other:?}"),
+        };
+        assert!(system.contains("/release — Cut a release"), "{system}");
+        assert!(system.contains("/help"), "{system}");
+        assert!(!system.contains("SECRET-BODY-STEPS"), "bodies load on invoke only: {system}");
+
+        // …and the catalogue is accounted for as a pinned ledger entry.
+        let explain = k.ledger().explain();
+        let row = explain.iter().find(|r| r.source == "system").expect("the system prompt");
+        assert!(row.pinned);
+        let events = loong_eventlog::replay(&t.log).unwrap().events;
+        let loaded = events.iter().find(|e| e.kind == ev::SKILLS_LOADED).unwrap();
+        assert!(loaded.data["names"].as_str().unwrap().contains("release"));
+    }
+
+    #[test]
+    fn the_model_can_load_a_body_by_name() {
+        let t = Temp::new();
+        install_command(
+            &t.dir,
+            "release",
+            "---
+description: Cut a release
+---
+
+Step one: breathe.
+",
+        );
+        let model = ScriptedModel::new(vec![
+            response(vec![call("c1", "skill", json!({"name": "release"}))], None),
+            response(vec![], Some("loaded")),
+        ]);
+        let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        k.submit("do a release").unwrap();
+
+        let events = loong_eventlog::replay(&t.log).unwrap().events;
+        let result = events.iter().find(|e| e.kind == ev::TOOL_RESULT).unwrap();
+        assert_eq!(result.data["ok"], true, "{:?}", result.data["output"]);
+        assert!(result.data["output"].as_str().unwrap().contains("Step one: breathe."));
+        let policy = events.iter().find(|e| e.kind == ev::POLICY_DECIDED).unwrap();
+        assert_eq!(policy.data["action_class"], "investigate", "loading a body is read-only");
+    }
+
+    #[test]
+    fn compaction_never_drops_the_system_prompt() {
+        let t = Temp::new();
+        let filler = "x".repeat(2_000);
+        let (model, seen) = RecordingModel::new(vec![
+            response(vec![], Some("first")),
+            response(vec![], Some("second")),
+            response(vec![], Some("third")),
+        ]);
+        let mut config = KernelConfig::new(&t.dir);
+        config.budget_tokens = Some(1_200);
+        config.keep_newest_tokens = 200;
+        let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+        for turn in 1..=3 {
+            k.submit(&format!("turn {turn} {filler}")).unwrap();
+        }
+        let sent = seen.lock().unwrap();
+        for (index, messages) in sent.iter().enumerate() {
+            assert!(
+                matches!(messages.first(), Some(ChatMessage::System { .. })),
+                "turn {index}: the system prompt is always first"
+            );
+        }
+        assert!(!sent.last().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_broken_skill_file_is_fatal() {
+        let t = Temp::new();
+        let dir = t.dir.join(".loongagent/skills/broken");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), "no frontmatter at all
+").unwrap();
+        let model = ScriptedModel::saying("hi");
+        let err = match Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)) {
+            Ok(_) => panic!("a malformed skill must be fatal, not silently skipped"),
+            Err(e) => e,
+        };
+        assert!(matches!(err, KernelError::Skills(_)), "{err}");
+        assert!(err.to_string().contains("frontmatter"));
     }
 
     #[test]

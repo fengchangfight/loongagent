@@ -201,6 +201,26 @@ pub struct RpcError {
     pub data: Option<Json>,
 }
 
+/// What the workspace offered as skills/commands (T-18). Names and descriptions enter context; bodies do not.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SkillsLoaded {
+    pub count: u64,
+    /// size of the catalogue that entered context
+    pub tokens: u64,
+    pub names: String,
+}
+
+/// A skill or /command was invoked. The body became the prompt, and this names the file it came from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SkillInvoked {
+    pub name: String,
+    pub source: String,
+    pub args: String,
+    pub tokens: u64,
+    /// set when no such skill exists
+    pub error: Option<String>,
+}
+
 /// JSON-RPC method names (ADR-0002).
 pub mod method {
     /// Attach a thin client to the local agent server (ADR-0009).
@@ -222,6 +242,8 @@ pub mod event {
     pub const COST_RECORDED: &str = "cost.recorded";
     pub const COMPACTION_APPLIED: &str = "compaction.applied";
     pub const HOOK_FIRED: &str = "hook.fired";
+    pub const SKILLS_LOADED: &str = "skills.loaded";
+    pub const SKILL_INVOKED: &str = "skill.invoked";
 }
 
 /// Event kinds. The bool is the `ignorable` envelope marker (ADR-0003).
@@ -235,6 +257,8 @@ pub const EVENT_KINDS: &[(&str, bool)] = &[
     ("cost.recorded", false),
     ("compaction.applied", false),
     ("hook.fired", false),
+    ("skills.loaded", false),
+    ("skill.invoked", false),
 ];
 
 /// `Some(ignorable)` for a known event kind, `None` for an unknown one.

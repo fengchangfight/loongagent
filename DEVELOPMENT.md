@@ -129,6 +129,22 @@ binary the TUI spawns as its server (used by the end-to-end test).
   outside and succeed inside — it never reports "available" without
   demonstrating denial. The server runs that self-test before its first tool
   call: a broken mechanism refuses startup, a missing one is a loud warning.
+- **Skills and commands** (`loong-skills`, T-18): one concept with two
+  spellings, `.loongagent/skills/<name>/SKILL.md` and
+  `.loongagent/commands/<name>.md`. The **description** enters context (in the
+  system prompt, with the file it came from); the **body** loads only on invoke —
+  so a workspace can carry twenty workflows and pay for twenty lines. `/name args`
+  expands `$ARGUMENTS` and `$1`…`$9`, and appends the arguments if the body uses no
+  placeholder. Invocation parsing is strict on purpose: `/etc/hosts is wrong` is a
+  sentence about a path, not a command, and an unknown `/reveiw` is **refused with
+  a pointer to `/help`** rather than guessed at. The model loads a body by name
+  through the `skill` tool. `/help` is always available and lists what exists.
+  Every load and every invocation is an event naming its source file, so a
+  surprising instruction is traceable to a path rather than being anonymous prompt.
+  `loongagent skills list` shows the catalogue and each body's token cost.
+- **A system prompt slot**: the first message is now a short frame plus the skill
+  catalogue. It is a pinned `SystemPrompt` ledger entry, it never counts as
+  compactable history, and compaction refuses to drop it.
 - **Two terminal surfaces** (`loong-tui-app`, ADR-0009/0013): `loongagent tui` is
   a ratatui full-screen UI — a scrollable conversation, an input line, approval
   prompts that repurpose it, a diagnostics pane fed by the server process's stderr
@@ -204,13 +220,18 @@ binary the TUI spawns as its server (used by the end-to-end test).
 5. **`grep`/`glob` do not honour `.gitignore` yet** — they use a small explicit
    skip list instead. Web tools (`web_fetch`, `web_search`) are not built, and
    `grep` reads whole files (no streaming) under a 4 MiB per-file cap.
-6. **MCP is stdio-only and eager**: no HTTP transport, no resources/prompts, no
+6. **Skills are not yet gated or scoped**: their descriptions enter every
+   session's context (an injection surface, mitigated by provenance events, not by
+   a trust gate), per-skill `allowed-tools` is parsed but not enforced, and MCP
+   prompts still do not surface as commands (the registry that would carry them
+   now exists).
+7. **MCP is stdio-only and eager**: no HTTP transport, no resources/prompts, no
    sampling, and server-initiated requests are refused rather than served. Tools
    are listed at session start and every schema is handed to the model.
-7. **Post-tool hook verdicts are recorded but cannot undo anything**, and hooks
+8. **Post-tool hook verdicts are recorded but cannot undo anything**, and hooks
    deliberately cannot rewrite a tool call — the moment they could, the loop would
    stop being small enough to audit.
-8. **Not started**: skills/commands, profiles/config packs, session
+9. **Not started**: profiles/config packs, session
    export/import, WASM extensions, the web client, compaction, the control plane.
 
 ## Commits

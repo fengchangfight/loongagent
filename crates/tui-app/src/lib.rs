@@ -239,6 +239,11 @@ impl App {
                 Style::default().fg(Color::Yellow),
             ),
             None if self.busy => ("working…".to_string(), Style::default().fg(Color::Cyan)),
+            // A leading `/` is a command: say where the list of them is.
+            None if self.input.starts_with('/') => (
+                "command — /help lists the skills available here".to_string(),
+                Style::default().fg(Color::Green),
+            ),
             None => ("prompt".to_string(), Style::default()),
         };
         let input = Paragraph::new(self.input.clone())
@@ -462,6 +467,16 @@ mod tests {
         );
         assert!(app.pending.is_none());
         assert!(app.lines.iter().any(|l| l.contains("approved appr-1")), "{:?}", app.lines);
+    }
+
+    #[test]
+    fn typing_a_slash_says_where_the_commands_are_listed() {
+        let mut app = App::new("s", "v");
+        type_text(&mut app, "/rev");
+        let screen = draw(&mut app, 70, 16);
+        assert!(screen.contains("command — /help lists the skills available here"), "{screen}");
+        // And it is only a hint: the text is still a normal prompt buffer.
+        assert_eq!(app.input, "/rev");
     }
 
     #[test]

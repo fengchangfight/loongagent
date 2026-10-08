@@ -23,10 +23,11 @@ ALLOWED = {
     "loong-tools": {"loong-schema", "loong-proc"},
     "loong-hooks": {"loong-schema", "loong-http", "loong-proc", "loong-manifest"},
     "loong-mcp": {"loong-schema", "loong-protocol", "loong-tools", "loong-manifest"},
+    "loong-skills": {"loong-schema", "loong-tools"},
     # the derived index reads the log; it is disposable and rebuildable
     "loong-index": {"loong-schema", "loong-eventlog"},
     # the fixed kernel calls its edges through traits; it never knows adapters
-    "loong-kernel": {"loong-schema", "loong-eventlog", "loong-index", "loong-providers", "loong-sandbox", "loong-tools", "loong-hooks", "loong-mcp"},
+    "loong-kernel": {"loong-schema", "loong-eventlog", "loong-index", "loong-providers", "loong-sandbox", "loong-tools", "loong-hooks", "loong-mcp", "loong-skills"},
     # surfaces
     "loong-server": {"loong-schema", "loong-protocol", "loong-eventlog", "loong-kernel"},
     "loong-tui": {"loong-schema", "loong-protocol"},
@@ -34,7 +35,7 @@ ALLOWED = {
     # the one binary that ties faces together
     "loongagent": {
         "loong-schema", "loong-protocol", "loong-eventlog", "loong-http", "loong-proc", "loong-manifest", "loong-providers",
-        "loong-sandbox", "loong-tools", "loong-hooks", "loong-mcp", "loong-index", "loong-kernel", "loong-server", "loong-tui", "loong-tui-app",
+        "loong-sandbox", "loong-tools", "loong-hooks", "loong-mcp", "loong-skills", "loong-index", "loong-kernel", "loong-server", "loong-tui", "loong-tui-app",
     },
 }
 

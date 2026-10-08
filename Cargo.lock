@@ -703,6 +703,7 @@ dependencies = [
  "loong-providers",
  "loong-sandbox",
  "loong-schema",
+ "loong-skills",
  "loong-tools",
  "serde",
  "serde_json",
@@ -779,6 +780,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "loong-skills"
+version = "0.0.1"
+dependencies = [
+ "loong-schema",
+ "loong-tools",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "loong-tools"
 version = "0.0.1"
 dependencies = [
@@ -824,6 +835,7 @@ dependencies = [
  "loong-sandbox",
  "loong-schema",
  "loong-server",
+ "loong-skills",
  "loong-tui",
  "loong-tui-app",
  "serde",

@@ -185,6 +185,24 @@ impl<T: Transport> Client<T> {
                 },
                 data.get("scope").and_then(|v| v.as_str()).unwrap_or("?")
             )),
+            gen::event::SKILLS_LOADED => Some(format!(
+                "· skills available ({}): {}",
+                data.get("count").and_then(|v| v.as_u64()).unwrap_or(0),
+                data.get("names").and_then(|v| v.as_str()).unwrap_or("")
+            )),
+            gen::event::SKILL_INVOKED => {
+                let name = data.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                if let Some(error) = data.get("error").and_then(|v| v.as_str()) {
+                    Some(format!("! /{name}: {error}"))
+                } else {
+                    let args = data.get("args").and_then(|v| v.as_str()).unwrap_or("");
+                    Some(format!(
+                        "· /{name} {args} ({} tokens from {})",
+                        data.get("tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+                        data.get("source").and_then(|v| v.as_str()).unwrap_or("?")
+                    ))
+                }
+            }
             gen::event::HOOK_FIRED => {
                 let id = data.get("hook_id").and_then(|v| v.as_str()).unwrap_or("?");
                 let fired = data.get("event").and_then(|v| v.as_str()).unwrap_or("?");
@@ -324,6 +342,20 @@ mod tests {
         let lines = client.submit("go").unwrap();
         assert!(lines[0].starts_with("! approval required (out_of_bounds)"));
         assert_eq!(client.pending_approval(), Some("appr-1"));
+    }
+
+    #[test]
+    fn a_command_invocation_and_an_unknown_one_are_both_visible() {
+        let fake = Fake::with(vec![
+            event(1, "skill.invoked", json!({"name": "review", "source": "/w/.loongagent/commands/review.md", "args": "HEAD~1", "tokens": 120})),
+            event(2, "skill.invoked", json!({"name": "reveiw", "source": "<none>", "args": "", "tokens": 0, "error": "no skill named \"reveiw\"; /help lists what exists"})),
+            response(3, json!({"turn_id": 1, "accepted": true})),
+        ]);
+        let mut client = Client::new(fake, "s-1");
+        let lines = client.submit("/review HEAD~1").unwrap();
+        assert!(lines[0].contains("/review HEAD~1"), "{}", lines[0]);
+        assert!(lines[0].contains("120 tokens"), "{}", lines[0]);
+        assert!(lines[1].starts_with("! /reveiw"), "{}", lines[1]);
     }
 
     #[test]

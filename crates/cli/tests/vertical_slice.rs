@@ -151,8 +151,16 @@ fn a_tool_runs_inside_the_workspace_and_the_log_is_the_same_truth() {
     let written = std::fs::read_to_string(t.path().join("demo.txt")).unwrap();
     assert!(written.contains("vertical slice"));
 
-    // What the client saw is what the log holds: stream == truth.
-    assert_eq!(logged_kinds(t.path()), seen);
+    // What the client saw is what the log holds: the streamed events are exactly
+    // the tail of the log (the session's earlier opening events were streamed to
+    // whoever attached before this turn).
+    let logged = logged_kinds(t.path());
+    assert!(logged.len() >= seen.len());
+    assert_eq!(
+        &logged[logged.len() - seen.len()..],
+        &seen[..],
+        "stream == truth"
+    );
     for line in std::fs::read_to_string(t.path().join("session.jsonl")).unwrap().lines() {
         let envelope: Value = serde_json::from_str(line).unwrap();
         assert!(envelope["ignorable"].is_boolean(), "every event carries the envelope");

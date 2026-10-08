@@ -304,7 +304,39 @@ name = "compaction.applied"
 payload = "CompactionApplied"
 ignorable = false
 
+[[types]]
+name = "SkillsLoaded"
+kind = "struct"
+doc = "What the workspace offered as skills/commands (T-18). Names and descriptions enter context; bodies do not."
+fields = [
+  { name = "count", type = "u64" },
+  { name = "tokens", type = "u64", doc = "size of the catalogue that entered context" },
+  { name = "names", type = "string" },
+]
+
+[[types]]
+name = "SkillInvoked"
+kind = "struct"
+doc = "A skill or /command was invoked. The body became the prompt, and this names the file it came from."
+fields = [
+  { name = "name", type = "string" },
+  { name = "source", type = "string" },
+  { name = "args", type = "string" },
+  { name = "tokens", type = "u64" },
+  { name = "error", type = "string", optional = true, doc = "set when no such skill exists" },
+]
+
 [[events]]
 name = "hook.fired"
 payload = "HookFired"
+ignorable = false
+
+[[events]]
+name = "skills.loaded"
+payload = "SkillsLoaded"
+ignorable = false
+
+[[events]]
+name = "skill.invoked"
+payload = "SkillInvoked"
 ignorable = false

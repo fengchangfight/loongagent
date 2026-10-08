@@ -257,10 +257,18 @@ mod tests {
             Kernel::create(t.0.join("s.jsonl"), KernelConfig::new(&t.0), Box::new(model)).unwrap();
         let mut server = Server::new(kernel, "s-local");
         let out = lines_of(&mut server, &attach_line());
-        assert_eq!(out.len(), 1, "attach streams no events");
-        assert_eq!(out[0]["result"]["session_id"], "s-local");
-        assert_eq!(out[0]["result"]["schema_version"], gen::SCHEMA_VERSION);
-        assert_eq!(out[0]["result"]["existing_events"], 0);
+        // Attaching streams the session's opening events (the skill catalogue),
+        // then answers.
+        let response = out.iter().find(|line| line.get("result").is_some()).expect("a response");
+        assert_eq!(response["result"]["session_id"], "s-local");
+        assert_eq!(response["result"]["schema_version"], gen::SCHEMA_VERSION);
+        assert_eq!(out.last().unwrap(), response, "the response comes last");
+        let events: Vec<&str> = out
+            .iter()
+            .filter(|line| line["method"] == "event")
+            .map(|line| line["params"]["kind"].as_str().unwrap_or(""))
+            .collect();
+        assert_eq!(events, vec!["skills.loaded"], "the opening event, and only it");
     }
 
     #[test]
@@ -286,6 +294,9 @@ mod tests {
         assert_eq!(
             kinds,
             vec![
+                // The session's opening event streams to whoever attaches, then the
+                // turn's own events in order.
+                "skills.loaded",
                 "message.appended",
                 "cost.recorded",
                 "message.appended",
@@ -370,7 +381,9 @@ mod tests {
         )
         .unwrap();
         let mut server = Server::new(kernel, "s-hooks");
-        assert_eq!(lines_of(&mut server, &attach_line())[0]["result"]["session_id"], "s-hooks");
+        let attached = lines_of(&mut server, &attach_line());
+        let response = attached.iter().find(|line| line.get("result").is_some()).unwrap();
+        assert_eq!(response["result"]["session_id"], "s-hooks");
 
         let out = lines_of(
             &mut server,

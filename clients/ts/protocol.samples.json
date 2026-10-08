@@ -92,6 +92,18 @@
       "code": 1,
       "message": "<string>",
       "data": {}
+    },
+    "SkillsLoaded": {
+      "count": 1,
+      "tokens": 1,
+      "names": "<string>"
+    },
+    "SkillInvoked": {
+      "name": "<string>",
+      "source": "<string>",
+      "args": "<string>",
+      "tokens": 1,
+      "error": "<string>"
     }
   },
   "methods": [
@@ -155,6 +167,16 @@
     {
       "name": "hook.fired",
       "payload": "HookFired",
+      "ignorable": false
+    },
+    {
+      "name": "skills.loaded",
+      "payload": "SkillsLoaded",
+      "ignorable": false
+    },
+    {
+      "name": "skill.invoked",
+      "payload": "SkillInvoked",
       "ignorable": false
     }
   ]

@@ -148,6 +148,24 @@ export interface RpcError {
   data?: Json;
 }
 
+/** What the workspace offered as skills/commands (T-18). Names and descriptions enter context; bodies do not. */
+export interface SkillsLoaded {
+  count: number;
+  /** size of the catalogue that entered context */
+  tokens: number;
+  names: string;
+}
+
+/** A skill or /command was invoked. The body became the prompt, and this names the file it came from. */
+export interface SkillInvoked {
+  name: string;
+  source: string;
+  args: string;
+  tokens: number;
+  /** set when no such skill exists */
+  error?: string;
+}
+
 export const METHODS = {
   sessionAttach: "session.attach",
   promptSubmit: "prompt.submit",
@@ -164,6 +182,8 @@ export const EVENTS = {
   costRecorded: "cost.recorded",
   compactionApplied: "compaction.applied",
   hookFired: "hook.fired",
+  skillsLoaded: "skills.loaded",
+  skillInvoked: "skill.invoked",
 } as const;
 
 export type MethodName = (typeof METHODS)[keyof typeof METHODS];

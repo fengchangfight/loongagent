@@ -93,6 +93,16 @@ fn roundtrip_rpc_error() {
 }
 
 #[test]
+fn roundtrip_skills_loaded() {
+    roundtrip::<g::SkillsLoaded>(r#"{"count": 1,"tokens": 1,"names": "<string>"}"#);
+}
+
+#[test]
+fn roundtrip_skill_invoked() {
+    roundtrip::<g::SkillInvoked>(r#"{"name": "<string>","source": "<string>","args": "<string>","tokens": 1,"error": "<string>"}"#);
+}
+
+#[test]
 fn declared_events_match_the_envelope_table() {
     assert_eq!(g::is_ignorable_event("message.appended"), Some(false));
     assert_eq!(g::is_ignorable_event("tool.call"), Some(false));
@@ -103,6 +113,8 @@ fn declared_events_match_the_envelope_table() {
     assert_eq!(g::is_ignorable_event("cost.recorded"), Some(false));
     assert_eq!(g::is_ignorable_event("compaction.applied"), Some(false));
     assert_eq!(g::is_ignorable_event("hook.fired"), Some(false));
+    assert_eq!(g::is_ignorable_event("skills.loaded"), Some(false));
+    assert_eq!(g::is_ignorable_event("skill.invoked"), Some(false));
     assert_eq!(g::is_ignorable_event("not.a.real.event"), None);
 }
 
@@ -117,4 +129,6 @@ fn every_event_payload_roundtrips() {
     roundtrip::<g::CostRecorded>(r#"{"profile": "<string>","tokens_in": 1,"tokens_out": 1,"usd_micros": 1}"#);
     roundtrip::<g::CompactionApplied>(r#"{"tokens_before": 1,"tokens_after": 1,"kept_tokens": 1,"cleared_tool_outputs": 1,"dropped_messages": 1,"summary": "<string>"}"#);
     roundtrip::<g::HookFired>(r#"{"event": "<string>","hook_id": "<string>","kind": "<string>","verdict": "allow","reason": "<string>","duration_ms": 1,"failed": true}"#);
+    roundtrip::<g::SkillsLoaded>(r#"{"count": 1,"tokens": 1,"names": "<string>"}"#);
+    roundtrip::<g::SkillInvoked>(r#"{"name": "<string>","source": "<string>","args": "<string>","tokens": 1,"error": "<string>"}"#);
 }

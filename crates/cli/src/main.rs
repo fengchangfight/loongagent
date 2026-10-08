@@ -43,6 +43,7 @@ MODELS (provider doubles, for a first run without keys):
                  LOONGAGENT_MODEL / LOONGAGENT_API_KEY as needed
 
   loongagent sandbox self-test [--cwd DIR]   prove the OS boundary actually denies
+  loongagent skills list       [--cwd DIR]   show the skills and commands available here
   loongagent hooks list        [--cwd DIR]   show the effective hook set and its trust
   loongagent hooks trust       [--cwd DIR]   trust the current hook bytes (per repository)
   loongagent mcp list          [--cwd DIR]   show the configured MCP servers and their trust
@@ -157,6 +158,10 @@ fn run() -> Result<(), String> {
             Some("probe") => std::process::exit(loong_sandbox::sandbox::probe_main()),
             _ => Err(format!("sandbox self-test | probe\n\n{USAGE}")),
         },
+        "skills" => match rest.first().map(String::as_str) {
+            Some("list") => skills_list(Args::parse(&rest[1..])?),
+            _ => Err(format!("skills list\n\n{USAGE}")),
+        },
         "hooks" => match rest.first().map(String::as_str) {
             Some("list") => hooks_list(Args::parse(&rest[1..])?),
             Some("trust") => hooks_trust(Args::parse(&rest[1..])?),
@@ -210,6 +215,12 @@ fn serve(args: Args) -> Result<(), String> {
     match loong_mcp::McpSet::load(&args.cwd) {
         Ok(set) => eprintln!("[mcp]   {}", set.summary()),
         Err(e) => return Err(format!("mcp.toml is broken: {e}")),
+    }
+    match loong_skills::SkillSet::load(&args.cwd) {
+        Ok(set) => {
+            eprintln!("[skills] {} available: {}", set.skills.len(), set.names().join(", "))
+        }
+        Err(e) => return Err(format!("a skill is broken: {e}")),
     }
     if let Ok(exe) = std::env::current_exe() {
         match loong_sandbox::sandbox::self_test(&exe, &args.cwd).result {
@@ -484,6 +495,30 @@ fn mcp_trust(args: Args) -> Result<(), String> {
     Ok(())
 }
 
+/// Show what a `/name` in this workspace resolves to.
+fn skills_list(args: Args) -> Result<(), String> {
+    let set = loong_skills::SkillSet::load(&args.cwd).map_err(|e| e.to_string())?;
+    println!("catalogue (this is what enters context):");
+    for line in set.catalogue().lines() {
+        println!("  {line}");
+    }
+    println!();
+    for skill in &set.skills {
+        let origin = if skill.builtin {
+            "<builtin>".to_string()
+        } else {
+            skill.source.display().to_string()
+        };
+        println!(
+            "  /{:<16} {:>5} tokens  {}",
+            skill.name,
+            loong_skills::estimate_tokens(&skill.body),
+            origin
+        );
+    }
+    Ok(())
+}
+
 /// Show what would run, and whether it is trusted to.
 fn hooks_list(args: Args) -> Result<(), String> {
     let set = loong_hooks::HookSet::load(&args.cwd).map_err(|e| e.to_string())?;
@@ -572,7 +607,7 @@ fn headless(args: Args, prompt: &str) -> Result<(), String> {
         println!("{line}");
     }
     if !client.last_accepted() {
-        eprintln!("the turn was refused by a hook; see the hook.fired event above");
+        eprintln!("the turn was refused; the reason is in the event above");
         std::process::exit(3);
     }
     if let Some(request_id) = client.pending_approval().map(|s| s.to_string()) {

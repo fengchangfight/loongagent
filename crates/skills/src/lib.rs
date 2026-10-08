@@ -1,0 +1,619 @@
+//! Skills and commands — **one concept** (T-18, T-16 merged in 2026-10-05).
+//!
+//! A skill is a markdown file with frontmatter. Its *description* is what enters
+//! context; its *body* loads only when it is invoked. That is ADR-0006's
+//! progressive disclosure applied to instructions: a workspace can carry twenty
+//! workflows and pay for twenty lines, not twenty pages.
+//!
+//! Two shapes are accepted, because "commands merged into skills" means the older
+//! spelling still works:
+//!
+//! ```text
+//! .loongagent/skills/<name>/SKILL.md
+//! .loongagent/commands/<name>.md
+//! ```
+//!
+//! Invocation is `/name arguments`, and the body is a template: `$ARGUMENTS` is
+//! everything after the name, `$1`…`$9` are individual arguments. If a body uses
+//! none of them, the arguments are appended rather than dropped — silently
+//! discarding what the user typed would be the worst option.
+//!
+//! **On trust:** skills are content, not code; nothing here executes. But their
+//! descriptions enter every session's context, so the catalogue is an injection
+//! surface, and it is treated as one: the kernel records what was loaded
+//! (`skills.loaded`) and every invocation names the file it came from
+//! (`skill.invoked`). A surprising instruction is therefore traceable to a path in
+//! the log rather than being an anonymous part of the prompt.
+
+use loong_tools::{ExecContext, Tool, ToolError};
+use loong_schema::generated::{ActionClass, Json};
+use serde_json::json;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+pub const SKILLS_DIR: &str = "skills";
+pub const COMMANDS_DIR: &str = "commands";
+pub const SKILL_FILE: &str = "SKILL.md";
+
+#[derive(Debug)]
+pub enum SkillError {
+    Io(String),
+    Invalid(String),
+}
+
+impl std::fmt::Display for SkillError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SkillError::Io(m) => write!(f, "{m}"),
+            SkillError::Invalid(m) => write!(f, "skill: {m}"),
+        }
+    }
+}
+
+impl std::error::Error for SkillError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Skill {
+    pub name: String,
+    pub description: String,
+    pub argument_hint: Option<String>,
+    /// Recorded for a later phase (per-skill tool allowlists); not enforced yet.
+    pub allowed_tools: Option<String>,
+    pub body: String,
+    pub source: PathBuf,
+    pub builtin: bool,
+}
+
+impl Skill {
+    /// What the model is shown: a name, a description and the invocation syntax.
+    /// Never the body.
+    pub fn catalogue_line(&self) -> String {
+        let hint = match &self.argument_hint {
+            Some(hint) => format!(" {hint}"),
+            None => String::new(),
+        };
+        let origin = if self.builtin {
+            String::new()
+        } else {
+            match (self.source.parent(), self.source.file_name()) {
+                (Some(dir), Some(file)) if file == SKILL_FILE => {
+                    format!("  [{}]", dir.display())
+                }
+                _ => format!("  [{}]", self.source.display()),
+            }
+        };
+        format!("/{}{} — {}{}", self.name, hint, self.description, origin)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Expansion {
+    pub name: String,
+    pub prompt: String,
+    pub source: String,
+    pub builtin: bool,
+    /// Rough size of what is about to enter context.
+    pub tokens: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SkillSet {
+    pub workspace: PathBuf,
+    pub skills: Vec<Skill>,
+}
+
+impl SkillSet {
+    /// Discover every skill in the workspace. A malformed skill is an error, not a
+    /// silently skipped file: a workflow that stopped working should say so.
+    pub fn load(workspace: impl AsRef<Path>) -> Result<Self, SkillError> {
+        let workspace = workspace.as_ref().to_path_buf();
+        let root = workspace.join(".loongagent");
+        let mut skills: Vec<Skill> = Vec::new();
+
+        // `<name>/SKILL.md`
+        let skills_dir = root.join(SKILLS_DIR);
+        if skills_dir.is_dir() {
+            let mut entries: Vec<_> = std::fs::read_dir(&skills_dir)
+                .map_err(|e| SkillError::Io(format!("{}: {e}", skills_dir.display())))?
+                .filter_map(|e| e.ok())
+                .collect();
+            entries.sort_by_key(|e| e.file_name());
+            for entry in entries {
+                let dir = entry.path();
+                if !dir.is_dir() {
+                    continue;
+                }
+                let file = dir.join(SKILL_FILE);
+                if !file.is_file() {
+                    continue;
+                }
+                let fallback = dir.file_name().map(|n| n.to_string_lossy().to_string());
+                skills.push(read_skill(&file, fallback.as_deref())?);
+            }
+        }
+
+        // `<name>.md` — the older "commands" spelling of the same concept.
+        let commands_dir = root.join(COMMANDS_DIR);
+        if commands_dir.is_dir() {
+            let mut entries: Vec<_> = std::fs::read_dir(&commands_dir)
+                .map_err(|e| SkillError::Io(format!("{}: {e}", commands_dir.display())))?
+                .filter_map(|e| e.ok())
+                .collect();
+            entries.sort_by_key(|e| e.file_name());
+            for entry in entries {
+                let file = entry.path();
+                if file.extension().map(|e| e != "md").unwrap_or(true) {
+                    continue;
+                }
+                let fallback = file.file_stem().map(|n| n.to_string_lossy().to_string());
+                skills.push(read_skill(&file, fallback.as_deref())?);
+            }
+        }
+
+        // A duplicate name is a configuration bug, and picking one at random would
+        // make `/name` depend on directory order.
+        let mut seen: BTreeMap<String, PathBuf> = BTreeMap::new();
+        for skill in &skills {
+            if let Some(first) = seen.get(&skill.name) {
+                return Err(SkillError::Invalid(format!(
+                    "{:?} is defined twice: {} and {}",
+                    skill.name,
+                    first.display(),
+                    skill.source.display()
+                )));
+            }
+            seen.insert(skill.name.clone(), skill.source.clone());
+        }
+
+        let mut set = SkillSet { workspace, skills };
+        set.skills.push(set.help_skill());
+        set.skills.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(set)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.skills.iter().all(|s| s.builtin)
+    }
+
+    pub fn get(&self, name: &str) -> Option<&Skill> {
+        self.skills.iter().find(|s| s.name == name)
+    }
+
+    pub fn names(&self) -> Vec<&str> {
+        self.skills.iter().map(|s| s.name.as_str()).collect()
+    }
+
+    /// The description-only view that goes into context.
+    pub fn catalogue(&self) -> String {
+        self.skills
+            .iter()
+            .map(|s| s.catalogue_line())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// `/name args` → the prompt to send, or `None` when no such skill exists.
+    pub fn invoke(&self, name: &str, args: &str) -> Option<Expansion> {
+        let skill = self.get(name)?;
+        let prompt = substitute(&skill.body, args);
+        Some(Expansion {
+            name: skill.name.clone(),
+            prompt,
+            source: if skill.builtin {
+                "<builtin>".to_string()
+            } else {
+                skill.source.display().to_string()
+            },
+            builtin: skill.builtin,
+            tokens: estimate_tokens(&skill.body),
+        })
+    }
+
+    fn help_skill(&self) -> Skill {
+        let mut body = String::from(
+            "The skills and commands available in this workspace are:\n\n",
+        );
+        for skill in self.skills.iter() {
+            body.push_str(&format!("- {}\n", skill.catalogue_line()));
+        }
+        // `/help` describes itself too: a listing that omits itself is a riddle.
+        body.push_str("- /help — list the skills and commands available here\n");
+        body.push_str(
+            "\nAsk the user which one to run, or run one yourself when it clearly fits the \
+             request. Arguments are passed after the name, e.g. `/code-review HEAD~1`.\n",
+        );
+        Skill {
+            name: "help".to_string(),
+            description: "list the skills and commands available here".to_string(),
+            argument_hint: None,
+            allowed_tools: None,
+            body,
+            source: PathBuf::from("<builtin>"),
+            builtin: true,
+        }
+    }
+}
+
+/// `/name the rest` → `("name", "the rest")`.
+///
+/// Deliberately strict about what counts as an invocation: `/etc/hosts is wrong`
+/// is a sentence about a path, not a command, and treating it as one would make a
+/// chat message fail for looking like a filename.
+pub fn parse_invocation(text: &str) -> Option<(String, String)> {
+    let rest = text.trim().strip_prefix('/')?;
+    let (name, args) = match rest.split_once(char::is_whitespace) {
+        Some((name, args)) => (name, args.trim()),
+        None => (rest, ""),
+    };
+    let looks_like_a_command = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    looks_like_a_command.then(|| (name.to_string(), args.to_string()))
+}
+
+fn substitute(body: &str, args: &str) -> String {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let mut used_placeholder = false;
+    let mut out = String::with_capacity(body.len() + args.len());
+    let mut chars = body.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '$' {
+            out.push(c);
+            continue;
+        }
+        if chars.peek() == Some(&'A') {
+            let mut word = String::new();
+            while let Some(&next) = chars.peek() {
+                if next.is_ascii_uppercase() {
+                    word.push(next);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            if word == "ARGUMENTS" {
+                out.push_str(args);
+                used_placeholder = true;
+                continue;
+            }
+            out.push('$');
+            out.push_str(&word);
+            continue;
+        }
+        if let Some(&digit) = chars.peek() {
+            if digit.is_ascii_digit() && digit != '0' {
+                chars.next();
+                let index = digit.to_digit(10).unwrap() as usize - 1;
+                out.push_str(parts.get(index).copied().unwrap_or(""));
+                used_placeholder = true;
+                continue;
+            }
+        }
+        out.push('$');
+    }
+    if !used_placeholder && !args.is_empty() {
+        out.push_str("\n\nArguments: ");
+        out.push_str(args);
+    }
+    out
+}
+
+fn read_skill(path: &Path, fallback_name: Option<&str>) -> Result<Skill, SkillError> {
+    let text =
+        std::fs::read_to_string(path).map_err(|e| SkillError::Io(format!("{}: {e}", path.display())))?;
+    let (front, body) = split_frontmatter(&text)
+        .ok_or_else(|| SkillError::Invalid(format!("{}: no `---` frontmatter block", path.display())))?;
+    let fields = parse_frontmatter(front)
+        .map_err(|e| SkillError::Invalid(format!("{}: {e}", path.display())))?;
+
+    let name = fields
+        .get("name")
+        .cloned()
+        .or_else(|| fallback_name.map(|n| n.to_string()))
+        .ok_or_else(|| SkillError::Invalid(format!("{}: no name and no file name", path.display())))?;
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(SkillError::Invalid(format!(
+            "{}: {name:?} is not a usable name (letters, digits, - and _ only)",
+            path.display()
+        )));
+    }
+    let description = fields.get("description").cloned().ok_or_else(|| {
+        SkillError::Invalid(format!(
+            "{}: frontmatter needs a `description` — it is the only part that enters context \
+             before invocation",
+            path.display()
+        ))
+    })?;
+
+    Ok(Skill {
+        name,
+        description,
+        argument_hint: fields.get("argument-hint").cloned(),
+        allowed_tools: fields.get("allowed-tools").cloned(),
+        body: body.to_string(),
+        source: path.to_path_buf(),
+        builtin: false,
+    })
+}
+
+fn split_frontmatter(text: &str) -> Option<(&str, &str)> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let rest = text.trim_start_matches(['\n', '\r']);
+    let rest = rest.strip_prefix("---")?;
+    let rest = rest.trim_start_matches(['\n', '\r']);
+    let end = rest.find("\n---")?;
+    let front = &rest[..end];
+    let after = &rest[end + 4..];
+    let body = after.trim_start_matches(['\n', '\r']);
+    Some((front, body))
+}
+
+fn parse_frontmatter(front: &str) -> Result<BTreeMap<String, String>, String> {
+    let mut fields = BTreeMap::new();
+    for (index, line) in front.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (key, value) = line
+            .split_once(':')
+            .ok_or_else(|| format!("line {}: {line:?} is not `key: value`", index + 1))?;
+        let key = key.trim().to_lowercase();
+        let value = value.trim().trim_matches(['"', '\'']).to_string();
+        fields.insert(key, value);
+    }
+    Ok(fields)
+}
+
+pub fn estimate_tokens(text: &str) -> u64 {
+    (text.chars().count() as u64 + 3) / 4
+}
+
+/// The model-invoked path: it sees the catalogue, and asks for a body by name.
+pub struct SkillTool {
+    skills: std::sync::Arc<SkillSet>,
+}
+
+impl SkillTool {
+    pub fn new(skills: std::sync::Arc<SkillSet>) -> Self {
+        Self { skills }
+    }
+}
+
+impl Tool for SkillTool {
+    fn name(&self) -> &str {
+        "skill"
+    }
+    fn description(&self) -> &str {
+        "Load the full instructions of a skill or command from this workspace by name. The \
+         catalogue of available names is in the system prompt; this returns the body."
+    }
+    fn parameters(&self) -> Json {
+        json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "a name from the catalogue, without the leading /"}
+            },
+            "required": ["name"]
+        })
+    }
+    /// Reading a local file: no side effects, nothing outside the workspace.
+    fn action_class(&self, _args: &Json, _cwd: &Path) -> ActionClass {
+        ActionClass::Investigate
+    }
+    fn execute(&self, args: &Json, _ctx: &ExecContext<'_>) -> Result<String, ToolError> {
+        let name = args
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::Refused("missing string argument \"name\"".into()))?;
+        match self.skills.get(name) {
+            Some(skill) => Ok(format!(
+                "# Skill: {} (from {})\n\n{}",
+                skill.name,
+                if skill.builtin { "<builtin>".to_string() } else { skill.source.display().to_string() },
+                skill.body
+            )),
+            None => Err(ToolError::Refused(format!(
+                "no skill named {name:?}; available: {}",
+                self.skills.names().join(", ")
+            ))),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static N: AtomicU64 = AtomicU64::new(0);
+
+    fn workspace() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "loong-skills-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::SeqCst)
+        ));
+        std::fs::create_dir_all(dir.join(".loongagent/skills")).unwrap();
+        std::fs::create_dir_all(dir.join(".loongagent/commands")).unwrap();
+        dir
+    }
+
+    fn skill_file(ws: &Path, name: &str, body: &str) -> PathBuf {
+        let dir = ws.join(".loongagent/skills").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(SKILL_FILE);
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    fn command_file(ws: &Path, name: &str, body: &str) -> PathBuf {
+        let path = ws.join(".loongagent/commands").join(format!("{name}.md"));
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_skill_is_discovered_with_its_description_and_body() {
+        let ws = workspace();
+        skill_file(
+            &ws,
+            "code-review",
+            "---\nname: code-review\ndescription: Review a diff for real bugs\nargument-hint: <ref>\n---\n\nLook at $ARGUMENTS and report only real bugs.\n",
+        );
+        let set = SkillSet::load(&ws).unwrap();
+        let skill = set.get("code-review").expect("discovered");
+        assert_eq!(skill.description, "Review a diff for real bugs");
+        assert_eq!(skill.argument_hint.as_deref(), Some("<ref>"));
+        assert!(skill.body.starts_with("Look at $ARGUMENTS"));
+        assert!(!skill.builtin);
+    }
+
+    #[test]
+    fn the_older_commands_shape_is_the_same_concept() {
+        let ws = workspace();
+        command_file(&ws, "ship", "---\ndescription: Ship the current branch\n---\n\nShip it.\n");
+        let set = SkillSet::load(&ws).unwrap();
+        assert!(set.get("ship").is_some(), "names come from the file stem: {:?}", set.names());
+    }
+
+    #[test]
+    fn the_catalogue_carries_descriptions_and_never_bodies() {
+        let ws = workspace();
+        skill_file(
+            &ws,
+            "release",
+            "---\ndescription: Cut a release\n---\n\nSECRET-BODY-DO-NOT-LEAK\n",
+        );
+        let set = SkillSet::load(&ws).unwrap();
+        let catalogue = set.catalogue();
+        assert!(catalogue.contains("/release — Cut a release"), "{catalogue}");
+        assert!(!catalogue.contains("SECRET-BODY"), "the body stays out of context: {catalogue}");
+        // The source is named, so a surprising description is traceable.
+        assert!(catalogue.contains("skills/release"), "{catalogue}");
+    }
+
+    #[test]
+    fn help_is_always_available_and_lists_what_exists() {
+        let ws = workspace();
+        skill_file(&ws, "review", "---\ndescription: Review something\n---\nbody\n");
+        let set = SkillSet::load(&ws).unwrap();
+        let help = set.invoke("help", "").expect("/help works");
+        assert!(help.builtin);
+        assert!(help.prompt.contains("/review — Review something"), "{}", help.prompt);
+        assert!(help.prompt.contains("/help"), "{}", help.prompt);
+    }
+
+    #[test]
+    fn arguments_substitute_all_forms_and_are_never_dropped() {
+        let ws = workspace();
+        skill_file(
+            &ws,
+            "all",
+            "---\ndescription: d\n---\nARGS=[$ARGUMENTS]\n",
+        );
+        skill_file(&ws, "positional", "---\ndescription: d\n---\nfirst=$1 second=$2 third=$3\n");
+        skill_file(&ws, "none", "---\ndescription: d\n---\nNo placeholder here.\n");
+        let set = SkillSet::load(&ws).unwrap();
+
+        assert!(set.invoke("all", "one two").unwrap().prompt.contains("ARGS=[one two]"));
+        let positional = set.invoke("positional", "a b").unwrap();
+        assert!(positional.prompt.contains("first=a second=b third="), "{}", positional.prompt);
+        let none = set.invoke("none", "a b").unwrap();
+        assert!(none.prompt.ends_with("Arguments: a b"), "{}", none.prompt);
+        // With no arguments, nothing is appended.
+        assert!(!set.invoke("none", "").unwrap().prompt.contains("Arguments:"));
+        // A lone `$` is not a placeholder and must survive.
+        skill_file(&ws, "dollar", "---\ndescription: d\n---\ncost is 5$ today\n");
+        let set = SkillSet::load(&ws).unwrap();
+        assert!(set.invoke("dollar", "").unwrap().prompt.contains("5$ today"));
+    }
+
+    #[test]
+    fn an_unknown_name_is_none_not_a_guess() {
+        let ws = workspace();
+        let set = SkillSet::load(&ws).unwrap();
+        assert!(set.invoke("nope", "").is_none());
+    }
+
+    #[test]
+    fn invocation_syntax_is_parsed_strictly() {
+        assert_eq!(parse_invocation("/review HEAD~1"), Some(("review".into(), "HEAD~1".into())));
+        assert_eq!(parse_invocation("/help"), Some(("help".into(), String::new())));
+        assert_eq!(parse_invocation("  /a-b_c  x  "), Some(("a-b_c".into(), "x".into())));
+        assert_eq!(parse_invocation("no slash"), None);
+        assert_eq!(parse_invocation("/"), None);
+        // A sentence about a path is a sentence, not a command.
+        assert_eq!(parse_invocation("/etc/hosts is misconfigured"), None);
+        assert_eq!(parse_invocation("/usr/bin/env has a bug"), None);
+    }
+
+    #[test]
+    fn broken_skills_are_loud_and_specific() {
+        let ws = workspace();
+        skill_file(&ws, "no-front", "just a body\n");
+        assert!(SkillSet::load(&ws).unwrap_err().to_string().contains("frontmatter"));
+
+        let ws = workspace();
+        skill_file(&ws, "no-description", "---\nname: x\n---\nbody\n");
+        let err = SkillSet::load(&ws).unwrap_err().to_string();
+        assert!(err.contains("description"), "{err}");
+
+        let ws = workspace();
+        skill_file(&ws, "bad-name", "---\nname: has space\ndescription: d\n---\nbody\n");
+        assert!(SkillSet::load(&ws).unwrap_err().to_string().contains("not a usable name"));
+
+        let ws = workspace();
+        skill_file(&ws, "dup", "---\nname: same\ndescription: one\n---\nbody\n");
+        command_file(&ws, "other", "---\nname: same\ndescription: two\n---\nbody\n");
+        let err = SkillSet::load(&ws).unwrap_err().to_string();
+        assert!(err.contains("defined twice"), "{err}");
+    }
+
+    #[test]
+    fn a_quoted_or_spaced_value_survives_the_frontmatter() {
+        let ws = workspace();
+        skill_file(
+            &ws,
+            "quoted",
+            "---\nname: \"quoted\"\ndescription: 'A description: with a colon'\n---\nbody\n",
+        );
+        let set = SkillSet::load(&ws).unwrap();
+        let skill = set.get("quoted").unwrap();
+        assert_eq!(skill.description, "A description: with a colon");
+    }
+
+    #[test]
+    fn the_model_can_load_a_body_by_name_and_gets_refused_for_a_bad_one() {
+        let ws = workspace();
+        skill_file(&ws, "deploy", "---\ndescription: Deploy it\n---\nStep one: breathe.\n");
+        let skills = std::sync::Arc::new(SkillSet::load(&ws).unwrap());
+        let tool = SkillTool::new(skills);
+        let ctx = ExecContext::new(&ws, &loong_tools::NoConfinement);
+
+        assert_eq!(tool.name(), "skill");
+        assert_eq!(tool.action_class(&json!({}), &ws), ActionClass::Investigate);
+        let output = tool.execute(&json!({"name": "deploy"}), &ctx).unwrap();
+        assert!(output.contains("Step one: breathe."), "{output}");
+        assert!(output.contains("skills/deploy"), "the source is named: {output}");
+
+        let err = tool.execute(&json!({"name": "absent"}), &ctx).unwrap_err().to_string();
+        assert!(err.contains("no skill named"), "{err}");
+        assert!(err.contains("deploy"), "the refusal lists what exists: {err}");
+        assert!(matches!(tool.execute(&json!({}), &ctx), Err(ToolError::Refused(_))));
+    }
+
+    #[test]
+    fn an_empty_workspace_still_offers_help() {
+        let ws = workspace();
+        let set = SkillSet::load(&ws).unwrap();
+        assert!(set.is_empty(), "only built-ins");
+        assert_eq!(set.names(), vec!["help"]);
+        assert!(set.catalogue().contains("/help"));
+    }
+}

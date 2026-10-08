@@ -55,13 +55,29 @@ impl Server {
     /// event notifications first, then exactly one response for a request.
     /// Pure enough to test without any transport at all.
     pub fn handle_line(&mut self, line: &str) -> Vec<String> {
+        self.handle_line_streaming(line, &mut |_| {})
+    }
+
+    /// As [`Server::handle_line`], but handing the model's **deltas** to `sink` as
+    /// they arrive instead of returning them at the end.
+    ///
+    /// A delta is a `model.delta` notification: it is written to the client
+    /// immediately (so the operator sees the answer being written) and nowhere else
+    /// — the event stream returned by this call, and the log behind it, carry only
+    /// the finished message. That asymmetry is deliberate: the log stays the truth,
+    /// and a client that misses a delta has missed nothing.
+    pub fn handle_line_streaming(
+        &mut self,
+        line: &str,
+        sink: &mut dyn FnMut(String),
+    ) -> Vec<String> {
         match Request::parse(line) {
-            Ok(request) => self.dispatch(request),
+            Ok(request) => self.dispatch(request, sink),
             Err(response) => vec![response.to_line()],
         }
     }
 
-    fn dispatch(&mut self, request: Request) -> Vec<String> {
+    fn dispatch(&mut self, request: Request, sink: &mut dyn FnMut(String)) -> Vec<String> {
         let id = request.id.clone().unwrap_or(Value::Null);
         match request.method.as_str() {
             gen::method::SESSION_ATTACH => {
@@ -86,7 +102,14 @@ impl Server {
                     return vec![bad];
                 }
                 self.turns += 1;
-                match self.kernel.submit(&params.text) {
+                let turn_id = self.turns;
+                match self.kernel.submit_with(&params.text, &mut |piece| {
+                    let notification = Notification::new(
+                        gen::notification::MODEL_DELTA,
+                        serde_json::json!({"turn_id": turn_id, "text": piece}),
+                    );
+                    sink(notification.to_line());
+                }) {
                     Ok(outcome) => {
                         // A `user_prompt_submit` hook can refuse the turn before
                         // the model runs; the reason travels as hook.fired events
@@ -184,7 +207,12 @@ impl Server {
             if line.trim().is_empty() {
                 continue;
             }
-            for out in self.handle_line(&line) {
+            let responses = self.handle_line_streaming(&line, &mut |delta| {
+                // Written and flushed on arrival: buffered, it would defeat the point.
+                let _ = writeln!(stdout, "{delta}");
+                let _ = stdout.flush();
+            });
+            for out in responses {
                 writeln!(stdout, "{out}")?;
             }
             stdout.flush()?;
@@ -197,7 +225,10 @@ impl Server {
 mod tests {
     use super::*;
     use loong_kernel::KernelConfig;
-    use loong_providers::{CompletionResponse, ScriptedModel, ToolCallRequest, Usage};
+    use loong_providers::{
+        CompletionRequest, CompletionResponse, Model, ModelError, ScriptedModel, ToolCallRequest,
+        Usage,
+    };
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -358,6 +389,83 @@ mod tests {
         assert!(kinds.contains(&"tool.result"));
         assert_eq!(out.last().unwrap()["result"]["accepted"], false);
         assert!(!escape.exists());
+    }
+
+    /// A model that writes its answer in pieces, the way a real one does.
+    struct StreamingModel;
+
+    impl Model for StreamingModel {
+        fn complete(&mut self, _request: &CompletionRequest) -> Result<CompletionResponse, ModelError> {
+            unreachable!("used only through its streaming path")
+        }
+        fn complete_streaming(
+            &mut self,
+            _request: &CompletionRequest,
+            on_delta: &mut dyn FnMut(&str),
+        ) -> Result<CompletionResponse, ModelError> {
+            for piece in ["the ", "answer ", "arrives"] {
+                on_delta(piece);
+            }
+            Ok(CompletionResponse {
+                text: Some("the answer arrives".to_string()),
+                tool_calls: Vec::new(),
+                usage: Usage { tokens_in: 5, tokens_out: 4 },
+            })
+        }
+    }
+
+    #[test]
+    fn deltas_are_written_as_they_arrive_and_never_enter_the_log() {
+        let t = Temp::new();
+        let kernel =
+            Kernel::create(t.0.join("s.jsonl"), KernelConfig::new(&t.0), Box::new(StreamingModel))
+                .unwrap();
+        let mut server = Server::new(kernel, "s-stream");
+        assert_eq!(lines_of(&mut server, &attach_line())[0]["method"], "event");
+
+        let mut deltas = Vec::new();
+        let out = server.handle_line_streaming(
+            &Request::new(
+                2,
+                gen::method::PROMPT_SUBMIT,
+                json!({"session_id": "s-stream", "text": "say something"}),
+            )
+            .to_line(),
+            &mut |line| deltas.push(line),
+        );
+
+        // The deltas reached the sink, in order, as `model.delta` notifications.
+        let deltas: Vec<Value> = deltas
+            .iter()
+            .map(|line| serde_json::from_str(line).expect("JSON"))
+            .collect();
+        assert_eq!(deltas.len(), 3, "{deltas:?}");
+        assert!(deltas.iter().all(|d| d["method"] == "model.delta"));
+        let pieces: Vec<&str> = deltas.iter().map(|d| d["params"]["text"].as_str().unwrap()).collect();
+        assert_eq!(pieces, vec!["the ", "answer ", "arrives"]);
+        assert_eq!(deltas[0]["params"]["turn_id"], 1);
+
+        // The returned stream (and the log) hold the finished message, not fragments.
+        let out: Vec<Value> = out
+            .iter()
+            .map(|line| serde_json::from_str(line).expect("JSON"))
+            .collect();
+        assert!(
+            out.iter().all(|line| line["method"] != "model.delta"),
+            "a delta is not part of the event stream: {out:?}"
+        );
+        let answer = out
+            .iter()
+            .filter(|line| line["method"] == "event")
+            .filter(|line| line["params"]["kind"] == "message.appended")
+            .map(|line| line["params"]["data"]["text"].as_str().unwrap_or(""))
+            .next_back()
+            .unwrap();
+        assert_eq!(answer, "the answer arrives");
+
+        let logged = std::fs::read_to_string(t.0.join("s.jsonl")).unwrap();
+        assert!(!logged.contains("model.delta"), "the log never holds a delta");
+        assert!(logged.contains("the answer arrives"));
     }
 
     #[test]

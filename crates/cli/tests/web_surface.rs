@@ -160,22 +160,40 @@ fn exchange(
     method: &str,
     params: Value,
 ) -> (Vec<Value>, Value) {
+    let (events, methods, response) = exchange_verbose(socket, id, method, params);
+    let _ = methods;
+    (events, response)
+}
+
+/// The same, but also reporting every notification method seen — which is how a
+/// test can tell a streamed answer from one delivered in a single piece.
+fn exchange_verbose(
+    socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>>,
+    id: u64,
+    method: &str,
+    params: Value,
+) -> (Vec<Value>, Vec<String>, Value) {
     socket
         .send(Message::text(
             json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}).to_string(),
         ))
         .unwrap();
     let mut events = Vec::new();
+    let mut methods = Vec::new();
     loop {
         let message = socket.read().expect("a reply");
         let text = message.into_text().unwrap().to_string();
         let value: Value = serde_json::from_str(&text).expect("JSON on the wire");
-        if value["method"] == "event" {
-            events.push(value["params"].clone());
+        if value.get("method").is_some() {
+            let method = value["method"].as_str().unwrap_or("").to_string();
+            methods.push(method.clone());
+            if method == "event" {
+                events.push(value["params"].clone());
+            }
             continue;
         }
         assert_eq!(value["id"], json!(id), "the response matches the request");
-        return (events, value);
+        return (events, methods, value);
     }
 }
 
@@ -198,13 +216,19 @@ fn a_browser_can_drive_a_session_with_a_model_behind_it() {
     let kinds: Vec<&str> = events.iter().map(|e| e["kind"].as_str().unwrap()).collect();
     assert!(kinds.contains(&"skills.loaded"), "the catalogue streams on attach: {kinds:?}");
 
-    let (events, response) = exchange(
+    let (events, methods, response) = exchange_verbose(
         &mut socket,
         2,
         "prompt.submit",
         json!({"session_id": session_id, "text": "read note.txt"}),
     );
     assert_eq!(response["result"]["accepted"], true, "{response}");
+    // The browser sees the answer *and* the fact that it was written: a delta
+    // notification reaches it before the response, while the log keeps only the
+    // finished message (asserted on the server side).
+    assert!(methods.contains(&"model.delta".to_string()), "deltas reach the browser: {methods:?}");
+    let first_delta = methods.iter().position(|m| m == "model.delta").unwrap();
+    assert_eq!(first_delta, 0, "before anything else: {methods:?}");
 
     let kinds: Vec<&str> = events.iter().map(|e| e["kind"].as_str().unwrap()).collect();
     for expected in ["message.appended", "tool.call", "policy.decided", "tool.result", "cost.recorded"] {

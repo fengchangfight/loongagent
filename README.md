@@ -44,7 +44,10 @@ TOML
 ./target/release/loongagent web --cwd ~/some/project
 ```
 
-Response streaming is not implemented: the answer appears when the turn finishes.
+Answers **stream** as the model writes them: the page, the TUI and the terminal
+all show the text arriving, and the turn's event stream carries the finished
+message as the record. A streamed fragment (`model.delta`) is a preview, never a
+log entry — a client that misses one has missed nothing.
 
 ## Three surfaces, one brain
 
@@ -93,13 +96,13 @@ under a Landlock policy that makes an escape from the workspace an `EACCES`.
 Working: the kernel loop, layered configuration, sessions and the JSONL log with a
 derived SQLite index, the ledger, compaction, permissions + Landlock, hooks (three
 kinds), MCP (tools and prompts, stdio), skills/commands, six built-in tools, and
-the three surfaces above. 271 tests.
+the three surfaces above, and streamed answers. 283 tests.
 
 Not done, and not pretending otherwise: signed org packs (so the org config layer
-is a plain admin-owned file, not tamper-resistant), response streaming, subagents,
-an LSP-backed code tool, `.gitignore` awareness in `grep`/`glob`, HTTP transport for
-MCP, multi-user sessions (one browser at a time drives the session), and a
-model-made summary for compaction.
+is a plain admin-owned file, not tamper-resistant), subagents, an LSP-backed code
+tool, `.gitignore` awareness in `grep`/`glob`, HTTP transport for MCP, multi-user
+sessions (one browser at a time drives the session), and a model-made summary for
+compaction.
 
 See [`DEVELOPMENT.md`](DEVELOPMENT.md) for the toolchain, the crate map and the
 per-area detail.

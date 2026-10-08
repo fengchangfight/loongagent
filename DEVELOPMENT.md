@@ -176,6 +176,13 @@ binary the TUI spawns as its server (used by the end-to-end test).
 - **A system prompt slot**: the first message is now a short frame plus the skill
   catalogue. It is a pinned `SystemPrompt` ledger entry, it never counts as
   compactable history, and compaction refuses to drop it.
+- **Streaming answers**: the adapter speaks Server-Sent Events (chunked replies,
+  reassembled across chunk boundaries — including tool-call arguments, which arrive
+  in fragments), and the kernel hands each fragment to a surface as a `model.delta`
+  **transient notification**: written to the client and nowhere else, because the
+  finished `message.appended` is the record. A server that ignores `stream: true`
+  and answers with plain JSON is still understood, and a model that cannot stream
+  at all falls back to the trait's default (one delta carrying the whole answer).
 - **A browser surface** (`loong-web`): `loongagent web` serves one self-contained
   page (embedded in the binary; no bundler, no CDN) and carries the *same* JSON-RPC
   lines over a WebSocket, so the browser speaks exactly what the TUI speaks. The
@@ -246,10 +253,9 @@ binary the TUI spawns as its server (used by the end-to-end test).
 
 ## What is not done yet (honest list)
 
-1. **No response streaming**: a turn arrives when it completes. TLS is wired
-   (rustls + ring + webpki roots), so a hosted provider is reachable, but cost is
-   still recorded as `usd_micros: 0` until pricing lands, and there is no
-   tokenizer (the ledger estimates tokens at ~4 chars).
+1. **Cost is not priced**: `usd_micros: 0` until pricing lands, and there is no
+   tokenizer (the ledger estimates tokens at ~4 chars). Tool-call deltas are
+   assembled but not shown live — a surface sees the call when it is complete.
 2. **Network egress is not confined** — Landlock covers the filesystem only;
    blocking egress needs seccomp or a network namespace (neither is available
    unprivileged in this container: `unshare -Urn` is refused). The `shell`

@@ -68,10 +68,25 @@ impl<T: Transport> Client<T> {
 
     /// Submit a turn; returns the lines to display (events, then the answer).
     pub fn submit(&mut self, text: &str) -> Result<Vec<String>, String> {
+        self.submit_with(text, &mut |_, _| {})
+    }
+
+    /// Submit a turn, handing every notification to `on_notification` **as it
+    /// arrives** — which is how a surface shows text being written
+    /// (`model.delta`) instead of only the finished message. The returned lines are
+    /// unchanged, so a caller that ignores the observer behaves exactly as before.
+    pub fn submit_with(
+        &mut self,
+        text: &str,
+        on_notification: &mut dyn FnMut(&str, &Value),
+    ) -> Result<Vec<String>, String> {
         let params =
             gen::PromptSubmitParams { session_id: self.session_id.clone(), text: text.to_string() };
-        let (lines, result) =
-            self.call(gen::method::PROMPT_SUBMIT, serde_json::to_value(params).unwrap())?;
+        let (lines, result) = self.call_with(
+            gen::method::PROMPT_SUBMIT,
+            serde_json::to_value(params).unwrap(),
+            on_notification,
+        )?;
         // A refused turn is a fact the surface must show, not swallow.
         self.last_accepted = result
             .get("accepted")
@@ -95,15 +110,27 @@ impl<T: Transport> Client<T> {
             scope,
             reason: reason.map(|r| r.to_string()),
         };
-        let (lines, _) =
-            self.call(gen::method::APPROVAL_RESPOND, serde_json::to_value(params).unwrap())?;
+        let (lines, _) = self.call_with(
+            gen::method::APPROVAL_RESPOND,
+            serde_json::to_value(params).unwrap(),
+            &mut |_, _| {},
+        )?;
         self.pending_approval = None;
         Ok(lines)
     }
 
-    /// Send a request and read until its response arrives, rendering every
-    /// notification on the way.
     fn call(&mut self, method: &str, params: Json) -> Result<(Vec<String>, Json), String> {
+        self.call_with(method, params, &mut |_, _| {})
+    }
+
+    /// Send a request and read until its response arrives, rendering every
+    /// notification on the way and reporting each one raw.
+    fn call_with(
+        &mut self,
+        method: &str,
+        params: Json,
+        on_notification: &mut dyn FnMut(&str, &Value),
+    ) -> Result<(Vec<String>, Json), String> {
         let id = self.next_id;
         self.next_id += 1;
         let request = Request::new(id, method, params);
@@ -126,6 +153,9 @@ impl<T: Transport> Client<T> {
                 }
             }
             if let Ok(notification) = serde_json::from_str::<Notification>(&line) {
+                // The method matters: `model.delta` carries its kind there, while an
+                // `event` carries it in `params.kind`.
+                on_notification(&notification.method, &notification.params);
                 if notification.method == loong_protocol::EVENT_NOTIFICATION {
                     if let Some(text) = self.render_event(&notification.params) {
                         rendered.push(text);

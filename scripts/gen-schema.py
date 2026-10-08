@@ -67,6 +67,7 @@ class Schema:
             self.types[t["name"]] = t
         self.methods: list[dict] = doc.get("methods", [])
         self.events: list[dict] = doc.get("events", [])
+        self.notifications: list[dict] = doc.get("notifications", [])
         self._validate()
 
     # ---------------------------------------------------------------- checks
@@ -109,7 +110,19 @@ class Schema:
             payload = self.resolve(e["payload"])
             if payload["kind"] != "struct":
                 fail(f"event {e['name']}: payload must be a struct")
-        for name in [m["name"] for m in self.methods] + [e["name"] for e in self.events]:
+        for n in self.notifications:
+            if self.resolve(n["payload"])["kind"] != "struct":
+                fail(f"notification {n['name']}: payload must be a struct")
+            if not n.get("transient"):
+                fail(
+                    f"notification {n['name']}: a notification must declare `transient = true` — "
+                    "anything durable belongs in the event set, which is the log"
+                )
+        for name in (
+            [m["name"] for m in self.methods]
+            + [e["name"] for e in self.events]
+            + [n["name"] for n in self.notifications]
+        ):
             if not name or " " in name:
                 fail(f"bad wire name {name!r}")
 
@@ -187,6 +200,17 @@ class Schema:
             out.append(f'    pub const {e["name"].replace(".", "_").upper()}: &str = "{e["name"]}";')
         out.append("}")
         out.append("")
+        out.append("/// Transient notifications: server to client, **never logged**.")
+        out.append("///")
+        out.append("/// These are a preview channel, not a record: a reader that misses one has")
+        out.append("/// lost nothing, because the event that follows carries the same content in")
+        out.append("/// its final form. Keeping them out of the event set is what lets the log")
+        out.append("/// stay the truth without a stream of partial states in it.")
+        out.append("pub mod notification {")
+        for n in self.notifications:
+            out.append(f'    pub const {n["name"].replace(".", "_").upper()}: &str = "{n["name"]}";')
+        out.append("}")
+        out.append("")
         out.append("/// Event kinds. The bool is the `ignorable` envelope marker (ADR-0003).")
         out.append("pub const EVENT_KINDS: &[(&str, bool)] = &[")
         for e in self.events:
@@ -261,6 +285,11 @@ class Schema:
             out.append(f'  {camel(e["name"])}: "{e["name"]}",')
         out.append("} as const;")
         out.append("")
+        out.append("export const NOTIFICATIONS = {")
+        for n in self.notifications:
+            out.append(f'  {camel(n["name"])}: "{n["name"]}",')
+        out.append("} as const;")
+        out.append("")
         out.append("export type MethodName = (typeof METHODS)[keyof typeof METHODS];")
         out.append("export type EventKind = (typeof EVENTS)[keyof typeof EVENTS];")
         out.append("")
@@ -329,6 +358,9 @@ class Schema:
                 "types": {t["name"]: self.sample(t["name"]) for t in self.types.values() if t["kind"] == "struct"},
                 "methods": [{"name": m["name"], "params": m.get("params"), "result": m.get("result")} for m in self.methods],
                 "events": [{"name": e["name"], "payload": e["payload"], "ignorable": e.get("ignorable", True)} for e in self.events],
+                "notifications": [
+                    {"name": n["name"], "payload": n["payload"]} for n in self.notifications
+                ],
             },
             indent=2,
             sort_keys=False,

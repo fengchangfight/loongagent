@@ -332,6 +332,15 @@ name = "hook.fired"
 payload = "HookFired"
 ignorable = false
 
+[[types]]
+name = "ModelDelta"
+kind = "struct"
+doc = "A piece of an answer, as the model writes it. A transient notification, not an event: the final message.appended is the record."
+fields = [
+  { name = "turn_id", type = "u64" },
+  { name = "text", type = "string", doc = "the fragment just written, not the whole answer so far" },
+]
+
 [[events]]
 name = "skills.loaded"
 payload = "SkillsLoaded"
@@ -341,3 +350,13 @@ ignorable = false
 name = "skill.invoked"
 payload = "SkillInvoked"
 ignorable = false
+
+# ------------------------------------------------------- transient notifications
+#
+# Server → client, never logged. A reader that misses one has lost nothing: the
+# event that follows carries the same content in its final form.
+
+[[notifications]]
+name = "model.delta"
+payload = "ModelDelta"
+transient = true

@@ -106,6 +106,16 @@ impl OpenAiCompat {
         )
     }
 
+    /// The body for a streamed call: the same shape, plus the two stream flags.
+    fn body_streaming(&self, request: &CompletionRequest) -> String {
+        let mut body: Value = serde_json::from_str(&self.body(request)).expect("body() is JSON");
+        body["stream"] = json!(true);
+        // Ask for usage in the final chunk; a provider that ignores the option
+        // simply reports zero tokens, which is what a missing usage already means.
+        body["stream_options"] = json!({"include_usage": true});
+        body.to_string()
+    }
+
     fn body(&self, request: &CompletionRequest) -> String {
         let mut body = json!({
             "model": self.model,
@@ -176,6 +186,114 @@ impl OpenAiCompat {
 }
 
 impl Model for OpenAiCompat {
+    /// Streamed: `stream: true`, and the deltas are reassembled into exactly the
+    /// response the non-streaming call would have produced. That equality is the
+    /// point — a surface shows a preview, the kernel consumes the same answer
+    /// either way.
+    fn complete_streaming(
+        &mut self,
+        request: &CompletionRequest,
+        on_delta: &mut dyn FnMut(&str),
+    ) -> Result<CompletionResponse, ModelError> {
+        let endpoint = self.endpoint();
+        let body = self.body_streaming(request);
+        let mut text = String::new();
+        // Tool calls arrive in fragments: index → (id, name, arguments so far).
+        let mut calls: Vec<(String, String, String)> = Vec::new();
+        let mut usage = Usage { tokens_in: 0, tokens_out: 0 };
+
+        http::post_sse(&endpoint, &body, self.api_key.as_deref(), IO_TIMEOUT, &mut |data| {
+            let Ok(chunk) = serde_json::from_str::<Value>(data) else {
+                return; // a keep-alive or an event we do not understand
+            };
+            if let Some(u) = chunk.get("usage") {
+                usage = Usage {
+                    tokens_in: u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(usage.tokens_in),
+                    tokens_out: u.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(usage.tokens_out),
+                };
+            }
+            let Some(choice) = chunk.get("choices").and_then(|c| c.get(0)) else {
+                return;
+            };
+            // A server that ignored `stream` sends a whole `message` instead of a
+            // `delta`; treat it as one large fragment.
+            if let Some(message) = choice.get("message") {
+                if let Some(piece) = message.get("content").and_then(|c| c.as_str()) {
+                    if !piece.is_empty() {
+                        text.push_str(piece);
+                        on_delta(piece);
+                    }
+                }
+                if let Some(list) = message.get("tool_calls").and_then(|t| t.as_array()) {
+                    for (index, call) in list.iter().enumerate() {
+                        let id = call.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+                        let function = call.get("function").cloned().unwrap_or(Value::Null);
+                        let name = function.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+                        let args = function.get("arguments").and_then(|a| a.as_str()).unwrap_or("{}").to_string();
+                        while calls.len() <= index {
+                            calls.push((String::new(), String::new(), String::new()));
+                        }
+                        calls[index] = (id, name, args);
+                    }
+                }
+                return;
+            }
+            let Some(delta) = choice.get("delta") else {
+                return;
+            };
+            if let Some(piece) = delta.get("content").and_then(|c| c.as_str()) {
+                if !piece.is_empty() {
+                    text.push_str(piece);
+                    on_delta(piece);
+                }
+            }
+            if let Some(fragments) = delta.get("tool_calls").and_then(|t| t.as_array()) {
+                for fragment in fragments {
+                    let index = fragment.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+                    while calls.len() <= index {
+                        calls.push((String::new(), String::new(), String::new()));
+                    }
+                    let slot = &mut calls[index];
+                    if let Some(id) = fragment.get("id").and_then(|i| i.as_str()) {
+                        slot.0.push_str(id);
+                    }
+                    if let Some(function) = fragment.get("function") {
+                        if let Some(name) = function.get("name").and_then(|n| n.as_str()) {
+                            slot.1.push_str(name);
+                        }
+                        // The arguments *are* a JSON string split across chunks; the
+                        // only safe thing to do is concatenate and parse at the end.
+                        if let Some(args) = function.get("arguments").and_then(|a| a.as_str()) {
+                            slot.2.push_str(args);
+                        }
+                    }
+                }
+            }
+        })
+        .map_err(|HttpError(message)| ModelError::Transport(message))?;
+
+        let mut tool_calls = Vec::new();
+        for (index, (id, name, arguments)) in calls.into_iter().enumerate() {
+            let args: Json = serde_json::from_str(if arguments.trim().is_empty() { "{}" } else { &arguments })
+                .map_err(|e| {
+                    ModelError::Protocol(format!(
+                        "tool {name:?} sent arguments that are not JSON ({e}): {arguments}"
+                    ))
+                })?;
+            tool_calls.push(ToolCallRequest {
+                call_id: if id.is_empty() { format!("call_{index}") } else { id },
+                tool: name,
+                args,
+            });
+        }
+
+        Ok(CompletionResponse {
+            text: if text.is_empty() { None } else { Some(text) },
+            tool_calls,
+            usage,
+        })
+    }
+
     fn complete(&mut self, request: &CompletionRequest) -> Result<CompletionResponse, ModelError> {
         let endpoint = self.endpoint();
         let body = self.body(request);
@@ -306,6 +424,93 @@ mod tests {
             "a transport error, not a scheme refusal: {message}"
         );
         assert!(!message.contains("TLS is not wired"));
+    }
+
+    #[test]
+    fn a_streamed_answer_is_assembled_from_its_deltas() {
+        let (base, server) = loong_http::testing::fake_sse_server(vec![
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n".to_string(),
+            "data: {\"choices\":[{\"delta\":{\"content\":\", world\"}}]}\n\n".to_string(),
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}\n\n".to_string(),
+            "data: [DONE]\n\n".to_string(),
+        ]);
+        let mut model = OpenAiCompat::new(&base, "m", None);
+        let mut deltas = Vec::new();
+        let response = model
+            .complete_streaming(
+                &CompletionRequest { messages: vec![], tools: vec![] },
+                &mut |piece| deltas.push(piece.to_string()),
+            )
+            .unwrap();
+        assert_eq!(deltas, vec!["Hello".to_string(), ", world".to_string()], "in order, as written");
+        assert_eq!(response.text.as_deref(), Some("Hello, world"));
+        assert_eq!(response.usage, Usage { tokens_in: 7, tokens_out: 3 });
+
+        // The request really asked for a stream, and asked for usage with it.
+        let sent = server.join().unwrap();
+        let (_, body) = sent.split_once("\r\n\r\n").unwrap();
+        let body: Value = serde_json::from_str(body).unwrap();
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn streamed_tool_arguments_split_across_chunks_are_rejoined() {
+        // Real providers send the name once and the arguments in pieces; a naive
+        // parser would hand the kernel half a JSON object.
+        let (base, _server) = loong_http::testing::fake_sse_server(vec![
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_9\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"pa\"}}]}}]}\n\n".to_string(),
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"th\\\":\\\"a.txt\\\"}\"}}]}}]}\n\n".to_string(),
+            "data: [DONE]\n\n".to_string(),
+        ]);
+        let mut model = OpenAiCompat::new(&base, "m", None);
+        let response = model
+            .complete_streaming(&CompletionRequest { messages: vec![], tools: vec![] }, &mut |_| {})
+            .unwrap();
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].call_id, "call_9");
+        assert_eq!(response.tool_calls[0].tool, "read_file");
+        assert_eq!(response.tool_calls[0].args["path"], "a.txt", "the fragments were rejoined");
+    }
+
+    #[test]
+    fn a_server_that_ignores_the_stream_flag_is_still_understood() {
+        // Some proxies strip streaming and answer with ordinary JSON. Returning an
+        // empty answer there would look like the model said nothing.
+        let (base, server) = loong_http::testing::fake_server(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n\
+             {\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"all at once\",
+             \"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",
+             \"arguments\":\"{\\\"path\\\":\\\"a.txt\\\"}\"}}]}}],
+             \"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2}}",
+        );
+        let mut model = OpenAiCompat::new(&base, "m", None);
+        let mut deltas = Vec::new();
+        let response = model
+            .complete_streaming(&CompletionRequest { messages: vec![], tools: vec![] }, &mut |piece| {
+                deltas.push(piece.to_string())
+            })
+            .unwrap();
+        assert_eq!(deltas, vec!["all at once".to_string()], "the text still arrives");
+        assert_eq!(response.text.as_deref(), Some("all at once"));
+        assert_eq!(response.tool_calls.len(), 1, "and so do its tool calls");
+        assert_eq!(response.tool_calls[0].args["path"], "a.txt");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_model_without_a_streaming_implementation_reports_its_answer_once() {
+        // The trait's default: a provider double that only knows how to complete.
+        use crate::ScriptedModel;
+        let mut model = ScriptedModel::saying("all at once");
+        let mut deltas = Vec::new();
+        let response = model
+            .complete_streaming(&CompletionRequest { messages: vec![], tools: vec![] }, &mut |piece| {
+                deltas.push(piece.to_string())
+            })
+            .unwrap();
+        assert_eq!(deltas, vec!["all at once".to_string()]);
+        assert_eq!(response.text.as_deref(), Some("all at once"));
     }
 
     #[test]

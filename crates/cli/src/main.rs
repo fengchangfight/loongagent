@@ -554,7 +554,11 @@ struct WebSession {
 }
 
 impl loong_web::Session for WebSession {
-    fn exchange(&mut self, line: &str) -> Result<Vec<String>, String> {
+    fn exchange(
+        &mut self,
+        line: &str,
+        sink: &mut dyn FnMut(String) -> Result<(), String>,
+    ) -> Result<(), String> {
         let mut request: serde_json::Value =
             serde_json::from_str(line).map_err(|e| format!("not JSON-RPC: {e}"))?;
         // The browser cannot know the server's working directory, so the surface
@@ -576,7 +580,6 @@ impl loong_web::Session for WebSession {
         let id = request.get("id").cloned();
         self.transport.send(&request.to_string())?;
 
-        let mut lines = Vec::new();
         loop {
             let Some(line) = self.transport.recv_line()? else {
                 return Err("the server closed the connection".to_string());
@@ -588,9 +591,11 @@ impl loong_web::Session for WebSession {
                 serde_json::from_str(&line).unwrap_or(serde_json::Value::Null);
             let is_response = parsed.get("id").is_some() && parsed.get("method").is_none();
             let mine = id.is_some() && parsed.get("id") == id.as_ref();
-            lines.push(line);
+            // Straight through: a delta written by the model reaches the browser now,
+            // not when the turn ends.
+            sink(line)?;
             if is_response && mine {
-                return Ok(lines);
+                return Ok(());
             }
         }
     }
@@ -628,6 +633,33 @@ fn web(args: Args) -> Result<(), String> {
     Ok(())
 }
 
+/// Print a turn's deltas as they arrive, and return the rendered lines that are
+/// not already on screen. A streamed answer would otherwise appear twice: once as
+/// it was written and once when the turn finished.
+fn print_streaming(
+    client: &mut Client<ChildTransport>,
+    text: &str,
+) -> Result<Vec<String>, String> {
+    let mut streamed = String::new();
+    let lines = client.submit_with(text, &mut |method, params| {
+        if method != loong_schema::generated::notification::MODEL_DELTA {
+            return;
+        }
+        if let Some(piece) = params.get("text").and_then(|t| t.as_str()) {
+            streamed.push_str(piece);
+            print!("{piece}");
+            let _ = std::io::stdout().flush();
+        }
+    })?;
+    if streamed.is_empty() {
+        return Ok(lines);
+    }
+    if !streamed.ends_with('\n') {
+        println!();
+    }
+    Ok(lines.into_iter().filter(|line| line != &streamed).collect())
+}
+
 fn repl(args: Args) -> Result<(), String> {
     args.ensure_parent()?;
     let (transport, _) = ChildTransport::spawn(&args, false)?;
@@ -662,7 +694,7 @@ fn repl(args: Args) -> Result<(), String> {
                 let granted = matches!(line.as_str(), "a" | "approve" | "y" | "yes");
                 client.respond(&request_id, granted, ApprovalScope::Once, None)
             }
-            None => client.submit(&line),
+            None => print_streaming(&mut client, &line),
         };
         match result {
             Ok(lines) => {
@@ -896,7 +928,7 @@ fn headless(args: Args, prompt: &str) -> Result<(), String> {
     let (transport, _) = ChildTransport::spawn(&args, false)?;
     let mut client = Client::new(transport, args.session_id());
     client.attach(&args.cwd.to_string_lossy(), "headless")?;
-    for line in client.submit(prompt)? {
+    for line in print_streaming(&mut client, prompt)? {
         println!("{line}");
     }
     if !client.last_accepted() {

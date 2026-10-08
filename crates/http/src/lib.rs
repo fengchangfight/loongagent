@@ -118,35 +118,121 @@ pub fn post_json(
     bearer: Option<&str>,
     timeout: Duration,
 ) -> Result<HttpResponse, HttpError> {
-    let (host, port, path, tls) = parse_http_url(url)?;
+    let mut stream = open(url, timeout)?;
+    write_request(&mut stream, url, body, bearer)?;
+    let (status, _content_type, mut reader) = read_head(&mut stream)?;
+    let mut raw = String::new();
+    reader
+        .read_to_string(&mut raw)
+        .map_err(|e| err(format!("reading the response: {e}")))?;
+    Ok(HttpResponse { status, body: raw })
+}
+
+/// POST and hand each Server-Sent Event `data:` payload to `on_data` as it
+/// arrives. Returns the status once the server closes the stream.
+///
+/// This is what lets a model's answer appear while it is still being written. Two
+/// details matter: a streamed HTTP/1.1 reply uses **chunked** transfer encoding
+/// (there is no `Content-Length` to wait for), and a chunk boundary has nothing to
+/// do with an event boundary, so the reader buffers *lines*, not chunks.
+pub fn post_sse(
+    url: &str,
+    body: &str,
+    bearer: Option<&str>,
+    timeout: Duration,
+    on_data: &mut dyn FnMut(&str),
+) -> Result<u16, HttpError> {
+    let mut stream = open(url, timeout)?;
+    write_request(&mut stream, url, body, bearer)?;
+    let (status, content_type, mut reader) = read_head(&mut stream)?;
+    if !(200..300).contains(&status) {
+        // An error reply is ordinary JSON, and the caller wants to see it.
+        let mut raw = String::new();
+        let _ = reader.read_to_string(&mut raw);
+        return Err(err(format!(
+            "HTTP {status}: {}",
+            raw.chars().take(500).collect::<String>()
+        )));
+    }
+
+    // A server (or a proxy in front of one) may ignore `stream` and answer with an
+    // ordinary JSON body. Handing that body over in one piece keeps the caller
+    // working instead of returning an empty answer.
+    if !content_type.to_ascii_lowercase().contains("text/event-stream") {
+        let mut whole = String::new();
+        reader
+            .read_to_string(&mut whole)
+            .map_err(|e| err(format!("reading the response: {e}")))?;
+        if !whole.trim().is_empty() {
+            on_data(whole.trim());
+        }
+        return Ok(status);
+    }
+
+    let mut pending = String::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .map_err(|e| err(format!("reading the stream: {e}")))?;
+        if read == 0 {
+            break;
+        }
+        pending.push_str(&String::from_utf8_lossy(&buffer[..read]));
+        // Only complete lines are interpreted; a partial line waits for the rest.
+        while let Some(index) = pending.find('\n') {
+            let line = pending[..index].trim_end_matches('\r').to_string();
+            pending.drain(..=index);
+            if let Some(data) = line.strip_prefix("data:") {
+                let data = data.trim_start();
+                if data == "[DONE]" {
+                    return Ok(status);
+                }
+                if !data.is_empty() {
+                    on_data(data);
+                }
+            }
+            // `event:`, `id:`, `retry:` and comment lines are not needed here.
+        }
+    }
+    Ok(status)
+}
+
+/// Connect, with TLS when the URL asks for it. The handshake completes here, so a
+/// certificate problem is reported as a certificate problem.
+fn open(url: &str, timeout: Duration) -> Result<Transport, HttpError> {
+    let (host, port, _path, tls) = parse_http_url(url)?;
     let addr = (host.as_str(), port)
         .to_socket_addrs()
         .map_err(|e| err(format!("resolving {host}:{port}: {e}")))?
         .next()
         .ok_or_else(|| err(format!("no address for {host}:{port}")))?;
-
     let socket = TcpStream::connect_timeout(&addr, timeout)
         .map_err(|e| err(format!("connecting to {host}:{port}: {e}")))?;
     socket.set_read_timeout(Some(timeout)).ok();
     socket.set_write_timeout(Some(timeout)).ok();
+    if !tls {
+        return Ok(Transport::Plain(socket));
+    }
+    let name = rustls::pki_types::ServerName::try_from(host.clone())
+        .map_err(|e| err(format!("{host} is not a valid certificate name: {e}")))?;
+    let connection = rustls::ClientConnection::new(tls_config(), name)
+        .map_err(|e| err(format!("starting TLS with {host}: {e}")))?;
+    let mut stream = rustls::StreamOwned::new(connection, socket);
+    stream
+        .conn
+        .complete_io(&mut stream.sock)
+        .map_err(|e| err(format!("TLS handshake with {host} failed: {e}")))?;
+    Ok(Transport::Tls(Box::new(stream)))
+}
 
-    let mut stream = if tls {
-        let name = rustls::pki_types::ServerName::try_from(host.clone())
-            .map_err(|e| err(format!("{host} is not a valid certificate name: {e}")))?;
-        let connection = rustls::ClientConnection::new(tls_config(), name)
-            .map_err(|e| err(format!("starting TLS with {host}: {e}")))?;
-        let mut stream = rustls::StreamOwned::new(connection, socket);
-        // Do the handshake now, so a certificate problem is reported as one rather
-        // than as a confusing read error later.
-        stream
-            .conn
-            .complete_io(&mut stream.sock)
-            .map_err(|e| err(format!("TLS handshake with {host} failed: {e}")))?;
-        Transport::Tls(Box::new(stream))
-    } else {
-        Transport::Plain(socket)
-    };
-
+fn write_request(
+    stream: &mut Transport,
+    url: &str,
+    body: &str,
+    bearer: Option<&str>,
+) -> Result<(), HttpError> {
+    let (host, port, path, tls) = parse_http_url(url)?;
     let authority = if (tls && port == 443) || (!tls && port == 80) {
         host.clone()
     } else {
@@ -154,38 +240,138 @@ pub fn post_json(
     };
     let mut head = format!(
         "POST {path} HTTP/1.1\r\nHost: {authority}\r\nContent-Type: application/json\r\n\
-         Content-Length: {}\r\nAccept: application/json\r\nConnection: close\r\n",
+         Content-Length: {}\r\nAccept: text/event-stream, application/json\r\n\
+         Connection: close\r\n",
         body.len()
     );
     if let Some(token) = bearer {
         head.push_str(&format!("Authorization: Bearer {token}\r\n"));
     }
-    head.push_str("User-Agent: loongagent\r\n");
-    head.push_str("\r\n");
-
+    head.push_str("User-Agent: loongagent\r\n\r\n");
     stream
         .write_all(head.as_bytes())
         .and_then(|_| stream.write_all(body.as_bytes()))
         .and_then(|_| stream.flush())
-        .map_err(|e| err(format!("sending the request: {e}")))?;
+        .map_err(|e| err(format!("sending the request: {e}")))
+}
 
-    let mut raw = Vec::new();
-    stream
-        .read_to_end(&mut raw)
-        .map_err(|e| err(format!("reading the response: {e}")))?;
-    let text = String::from_utf8_lossy(&raw).to_string();
-
-    let (head, body) = text
-        .split_once("\r\n\r\n")
-        .ok_or_else(|| err("the response has no header/body separator"))?;
+/// Read the status line and headers, and hand back a reader on the body.
+///
+/// A **chunked** body is decoded here so callers see plain bytes: SSE arrives in
+/// chunks whose boundaries have nothing to do with event boundaries.
+fn read_head(stream: &mut Transport) -> Result<(u16, String, BodyReader<'_>), HttpError> {
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        let read = stream
+            .read(&mut byte)
+            .map_err(|e| err(format!("reading the response head: {e}")))?;
+        if read == 0 {
+            return Err(err("the response ended before its headers did"));
+        }
+        head.push(byte[0]);
+        if head.len() > 64 * 1024 {
+            return Err(err("the response headers are implausibly large"));
+        }
+    }
+    let head = String::from_utf8_lossy(&head).to_string();
     let status = head
         .lines()
         .next()
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|code| code.parse::<u16>().ok())
         .ok_or_else(|| err("the response has no status line"))?;
+    let lowered = head.to_ascii_lowercase();
+    let chunked = lowered.contains("transfer-encoding: chunked");
+    let content_type = head
+        .lines()
+        .find(|line| line.to_ascii_lowercase().starts_with("content-type:"))
+        .map(|line| line.split_once(':').map(|(_, v)| v.trim().to_string()).unwrap_or_default())
+        .unwrap_or_default();
+    Ok((status, content_type, BodyReader { stream, chunked, done: false }))
+}
 
-    Ok(HttpResponse { status, body: body.to_string() })
+/// The body of a response: plain, or chunked (which every streamed reply is).
+struct BodyReader<'a> {
+    stream: &'a mut Transport,
+    chunked: bool,
+    done: bool,
+}
+
+impl Read for BodyReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.done {
+            return Ok(0);
+        }
+        if !self.chunked {
+            let read = self.stream.read(buf)?;
+            if read == 0 {
+                self.done = true;
+            }
+            return Ok(read);
+        }
+        // Chunked: `<hex size>CRLF <bytes> CRLF`, terminated by a zero-size chunk.
+        let size = match read_chunk_size(self.stream)? {
+            Some(0) | None => {
+                self.done = true;
+                return Ok(0);
+            }
+            Some(size) => size,
+        };
+        let take = size.min(buf.len());
+        let mut filled = 0;
+        while filled < take {
+            let read = self.stream.read(&mut buf[filled..take])?;
+            if read == 0 {
+                self.done = true;
+                return Ok(filled);
+            }
+            filled += read;
+        }
+        // Whatever did not fit is discarded, so the next call starts on a boundary.
+        let mut leftover = size - filled;
+        let mut sink = [0u8; 1024];
+        while leftover > 0 {
+            let want = leftover.min(sink.len());
+            let read = self.stream.read(&mut sink[..want])?;
+            if read == 0 {
+                self.done = true;
+                break;
+            }
+            leftover -= read;
+        }
+        let mut crlf = [0u8; 2];
+        let _ = self.stream.read(&mut crlf);
+        Ok(filled)
+    }
+}
+
+fn read_chunk_size(stream: &mut Transport) -> std::io::Result<Option<usize>> {
+    let mut line = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        let read = stream.read(&mut byte)?;
+        if read == 0 {
+            return Ok(None);
+        }
+        if byte[0] == b'\n' {
+            break;
+        }
+        if byte[0] != b'\r' {
+            line.push(byte[0]);
+        }
+        if line.len() > 64 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "chunk size line is implausibly long",
+            ));
+        }
+    }
+    let text = String::from_utf8_lossy(&line);
+    let size = text.split(';').next().unwrap_or("").trim();
+    usize::from_str_radix(size, 16).map(Some).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, format!("chunk size {text:?}"))
+    })
 }
 
 /// A tiny HTTP/1.1 server that serves exactly one canned response. Exposed
@@ -204,37 +390,70 @@ pub mod testing {
         let addr = listener.local_addr().unwrap();
         let handle = std::thread::spawn(move || {
             let (mut sock, _) = listener.accept().unwrap();
-            let mut raw = Vec::new();
-            let mut buf = [0u8; 4096];
-            loop {
-                let n = sock.read(&mut buf).unwrap();
-                if n == 0 {
-                    break;
-                }
-                raw.extend_from_slice(&buf[..n]);
-                let text = String::from_utf8_lossy(&raw).to_string();
-                if let Some((head, body)) = text.split_once("\r\n\r\n") {
-                    let want = head
-                        .lines()
-                        .find_map(|l| l.strip_prefix("Content-Length: "))
-                        .and_then(|v| v.trim().parse::<usize>().ok())
-                        .unwrap_or(0);
-                    if body.len() >= want {
-                        break;
-                    }
-                }
-            }
+            let request = read_request(&mut sock);
             sock.write_all(response.as_bytes()).unwrap();
             sock.flush().unwrap();
-            String::from_utf8_lossy(&raw).to_string()
+            request
         });
         (format!("http://127.0.0.1:{}/v1", addr.port()), handle)
+    }
+
+    /// A server that answers with **chunked** Server-Sent Events, writing each
+    /// piece separately: the shape a streaming model actually uses, including the
+    /// case where one event is split across two chunks.
+    ///
+    /// `pieces` are written as they are, so a test controls the framing exactly.
+    pub fn fake_sse_server(pieces: Vec<String>) -> (String, JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let request = read_request(&mut sock);
+            sock.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+                  Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+            for piece in pieces {
+                let framed = format!("{:x}\r\n{}\r\n", piece.len(), piece);
+                sock.write_all(framed.as_bytes()).unwrap();
+                sock.flush().unwrap();
+            }
+            sock.write_all(b"0\r\n\r\n").unwrap();
+            sock.flush().unwrap();
+            request
+        });
+        (format!("http://127.0.0.1:{}/v1/chat/completions", addr.port()), handle)
+    }
+
+    fn read_request(sock: &mut std::net::TcpStream) -> String {
+        let mut raw = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            let Ok(n) = sock.read(&mut buf) else { break };
+            if n == 0 {
+                break;
+            }
+            raw.extend_from_slice(&buf[..n]);
+            let text = String::from_utf8_lossy(&raw).to_string();
+            if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                let want = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("Content-Length: "))
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if body.len() >= want {
+                    break;
+                }
+            }
+        }
+        String::from_utf8_lossy(&raw).to_string()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::testing::fake_server;
+    use super::testing::{fake_server, fake_sse_server};
     use super::*;
     use std::time::Duration;
 
@@ -333,6 +552,57 @@ mod tests {
         let response = post_json(&url, "{}", None, Duration::from_secs(5)).unwrap();
         assert_eq!(response.status, 503);
         assert_eq!(response.body, "busy");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn sse_events_arrive_in_order_as_they_are_written() {
+        let (url, server) = fake_sse_server(vec![
+            "data: {\"n\":1}\n\n".to_string(),
+            "data: {\"n\":2}\n\n".to_string(),
+            "data: [DONE]\n\n".to_string(),
+        ]);
+        let mut seen = Vec::new();
+        let status = post_sse(&url, "{}", None, Duration::from_secs(5), &mut |data| {
+            seen.push(data.to_string());
+        })
+        .unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(seen, vec!["{\"n\":1}".to_string(), "{\"n\":2}".to_string()]);
+        let sent = server.join().unwrap();
+        assert!(sent.contains("Accept: text/event-stream"), "we ask for a stream: {sent}");
+    }
+
+    #[test]
+    fn a_chunk_boundary_does_not_split_an_event() {
+        // One event, delivered in three pieces: the reader buffers lines, not chunks.
+        let (url, server) = fake_sse_server(vec![
+            "data: {\"te".to_string(),
+            "xt\":\"hello\"}".to_string(),
+            "\n\ndata: [DONE]\n\n".to_string(),
+        ]);
+        let mut seen = Vec::new();
+        post_sse(&url, "{}", None, Duration::from_secs(5), &mut |data| {
+            seen.push(data.to_string());
+        })
+        .unwrap();
+        assert_eq!(seen, vec!["{\"text\":\"hello\"}".to_string()], "one event, reassembled");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_non_2xx_stream_is_an_error_with_the_body() {
+        let (url, server) = fake_server(
+            "HTTP/1.1 402 Payment Required\r\nContent-Length: 12\r\nConnection: close\r\n\r\nno credit :(",
+        );
+        let mut seen = Vec::new();
+        let err = post_sse(&url, "{}", None, Duration::from_secs(5), &mut |data| {
+            seen.push(data.to_string());
+        })
+        .unwrap_err();
+        assert!(err.0.contains("402"), "{err}");
+        assert!(err.0.contains("no credit"), "{err}");
+        assert!(seen.is_empty(), "nothing is reported as a delta");
         server.join().unwrap();
     }
 

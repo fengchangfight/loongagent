@@ -223,6 +223,14 @@ pub struct SkillInvoked {
     pub error: Option<String>,
 }
 
+/// A piece of an answer, as the model writes it. A transient notification, not an event: the final message.appended is the record.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelDelta {
+    pub turn_id: u64,
+    /// the fragment just written, not the whole answer so far
+    pub text: String,
+}
+
 /// JSON-RPC method names (ADR-0002).
 pub mod method {
     /// Attach a thin client to the local agent server (ADR-0009).
@@ -246,6 +254,16 @@ pub mod event {
     pub const HOOK_FIRED: &str = "hook.fired";
     pub const SKILLS_LOADED: &str = "skills.loaded";
     pub const SKILL_INVOKED: &str = "skill.invoked";
+}
+
+/// Transient notifications: server to client, **never logged**.
+///
+/// These are a preview channel, not a record: a reader that misses one has
+/// lost nothing, because the event that follows carries the same content in
+/// its final form. Keeping them out of the event set is what lets the log
+/// stay the truth without a stream of partial states in it.
+pub mod notification {
+    pub const MODEL_DELTA: &str = "model.delta";
 }
 
 /// Event kinds. The bool is the `ignorable` envelope marker (ADR-0003).

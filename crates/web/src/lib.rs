@@ -30,7 +30,17 @@ pub const INDEX: &str = include_str!("index.html");
 /// The lines are exactly what the stdio server writes — events first, then the
 /// response — so a WebSocket message maps one-to-one onto a `handle_line` call.
 pub trait Session: Send {
-    fn exchange(&mut self, line: &str) -> Result<Vec<String>, String>;
+    /// Send one line, and hand back each line of the answer **as it arrives**.
+    ///
+    /// The sink exists for one reason: a model writes its answer over seconds, and
+    /// making the browser wait for the last byte would waste the whole point of the
+    /// event stream. A session that only produces its lines at the end is still
+    /// correct — it simply calls the sink late.
+    fn exchange(
+        &mut self,
+        line: &str,
+        sink: &mut dyn FnMut(String) -> Result<(), String>,
+    ) -> Result<(), String>;
 }
 
 /// A token no other page can guess, read from the OS entropy pool.
@@ -138,19 +148,26 @@ fn websocket(
         };
         match message {
             Message::Text(text) => {
-                let reply = match session.lock() {
-                    Ok(mut session) => session.exchange(text.as_str()),
-                    Err(_) => Err("the session is poisoned".to_string()),
-                };
-                match reply {
-                    Ok(lines) => {
-                        for line in lines {
-                            socket
+                // Held for the whole exchange: one request at a time reaches the
+                // session, while each line goes out the moment it exists.
+                let mut failure = None;
+                {
+                    let socket_ref = &mut socket;
+                    let outcome = match session.lock() {
+                        Ok(mut session) => session.exchange(text.as_str(), &mut |line| {
+                            socket_ref
                                 .send(Message::text(line))
-                                .map_err(|e| format!("sending to the browser: {e}"))?;
-                        }
+                                .map_err(|e| format!("sending to the browser: {e}"))
+                        }),
+                        Err(_) => Err("the session is poisoned".to_string()),
+                    };
+                    if let Err(e) = outcome {
+                        failure = Some(e);
                     }
-                    Err(e) => {
+                }
+                match failure {
+                    None => {}
+                    Some(e) => {
                         // A transport failure is an event like any other: the page
                         // shows it instead of freezing with a dead socket.
                         let notice = json!({
@@ -185,15 +202,18 @@ fn websocket(
 pub struct Echo(pub Vec<String>);
 
 impl Session for Echo {
-    fn exchange(&mut self, line: &str) -> Result<Vec<String>, String> {
+    fn exchange(
+        &mut self,
+        line: &str,
+        sink: &mut dyn FnMut(String) -> Result<(), String>,
+    ) -> Result<(), String> {
         let request: Value = serde_json::from_str(line).map_err(|e| e.to_string())?;
         let id = request.get("id").cloned().unwrap_or(Value::Null);
-        let mut lines = self.0.clone();
-        lines.push(
-            json!({"jsonrpc": "2.0", "id": id, "result": {"accepted": true, "turn_id": 1}})
-                .to_string(),
-        );
-        Ok(lines)
+        for line in self.0.clone() {
+            sink(line)?;
+        }
+        sink(json!({"jsonrpc": "2.0", "id": id, "result": {"accepted": true, "turn_id": 1}})
+            .to_string())
     }
 }
 
@@ -265,10 +285,42 @@ mod tests {
     }
 
     #[test]
+    fn lines_reach_the_browser_as_the_session_produces_them() {
+        struct Trickle;
+        impl Session for Trickle {
+            fn exchange(
+                &mut self,
+                _line: &str,
+                sink: &mut dyn FnMut(String) -> Result<(), String>,
+            ) -> Result<(), String> {
+                for piece in ["one", "two"] {
+                    sink(json!({"jsonrpc": "2.0", "method": "model.delta",
+                                "params": {"turn_id": 1, "text": piece}}).to_string())?;
+                }
+                sink(json!({"jsonrpc": "2.0", "id": 1, "result": {"accepted": true}}).to_string())
+            }
+        }
+        let (addr, token) = start(Arc::new(Mutex::new(Trickle)));
+        let request = format!("ws://{addr}/ws?token={token}").into_client_request().unwrap();
+        let (mut socket, _) = tungstenite::connect(request).unwrap();
+        socket.send(Message::text("{}")).unwrap();
+        let first = socket.read().unwrap().into_text().unwrap().to_string();
+        let second = socket.read().unwrap().into_text().unwrap().to_string();
+        let third = socket.read().unwrap().into_text().unwrap().to_string();
+        assert!(first.contains("model.delta") && first.contains("one"), "{first}");
+        assert!(second.contains("two"), "{second}");
+        assert!(third.contains("accepted"), "the response still comes last: {third}");
+    }
+
+    #[test]
     fn a_session_failure_becomes_an_event_instead_of_a_dead_socket() {
         struct Broken;
         impl Session for Broken {
-            fn exchange(&mut self, _line: &str) -> Result<Vec<String>, String> {
+            fn exchange(
+                &mut self,
+                _line: &str,
+                _sink: &mut dyn FnMut(String) -> Result<(), String>,
+            ) -> Result<(), String> {
                 Err("the server closed the connection".to_string())
             }
         }

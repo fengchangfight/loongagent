@@ -103,6 +103,11 @@ fn roundtrip_skill_invoked() {
 }
 
 #[test]
+fn roundtrip_model_delta() {
+    roundtrip::<g::ModelDelta>(r#"{"turn_id": 1,"text": "<string>"}"#);
+}
+
+#[test]
 fn declared_events_match_the_envelope_table() {
     assert_eq!(g::is_ignorable_event("message.appended"), Some(false));
     assert_eq!(g::is_ignorable_event("tool.call"), Some(false));

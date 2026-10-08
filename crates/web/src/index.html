@@ -40,6 +40,7 @@
   #prompt:focus { border-color: var(--accent); }
   .hint { color: var(--dim); font-size: 12px; margin-top: 6px; display: flex; justify-content: space-between; }
   .spinner { color: var(--accent); }
+  .streaming { color: #b9c2d6; border-left: 2px solid var(--accent); padding-left: 8px; }
 </style>
 </head>
 <body>
@@ -68,6 +69,19 @@
 
   let nextId = 1, sessionId = "", busy = false;
   const waiting = new Map();
+  // The model writes over seconds: show the fragment as it arrives, and let the
+  // finished message replace it. The log holds only the finished one.
+  let live = null;
+  function appendDelta(text) {
+    if (!live) {
+      live = document.createElement("div");
+      live.className = "row say streaming";
+      log.appendChild(live);
+    }
+    live.textContent += text;
+    log.scrollTop = log.scrollHeight;
+  }
+  function endDelta() { if (live) { live.remove(); live = null; } }
 
   function row(html, cls) {
     const element = document.createElement("div");
@@ -107,6 +121,7 @@
 
   socket.onmessage = (event) => {
     const message = JSON.parse(event.data);
+    if (message.method === "model.delta") { appendDelta(message.params.text || ""); return; }
     if (message.method === "event") { renderEvent(message.params); return; }
     const callback = waiting.get(message.id);
     if (callback) { waiting.delete(message.id); callback(message); }
@@ -119,9 +134,10 @@
     switch (kind) {
       case "message.appended":
         if (data.role === "user") row("<b>you</b> " + escape(data.text), "you");
-        else if (data.text) row(escape(data.text), "say");
+        else if (data.text) { endDelta(); row(escape(data.text), "say"); }
         break;
       case "tool.call":
+        endDelta();
         row(`→ <b>${escape(data.tool)}</b> <span class="note">${escape(JSON.stringify(data.args))}</span>`, "tool");
         break;
       case "tool.result": {

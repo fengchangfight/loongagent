@@ -168,6 +168,13 @@ export interface SkillInvoked {
   error?: string;
 }
 
+/** A piece of an answer, as the model writes it. A transient notification, not an event: the final message.appended is the record. */
+export interface ModelDelta {
+  turn_id: number;
+  /** the fragment just written, not the whole answer so far */
+  text: string;
+}
+
 export const METHODS = {
   sessionAttach: "session.attach",
   promptSubmit: "prompt.submit",
@@ -186,6 +193,10 @@ export const EVENTS = {
   hookFired: "hook.fired",
   skillsLoaded: "skills.loaded",
   skillInvoked: "skill.invoked",
+} as const;
+
+export const NOTIFICATIONS = {
+  modelDelta: "model.delta",
 } as const;
 
 export type MethodName = (typeof METHODS)[keyof typeof METHODS];

@@ -85,8 +85,12 @@ impl Session {
                 panic!("the server closed the connection");
             }
             let value: Value = serde_json::from_str(buf.trim()).expect("a JSON line");
-            if value["method"] == "event" {
-                events.push(value["params"].clone());
+            // Anything with a `method` is a notification: `event` lines are the log
+            // streamed, `model.delta` is a transient preview. Neither is the answer.
+            if value.get("method").is_some() {
+                if value["method"] == "event" {
+                    events.push(value["params"].clone());
+                }
                 continue;
             }
             assert_eq!(value["id"], json!(id), "responses match the request");

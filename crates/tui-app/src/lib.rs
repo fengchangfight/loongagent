@@ -31,6 +31,8 @@ pub enum ToWorker {
 /// What the worker reports back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FromWorker {
+    /// A fragment of the answer, as the model writes it (a preview, not the record).
+    Delta(String),
     Lines(Vec<String>),
     /// A turn finished (or stopped for approval), so the UI can update.
     State { pending: Option<String> },
@@ -57,6 +59,8 @@ pub struct App {
     pub schema: String,
     pub busy: bool,
     pub error: Option<String>,
+    /// The answer so far, while it is being written.
+    pub streaming: String,
     /// Lines scrolled up from the bottom.
     pub scroll: usize,
     pub quit: bool,
@@ -73,6 +77,7 @@ impl App {
             schema: schema.into(),
             busy: false,
             error: None,
+            streaming: String::new(),
             scroll: 0,
             quit: false,
         }
@@ -100,10 +105,17 @@ impl App {
     pub fn drain(&mut self, worker: &Receiver<FromWorker>) {
         loop {
             match worker.try_recv() {
-                Ok(FromWorker::Lines(lines)) => self.push_lines(lines),
+                Ok(FromWorker::Delta(piece)) => self.streaming.push_str(&piece),
+                Ok(FromWorker::Lines(lines)) => {
+                    // The finished message supersedes the fragments on screen, and it
+                    // is the only one of the two that exists in the log.
+                    self.streaming.clear();
+                    self.push_lines(lines);
+                }
                 Ok(FromWorker::State { pending }) => {
                     self.pending = pending;
                     self.busy = false;
+                    self.streaming.clear();
                 }
                 Ok(FromWorker::Failed(message)) => {
                     self.busy = false;
@@ -202,7 +214,15 @@ impl App {
         let total = self.lines.len();
         let end = total.saturating_sub(self.scroll);
         let start = end.saturating_sub(height.max(1));
-        self.lines[start..end].iter().map(|l| Line::from(l.clone())).collect()
+        let mut shown: Vec<Line<'static>> =
+            self.lines[start..end].iter().map(|l| Line::from(l.clone())).collect();
+        // What is being written right now goes below the finished output.
+        if !self.streaming.is_empty() {
+            shown.extend(self.streaming.split('\n').map(|piece| {
+                Line::from(Span::styled(piece.to_string(), Style::default().fg(Color::Gray)))
+            }));
+        }
+        shown
     }
 
     pub fn draw(&mut self, frame: &mut Frame) {
@@ -282,7 +302,18 @@ pub fn spawn_worker<T: Transport + Send + 'static>(
     std::thread::spawn(move || {
         while let Ok(command) = commands.recv() {
             let result = match command {
-                ToWorker::Submit(text) => client.submit(&text),
+                ToWorker::Submit(text) => {
+                    // Deltas go out as they arrive; the finished lines follow.
+                    let _ = events.send(FromWorker::Lines(Vec::new()));
+                    client.submit_with(&text, &mut |method, params| {
+                        if method != loong_schema::generated::notification::MODEL_DELTA {
+                            return;
+                        }
+                        if let Some(piece) = params.get("text").and_then(|t| t.as_str()) {
+                            let _ = events.send(FromWorker::Delta(piece.to_string()));
+                        }
+                    })
+                }
                 ToWorker::Respond { request_id, granted } => client.respond(
                     &request_id,
                     granted,
@@ -533,6 +564,30 @@ mod tests {
         assert!(!app.busy);
         assert_eq!(app.error.as_deref(), Some("the server closed the connection"));
         assert!(draw(&mut app, 80, 16).contains("the server closed the connection"));
+    }
+
+    #[test]
+    fn the_answer_appears_while_it_is_written_and_then_settles() {
+        let (to_app, from_worker) = channel::<FromWorker>();
+        let mut app = App::new("s", "v");
+        app.busy = true;
+        to_app.send(FromWorker::Delta("Wri".to_string())).unwrap();
+        to_app.send(FromWorker::Delta("ting…".to_string())).unwrap();
+        app.drain(&from_worker);
+        assert_eq!(app.streaming, "Writing…");
+        let screen = draw(&mut app, 40, 12);
+        assert!(screen.contains("Writing…"), "the fragment is on screen: {screen}");
+
+        // The finished message arrives: one line, and the fragments are gone.
+        to_app
+            .send(FromWorker::Lines(vec!["Writing the answer.".to_string()]))
+            .unwrap();
+        to_app.send(FromWorker::State { pending: None }).unwrap();
+        app.drain(&from_worker);
+        assert!(app.streaming.is_empty(), "the preview is cleared by the record");
+        let screen = draw(&mut app, 40, 12);
+        assert!(screen.contains("Writing the answer."), "{screen}");
+        assert_eq!(screen.matches("Writing").count(), 1, "and it is not shown twice: {screen}");
     }
 
     #[test]

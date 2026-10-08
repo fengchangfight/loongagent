@@ -739,6 +739,19 @@ impl Kernel {
     /// Submit a user turn and run the loop until it finishes, asks, or hits the
     /// step limit.
     pub fn submit(&mut self, text: &str) -> Result<TurnOutcome, KernelError> {
+        self.submit_with(text, &mut |_| {})
+    }
+
+    /// As [`Kernel::submit`], but reporting the model's text **as it is written**.
+    ///
+    /// Deltas are a preview, never the record: they are not logged, not added to the
+    /// ledger, and do not change the outcome. The final `message.appended` is the
+    /// answer, which is why a client that misses every delta has missed nothing.
+    pub fn submit_with(
+        &mut self,
+        text: &str,
+        on_delta: &mut dyn FnMut(&str),
+    ) -> Result<TurnOutcome, KernelError> {
         if let Some(p) = &self.pending {
             return Err(KernelError::OutOfOrder(format!(
                 "approval {} is still pending",
@@ -840,7 +853,7 @@ impl Kernel {
                 events,
             });
         }
-        self.run(events)
+        self.run(events, on_delta)
     }
 
     /// Answer a pending approval; the decision is an event either way.
@@ -899,19 +912,28 @@ impl Kernel {
             };
             events.push(self.record_tool_result(&pending.call_id, false, &output)?);
         }
-        self.run(events)
+        // Resuming after an approval has no observer: the surface that answered the
+        // question already has the flow, and a new one would have to attach first.
+        self.run(events, &mut |_| {})
     }
 
     // ------------------------------------------------------------- the loop
 
-    fn run(&mut self, mut events: Vec<u64>) -> Result<TurnOutcome, KernelError> {
+    fn run(
+        &mut self,
+        mut events: Vec<u64>,
+        on_delta: &mut dyn FnMut(&str),
+    ) -> Result<TurnOutcome, KernelError> {
         for step in 1..=self.config.max_steps {
             self.compact_if_needed(&mut events)?;
             let request = CompletionRequest {
                 messages: self.messages.clone(),
                 tools: self.tool_specs(),
             };
-            let response = self.model.complete(&request).map_err(KernelError::Model)?;
+            let response = self
+                .model
+                .complete_streaming(&request, on_delta)
+                .map_err(KernelError::Model)?;
             events.push(self.record_cost(&response.usage)?);
 
             if response.tool_calls.is_empty() {
@@ -2126,6 +2148,63 @@ Step one: breathe.
             );
         }
         assert!(!sent.last().unwrap().is_empty());
+    }
+
+    struct StreamingModel {
+        pieces: Vec<String>,
+    }
+
+    impl Model for StreamingModel {
+        fn complete(&mut self, _request: &CompletionRequest) -> Result<CompletionResponse, ModelError> {
+            unreachable!("this model is only used through its streaming path")
+        }
+        fn complete_streaming(
+            &mut self,
+            _request: &CompletionRequest,
+            on_delta: &mut dyn FnMut(&str),
+        ) -> Result<CompletionResponse, ModelError> {
+            for piece in &self.pieces {
+                on_delta(piece);
+            }
+            Ok(CompletionResponse {
+                text: Some(self.pieces.concat()),
+                tool_calls: Vec::new(),
+                usage: Usage { tokens_in: 3, tokens_out: 9 },
+            })
+        }
+    }
+
+    #[test]
+    fn deltas_are_a_preview_and_never_the_record() {
+        let t = Temp::new();
+        let model = StreamingModel {
+            pieces: vec!["Hel".to_string(), "lo, ".to_string(), "world".to_string()],
+        };
+        let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+
+        let mut seen = Vec::new();
+        let outcome = k.submit_with("say hi", &mut |piece| seen.push(piece.to_string())).unwrap();
+        assert_eq!(seen, vec!["Hel", "lo, ", "world"], "in the order they were written");
+        assert_eq!(outcome.final_text.as_deref(), Some("Hello, world"));
+
+        // The record is the message, not the fragments: nothing in the log mentions
+        // a delta, and the assistant message holds the whole answer.
+        let events = loong_eventlog::replay(&t.log).unwrap().events;
+        assert!(events.iter().all(|e| e.kind != "model.delta"), "deltas are not logged");
+        let answer = events
+            .iter()
+            .filter(|e| e.kind == ev::MESSAGE_APPENDED && e.data["role"] == "assistant")
+            .next_back()
+            .unwrap();
+        assert_eq!(answer.data["text"], "Hello, world");
+        // …and the ledger accounted for the answer once, not once per fragment.
+        let history = k
+            .ledger()
+            .entries()
+            .iter()
+            .filter(|e| e.source == "assistant")
+            .count();
+        assert_eq!(history, 1, "one assistant entry, not one per delta");
     }
 
     #[test]

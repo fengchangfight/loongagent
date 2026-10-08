@@ -105,6 +105,10 @@
       "args": "<string>",
       "tokens": 1,
       "error": "<string>"
+    },
+    "ModelDelta": {
+      "turn_id": 1,
+      "text": "<string>"
     }
   },
   "methods": [
@@ -179,6 +183,12 @@
       "name": "skill.invoked",
       "payload": "SkillInvoked",
       "ignorable": false
+    }
+  ],
+  "notifications": [
+    {
+      "name": "model.delta",
+      "payload": "ModelDelta"
     }
   ]
 }

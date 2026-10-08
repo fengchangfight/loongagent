@@ -12,6 +12,11 @@ pub mod openai_compat;
 
 pub use openai_compat::OpenAiCompat;
 
+/// A delta for a caller that wants to watch an answer arrive. Kept as a plain
+/// `&str` callback in the trait: the provider assembles tool calls itself, so only
+/// text is interesting to a surface.
+pub type DeltaSink<'a> = &'a mut dyn FnMut(&str);
+
 /// A tool as the model sees it (name + description + JSON Schema parameters).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolSpec {
@@ -94,6 +99,26 @@ impl std::error::Error for ModelError {}
 /// The one interface the kernel knows (ADR-0004: provider adapters are edges).
 pub trait Model: Send {
     fn complete(&mut self, req: &CompletionRequest) -> Result<CompletionResponse, ModelError>;
+
+    /// The same call, reporting text as it is written.
+    ///
+    /// Streaming is a **preview, never the record**: the deltas are neither logged
+    /// nor consumed as the answer — [`CompletionResponse`] is, exactly as before. The
+    /// default delivers the whole text in one delta, so a model that cannot stream
+    /// still works behind every surface.
+    fn complete_streaming(
+        &mut self,
+        req: &CompletionRequest,
+        on_delta: &mut dyn FnMut(&str),
+    ) -> Result<CompletionResponse, ModelError> {
+        let response = self.complete(req)?;
+        if let Some(text) = &response.text {
+            if !text.is_empty() {
+                on_delta(text);
+            }
+        }
+        Ok(response)
+    }
 }
 
 /// A scripted model for tests and for the first vertical slice: it returns the

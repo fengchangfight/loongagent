@@ -21,6 +21,20 @@ Thumbs.db
 *.log
 logs/
 
+# loongagent: the *configuration* under .loongagent/ is meant to be committed
+# (profile.toml, hooks.toml, mcp.toml, skills/, commands/) — these are the
+# artifacts of *running* it, and they are not:
+#
+#   session.jsonl / *.sqlite  the session itself: prompts, file contents, tool
+#                            output, approvals. Committing one leaks the context.
+#   *.trusted                "a human trusted these exact bytes". Committing one
+#                            would let a repository ship a pre-trusted hook or MCP
+#                            server, which is precisely what the gate exists to
+#                            prevent.
+.loongagent/session.jsonl
+.loongagent/*.sqlite
+.loongagent/*.trusted
+
 # Language toolchains (harmless until used)
 node_modules/
 target/

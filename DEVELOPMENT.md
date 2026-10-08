@@ -291,6 +291,19 @@ binary the TUI spawns as its server (used by the end-to-end test).
 10. **Not started**: session
    export/import, WASM extensions, the web client, compaction, the control plane.
 
+## What belongs in git, and what must not
+
+`.loongagent/` holds two very different kinds of file, and the difference is a
+security property rather than a preference:
+
+| Commit it | Never commit it |
+|---|---|
+| `profile.toml`, `hooks.toml`, `mcp.toml` — the project layer (ADR-0008) | `session.jsonl` / `*.sqlite` — the session itself: prompts, file contents, tool output, approvals |
+| `skills/`, `commands/` | `*.trusted` — "a human trusted these exact bytes". Committing one lets a repository ship a pre-trusted hook or MCP server, which is exactly what the gate exists to prevent |
+
+`.gitignore` ships those ignores. If you copy the layout into another repository,
+copy that part of the file too.
+
 ## Commits
 
 The repository has no git identity configured; commits here use

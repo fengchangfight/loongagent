@@ -25,6 +25,40 @@ export PATH="$HOME/.cargo/bin:$PATH"   # add to ~/.bashrc to make it permanent
 crates.io is mirrored in `~/.cargo/config.toml` (`[source.crates-io] replace-with
 = "tuna"`); without it, dependency downloads fail here.
 
+## Gates
+
+One command runs exactly what CI runs, so "it passed here" means one thing:
+
+```bash
+./scripts/check.sh          # formatting, schema, layering, tests, release build
+FAST=1 ./scripts/check.sh   # skip the release build (the slow one)
+```
+
+| Gate | Catches |
+|---|---|
+| `cargo fmt --check` | style drift; note that generated Rust is formatted **by the generator**, or the two would fight over the same bytes |
+| `gen-schema.py --check` | generated types drifting from `crates/schema/protocol.toml` |
+| `check-layering.sh` | a crate dependency pointing the wrong way (ADR-0004) |
+| `cargo test --workspace --locked` | behaviour, including end-to-end tests against the real binary |
+| `cargo build --release --locked` | code that compiles in debug and not with optimisations |
+
+`.github/workflows/ci.yml` and `.gitea/workflows/ci.yml` call that script, so the
+same gates run wherever the repository is hosted. Both install rustfmt (the
+toolchain uses the `minimal` profile) and use the TUNA mirror, because this project
+is built from behind one.
+
+### The toolchain, and what is pinned where
+
+`rust-toolchain.toml` pins the **channel** (`stable`) so a developer's machine needs
+no network to start. CI pins the **exact version** (`RUST_VERSION` in the workflow),
+because an artifact must be traceable to a compiler — and `scripts/release.sh`
+records that version in the artifact's `BUILD` file.
+
+Pinning the exact version in `rust-toolchain.toml` was tried and reverted: rustup
+treats it as a separate toolchain and tried to download it (the mirror 404s that
+tarball here). If your mirror serves versioned tarballs, pinning it in the file is
+the better end state.
+
 ## Everyday commands
 
 ```bash
@@ -283,13 +317,45 @@ binary the TUI spawns as its server (used by the end-to-end test).
 8. **Post-tool hook verdicts are recorded but cannot undo anything**, and hooks
    deliberately cannot rewrite a tool call — the moment they could, the loop would
    stop being small enough to audit.
-9. **Configuration is layered but not yet distributed**: ADR-0008's signed pack
+9. **`cargo clippy` is not a gate yet**: the code has never had a lint sweep, and
+   adding a gate that fails on the first run is worse than not having it. It is the
+   next hygiene step after the formatter sweep.
+10. **Configuration is layered but not yet distributed**: ADR-0008's signed pack
    envelope is not implemented, so the org layer is a plain file an administrator
    owns and nothing is tamper-resistant; `keychain:` and `gateway:` credential
    references are recognised and refused (no credential store is wired), and there
    is no `--set key=value` for ad-hoc session overrides.
-10. **Not started**: session
+11. **Not started**: session
    export/import, WASM extensions, the web client, compaction, the control plane.
+
+## Cutting a release
+
+```bash
+./scripts/release.sh      # refuses a dirty tree
+```
+
+It builds with `--locked --release` and writes, into `dist/`:
+
+- `loongagent-<version>-<target>.tar.gz` — the binary, `README.md`, and a `BUILD`
+  file naming the version, the commit, the host target and the exact toolchain;
+- `SHA256SUMS` — checksums over the tarball.
+
+Install it versioned, so an upgrade or a rollback is a symlink flip:
+
+```bash
+tar -xzf loongagent-0.0.1-x86_64-unknown-linux-gnu.tar.gz -C /opt
+ln -sfn /opt/loongagent-0.0.1-x86_64-unknown-linux-gnu /opt/loongagent/current
+ln -sfn /opt/loongagent/current/bin/loongagent /usr/local/bin/loongagent
+```
+
+Two limits worth knowing before distributing it:
+
+- **The artifact is not signed.** ADR-0008 §6 makes an organisation's configuration
+  layer tamper-resistant through a signature, and that is not implemented — so do
+  not describe the org layer as enforced yet.
+- **The binary is dynamically linked against glibc** (`ldd target/release/loongagent`),
+  so it runs on distributions at least as new as the build host. For an older fleet,
+  build in a container pinned to that glibc or add a musl target.
 
 ## What belongs in git, and what must not
 

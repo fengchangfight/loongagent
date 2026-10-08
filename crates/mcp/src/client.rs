@@ -43,6 +43,29 @@ fn err(message: impl Into<String>) -> McpError {
     McpError(message.into())
 }
 
+/// What the server said it can do. We ask only for what it advertised: a
+/// `prompts/list` sent to a server without prompts is an error the operator did
+/// not ask for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct McpCapabilities {
+    pub tools: bool,
+    pub prompts: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpPromptArgument {
+    pub name: String,
+    pub description: String,
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpPromptInfo {
+    pub name: String,
+    pub description: String,
+    pub arguments: Vec<McpPromptArgument>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct McpToolInfo {
     pub name: String,
@@ -57,6 +80,7 @@ pub struct McpClient {
     lines: Receiver<String>,
     next_id: u64,
     timeout: Duration,
+    capabilities: McpCapabilities,
 }
 
 impl McpClient {
@@ -105,8 +129,9 @@ impl McpClient {
             lines,
             next_id: 1,
             timeout: spec.timeout,
+            capabilities: McpCapabilities::default(),
         };
-        client.request(
+        let handshake = client.request(
             "initialize",
             json!({
                 "protocolVersion": PROTOCOL_VERSION,
@@ -114,12 +139,124 @@ impl McpClient {
                 "clientInfo": {"name": "loongagent", "version": env!("CARGO_PKG_VERSION")},
             }),
         )?;
+        let advertised = handshake.get("capabilities");
+        client.capabilities = McpCapabilities {
+            tools: advertised.and_then(|c| c.get("tools")).is_some(),
+            prompts: advertised.and_then(|c| c.get("prompts")).is_some(),
+        };
         client.notify("notifications/initialized", json!({}))?;
         Ok(client)
     }
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    pub fn capabilities(&self) -> McpCapabilities {
+        self.capabilities
+    }
+
+    /// The prompts the server offers. Empty when it never advertised any — that is
+    /// an answer, not a failure.
+    pub fn list_prompts(&mut self) -> Result<Vec<McpPromptInfo>, McpError> {
+        if !self.capabilities.prompts {
+            return Ok(Vec::new());
+        }
+        let result = self.request("prompts/list", json!({}))?;
+        let prompts = result
+            .get("prompts")
+            .and_then(|p| p.as_array())
+            .ok_or_else(|| err("prompts/list returned no prompts array"))?;
+        let mut out = Vec::new();
+        for prompt in prompts {
+            let name = prompt
+                .get("name")
+                .and_then(|n| n.as_str())
+                .ok_or_else(|| err("a prompt has no name"))?
+                .to_string();
+            let arguments = prompt
+                .get("arguments")
+                .and_then(|a| a.as_array())
+                .map(|list| {
+                    list.iter()
+                        .filter_map(|arg| {
+                            let name = arg.get("name")?.as_str()?.to_string();
+                            Some(McpPromptArgument {
+                                name,
+                                description: arg
+                                    .get("description")
+                                    .and_then(|d| d.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                required: arg
+                                    .get("required")
+                                    .and_then(|r| r.as_bool())
+                                    .unwrap_or(false),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            out.push(McpPromptInfo {
+                name,
+                description: prompt
+                    .get("description")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or("(no description)")
+                    .to_string(),
+                arguments,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Fetch a prompt's messages as text. A prompt is instructions the server
+    /// author wrote, so the same rule as any other tool output applies: it is
+    /// content, and which server it came from is recorded.
+    pub fn get_prompt(
+        &mut self,
+        name: &str,
+        arguments: &serde_json::Map<String, Value>,
+    ) -> Result<String, McpError> {
+        let result = self.request(
+            "prompts/get",
+            json!({"name": name, "arguments": Value::Object(arguments.clone())}),
+        )?;
+        let messages = result
+            .get("messages")
+            .and_then(|m| m.as_array())
+            .ok_or_else(|| err(format!("prompt {name:?} returned no messages")))?;
+        let mut parts: Vec<(String, String)> = Vec::new();
+        for message in messages {
+            let role = message.get("role").and_then(|r| r.as_str()).unwrap_or("user").to_string();
+            let text = match message.get("content") {
+                Some(Value::Array(blocks)) => blocks
+                    .iter()
+                    .filter_map(|block| match block.get("type").and_then(|t| t.as_str()) {
+                        Some("text") => block.get("text").and_then(|t| t.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                Some(Value::Object(_)) => message["content"]
+                    .get("text")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                _ => String::new(),
+            };
+            parts.push((role, text));
+        }
+        // A single user message *is* the command's prompt; anything richer keeps
+        // its speakers visible rather than silently merging them.
+        if parts.len() == 1 && parts[0].0 == "user" {
+            return Ok(parts.remove(0).1);
+        }
+        Ok(parts
+            .into_iter()
+            .map(|(role, text)| format!("[{role}] {text}"))
+            .collect::<Vec<_>>()
+            .join("\n\n"))
     }
 
     pub fn list_tools(&mut self) -> Result<Vec<McpToolInfo>, McpError> {
@@ -248,6 +385,27 @@ impl Drop for McpClient {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+/// Map a command's arguments onto the names a prompt declared: positionally first
+/// (`/review HEAD~1` → `ref=HEAD~1`), then `name=value` tokens override.
+pub fn map_prompt_arguments(names: &[String], args: &str) -> serde_json::Map<String, Value> {
+    let mut map = serde_json::Map::new();
+    let mut positional = Vec::new();
+    for token in args.split_whitespace() {
+        match token.split_once('=') {
+            Some((key, value)) if names.iter().any(|n| n == key) => {
+                map.insert(key.to_string(), Value::String(value.to_string()));
+            }
+            _ => positional.push(token.to_string()),
+        }
+    }
+    for (index, value) in positional.into_iter().enumerate() {
+        if let Some(name) = names.get(index) {
+            map.entry(name.clone()).or_insert(Value::String(value));
+        }
+    }
+    map
 }
 
 /// MCP content blocks → one string. Text passes through; anything else is
@@ -382,6 +540,54 @@ mod tests {
 
         let out = client.call_tool("ping", &json!({"message": "hello"})).unwrap();
         assert_eq!(out, "pong: hello");
+    }
+
+    #[test]
+    fn prompts_are_listed_and_fetched() {
+        let Some(script) = fake_server() else { return };
+        let mut client = McpClient::start(&spec(&script, "normal")).unwrap();
+        assert!(client.capabilities().prompts, "the fixture advertises prompts");
+        let prompts = client.list_prompts().unwrap();
+        assert_eq!(prompts.len(), 3, "{prompts:?}");
+        assert_eq!(prompts[0].name, "review");
+        assert_eq!(prompts[0].arguments.len(), 1);
+        assert_eq!(prompts[0].arguments[0].name, "ref");
+        assert!(prompts[0].arguments[0].required);
+
+        let mut arguments = serde_json::Map::new();
+        arguments.insert("ref".to_string(), json!("HEAD~1"));
+        let text = client.get_prompt("review", &arguments).unwrap();
+        assert_eq!(text, "Review HEAD~1 and report ONLY real bugs, each with file:line.");
+
+        // A multi-message prompt keeps its speakers.
+        let text = client.get_prompt("release", &serde_json::Map::new()).unwrap();
+        assert!(text.contains("[user] Walk the release checklist."), "{text}");
+        assert!(text.contains("[assistant] Understood."), "{text}");
+    }
+
+    #[test]
+    fn prompt_arguments_map_positionally_and_by_name() {
+        let names = vec!["ref".to_string(), "focus".to_string()];
+        let mapped = map_prompt_arguments(&names, "HEAD~1 security");
+        assert_eq!(mapped["ref"], "HEAD~1");
+        assert_eq!(mapped["focus"], "security");
+
+        let by_name = map_prompt_arguments(&names, "focus=perf HEAD~2");
+        assert_eq!(by_name["ref"], "HEAD~2", "the positional token fills the free slot");
+        assert_eq!(by_name["focus"], "perf");
+
+        // An undeclared `key=value` is a positional argument, not a silent drop.
+        let undeclared = map_prompt_arguments(&names, "a=b");
+        assert_eq!(undeclared["ref"], "a=b");
+        assert!(map_prompt_arguments(&[], "anything").is_empty());
+    }
+
+    #[test]
+    fn a_server_without_the_prompts_capability_is_not_asked() {
+        let Some(script) = fake_server() else { return };
+        let mut client = McpClient::start(&spec(&script, "no-prompts")).unwrap();
+        assert!(!client.capabilities().prompts);
+        assert_eq!(client.list_prompts().unwrap(), Vec::new(), "no prompts, no error");
     }
 
     #[test]

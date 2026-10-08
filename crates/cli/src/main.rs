@@ -217,9 +217,10 @@ fn serve(args: Args) -> Result<(), String> {
         Err(e) => return Err(format!("mcp.toml is broken: {e}")),
     }
     match loong_skills::SkillSet::load(&args.cwd) {
-        Ok(set) => {
-            eprintln!("[skills] {} available: {}", set.skills.len(), set.names().join(", "))
-        }
+        Ok(set) => eprintln!(
+            "[skills] workspace: {} (MCP prompts join per session)",
+            set.names().join(", ")
+        ),
         Err(e) => return Err(format!("a skill is broken: {e}")),
     }
     if let Ok(exe) = std::env::current_exe() {
@@ -498,22 +499,19 @@ fn mcp_trust(args: Args) -> Result<(), String> {
 /// Show what a `/name` in this workspace resolves to.
 fn skills_list(args: Args) -> Result<(), String> {
     let set = loong_skills::SkillSet::load(&args.cwd).map_err(|e| e.to_string())?;
-    println!("catalogue (this is what enters context):");
+    println!("workspace skills and commands (an MCP server's prompts join the");
+    println!("catalogue inside a session, namespaced as mcp__<server>__<prompt>):");
+    println!();
     for line in set.catalogue().lines() {
         println!("  {line}");
     }
     println!();
     for skill in &set.skills {
-        let origin = if skill.builtin {
-            "<builtin>".to_string()
-        } else {
-            skill.source.display().to_string()
-        };
         println!(
-            "  /{:<16} {:>5} tokens  {}",
+            "  /{:<22} {:>5} tokens  {}",
             skill.name,
-            loong_skills::estimate_tokens(&skill.body),
-            origin
+            skill.tokens(),
+            skill.source_label()
         );
     }
     Ok(())

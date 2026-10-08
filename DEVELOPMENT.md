@@ -157,7 +157,12 @@ binary the TUI spawns as its server (used by the end-to-end test).
 - **MCP servers** (`loong-mcp`, T-15): a trusted `.loongagent/mcp.toml` names
   stdio servers to start; their tools join the **same registry** as the built-ins
   (`mcp__<server>__<tool>`), so they go through the same PDP verdict, emit the
-  same `tool.call`/`tool.result` events, and appear in the same audit trail. Every
+  same `tool.call`/`tool.result` events, and appear in the same audit trail. Their
+  **prompts become commands** (`mcp__<server>__<prompt>`) in the same catalogue as
+  workspace skills, with their declared arguments as the hint; the body is fetched
+  on invoke, so a server can offer twenty workflows at the cost of twenty lines.
+  Capabilities are negotiated: a server that advertises no prompts is never sent
+  `prompts/list`. Every
   read has a deadline (a reader thread plus a timeout, so a wedged server fails the
   call instead of hanging the session), and each tool's **action class is declared**
   in the manifest — per server, with per-tool overrides, defaulting to the cautious
@@ -222,10 +227,11 @@ binary the TUI spawns as its server (used by the end-to-end test).
    `grep` reads whole files (no streaming) under a 4 MiB per-file cap.
 6. **Skills are not yet gated or scoped**: their descriptions enter every
    session's context (an injection surface, mitigated by provenance events, not by
-   a trust gate), per-skill `allowed-tools` is parsed but not enforced, and MCP
-   prompts still do not surface as commands (the registry that would carry them
-   now exists).
-7. **MCP is stdio-only and eager**: no HTTP transport, no resources/prompts, no
+   a trust gate), and per-skill `allowed-tools` is parsed but not enforced. An
+   MCP prompt's *description* likewise enters context as soon as its server is
+   trusted — the server's manifest is gated, the prompt text is not reviewable in
+   advance.
+7. **MCP is stdio-only and eager**: no HTTP transport, no resources, no
    sampling, and server-initiated requests are refused rather than served. Tools
    are listed at session start and every schema is handed to the model.
 8. **Post-tool hook verdicts are recorded but cannot undo anything**, and hooks

@@ -15,6 +15,9 @@
 pub mod client;
 pub mod config;
 
-pub use client::{McpClient, McpError, McpTool, McpToolInfo, PROTOCOL_VERSION};
+pub use client::{
+    map_prompt_arguments, McpCapabilities, McpClient, McpError, McpPromptArgument, McpPromptInfo,
+    McpTool, McpToolInfo, PROTOCOL_VERSION,
+};
 pub use config::{ConfigError, McpServerSpec, McpSet, MCP_DIR, MCP_FILE, MCP_TRUST_FILE};
 pub use loong_manifest::TrustStatus;

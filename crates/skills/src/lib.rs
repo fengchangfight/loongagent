@@ -52,6 +52,18 @@ impl std::fmt::Display for SkillError {
 
 impl std::error::Error for SkillError {}
 
+/// Where a skill's body lives. MCP prompts are the third case: the description is
+/// in hand, the body is fetched on invoke — progressive disclosure, over a wire.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Origin {
+    /// A markdown file in the workspace.
+    File { source: PathBuf, body: String },
+    /// Provided by the agent itself (`/help`).
+    Builtin { body: String },
+    /// A prompt on an MCP server, with the argument names it declared.
+    Mcp { server: String, prompt: String, arguments: Vec<String> },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Skill {
     pub name: String,
@@ -59,12 +71,36 @@ pub struct Skill {
     pub argument_hint: Option<String>,
     /// Recorded for a later phase (per-skill tool allowlists); not enforced yet.
     pub allowed_tools: Option<String>,
-    pub body: String,
-    pub source: PathBuf,
-    pub builtin: bool,
+    pub origin: Origin,
 }
 
 impl Skill {
+    /// The body, when it is already in hand.
+    pub fn body(&self) -> Option<&str> {
+        match &self.origin {
+            Origin::File { body, .. } | Origin::Builtin { body } => Some(body),
+            Origin::Mcp { .. } => None,
+        }
+    }
+
+    /// What to show a human (and the log) as this skill's provenance.
+    pub fn source_label(&self) -> String {
+        match &self.origin {
+            Origin::File { source, .. } => source.display().to_string(),
+            Origin::Builtin { .. } => "<builtin>".to_string(),
+            Origin::Mcp { server, prompt, .. } => format!("mcp:{server}/{prompt}"),
+        }
+    }
+
+    /// Rough size of what an invocation will add. An un-fetched MCP prompt has no
+    /// known size, and pretending otherwise would be a made-up number.
+    pub fn tokens(&self) -> u64 {
+        match &self.origin {
+            Origin::File { body, .. } | Origin::Builtin { body } => estimate_tokens(body),
+            Origin::Mcp { .. } => 0,
+        }
+    }
+
     /// What the model is shown: a name, a description and the invocation syntax.
     /// Never the body.
     pub fn catalogue_line(&self) -> String {
@@ -72,27 +108,23 @@ impl Skill {
             Some(hint) => format!(" {hint}"),
             None => String::new(),
         };
-        let origin = if self.builtin {
-            String::new()
-        } else {
-            match (self.source.parent(), self.source.file_name()) {
-                (Some(dir), Some(file)) if file == SKILL_FILE => {
-                    format!("  [{}]", dir.display())
-                }
-                _ => format!("  [{}]", self.source.display()),
-            }
+        let origin = match &self.origin {
+            Origin::Builtin { .. } => String::new(),
+            Origin::File { source, .. } => format!("  [{}]", source.display()),
+            Origin::Mcp { server, prompt, .. } => format!("  [mcp:{server}/{prompt}]"),
         };
         format!("/{}{} — {}{}", self.name, hint, self.description, origin)
     }
 }
 
+/// What an invocation resolved to. `prompt` is `None` for an MCP prompt: the
+/// caller fetches it (it owns the server connection).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Expansion {
+pub struct Invocation {
     pub name: String,
-    pub prompt: String,
+    pub args: String,
     pub source: String,
-    pub builtin: bool,
-    /// Rough size of what is about to enter context.
+    pub prompt: Option<String>,
     pub tokens: u64,
 }
 
@@ -150,29 +182,42 @@ impl SkillSet {
             }
         }
 
+        let set = SkillSet { workspace, skills };
+        set.finalize()
+    }
+
+    /// Add skills that come from somewhere else (MCP prompts), then rebuild the
+    /// catalogue: `/help` must list them too.
+    pub fn with_external(mut self, mut extra: Vec<Skill>) -> Result<Self, SkillError> {
+        self.skills.append(&mut extra);
+        self.finalize()
+    }
+
+    fn finalize(mut self) -> Result<Self, SkillError> {
+        // `/help` is regenerated from the final set — including skills that arrived
+        // after the first pass — so a stale help entry must not survive.
+        self.skills.retain(|s| !matches!(s.origin, Origin::Builtin { .. }));
         // A duplicate name is a configuration bug, and picking one at random would
         // make `/name` depend on directory order.
-        let mut seen: BTreeMap<String, PathBuf> = BTreeMap::new();
-        for skill in &skills {
+        let mut seen: BTreeMap<String, String> = BTreeMap::new();
+        for skill in &self.skills {
             if let Some(first) = seen.get(&skill.name) {
                 return Err(SkillError::Invalid(format!(
-                    "{:?} is defined twice: {} and {}",
+                    "{:?} is defined twice: {first} and {}",
                     skill.name,
-                    first.display(),
-                    skill.source.display()
+                    skill.source_label()
                 )));
             }
-            seen.insert(skill.name.clone(), skill.source.clone());
+            seen.insert(skill.name.clone(), skill.source_label());
         }
-
-        let mut set = SkillSet { workspace, skills };
-        set.skills.push(set.help_skill());
-        set.skills.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(set)
+        let help = self.help_skill();
+        self.skills.push(help);
+        self.skills.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(self)
     }
 
     pub fn is_empty(&self) -> bool {
-        self.skills.iter().all(|s| s.builtin)
+        self.skills.iter().all(|s| matches!(s.origin, Origin::Builtin { .. }))
     }
 
     pub fn get(&self, name: &str) -> Option<&Skill> {
@@ -192,20 +237,16 @@ impl SkillSet {
             .join("\n")
     }
 
-    /// `/name args` → the prompt to send, or `None` when no such skill exists.
-    pub fn invoke(&self, name: &str, args: &str) -> Option<Expansion> {
+    /// `/name args` → what to send, or `None` when no such skill exists. An MCP
+    /// prompt comes back without its body: the caller owns the connection.
+    pub fn invoke(&self, name: &str, args: &str) -> Option<Invocation> {
         let skill = self.get(name)?;
-        let prompt = substitute(&skill.body, args);
-        Some(Expansion {
+        Some(Invocation {
             name: skill.name.clone(),
-            prompt,
-            source: if skill.builtin {
-                "<builtin>".to_string()
-            } else {
-                skill.source.display().to_string()
-            },
-            builtin: skill.builtin,
-            tokens: estimate_tokens(&skill.body),
+            args: args.to_string(),
+            source: skill.source_label(),
+            prompt: skill.body().map(|body| substitute(body, args)),
+            tokens: skill.tokens(),
         })
     }
 
@@ -227,9 +268,7 @@ impl SkillSet {
             description: "list the skills and commands available here".to_string(),
             argument_hint: None,
             allowed_tools: None,
-            body,
-            source: PathBuf::from("<builtin>"),
-            builtin: true,
+            origin: Origin::Builtin { body },
         }
     }
 }
@@ -335,9 +374,7 @@ fn read_skill(path: &Path, fallback_name: Option<&str>) -> Result<Skill, SkillEr
         description,
         argument_hint: fields.get("argument-hint").cloned(),
         allowed_tools: fields.get("allowed-tools").cloned(),
-        body: body.to_string(),
-        source: path.to_path_buf(),
-        builtin: false,
+        origin: Origin::File { source: path.to_path_buf(), body: body.to_string() },
     })
 }
 
@@ -374,14 +411,34 @@ pub fn estimate_tokens(text: &str) -> u64 {
     (text.chars().count() as u64 + 3) / 4
 }
 
+/// Fetching a prompt body from the server that owns it. The skill registry stays
+/// ignorant of MCP; whoever owns the connections supplies this.
+pub trait PromptFetcher: Send + Sync {
+    fn fetch(
+        &self,
+        server: &str,
+        prompt: &str,
+        argument_names: &[String],
+        args: &str,
+    ) -> Result<String, String>;
+}
+
 /// The model-invoked path: it sees the catalogue, and asks for a body by name.
 pub struct SkillTool {
     skills: std::sync::Arc<SkillSet>,
+    fetcher: Option<std::sync::Arc<dyn PromptFetcher>>,
 }
 
 impl SkillTool {
     pub fn new(skills: std::sync::Arc<SkillSet>) -> Self {
-        Self { skills }
+        Self { skills, fetcher: None }
+    }
+
+    pub fn with_fetcher(
+        skills: std::sync::Arc<SkillSet>,
+        fetcher: std::sync::Arc<dyn PromptFetcher>,
+    ) -> Self {
+        Self { skills, fetcher: Some(fetcher) }
     }
 }
 
@@ -411,18 +468,31 @@ impl Tool for SkillTool {
             .get("name")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::Refused("missing string argument \"name\"".into()))?;
-        match self.skills.get(name) {
-            Some(skill) => Ok(format!(
-                "# Skill: {} (from {})\n\n{}",
-                skill.name,
-                if skill.builtin { "<builtin>".to_string() } else { skill.source.display().to_string() },
-                skill.body
-            )),
-            None => Err(ToolError::Refused(format!(
+        let Some(skill) = self.skills.get(name) else {
+            return Err(ToolError::Refused(format!(
                 "no skill named {name:?}; available: {}",
                 self.skills.names().join(", ")
-            ))),
-        }
+            )));
+        };
+        // An MCP prompt has no local body: fetch it from the server that owns it.
+        let (body, source) = match &skill.origin {
+            Origin::File { body, .. } | Origin::Builtin { body } => {
+                (body.clone(), skill.source_label())
+            }
+            Origin::Mcp { server, prompt, arguments } => {
+                let Some(fetcher) = &self.fetcher else {
+                    return Err(ToolError::Refused(format!(
+                        "{name} is provided by MCP server {server:?}, which is not reachable in \
+                         this session"
+                    )));
+                };
+                let body = fetcher
+                    .fetch(server, prompt, arguments, "")
+                    .map_err(|e| ToolError::Failed(format!("fetching {server}/{prompt}: {e}")))?;
+                (body, skill.source_label())
+            }
+        };
+        Ok(format!("# Skill: {} (from {source})\n\n{body}", skill.name))
     }
 }
 
@@ -470,8 +540,8 @@ mod tests {
         let skill = set.get("code-review").expect("discovered");
         assert_eq!(skill.description, "Review a diff for real bugs");
         assert_eq!(skill.argument_hint.as_deref(), Some("<ref>"));
-        assert!(skill.body.starts_with("Look at $ARGUMENTS"));
-        assert!(!skill.builtin);
+        assert!(skill.body().unwrap().starts_with("Look at $ARGUMENTS"));
+        assert!(matches!(skill.origin, Origin::File { .. }));
     }
 
     #[test]
@@ -504,9 +574,10 @@ mod tests {
         skill_file(&ws, "review", "---\ndescription: Review something\n---\nbody\n");
         let set = SkillSet::load(&ws).unwrap();
         let help = set.invoke("help", "").expect("/help works");
-        assert!(help.builtin);
-        assert!(help.prompt.contains("/review — Review something"), "{}", help.prompt);
-        assert!(help.prompt.contains("/help"), "{}", help.prompt);
+        assert_eq!(help.source, "<builtin>");
+        let prompt = help.prompt.expect("a builtin body is in hand");
+        assert!(prompt.contains("/review — Review something"), "{prompt}");
+        assert!(prompt.contains("/help"), "{prompt}");
     }
 
     #[test]
@@ -521,17 +592,16 @@ mod tests {
         skill_file(&ws, "none", "---\ndescription: d\n---\nNo placeholder here.\n");
         let set = SkillSet::load(&ws).unwrap();
 
-        assert!(set.invoke("all", "one two").unwrap().prompt.contains("ARGS=[one two]"));
-        let positional = set.invoke("positional", "a b").unwrap();
-        assert!(positional.prompt.contains("first=a second=b third="), "{}", positional.prompt);
-        let none = set.invoke("none", "a b").unwrap();
-        assert!(none.prompt.ends_with("Arguments: a b"), "{}", none.prompt);
+        let prompt = |name: &str, args: &str| set.invoke(name, args).unwrap().prompt.unwrap();
+        assert!(prompt("all", "one two").contains("ARGS=[one two]"));
+        assert!(prompt("positional", "a b").contains("first=a second=b third="));
+        assert!(prompt("none", "a b").ends_with("Arguments: a b"));
         // With no arguments, nothing is appended.
-        assert!(!set.invoke("none", "").unwrap().prompt.contains("Arguments:"));
+        assert!(!prompt("none", "").contains("Arguments:"));
         // A lone `$` is not a placeholder and must survive.
         skill_file(&ws, "dollar", "---\ndescription: d\n---\ncost is 5$ today\n");
         let set = SkillSet::load(&ws).unwrap();
-        assert!(set.invoke("dollar", "").unwrap().prompt.contains("5$ today"));
+        assert!(set.invoke("dollar", "").unwrap().prompt.unwrap().contains("5$ today"));
     }
 
     #[test]
@@ -601,11 +671,127 @@ mod tests {
         let output = tool.execute(&json!({"name": "deploy"}), &ctx).unwrap();
         assert!(output.contains("Step one: breathe."), "{output}");
         assert!(output.contains("skills/deploy"), "the source is named: {output}");
+        assert!(output.contains("/deploy"), "{output}");
 
         let err = tool.execute(&json!({"name": "absent"}), &ctx).unwrap_err().to_string();
         assert!(err.contains("no skill named"), "{err}");
         assert!(err.contains("deploy"), "the refusal lists what exists: {err}");
         assert!(matches!(tool.execute(&json!({}), &ctx), Err(ToolError::Refused(_))));
+    }
+
+    #[test]
+    fn an_mcp_prompt_is_a_skill_whose_body_is_fetched_on_invoke() {
+        let ws = workspace();
+        skill_file(&ws, "local", "---\ndescription: A local skill\n---\nlocal body\n");
+        let set = SkillSet::load(&ws)
+            .unwrap()
+            .with_external(vec![Skill {
+                name: "mcp__policy__review".to_string(),
+                description: "Review a diff (from the policy server)".to_string(),
+                argument_hint: Some("<ref>".to_string()),
+                allowed_tools: None,
+                origin: Origin::Mcp {
+                    server: "policy".to_string(),
+                    prompt: "review".to_string(),
+                    arguments: vec!["ref".to_string()],
+                },
+            }])
+            .unwrap();
+
+        // Description in context, body not — and the origin is named.
+        let catalogue = set.catalogue();
+        assert!(catalogue.contains("/mcp__policy__review <ref> — Review a diff"), "{catalogue}");
+        assert!(catalogue.contains("[mcp:policy/review]"), "{catalogue}");
+        assert!(set.get("mcp__policy__review").unwrap().body().is_none());
+        assert_eq!(set.get("mcp__policy__review").unwrap().tokens(), 0, "no made-up size");
+
+        // Invoking yields no body but the coordinates to fetch it.
+        let invocation = set.invoke("mcp__policy__review", "HEAD~1").unwrap();
+        assert!(invocation.prompt.is_none());
+        assert_eq!(invocation.source, "mcp:policy/review");
+        match &set.get("mcp__policy__review").unwrap().origin {
+            Origin::Mcp { server, prompt, arguments } => {
+                assert_eq!(server, "policy");
+                assert_eq!(prompt, "review");
+                assert_eq!(arguments, &vec!["ref".to_string()]);
+            }
+            other => panic!("expected an MCP origin, got {other:?}"),
+        }
+
+        // `/help` lists it, and it is listed for the human too.
+        let help = set.invoke("help", "").unwrap().prompt.unwrap();
+        assert!(help.contains("/mcp__policy__review"), "{help}");
+        assert!(set.names().contains(&"mcp__policy__review"));
+    }
+
+    struct FakeFetcher;
+
+    impl PromptFetcher for FakeFetcher {
+        fn fetch(
+            &self,
+            server: &str,
+            prompt: &str,
+            argument_names: &[String],
+            args: &str,
+        ) -> Result<String, String> {
+            Ok(format!("fetched {server}/{prompt} with {argument_names:?} args={args:?}"))
+        }
+    }
+
+    #[test]
+    fn the_tool_fetches_an_mcp_body_and_says_so_without_a_server() {
+        let ws = workspace();
+        let set = std::sync::Arc::new(
+            SkillSet::load(&ws)
+                .unwrap()
+                .with_external(vec![Skill {
+                    name: "mcp__policy__review".to_string(),
+                    description: "Review a diff".to_string(),
+                    argument_hint: None,
+                    allowed_tools: None,
+                    origin: Origin::Mcp {
+                        server: "policy".to_string(),
+                        prompt: "review".to_string(),
+                        arguments: vec!["ref".to_string()],
+                    },
+                }])
+                .unwrap(),
+        );
+        let ctx = ExecContext::new(&ws, &loong_tools::NoConfinement);
+
+        let with_fetcher =
+            SkillTool::with_fetcher(std::sync::Arc::clone(&set), std::sync::Arc::new(FakeFetcher));
+        let output = with_fetcher.execute(&json!({"name": "mcp__policy__review"}), &ctx).unwrap();
+        assert!(output.contains("fetched policy/review"), "{output}");
+        assert!(output.contains("mcp:policy/review"), "{output}");
+
+        // Without a connection there is no body to give, and pretending otherwise
+        // would be worse than refusing.
+        let without = SkillTool::new(set);
+        let err = without.execute(&json!({"name": "mcp__policy__review"}), &ctx).unwrap_err();
+        assert!(err.to_string().contains("not reachable"), "{err}");
+    }
+
+    #[test]
+    fn an_external_skill_cannot_shadow_a_local_one() {
+        let ws = workspace();
+        skill_file(&ws, "review", "---\ndescription: local\n---\nbody\n");
+        let err = SkillSet::load(&ws)
+            .unwrap()
+            .with_external(vec![Skill {
+                name: "review".to_string(),
+                description: "from a server".to_string(),
+                argument_hint: None,
+                allowed_tools: None,
+                origin: Origin::Mcp {
+                    server: "s".to_string(),
+                    prompt: "review".to_string(),
+                    arguments: vec![],
+                },
+            }])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("defined twice"), "{err}");
     }
 
     #[test]

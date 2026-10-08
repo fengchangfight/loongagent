@@ -93,8 +93,9 @@ rows below are what "not losing" means concretely.
 | CC feature | Our status | Where | Next |
 |---|---|---|---|
 | stdio + HTTP servers, user/project/local scopes | ⚠️ | `loong-mcp` (2026-10-07): **stdio shipped**, one project scope (`.loongagent/mcp.toml`); HTTP/SSE transport and user/local scopes to come | HTTP transport reuses `loong-http`; scopes need the config layering of ADR-0008 |
+| Capability negotiation (`initialize` → tools/prompts) | ✅ | 2026-10-08: we ask only for what the server advertised, so a server without prompts is never sent `prompts/list` | — |
 | **Org allow/deny lists for MCP servers** | ⚠️ | T-05/T-15 (approved-server gateway) | make it a first-class org policy key; today the trust gate is per repository |
-| MCP prompts surface as slash commands | ❌ | T-15 + the skill registry now exist | unblocked: `prompts/list` + `prompts/get` on the MCP client, then expose each as a skill |
+| MCP prompts surface as slash commands | ✅ | implemented 2026-10-08: a server's prompts join the session's catalogue as `mcp__<server>__<prompt>` with their declared arguments as the hint, and the body is fetched on invoke (`prompts/get`) — never held in context | resources and sampling remain unimplemented |
 | Lazy tool loading (names first, schemas on demand) | ❌ | T-15 | we list tools at session start and hand the model every schema; lazy loading is worth it once a server exposes dozens |
 | Injection defence on MCP content | ⚠️ | tool output is data, not instructions, and every call is an audited event; but there is no content-level scrubbing yet | T-15 |
 | Declared action classes for external tools (default: ask every time) | ✅ | `loong-mcp::config` — per-server `action_class` with per-tool overrides, defaulting to `out_of_bounds` | org-pinnable in T-05 |

@@ -22,7 +22,7 @@ use loong_schema::generated::{ActionClass, ApprovalScope, Json, Role, Verdict};
 use loong_hooks::{payload, HookEvent, HookReport, HookRunner, HookSet};
 use loong_hooks::McpCaller;
 use loong_mcp::{McpClient, McpSet, McpTool};
-use loong_skills::{parse_invocation, SkillSet, SkillTool};
+use loong_skills::{parse_invocation, Origin, PromptFetcher, Skill, SkillSet, SkillTool};
 use std::sync::{Arc, Mutex};
 use loong_sandbox::landlock::WorkspacePolicy;
 use loong_tools::{Confinement, ExecContext, NoConfinement, Registry};
@@ -164,6 +164,25 @@ struct KernelMcp {
     clients: Vec<Arc<Mutex<McpClient>>>,
 }
 
+impl PromptFetcher for KernelMcp {
+    fn fetch(
+        &self,
+        server: &str,
+        prompt: &str,
+        argument_names: &[String],
+        args: &str,
+    ) -> Result<String, String> {
+        let client = self
+            .clients
+            .iter()
+            .find(|c| c.lock().map(|c| c.name() == server).unwrap_or(false))
+            .ok_or_else(|| format!("no MCP server named {server:?} is running"))?;
+        let arguments = loong_mcp::map_prompt_arguments(argument_names, args);
+        let mut client = client.lock().map_err(|_| format!("the {server} client is poisoned"))?;
+        client.get_prompt(prompt, &arguments).map_err(|e| e.to_string())
+    }
+}
+
 impl McpCaller for KernelMcp {
     fn call(&self, server: &str, tool: &str, args: &Json) -> Result<String, String> {
         let client = self
@@ -181,13 +200,17 @@ impl McpCaller for KernelMcp {
 /// A server that is `required` (the default) and cannot be used is fatal: the
 /// operator asked for it, and quietly running without a guard rail they believe is
 /// present would be the worst outcome. `required = false` opts into a note.
-fn attach_mcp(
-    workspace: &Path,
-    tools: &mut Registry,
-) -> Result<(String, Vec<Arc<Mutex<McpClient>>>), KernelError> {
+struct AttachedMcp {
+    note: String,
+    clients: Vec<Arc<Mutex<McpClient>>>,
+    prompt_skills: Vec<Skill>,
+}
+
+fn attach_mcp(workspace: &Path, tools: &mut Registry) -> Result<AttachedMcp, KernelError> {
     let set = McpSet::load(workspace).map_err(|e| KernelError::Mcp(e.to_string()))?;
     let mut note = set.summary();
     let mut clients = Vec::new();
+    let mut prompt_skills = Vec::new();
     for spec in set.active() {
         let mut client = match McpClient::start(spec) {
             Ok(client) => client,
@@ -215,10 +238,64 @@ fn attach_mcp(
             let class = spec.class_for(&info.name);
             tools.register(McpTool::new(&spec.name, info, class, Arc::clone(&client)));
         }
+        // A server's prompts become commands: same catalogue, same /name syntax,
+        // body fetched from the server on invoke.
+        let prompts = match client.lock() {
+            Ok(mut locked) => locked.list_prompts(),
+            Err(_) => Err(loong_mcp::McpError(format!("the {} client is poisoned", spec.name))),
+        };
+        match prompts {
+            Ok(prompts) => {
+                if !prompts.is_empty() {
+                    note.push_str(&format!(", {} prompt(s)", prompts.len()));
+                }
+                for prompt in prompts {
+                    let names: Vec<String> =
+                        prompt.arguments.iter().map(|a| a.name.clone()).collect();
+                    let hint = if names.is_empty() {
+                        None
+                    } else {
+                        Some(
+                            names
+                                .iter()
+                                .map(|n| {
+                                    if prompt
+                                        .arguments
+                                        .iter()
+                                        .any(|a| &a.name == n && a.required)
+                                    {
+                                        format!("<{n}>")
+                                    } else {
+                                        format!("[{n}]")
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                                .join(" "),
+                        )
+                    };
+                    prompt_skills.push(Skill {
+                        // Namespaced like MCP tools, so a prompt can never shadow a
+                        // workspace skill.
+                        name: format!("mcp__{}__{}", spec.name, prompt.name),
+                        description: prompt.description,
+                        argument_hint: hint,
+                        allowed_tools: None,
+                        origin: Origin::Mcp {
+                            server: spec.name.clone(),
+                            prompt: prompt.name,
+                            arguments: names,
+                        },
+                    });
+                }
+            }
+            Err(e) => {
+                note.push_str(&format!("; {} prompts unavailable: {e}", spec.name));
+            }
+        }
         clients.push(client);
         note.push_str(&format!("; {} exposed {count} tool(s)", spec.name));
     }
-    Ok((note, clients))
+    Ok(AttachedMcp { note, clients, prompt_skills })
 }
 
 /// A hook verdict replaces the policy's only when it is stricter (hooks tighten,
@@ -285,6 +362,9 @@ pub struct Kernel {
     mcp_note: String,
     /// Skills and commands: descriptions in context, bodies on invoke (T-18).
     skills: Arc<SkillSet>,
+    /// The bridge to this session's MCP servers, for `mcp` hooks and for prompts
+    /// invoked as commands.
+    mcp_caller: Option<Arc<KernelMcp>>,
     /// Derived, disposable SQLite view of the log (ADR-0003). It trails the log
     /// by design: the log is the truth, this only makes queries fast. A failure
     /// to index never loses an event — it marks the index stale instead.
@@ -324,13 +404,28 @@ impl Kernel {
         // External tools join the same registry as the built-ins (T-15): one
         // interface, one PDP, one event stream, one audit trail.
         let mut tools = Registry::with_builtins();
-        let (mcp_note, mcp_clients) = attach_mcp(&config.cwd, &mut tools)?;
-        // Skills are one concept with commands (T-18): the model sees the
-        // catalogue and asks for a body by name.
+        let attached = attach_mcp(&config.cwd, &mut tools)?;
+        let (mcp_note, mcp_clients, prompt_skills) =
+            (attached.note, attached.clients, attached.prompt_skills);
+        let mcp_caller: Option<Arc<KernelMcp>> = (!mcp_clients.is_empty()).then(|| {
+            Arc::new(KernelMcp { clients: mcp_clients.clone() })
+        });
+        // Skills are one concept with commands (T-18) — and MCP prompts are skills
+        // whose body lives on the server (T-15): the model sees the catalogue and
+        // asks for a body by name.
         let skills = Arc::new(
-            SkillSet::load(&config.cwd).map_err(|e| KernelError::Skills(e.to_string()))?,
+            SkillSet::load(&config.cwd)
+                .map_err(|e| KernelError::Skills(e.to_string()))?
+                .with_external(prompt_skills)
+                .map_err(|e| KernelError::Skills(e.to_string()))?,
         );
-        tools.register(SkillTool::new(Arc::clone(&skills)));
+        match &mcp_caller {
+            Some(caller) => tools.register(SkillTool::with_fetcher(
+                Arc::clone(&skills),
+                Arc::clone(caller) as Arc<dyn PromptFetcher>,
+            )),
+            None => tools.register(SkillTool::new(Arc::clone(&skills))),
+        }
 
         let mut kernel;
         // The PEP is chosen here, once, and handed to every tool call.
@@ -351,9 +446,9 @@ impl Kernel {
         let hooks_note = hook_set.summary();
         // `mcp` hooks reach the servers this session started; without any, they
         // fail closed and say why.
-        let caller: Option<Arc<dyn McpCaller>> = (!mcp_clients.is_empty()).then(|| {
-            Arc::new(KernelMcp { clients: mcp_clients.clone() }) as Arc<dyn McpCaller>
-        });
+        let caller: Option<Arc<dyn McpCaller>> = mcp_caller
+            .as_ref()
+            .map(|caller| Arc::clone(caller) as Arc<dyn McpCaller>);
         let hooks =
             HookRunner::new(&config.cwd, hook_set.active().to_vec()).with_mcp(caller);
         let session_start_fields = json!({"cwd": config.cwd, "profile": config.profile});
@@ -375,6 +470,7 @@ impl Kernel {
             mcp_clients,
             mcp_note,
             skills,
+            mcp_caller,
             index,
             index_path,
             index_stale: None,
@@ -430,6 +526,19 @@ impl Kernel {
     /// The skills and commands this workspace offers.
     pub fn skills(&self) -> &SkillSet {
         &self.skills
+    }
+
+    /// Fetch an MCP prompt's body for a command invocation, naming its arguments.
+    fn fetch_mcp_prompt(&self, name: &str, args: &str) -> Result<(String, u64), String> {
+        let skill = self.skills.get(name).ok_or_else(|| format!("no skill named {name:?}"))?;
+        let Origin::Mcp { server, prompt, arguments } = &skill.origin else {
+            return Err(format!("{name} has no body to fetch"));
+        };
+        let Some(caller) = &self.mcp_caller else {
+            return Err(format!("MCP server {server:?} is not running in this session"));
+        };
+        let body = caller.fetch(server, prompt, arguments, args)?;
+        Ok((body.clone(), loong_skills::estimate_tokens(&body)))
     }
 
     /// The one place the system prompt is built: a short frame plus the
@@ -567,16 +676,44 @@ impl Kernel {
             Some((name, args)) => match self.skills.invoke(&name, &args) {
                 Some(expansion) => {
                     let source = expansion.source.clone();
-                    (
-                        expansion.prompt,
-                        Some(gen::SkillInvoked {
-                            name: expansion.name,
-                            source,
-                            args,
-                            tokens: expansion.tokens,
-                            error: None,
-                        }),
-                    )
+                    // An MCP prompt has no local body: fetch it from the server that
+                    // owns it, and refuse the turn if that is not possible rather
+                    // than sending the model a command name it cannot resolve.
+                    let fetched = match expansion.prompt {
+                        Some(prompt) => Ok((prompt, expansion.tokens)),
+                        None => self.fetch_mcp_prompt(&expansion.name, &args),
+                    };
+                    match fetched {
+                        Ok((prompt, tokens)) => (
+                            prompt,
+                            Some(gen::SkillInvoked {
+                                name: expansion.name,
+                                source,
+                                args,
+                                tokens,
+                                error: None,
+                            }),
+                        ),
+                        Err(e) => {
+                            let event = self.append(
+                                gen::event::SKILL_INVOKED,
+                                &gen::SkillInvoked {
+                                    name: expansion.name.clone(),
+                                    source,
+                                    args,
+                                    tokens: 0,
+                                    error: Some(e.clone()),
+                                },
+                            )?;
+                            return Ok(TurnOutcome {
+                                steps: 0,
+                                final_text: None,
+                                pending_approval: None,
+                                refused: Some(format!("/{} could not be loaded: {e}", expansion.name)),
+                                events: vec![event],
+                            });
+                        }
+                    }
                 }
                 None => {
                     // An unknown command is refused rather than sent to the model as
@@ -1380,6 +1517,10 @@ mod tests {
     }
 
     fn install_mcp(dir: &Path, action_class: &str, trust: bool) -> bool {
+        install_mcp_mode(dir, action_class, trust, "normal")
+    }
+
+    fn install_mcp_mode(dir: &Path, action_class: &str, trust: bool, mode: &str) -> bool {
         let script = fake_mcp();
         if !script.exists() || std::process::Command::new("python3").arg("--version").output().is_err()
         {
@@ -1393,13 +1534,143 @@ mod tests {
                 "[[server]]\nname = \"fake\"\ncommand = \"python3\"\nargs = [\"{}\", \"normal\"]\n\
                  action_class = \"{action_class}\"\n",
                 script.display()
-            ),
+            )
+            .replace("\"normal\"", &format!("\"{mode}\"")),
         )
         .unwrap();
         if trust {
             loong_mcp::McpSet::load(dir).unwrap().trust_now().unwrap();
         }
         true
+    }
+
+    #[test]
+    fn an_mcp_prompt_becomes_a_command_with_its_body_fetched_on_invoke() {
+        let t = Temp::new();
+        if !install_mcp(&t.dir, "investigate", true) {
+            return;
+        }
+        let (model, seen) = RecordingModel::new(vec![response(vec![], Some("reviewed"))]);
+        let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+
+        // The catalogue advertises the server's prompts as commands…
+        assert!(k.skills().names().contains(&"mcp__fake__review"), "{:?}", k.skills().names());
+        let sent = seen.lock().unwrap();
+        assert!(sent.is_empty(), "nothing has been asked of the model yet");
+        drop(sent);
+
+        // …and invoking one fetches the body from the server, with the argument
+        // mapped onto the name the prompt declared.
+        k.submit("/mcp__fake__review HEAD~1").unwrap();
+        let events = loong_eventlog::replay(&t.log).unwrap().events;
+        let invoked = events.iter().find(|e| e.kind == ev::SKILL_INVOKED).unwrap();
+        assert_eq!(invoked.data["name"], "mcp__fake__review");
+        assert_eq!(invoked.data["source"], "mcp:fake/review");
+        assert!(invoked.data["tokens"].as_u64().unwrap() > 0, "the fetched body is accounted for");
+        assert!(invoked.data["error"].is_null());
+
+        let sent = seen.lock().unwrap();
+        let user = sent[0]
+            .iter()
+            .find_map(|m| match m {
+                ChatMessage::User { text } => Some(text.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            user.contains("Review HEAD~1 and report ONLY real bugs"),
+            "the argument reached the server and the body came back: {user}"
+        );
+    }
+
+    #[test]
+    fn the_model_can_fetch_an_mcp_prompt_body_with_the_tool() {
+        let t = Temp::new();
+        if !install_mcp(&t.dir, "investigate", true) {
+            return;
+        }
+        let model = ScriptedModel::new(vec![
+            response(vec![call("c1", "skill", json!({"name": "mcp__fake__review"}))], None),
+            response(vec![], Some("loaded")),
+        ]);
+        let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        k.submit("get the review checklist").unwrap();
+
+        let events = loong_eventlog::replay(&t.log).unwrap().events;
+        let result = events.iter().find(|e| e.kind == ev::TOOL_RESULT).unwrap();
+        assert_eq!(result.data["ok"], true, "{:?}", result.data["output"]);
+        let output = result.data["output"].as_str().unwrap();
+        assert!(output.contains("Review HEAD and report ONLY real bugs"), "{output}");
+        assert!(output.contains("mcp:fake/review"), "the origin is named: {output}");
+    }
+
+    #[test]
+    fn help_lists_the_servers_prompts_too() {
+        let t = Temp::new();
+        if !install_mcp(&t.dir, "investigate", true) {
+            return;
+        }
+        let (model, seen) = RecordingModel::new(vec![response(vec![], Some("listed"))]);
+        let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        k.submit("/help").unwrap();
+        let sent = seen.lock().unwrap();
+        let user = sent[0]
+            .iter()
+            .find_map(|m| match m {
+                ChatMessage::User { text } => Some(text.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(user.contains("/mcp__fake__review"), "{user}");
+        assert!(user.contains("/mcp__fake__release"), "{user}");
+        // A prompt with no declared arguments gets no hint.
+        assert!(user.contains("Walk the release checklist"), "{user}");
+    }
+
+    #[test]
+    fn a_server_without_prompts_contributes_none() {
+        let t = Temp::new();
+        if !install_mcp_mode(&t.dir, "investigate", true, "no-prompts") {
+            return;
+        }
+        let model = ScriptedModel::saying("hi");
+        let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        assert!(
+            !k.skills().names().iter().any(|n| n.starts_with("mcp__")),
+            "a server that advertises no prompts adds no commands: {:?}",
+            k.skills().names()
+        );
+        // Its tools still work.
+        assert!(k.tools_mut().names().contains(&"mcp__fake__ping"));
+    }
+
+    #[test]
+    fn a_prompt_that_fails_to_load_refuses_the_turn_instead_of_reaching_the_model() {
+        let t = Temp::new();
+        if !install_mcp(&t.dir, "investigate", true) {
+            return;
+        }
+        // An empty script: if the model were called the turn would fail instead.
+        let model = ScriptedModel::new(vec![]);
+        let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        assert!(k.skills().names().contains(&"mcp__fake__broken"));
+
+        let outcome = k.submit("/mcp__fake__broken").unwrap();
+        let refused = outcome.refused.expect("a prompt that cannot load is refused");
+        assert!(refused.contains("could not be loaded"), "{refused}");
+
+        let events = loong_eventlog::replay(&t.log).unwrap().events;
+        let invoked = events.iter().find(|e| e.kind == ev::SKILL_INVOKED).unwrap();
+        assert_eq!(invoked.data["name"], "mcp__fake__broken");
+        assert!(
+            invoked.data["error"].as_str().unwrap().contains("prompt handler is broken"),
+            "{:?}",
+            invoked.data
+        );
+        assert!(
+            !events.iter().any(|e| e.kind == ev::COST_RECORDED),
+            "the model was never called"
+        );
     }
 
     #[test]

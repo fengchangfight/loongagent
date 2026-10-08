@@ -30,10 +30,11 @@ ALLOWED = {
     # surfaces
     "loong-server": {"loong-schema", "loong-protocol", "loong-eventlog", "loong-kernel"},
     "loong-tui": {"loong-schema", "loong-protocol"},
+    "loong-tui-app": {"loong-schema", "loong-tui"},
     # the one binary that ties faces together
     "loongagent": {
         "loong-schema", "loong-protocol", "loong-eventlog", "loong-http", "loong-proc", "loong-manifest", "loong-providers",
-        "loong-sandbox", "loong-tools", "loong-hooks", "loong-mcp", "loong-index", "loong-kernel", "loong-server", "loong-tui",
+        "loong-sandbox", "loong-tools", "loong-hooks", "loong-mcp", "loong-index", "loong-kernel", "loong-server", "loong-tui", "loong-tui-app",
     },
 }
 

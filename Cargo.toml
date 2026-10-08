@@ -29,3 +29,4 @@ loong-index = { path = "crates/index" }
 loong-kernel = { path = "crates/kernel" }
 loong-server = { path = "crates/server" }
 loong-tui = { path = "crates/tui" }
+loong-tui-app = { path = "crates/tui-app" }

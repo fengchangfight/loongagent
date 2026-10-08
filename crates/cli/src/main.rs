@@ -21,6 +21,7 @@ use loong_server::Server;
 use loong_tui::{Client, Transport};
 use serde_json::json;
 use std::io::{BufRead, BufReader, Write};
+use std::sync::mpsc::Receiver;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
@@ -29,7 +30,8 @@ loongagent — a firm-internal coding agent
 
 USAGE:
   loongagent server --stdio [--session PATH] [--cwd DIR] [--model NAME]
-  loongagent tui            [--session PATH] [--cwd DIR] [--model NAME]
+  loongagent tui            [--session PATH] [--cwd DIR] [--model NAME]   full-screen
+  loongagent repl           [--session PATH] [--cwd DIR] [--model NAME]   line mode (any pipe)
   loongagent run \"PROMPT\"   [--session PATH] [--cwd DIR] [--model NAME] [--budget N] [--keep-newest N]
   loongagent --version
 
@@ -165,7 +167,8 @@ fn run() -> Result<(), String> {
             Some("trust") => mcp_trust(Args::parse(&rest[1..])?),
             _ => Err(format!("mcp list | mcp trust\n\n{USAGE}")),
         },
-        "tui" => repl(Args::parse(rest)?),
+        "tui" => full_screen(Args::parse(rest)?),
+        "repl" => repl(Args::parse(rest)?),
         "run" => {
             let args = Args::parse(rest)?;
             let prompt = args
@@ -309,7 +312,9 @@ struct ChildTransport {
 }
 
 impl ChildTransport {
-    fn spawn(args: &Args) -> Result<Self, String> {
+    /// `capture_notes` pipes the server's stderr instead of inheriting it: a
+    /// full-screen UI owns the terminal, so diagnostics must be drawn, not dumped.
+    fn spawn(args: &Args, capture_notes: bool) -> Result<(Self, Option<Receiver<String>>), String> {
         // Same binary by default; overridable so a *test* binary can point at the
         // built server (an integration test's current_exe is the test harness).
         let exe = match std::env::var_os("LOONGAGENT_SERVER_BIN") {
@@ -333,12 +338,28 @@ impl ChildTransport {
             .arg(args.keep_newest.to_string())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(if capture_notes { Stdio::piped() } else { Stdio::inherit() })
             .spawn()
             .map_err(|e| format!("spawning the local server: {e}"))?;
         let stdin = child.stdin.take().ok_or("no stdin on the server child")?;
         let stdout = BufReader::new(child.stdout.take().ok_or("no stdout on the server child")?);
-        Ok(Self { child, stdin, stdout })
+        let notes = if capture_notes {
+            child.stderr.take().map(|stderr| {
+                let (sender, receiver) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    use std::io::BufRead;
+                    for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                        if sender.send(line).is_err() {
+                            break;
+                        }
+                    }
+                });
+                receiver
+            })
+        } else {
+            None
+        };
+        Ok((Self { child, stdin, stdout }, notes))
     }
 }
 
@@ -365,9 +386,21 @@ impl Drop for ChildTransport {
     }
 }
 
+/// The full-screen surface: the client here, the screen in `loong-tui-app`.
+fn full_screen(args: Args) -> Result<(), String> {
+    args.ensure_parent()?;
+    let (transport, notes) = ChildTransport::spawn(&args, true)?;
+    let mut client = Client::new(transport, args.session_id());
+    let attached = client.attach(&args.cwd.to_string_lossy(), "tui")?;
+    if attached.existing_events > 0 {
+        eprintln!("resuming session {} ({} events)", attached.session_id, attached.existing_events);
+    }
+    loong_tui_app::run(client, attached.session_id, attached.schema_version, notes)
+}
+
 fn repl(args: Args) -> Result<(), String> {
     args.ensure_parent()?;
-    let transport = ChildTransport::spawn(&args)?;
+    let (transport, _) = ChildTransport::spawn(&args, false)?;
     let mut client = Client::new(transport, args.session_id());
     let cwd = args.cwd.to_string_lossy().to_string();
     let attached = client.attach(&cwd, "tui")?;
@@ -532,7 +565,7 @@ fn sandbox_self_test(args: Args) -> Result<(), String> {
 
 fn headless(args: Args, prompt: &str) -> Result<(), String> {
     args.ensure_parent()?;
-    let transport = ChildTransport::spawn(&args)?;
+    let (transport, _) = ChildTransport::spawn(&args, false)?;
     let mut client = Client::new(transport, args.session_id());
     client.attach(&args.cwd.to_string_lossy(), "headless")?;
     for line in client.submit(prompt)? {

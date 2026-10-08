@@ -64,8 +64,11 @@ cargo build
 ./target/debug/loongagent run "write it" --session /tmp/w.jsonl --cwd /tmp --model demo-write
 ./target/debug/loongagent run "escape"  --session /tmp/e.jsonl --cwd /tmp --model demo-escape   # exits 3: needs a human
 
-# interactive: the TUI spawns its own server child and talks JSON-RPC over pipes
+# full-screen: the TUI spawns its own server child and talks JSON-RPC over pipes
 ./target/debug/loongagent tui --session /tmp/s.jsonl --cwd /tmp --model demo-escape
+
+# line mode: same client, no TTY needed (pipes, CI, scripts)
+echo "hello" | ./target/debug/loongagent repl --session /tmp/s.jsonl --cwd /tmp --model echo
 
 # the server alone, for scripting
 ./target/debug/loongagent server --stdio --session /tmp/s.jsonl --cwd /tmp --model echo
@@ -126,6 +129,15 @@ binary the TUI spawns as its server (used by the end-to-end test).
   outside and succeed inside — it never reports "available" without
   demonstrating denial. The server runs that self-test before its first tool
   call: a broken mechanism refuses startup, a missing one is a loud warning.
+- **Two terminal surfaces** (`loong-tui-app`, ADR-0009/0013): `loongagent tui` is
+  a ratatui full-screen UI — a scrollable conversation, an input line, approval
+  prompts that repurpose it, a diagnostics pane fed by the server process's stderr
+  (so startup notes are drawn, never dumped over the UI), and a worker thread that
+  owns the blocking client so a turn never freezes the screen. `loongagent repl`
+  is the same client in line mode, which is what a pipe or CI needs; `tui` refuses
+  a pipe with a message that names that way out. The UI's state machine and drawing
+  are tested against ratatui's `TestBackend` (no TTY required), and the real
+  terminal path was verified in a PTY.
 - **MCP servers** (`loong-mcp`, T-15): a trusted `.loongagent/mcp.toml` names
   stdio servers to start; their tools join the **same registry** as the built-ins
   (`mcp__<server>__<tool>`), so they go through the same PDP verdict, emit the
@@ -186,7 +198,9 @@ binary the TUI spawns as its server (used by the end-to-end test).
    model-made summary of what it drops is the other half of ADR-0006 §4, and a
    session that must shrink a lot currently loses the oldest turns instead.
    Budgets come from CLI flags, not from profiles (ADR-0008 is unimplemented).
-4. **The TUI is a line REPL** — ADR-0013 expects `ratatui` for the real surface.
+4. **The TUI is single-session and minimal** — no mouse, no copy mode, no split
+   panes, no session picker, no syntax highlighting. `--budget` and friends are
+   flags, not profiles.
 5. **`grep`/`glob` do not honour `.gitignore` yet** — they use a small explicit
    skip list instead. Web tools (`web_fetch`, `web_search`) are not built, and
    `grep` reads whole files (no streaming) under a 4 MiB per-file cap.

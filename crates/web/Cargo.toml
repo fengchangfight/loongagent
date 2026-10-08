@@ -1,0 +1,10 @@
+[package]
+name = "loong-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The web surface: the same session over a browser (ADR-0009)"
+
+[dependencies]
+serde_json.workspace = true
+tungstenite = "0.30.0"

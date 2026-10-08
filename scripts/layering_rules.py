@@ -33,10 +33,11 @@ ALLOWED = {
     "loong-server": {"loong-schema", "loong-protocol", "loong-eventlog", "loong-kernel"},
     "loong-tui": {"loong-schema", "loong-protocol"},
     "loong-tui-app": {"loong-schema", "loong-tui"},
+    "loong-web": set(),
     # the one binary that ties faces together
     "loongagent": {
         "loong-schema", "loong-protocol", "loong-eventlog", "loong-http", "loong-proc", "loong-manifest", "loong-providers",
-        "loong-sandbox", "loong-tools", "loong-hooks", "loong-mcp", "loong-skills", "loong-config", "loong-index", "loong-kernel", "loong-server", "loong-tui", "loong-tui-app",
+        "loong-sandbox", "loong-tools", "loong-hooks", "loong-mcp", "loong-skills", "loong-config", "loong-index", "loong-kernel", "loong-server", "loong-tui", "loong-tui-app", "loong-web",
     },
 }
 

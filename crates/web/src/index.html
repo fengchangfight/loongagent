@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>loongagent</title>
+<style>
+  :root {
+    --bg: #12141a; --panel: #191c24; --line: #262b36; --fg: #dfe3ec;
+    --dim: #8b93a7; --accent: #6fb3ff; --ok: #62d18a; --warn: #f0c674; --bad: #f2777a;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; gap: 16px; align-items: baseline; padding: 10px 16px;
+           border-bottom: 1px solid var(--line); background: var(--panel); }
+  header b { color: var(--accent); font-weight: 600; }
+  header .meta { color: var(--dim); font-size: 13px; }
+  #log { padding: 16px; height: calc(100vh - 148px); overflow-y: auto; }
+  .row { margin: 0 0 10px; white-space: pre-wrap; word-break: break-word; }
+  .you { color: var(--accent); }
+  .say { color: var(--fg); }
+  .tool { font-family: var(--mono); font-size: 13px; color: var(--dim); }
+  .tool .out { display: block; color: #a9b1c4; max-height: 12em; overflow: auto;
+               border-left: 2px solid var(--line); padding-left: 8px; margin-top: 4px; }
+  .note { color: var(--dim); font-size: 13px; }
+  .warn { color: var(--warn); font-size: 13px; }
+  .bad { color: var(--bad); }
+  .ok { color: var(--ok); }
+  .card { border: 1px solid var(--warn); border-radius: 8px; padding: 10px 12px;
+          background: #20222c; margin-bottom: 12px; }
+  .card button { font: inherit; padding: 5px 14px; margin-right: 8px; border-radius: 6px;
+                 border: 1px solid var(--line); background: #2b3040; color: var(--fg); cursor: pointer; }
+  .card button.yes { border-color: var(--ok); color: var(--ok); }
+  .card button.no { border-color: var(--bad); color: var(--bad); }
+  footer { padding: 10px 16px; border-top: 1px solid var(--line); background: var(--panel); }
+  #prompt { width: 100%; padding: 10px 12px; font: inherit; color: var(--fg);
+            background: #14161d; border: 1px solid var(--line); border-radius: 8px; outline: none; }
+  #prompt:focus { border-color: var(--accent); }
+  .hint { color: var(--dim); font-size: 12px; margin-top: 6px; display: flex; justify-content: space-between; }
+  .spinner { color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <b>loongagent</b>
+  <span class="meta" id="session">connecting…</span>
+  <span class="meta" id="state"></span>
+</header>
+<div id="log"></div>
+<footer>
+  <input id="prompt" placeholder="Ask for something — /help lists the skills and commands here" autocomplete="off" autofocus>
+  <div class="hint"><span>Enter sends · approvals appear inline · every call is in the session log</span>
+  <span id="cwd" class="meta"></span></div>
+</footer>
+<script>
+(() => {
+  const log = document.getElementById("log");
+  const sessionLabel = document.getElementById("session");
+  const stateLabel = document.getElementById("state");
+  const input = document.getElementById("prompt");
+
+  // The token is in the fragment: browsers never send a fragment to a server, so
+  // it does not appear in any log on the way here.
+  const token = new URLSearchParams(location.hash.replace(/^#/, "")).get("token") || "";
+  document.getElementById("cwd").textContent = location.host;
+
+  let nextId = 1, sessionId = "", busy = false;
+  const waiting = new Map();
+
+  function row(html, cls) {
+    const element = document.createElement("div");
+    element.className = "row " + (cls || "");
+    element.innerHTML = html;
+    log.appendChild(element);
+    log.scrollTop = log.scrollHeight;
+    return element;
+  }
+  const escape = (text) => String(text ?? "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+
+  function setBusy(value, label) {
+    busy = value;
+    stateLabel.textContent = value ? (label || "working…") : "";
+    stateLabel.className = "meta " + (value ? "spinner" : "");
+  }
+
+  function send(method, params, onResult) {
+    const id = nextId++;
+    if (onResult) waiting.set(id, onResult);
+    socket.send(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
+  }
+
+  const socket = new WebSocket(`ws://${location.host}/ws?token=${encodeURIComponent(token)}`);
+
+  socket.onopen = () => {
+    send("session.attach", { cwd: "", client: "web" }, (message) => {
+      if (message.error) { row("attach failed: " + escape(message.error.message), "bad"); return; }
+      sessionId = message.result.session_id;
+      sessionLabel.textContent = `session ${sessionId} · schema ${message.result.schema_version}` +
+        (message.result.existing_events ? ` · ${message.result.existing_events} events` : "");
+      row("Connected. Ask for something — try <code>/help</code>.", "note");
+    });
+  };
+  socket.onclose = () => { setBusy(false); row("Disconnected.", "bad"); };
+  socket.onerror = () => row("The connection failed. Is the token right?", "bad");
+
+  socket.onmessage = (event) => {
+    const message = JSON.parse(event.data);
+    if (message.method === "event") { renderEvent(message.params); return; }
+    const callback = waiting.get(message.id);
+    if (callback) { waiting.delete(message.id); callback(message); }
+    if (message.error) { setBusy(false); row(escape(message.error.message), "bad"); }
+  };
+
+  function renderEvent(envelope) {
+    const kind = envelope.kind, data = envelope.data || {};
+    if (kind === "client.error") { setBusy(false); row(escape(data.message), "bad"); return; }
+    switch (kind) {
+      case "message.appended":
+        if (data.role === "user") row("<b>you</b> " + escape(data.text), "you");
+        else if (data.text) row(escape(data.text), "say");
+        break;
+      case "tool.call":
+        row(`→ <b>${escape(data.tool)}</b> <span class="note">${escape(JSON.stringify(data.args))}</span>`, "tool");
+        break;
+      case "tool.result": {
+        const cls = data.ok ? "ok" : "bad";
+        row(`← <span class="${cls}">${data.ok ? "ok" : "failed"}</span><span class="out">${escape(data.output)}</span>`, "tool");
+        break;
+      }
+      case "policy.decided":
+        row(`policy: <b>${escape(data.verdict)}</b> by ${escape(data.rule)} (${escape(data.action_class)})`, "note");
+        break;
+      case "approval.requested": askApproval(data); break;
+      case "approval.decided":
+        row(`approval ${data.granted ? "granted" : "denied"} (${escape(data.scope)})`, data.granted ? "ok" : "warn");
+        break;
+      case "hook.fired": {
+        const denied = data.verdict !== "allow";
+        row(`hook <b>${escape(data.hook_id)}</b> ${escape(data.verdict)} on ${escape(data.event)}` +
+            (data.reason ? `: ${escape(data.reason)}` : "") + (data.failed ? " (could not answer)" : ""),
+            denied ? "warn" : "note");
+        break;
+      }
+      case "skill.invoked":
+        row(data.error ? `/ ${escape(data.name)}: ${escape(data.error)}`
+                       : `/ ${escape(data.name)} ${escape(data.args)} — ${escape(data.source)}`,
+            data.error ? "bad" : "note");
+        break;
+      case "skills.loaded":
+        row(`skills available: ${escape(data.names)}` + (data.disabled ? ` (disabled: ${escape(data.disabled)})` : ""), "note");
+        break;
+      case "compaction.applied":
+        row(`compacted ${data.tokens_before} → ${data.tokens_after} tokens ` +
+            `(cleared ${data.cleared_tool_outputs}, dropped ${data.dropped_messages})`, "warn");
+        break;
+      case "cost.recorded":
+        row(`tokens ${data.tokens_in} in / ${data.tokens_out} out`, "note");
+        break;
+      default:
+        row(kind, "note");
+    }
+  }
+
+  function askApproval(data) {
+    const card = row(`<b>approval required</b> — ${escape(data.action_class)}<br>${escape(data.reason)}`, "card");
+    card.classList.remove("row");
+    const buttons = document.createElement("div");
+    buttons.innerHTML = `<button class="yes">approve</button><button class="no">deny</button>`;
+    card.appendChild(buttons);
+    const answer = (granted) => {
+      buttons.remove();
+      send("approval.respond", { session_id: sessionId, request_id: data.request_id, granted, scope: "once" },
+        (message) => { if (message.error) row(escape(message.error.message), "bad"); });
+    };
+    buttons.querySelector(".yes").onclick = () => answer(true);
+    buttons.querySelector(".no").onclick = () => answer(false);
+  }
+
+  input.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" || busy) return;
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = "";
+    setBusy(true);
+    send("prompt.submit", { session_id: sessionId, text }, (message) => {
+      setBusy(false);
+      if (message.result && message.result.accepted === false) {
+        row("the turn was refused — see the event above", "warn");
+      }
+    });
+  });
+})();
+</script>
+</body>
+</html>

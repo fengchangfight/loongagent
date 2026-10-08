@@ -119,7 +119,7 @@ rows below are what "not losing" means concretely.
 | Subagent-specific model | ✅ | T-17 + ADR-0005 | — |
 | SDK (Python + TypeScript) over the same loop | ✅ | ADR-0002 (JSON-RPC + schema) | generate bindings |
 | Headless / print mode / CI | ✅ | `loongagent run "…"` (headless) and `loongagent repl` (line mode, works under a pipe) — the line surface exists *because* CI and scripts need a surface that is not a TTY | — |
-| Surfaces: CLI, VS Code/Cursor, JetBrains, Desktop, web, mobile, Slack, GH Actions | ⚠️ | ADR-0009: TUI → web → ACP; desktop/CI dropped; Slack/GH Actions not planned. The **full-screen TUI shipped 2026-10-08** (`loong-tui-app`, ratatui: scrollback, input, approval prompts, a diagnostics pane, a worker thread so a turn never freezes the screen) | ACP buys the IDE half; the web client is next |
+| Surfaces: CLI, VS Code/Cursor, JetBrains, Desktop, web, mobile, Slack, GH Actions | ⚠️ | ADR-0009: TUI → web → ACP; desktop/CI dropped; Slack/GH Actions not planned. The **full-screen TUI** shipped 2026-10-08 (`loong-tui-app`, ratatui) and the **web client** shipped 2026-10-08 (`loong-web`: one embedded page, the same JSON-RPC over a WebSocket, token-gated, approvals inline) | ACP buys the IDE half |
 | Session resume / fork / name; JSONL on disk | ✅ | ADR-0003/0015 | — |
 | **Session export/import across machines** | ✅ | ADR-0014 | **CC does not have this** (see C) |
 

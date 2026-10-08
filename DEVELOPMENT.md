@@ -73,15 +73,25 @@ echo "hello" | ./target/debug/loongagent repl --session /tmp/s.jsonl --cwd /tmp 
 # the server alone, for scripting
 ./target/debug/loongagent server --stdio --session /tmp/s.jsonl --cwd /tmp --model echo
 
-# a real provider: any OpenAI-compatible Chat Completions endpoint over http://
+# a real provider: any OpenAI-compatible Chat Completions endpoint, http:// or https://
 # (vLLM, LM Studio, llama.cpp --server, Ollama /v1, an intranet gateway)
 LOONGAGENT_BASE_URL=http://127.0.0.1:8000/v1 LOONGAGENT_MODEL=qwen2.5-coder \
   ./target/debug/loongagent run "summarise README.md" --session /tmp/r.jsonl --cwd . --model openai-compat
 ```
 
-`https://` endpoints are refused with a clear message for now: TLS is a
-dependency decision that has not been made, and self-hosted `http://` endpoints
-are the firm-internal case this adapter was built for.
+For a hosted provider, set the base URL to its https endpoint:
+
+```bash
+LOONGAGENT_BASE_URL=https://api.deepseek.com LOONGAGENT_MODEL=deepseek-chat \
+LOONGAGENT_API_KEY=sk-… ./target/debug/loongagent web --cwd .
+```
+
+TLS is rustls with the `ring` backend and the webpki root store; a certificate that
+does not match the host is refused. Response streaming is not implemented, so the
+answer appears when the turn completes.
+
+`README.md` is the short version for someone trying it, and `scripts/demo.sh`
+runs a scripted model with no API key at all (`./scripts/demo.sh [web|tui|run]`).
 
 Sessions are plain JSONL — `cat` them. `LOONGAGENT_SERVER_BIN` overrides which
 binary the TUI spawns as its server (used by the end-to-end test).
@@ -166,6 +176,15 @@ binary the TUI spawns as its server (used by the end-to-end test).
 - **A system prompt slot**: the first message is now a short frame plus the skill
   catalogue. It is a pinned `SystemPrompt` ledger entry, it never counts as
   compactable history, and compaction refuses to drop it.
+- **A browser surface** (`loong-web`): `loongagent web` serves one self-contained
+  page (embedded in the binary; no bundler, no CDN) and carries the *same* JSON-RPC
+  lines over a WebSocket, so the browser speaks exactly what the TUI speaks. The
+  page needs a **token** on the handshake — any tab can open `ws://127.0.0.1:…`, so
+  a loopback bind is not authorisation — and the token travels in the URL fragment,
+  which browsers never send to a server. A request/response maps onto one
+  WebSocket message, which is what the server's "stream the events, then answer"
+  design was for. One browser at a time drives the session (the connection is
+  serialised behind the session); a second tab waits its turn.
 - **Two terminal surfaces** (`loong-tui-app`, ADR-0009/0013): `loongagent tui` is
   a ratatui full-screen UI — a scrollable conversation, an input line, approval
   prompts that repurpose it, a diagnostics pane fed by the server process's stderr
@@ -227,9 +246,10 @@ binary the TUI spawns as its server (used by the end-to-end test).
 
 ## What is not done yet (honest list)
 
-1. **The adapter is HTTP-only** — there is no TLS client and no streaming;
-   cost is recorded as `usd_micros: 0` until pricing/profiles land, and there is
-   no tokenizer (the ledger estimates tokens at ~4 chars).
+1. **No response streaming**: a turn arrives when it completes. TLS is wired
+   (rustls + ring + webpki roots), so a hosted provider is reachable, but cost is
+   still recorded as `usd_micros: 0` until pricing lands, and there is no
+   tokenizer (the ledger estimates tokens at ~4 chars).
 2. **Network egress is not confined** — Landlock covers the filesystem only;
    blocking egress needs seccomp or a network namespace (neither is available
    unprivileged in this container: `unshare -Urn` is refused). The `shell`

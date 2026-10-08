@@ -23,8 +23,10 @@ loong-hooks.workspace = true
 loong-mcp.workspace = true
 loong-skills.workspace = true
 loong-config.workspace = true
+loong-web.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+tungstenite = "0.30"
 loong-schema.workspace = true

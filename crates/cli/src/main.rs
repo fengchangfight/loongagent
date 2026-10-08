@@ -32,6 +32,7 @@ USAGE:
   loongagent server --stdio [--session PATH] [--cwd DIR] [--model NAME]
   loongagent tui            [--session PATH] [--cwd DIR] [--model NAME]   full-screen
   loongagent repl           [--session PATH] [--cwd DIR] [--model NAME]   line mode (any pipe)
+  loongagent web            [--session PATH] [--cwd DIR] [--model NAME] [--port N] [--bind IP]
   loongagent run \"PROMPT\"   [--session PATH] [--cwd DIR] [--model NAME] [--budget N] [--keep-newest N]
   loongagent --version
 
@@ -68,6 +69,10 @@ struct Args {
     model: Option<String>,
     /// A profile file used as the session layer.
     profile: Option<PathBuf>,
+    /// The web surface's bind address and port (loopback by default: a browser on
+    /// this machine, not the network).
+    bind: String,
+    port: u16,
     stdio: bool,
     /// Context budget in tokens; 0 means unbounded.
     budget: Option<u64>,
@@ -84,6 +89,8 @@ impl Args {
             cwd: cwd.clone(),
             model: None,
             profile: None,
+            bind: "127.0.0.1".to_string(),
+            port: 8737,
             stdio: false,
             budget: None,
             keep_newest: None,
@@ -109,6 +116,18 @@ impl Args {
                     args.profile = Some(PathBuf::from(rest.get(i).ok_or("--profile needs a path")?));
                 }
                 "--stdio" => args.stdio = true,
+                "--bind" => {
+                    i += 1;
+                    args.bind = rest.get(i).ok_or("--bind needs an address")?.clone();
+                }
+                "--port" => {
+                    i += 1;
+                    args.port = rest
+                        .get(i)
+                        .ok_or("--port needs a number")?
+                        .parse()
+                        .map_err(|_| "--port must be a number".to_string())?;
+                }
                 "--budget" => {
                     i += 1;
                     args.budget = Some(
@@ -197,6 +216,7 @@ fn run() -> Result<(), String> {
         },
         "tui" => full_screen(Args::parse(rest)?),
         "repl" => repl(Args::parse(rest)?),
+        "web" => web(Args::parse(rest)?),
         "run" => {
             let args = Args::parse(rest)?;
             let prompt = args
@@ -525,6 +545,87 @@ fn full_screen(args: Args) -> Result<(), String> {
         eprintln!("resuming session {} ({} events)", attached.session_id, attached.existing_events);
     }
     loong_tui_app::run(client, attached.session_id, attached.schema_version, notes)
+}
+
+/// The browser surface: the same JSON-RPC lines, carried over a WebSocket.
+struct WebSession {
+    transport: ChildTransport,
+    cwd: String,
+}
+
+impl loong_web::Session for WebSession {
+    fn exchange(&mut self, line: &str) -> Result<Vec<String>, String> {
+        let mut request: serde_json::Value =
+            serde_json::from_str(line).map_err(|e| format!("not JSON-RPC: {e}"))?;
+        // The browser cannot know the server's working directory, so the surface
+        // fills it in. Everything else is passed through untouched.
+        if request.get("method").and_then(|m| m.as_str())
+            == Some(loong_schema::generated::method::SESSION_ATTACH)
+        {
+            if let Some(params) = request.get_mut("params") {
+                let empty = params
+                    .get("cwd")
+                    .and_then(|c| c.as_str())
+                    .map(|c| c.is_empty())
+                    .unwrap_or(true);
+                if empty {
+                    params["cwd"] = serde_json::json!(self.cwd);
+                }
+            }
+        }
+        let id = request.get("id").cloned();
+        self.transport.send(&request.to_string())?;
+
+        let mut lines = Vec::new();
+        loop {
+            let Some(line) = self.transport.recv_line()? else {
+                return Err("the server closed the connection".to_string());
+            };
+            if line.trim().is_empty() {
+                continue;
+            }
+            let parsed: serde_json::Value =
+                serde_json::from_str(&line).unwrap_or(serde_json::Value::Null);
+            let is_response = parsed.get("id").is_some() && parsed.get("method").is_none();
+            let mine = id.is_some() && parsed.get("id") == id.as_ref();
+            lines.push(line);
+            if is_response && mine {
+                return Ok(lines);
+            }
+        }
+    }
+}
+
+fn web(args: Args) -> Result<(), String> {
+    args.ensure_parent()?;
+    let settings = args.settings()?;
+    let (transport, notes) = ChildTransport::spawn(&args, true)?;
+    if let Some(notes) = notes {
+        // The server's own diagnostics go to this terminal, where the operator is.
+        std::thread::spawn(move || {
+            while let Ok(line) = notes.recv() {
+                eprintln!("[server] {line}");
+            }
+        });
+    }
+    let session = std::sync::Arc::new(std::sync::Mutex::new(WebSession {
+        transport,
+        cwd: args.cwd.display().to_string(),
+    }));
+    let token = loong_web::random_token()?;
+    let (listener, addr) = loong_web::bind(&args.bind, args.port)?;
+
+    for row in settings.explain_all() {
+        eprintln!("[config] {:<28} {:<9} {}", row.key, row.value.render(), row.source);
+    }
+    println!("loongagent web — open this URL:");
+    println!();
+    println!("  http://{addr}/#token={token}");
+    println!();
+    println!("The token is in the URL fragment: browsers never send it to a server, and");
+    println!("another page cannot open the socket without it. Bound to {addr}.");
+    loong_web::serve(session, listener, token);
+    Ok(())
 }
 
 fn repl(args: Args) -> Result<(), String> {

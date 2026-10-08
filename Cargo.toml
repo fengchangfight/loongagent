@@ -19,6 +19,7 @@ loong-proc = { path = "crates/proc" }
 loong-manifest = { path = "crates/manifest" }
 loong-mcp = { path = "crates/mcp" }
 loong-skills = { path = "crates/skills" }
+loong-config = { path = "crates/config" }
 toml = "1.1.6"
 loong-hooks = { path = "crates/hooks" }
 loong-protocol = { path = "crates/protocol" }

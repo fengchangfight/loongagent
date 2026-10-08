@@ -129,6 +129,27 @@ binary the TUI spawns as its server (used by the end-to-end test).
   outside and succeed inside — it never reports "available" without
   demonstrating denial. The server runs that self-test before its first tool
   call: a broken mechanism refuses startup, a missing one is a loud warning.
+- **Layered configuration** (`loong-config`, ADR-0008): built-in defaults < org
+  < project < user < session, merged **per key kind** rather than by "last writer
+  wins":
+  | kind | keys | rule |
+  |---|---|---|
+  | free-override | `model`, `base_url`, `profile` | the most local layer that sets it wins |
+  | narrow-only | `budget_tokens`, `keep_newest_tokens`, `max_steps`, `compact_at_percent`, `[permissions]` | strictest wins; a lower-authority layer may only narrow |
+  | add-only | `skill_dirs`, `disable_skills` | union across layers |
+  | reference | `api_key` | names a source (`env:NAME`); a literal secret is refused |
+
+  The built-in ladder is the *ceiling of permissiveness*, so a profile cannot make
+  `out_of_bounds` free; the PDP names the layer that narrowed a rule
+  (`profile:project:write_workspace`); every key answers "why is this the value?"
+  via `loongagent config show` / `config explain <key>`. Two rules come from the
+  threat model rather than the table: **the project layer may not set `model`,
+  `base_url` or `api_key`** (a repository must not choose where prompts go), and a
+  project layer's `skill_dirs` must stay inside the workspace. Layer files:
+  `/etc/loongagent/profile.toml` (an administrator's file — the placeholder for
+  ADR-0008's signed org pack), `<workspace>/.loongagent/profile.toml`,
+  `$XDG_CONFIG_HOME/loongagent/profile.toml`, and `--profile FILE` as the session
+  layer.
 - **Skills and commands** (`loong-skills`, T-18): one concept with two
   spellings, `.loongagent/skills/<name>/SKILL.md` and
   `.loongagent/commands/<name>.md`. The **description** enters context (in the
@@ -218,7 +239,6 @@ binary the TUI spawns as its server (used by the end-to-end test).
 3. **Compaction does not summarize yet** — it clears and drops, but a
    model-made summary of what it drops is the other half of ADR-0006 §4, and a
    session that must shrink a lot currently loses the oldest turns instead.
-   Budgets come from CLI flags, not from profiles (ADR-0008 is unimplemented).
 4. **The TUI is single-session and minimal** — no mouse, no copy mode, no split
    panes, no session picker, no syntax highlighting. `--budget` and friends are
    flags, not profiles.
@@ -237,7 +257,12 @@ binary the TUI spawns as its server (used by the end-to-end test).
 8. **Post-tool hook verdicts are recorded but cannot undo anything**, and hooks
    deliberately cannot rewrite a tool call — the moment they could, the loop would
    stop being small enough to audit.
-9. **Not started**: profiles/config packs, session
+9. **Configuration is layered but not yet distributed**: ADR-0008's signed pack
+   envelope is not implemented, so the org layer is a plain file an administrator
+   owns and nothing is tamper-resistant; `keychain:` and `gateway:` credential
+   references are recognised and refused (no credential store is wired), and there
+   is no `--set key=value` for ad-hoc session overrides.
+10. **Not started**: session
    export/import, WASM extensions, the web client, compaction, the control plane.
 
 ## Commits

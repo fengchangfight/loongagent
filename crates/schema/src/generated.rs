@@ -208,6 +208,8 @@ pub struct SkillsLoaded {
     /// size of the catalogue that entered context
     pub tokens: u64,
     pub names: String,
+    /// names a lower-authority layer disabled by identity (ADR-0008 add-only rule), or empty
+    pub disabled: String,
 }
 
 /// A skill or /command was invoked. The body became the prompt, and this names the file it came from.

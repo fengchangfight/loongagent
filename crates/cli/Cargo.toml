@@ -22,6 +22,7 @@ loong-sandbox.workspace = true
 loong-hooks.workspace = true
 loong-mcp.workspace = true
 loong-skills.workspace = true
+loong-config.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 

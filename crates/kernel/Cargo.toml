@@ -13,6 +13,7 @@ loong-sandbox.workspace = true
 loong-hooks.workspace = true
 loong-mcp.workspace = true
 loong-skills.workspace = true
+loong-config.workspace = true
 loong-tools.workspace = true
 loong-index.workspace = true
 serde.workspace = true

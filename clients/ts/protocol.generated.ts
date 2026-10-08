@@ -154,6 +154,8 @@ export interface SkillsLoaded {
   /** size of the catalogue that entered context */
   tokens: number;
   names: string;
+  /** names a lower-authority layer disabled by identity (ADR-0008 add-only rule), or empty */
+  disabled: string;
 }
 
 /** A skill or /command was invoked. The body became the prompt, and this names the file it came from. */

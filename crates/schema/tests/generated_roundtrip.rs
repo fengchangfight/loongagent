@@ -94,7 +94,7 @@ fn roundtrip_rpc_error() {
 
 #[test]
 fn roundtrip_skills_loaded() {
-    roundtrip::<g::SkillsLoaded>(r#"{"count": 1,"tokens": 1,"names": "<string>"}"#);
+    roundtrip::<g::SkillsLoaded>(r#"{"count": 1,"tokens": 1,"names": "<string>","disabled": "<string>"}"#);
 }
 
 #[test]
@@ -129,6 +129,6 @@ fn every_event_payload_roundtrips() {
     roundtrip::<g::CostRecorded>(r#"{"profile": "<string>","tokens_in": 1,"tokens_out": 1,"usd_micros": 1}"#);
     roundtrip::<g::CompactionApplied>(r#"{"tokens_before": 1,"tokens_after": 1,"kept_tokens": 1,"cleared_tool_outputs": 1,"dropped_messages": 1,"summary": "<string>"}"#);
     roundtrip::<g::HookFired>(r#"{"event": "<string>","hook_id": "<string>","kind": "<string>","verdict": "allow","reason": "<string>","duration_ms": 1,"failed": true}"#);
-    roundtrip::<g::SkillsLoaded>(r#"{"count": 1,"tokens": 1,"names": "<string>"}"#);
+    roundtrip::<g::SkillsLoaded>(r#"{"count": 1,"tokens": 1,"names": "<string>","disabled": "<string>"}"#);
     roundtrip::<g::SkillInvoked>(r#"{"name": "<string>","source": "<string>","args": "<string>","tokens": 1,"error": "<string>"}"#);
 }

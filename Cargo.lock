@@ -657,6 +657,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
+name = "loong-config"
+version = "0.0.1"
+dependencies = [
+ "loong-schema",
+ "serde",
+ "toml",
+]
+
+[[package]]
 name = "loong-eventlog"
 version = "0.0.1"
 dependencies = [
@@ -696,6 +705,7 @@ dependencies = [
 name = "loong-kernel"
 version = "0.0.1"
 dependencies = [
+ "loong-config",
  "loong-eventlog",
  "loong-hooks",
  "loong-index",
@@ -826,6 +836,7 @@ dependencies = [
 name = "loongagent"
 version = "0.0.1"
 dependencies = [
+ "loong-config",
  "loong-eventlog",
  "loong-hooks",
  "loong-kernel",

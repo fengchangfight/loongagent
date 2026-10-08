@@ -130,12 +130,23 @@ impl Pdp {
 
     /// Tighten one action class. Refuses to widen (ADR-0008 monotonicity).
     pub fn tighten(&mut self, class: ActionClass, verdict: Verdict) -> Result<(), PolicyError> {
+        self.tighten_from(class, verdict, "session")
+    }
+
+    /// Tighten and record **who** narrowed it, so the rule that fired names its
+    /// source (ADR-0008 §4 provenance, ADR-0007 "the rule that fired").
+    pub fn tighten_from(
+        &mut self,
+        class: ActionClass,
+        verdict: Verdict,
+        source: &str,
+    ) -> Result<(), PolicyError> {
         let from = self.effective.get(class);
         if rank(verdict) < rank(from) {
             return Err(PolicyError::WouldWiden { class, from, to: verdict });
         }
         self.effective.set(class, verdict);
-        self.rules[Self::slot(class)] = format!("session:{}", class_name(class));
+        self.rules[Self::slot(class)] = format!("{source}:{}", class_name(class));
         Ok(())
     }
 

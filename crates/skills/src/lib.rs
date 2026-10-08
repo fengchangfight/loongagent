@@ -132,57 +132,60 @@ pub struct Invocation {
 pub struct SkillSet {
     pub workspace: PathBuf,
     pub skills: Vec<Skill>,
+    /// Names config disabled by identity (ADR-0008's add-only escape hatch), kept
+    /// so the session can say what it left out rather than silently dropping it.
+    pub disabled: Vec<String>,
 }
 
 impl SkillSet {
     /// Discover every skill in the workspace. A malformed skill is an error, not a
     /// silently skipped file: a workflow that stopped working should say so.
     pub fn load(workspace: impl AsRef<Path>) -> Result<Self, SkillError> {
+        Self::load_in(workspace, &[], &[])
+    }
+
+    /// Discover skills from the workspace **and** any extra roots a profile
+    /// contributed (ADR-0008 add-only: layers union), minus entries a
+    /// lower-authority layer disabled by identity.
+    pub fn load_in(
+        workspace: impl AsRef<Path>,
+        extra_dirs: &[PathBuf],
+        disabled: &[String],
+    ) -> Result<Self, SkillError> {
         let workspace = workspace.as_ref().to_path_buf();
         let root = workspace.join(".loongagent");
         let mut skills: Vec<Skill> = Vec::new();
 
-        // `<name>/SKILL.md`
-        let skills_dir = root.join(SKILLS_DIR);
-        if skills_dir.is_dir() {
-            let mut entries: Vec<_> = std::fs::read_dir(&skills_dir)
-                .map_err(|e| SkillError::Io(format!("{}: {e}", skills_dir.display())))?
-                .filter_map(|e| e.ok())
-                .collect();
-            entries.sort_by_key(|e| e.file_name());
-            for entry in entries {
-                let dir = entry.path();
-                if !dir.is_dir() {
-                    continue;
+        // The workspace's own two spellings, then every extra root in the same two
+        // shapes: a directory per skill, or flat markdown files.
+        let mut roots: Vec<PathBuf> = vec![root.clone()];
+        roots.extend(extra_dirs.iter().cloned());
+        for root in roots {
+            if !root.is_dir() {
+                if root != workspace.join(".loongagent") {
+                    return Err(SkillError::Io(format!(
+                        "{} is not a directory (a profile's skill_dirs must exist)",
+                        root.display()
+                    )));
                 }
-                let file = dir.join(SKILL_FILE);
-                if !file.is_file() {
-                    continue;
-                }
-                let fallback = dir.file_name().map(|n| n.to_string_lossy().to_string());
-                skills.push(read_skill(&file, fallback.as_deref())?);
+                continue;
             }
+            skills.extend(scan_root(&root)?);
         }
 
-        // `<name>.md` — the older "commands" spelling of the same concept.
-        let commands_dir = root.join(COMMANDS_DIR);
-        if commands_dir.is_dir() {
-            let mut entries: Vec<_> = std::fs::read_dir(&commands_dir)
-                .map_err(|e| SkillError::Io(format!("{}: {e}", commands_dir.display())))?
-                .filter_map(|e| e.ok())
-                .collect();
-            entries.sort_by_key(|e| e.file_name());
-            for entry in entries {
-                let file = entry.path();
-                if file.extension().map(|e| e != "md").unwrap_or(true) {
-                    continue;
-                }
-                let fallback = file.file_stem().map(|n| n.to_string_lossy().to_string());
-                skills.push(read_skill(&file, fallback.as_deref())?);
+        // A disabled entry is removed before anything is built from the set, so the
+        // catalogue and `/help` cannot advertise a skill that will not run.
+        let mut disabled_hits = Vec::new();
+        skills.retain(|skill| {
+            if disabled.iter().any(|name| name == &skill.name) {
+                disabled_hits.push(skill.name.clone());
+                false
+            } else {
+                true
             }
-        }
+        });
 
-        let set = SkillSet { workspace, skills };
+        let set = SkillSet { workspace, skills, disabled: disabled_hits };
         set.finalize()
     }
 
@@ -336,6 +339,57 @@ fn substitute(body: &str, args: &str) -> String {
         out.push_str(args);
     }
     out
+}
+
+/// Every skill file under one root, in both accepted spellings.
+fn scan_root(root: &Path) -> Result<Vec<Skill>, SkillError> {
+    let mut skills = Vec::new();
+    // Both readings are natural, so both work: a root that holds a `skills/`
+    // directory (the workspace layout) and a root that *is* a directory of skills
+    // (what `skill_dirs = ["~/team-skills"]` reads like).
+    for parent in [root.join(SKILLS_DIR), root.to_path_buf()] {
+        if !parent.is_dir() {
+            continue;
+        }
+        let mut entries: Vec<_> = std::fs::read_dir(&parent)
+            .map_err(|e| SkillError::Io(format!("{}: {e}", parent.display())))?
+            .filter_map(|e| e.ok())
+            .collect();
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
+            let dir = entry.path();
+            if !dir.is_dir() {
+                continue;
+            }
+            let file = dir.join(SKILL_FILE);
+            if !file.is_file() {
+                continue;
+            }
+            let fallback = dir.file_name().map(|n| n.to_string_lossy().to_string());
+            skills.push(read_skill(&file, fallback.as_deref())?);
+        }
+    }
+    // `<name>.md` — the older "commands" spelling of the same concept. Accepted at
+    // a root directly as well, so an extra profile root can be flat.
+    for dir in [root.join(COMMANDS_DIR), root.to_path_buf()] {
+        if !dir.is_dir() {
+            continue;
+        }
+        let mut entries: Vec<_> = std::fs::read_dir(&dir)
+            .map_err(|e| SkillError::Io(format!("{}: {e}", dir.display())))?
+            .filter_map(|e| e.ok())
+            .collect();
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
+            let file = entry.path();
+            if file.extension().map(|e| e != "md").unwrap_or(true) {
+                continue;
+            }
+            let fallback = file.file_stem().map(|n| n.to_string_lossy().to_string());
+            skills.push(read_skill(&file, fallback.as_deref())?);
+        }
+    }
+    Ok(skills)
 }
 
 fn read_skill(path: &Path, fallback_name: Option<&str>) -> Result<Skill, SkillError> {
@@ -792,6 +846,46 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("defined twice"), "{err}");
+    }
+
+    #[test]
+    fn extra_roots_are_unioned_and_disabled_names_are_reported() {
+        let ws = workspace();
+        skill_file(&ws, "local", "---\ndescription: Local\n---\nbody\n");
+        let team = ws.join("team-skills");
+        std::fs::create_dir_all(team.join("from-team")).unwrap();
+        std::fs::write(
+            team.join("from-team/SKILL.md"),
+            "---\ndescription: From the team profile\n---\nteam body\n",
+        )
+        .unwrap();
+        std::fs::write(
+            team.join("flat.md"),
+            "---\ndescription: A flat one\n---\nflat body\n",
+        )
+        .unwrap();
+
+        let set = SkillSet::load_in(&ws, &[team.clone()], &["from-team".to_string()]).unwrap();
+        assert!(set.names().contains(&"local"));
+        assert!(set.names().contains(&"flat"), "{:?}", set.names());
+        assert!(
+            !set.names().contains(&"from-team"),
+            "a disabled name is gone from the set: {:?}",
+            set.names()
+        );
+        assert_eq!(set.disabled, vec!["from-team".to_string()]);
+        assert!(
+            !set.catalogue().contains("from-team"),
+            "and from the catalogue, so /help cannot advertise it: {}",
+            set.catalogue()
+        );
+    }
+
+    #[test]
+    fn a_profile_root_that_does_not_exist_is_loud() {
+        let ws = workspace();
+        let err = SkillSet::load_in(&ws, &[ws.join("nope")], &[]).unwrap_err().to_string();
+        assert!(err.contains("must exist"), "{err}");
     }
 
     #[test]

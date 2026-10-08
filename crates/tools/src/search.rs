@@ -11,7 +11,7 @@
 //! worse than saying so.
 
 use crate::{
-    arg_str, classify_path, resolve, ExecContext, Tool, ToolError,
+    arg_str, classify_read_path, resolve, ExecContext, Tool, ToolError,
 };
 use loong_schema::generated::{ActionClass, Json};
 use regex::RegexBuilder;
@@ -110,7 +110,7 @@ impl Tool for Grep {
     }
     fn action_class(&self, args: &Json, cwd: &Path) -> ActionClass {
         match args.get("path").and_then(|v| v.as_str()) {
-            Some(p) => classify_path(cwd, p),
+            Some(p) => classify_read_path(cwd, p),
             None => ActionClass::Investigate,
         }
     }
@@ -231,7 +231,7 @@ impl Tool for Glob {
     }
     fn action_class(&self, args: &Json, cwd: &Path) -> ActionClass {
         match args.get("path").and_then(|v| v.as_str()) {
-            Some(p) => classify_path(cwd, p),
+            Some(p) => classify_read_path(cwd, p),
             None => ActionClass::Investigate,
         }
     }

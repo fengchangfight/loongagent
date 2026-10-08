@@ -22,6 +22,7 @@ use loong_schema::generated::{ActionClass, ApprovalScope, Json, Role, Verdict};
 use loong_hooks::{payload, HookEvent, HookReport, HookRunner, HookSet};
 use loong_hooks::McpCaller;
 use loong_mcp::{McpClient, McpSet, McpTool};
+use loong_config::Profile;
 use loong_skills::{parse_invocation, Origin, PromptFetcher, Skill, SkillSet, SkillTool};
 use std::sync::{Arc, Mutex};
 use loong_sandbox::landlock::WorkspacePolicy;
@@ -45,6 +46,8 @@ pub enum KernelError {
     Mcp(String),
     /// A skill or command is malformed. A workflow that stopped working must say so.
     Skills(String),
+    /// Configuration contradicts itself (a layer tried to widen a cap).
+    Config(String),
 }
 
 impl std::fmt::Display for KernelError {
@@ -58,6 +61,7 @@ impl std::fmt::Display for KernelError {
             KernelError::Hooks(m) => write!(f, "hooks: {m}"),
             KernelError::Mcp(m) => write!(f, "mcp: {m}"),
             KernelError::Skills(m) => write!(f, "skills: {m}"),
+            KernelError::Config(m) => write!(f, "config: {m}"),
         }
     }
 }
@@ -116,6 +120,10 @@ pub struct KernelConfig {
     /// Compact once context passes this fraction of the budget (80%).
     pub compact_at_percent: u64,
     pub max_steps: usize,
+    /// The resolved layered settings (ADR-0008) — distinct from `profile`, which is
+    /// the profile's *name*. The kernel uses it for the two things it owns:
+    /// narrowing the PDP ladder, and which skills exist.
+    pub settings: Profile,
 }
 
 impl KernelConfig {
@@ -126,6 +134,7 @@ impl KernelConfig {
             budget_tokens: None,
             keep_newest_tokens: 20_000,
             compact_at_percent: 80,
+            settings: Profile::default(),
             max_steps: 8,
         }
     }
@@ -298,6 +307,17 @@ fn attach_mcp(workspace: &Path, tools: &mut Registry) -> Result<AttachedMcp, Ker
     Ok(AttachedMcp { note, clients, prompt_skills })
 }
 
+/// The strictest of a caller's budget and the configuration's: `None` means
+/// unbounded, which is the widest, so a limit from either side holds.
+fn narrow_budget(caller: Option<u64>, configured: Option<u64>) -> Option<u64> {
+    match (caller, configured) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
+}
+
 /// A hook verdict replaces the policy's only when it is stricter (hooks tighten,
 /// never widen). The rule records which hook objected, so the log says why.
 fn tighten(ruling: &loong_sandbox::Ruling, report: &HookReport) -> Option<loong_sandbox::Ruling> {
@@ -362,6 +382,8 @@ pub struct Kernel {
     mcp_note: String,
     /// Skills and commands: descriptions in context, bodies on invoke (T-18).
     skills: Arc<SkillSet>,
+    /// Names config switched off, reported once at session start.
+    disabled_skills: Vec<String>,
     /// The bridge to this session's MCP servers, for `mcp` hooks and for prompts
     /// invoked as commands.
     mcp_caller: Option<Arc<KernelMcp>>,
@@ -392,9 +414,26 @@ impl Kernel {
 
     fn build(
         log: SessionLog,
-        config: KernelConfig,
+        mut config: KernelConfig,
         model: Box<dyn Model>,
     ) -> Result<Self, KernelError> {
+        // Narrow-only keys (ADR-0008 §2): the strictest of what the caller asked for
+        // and what the layered configuration says. One place does this arithmetic,
+        // so a session flag can never widen a cap that config set.
+        config.budget_tokens = narrow_budget(config.budget_tokens, config.settings.budget_tokens);
+        config.keep_newest_tokens = config
+            .keep_newest_tokens
+            .min(config.settings.keep_newest_tokens.unwrap_or(u64::MAX));
+        config.compact_at_percent = config
+            .compact_at_percent
+            .min(config.settings.compact_at_percent.unwrap_or(u64::MAX));
+        config.max_steps = config.max_steps.min(
+            config
+                .settings
+                .max_steps
+                .map(|steps| steps.max(1))
+                .unwrap_or(usize::MAX),
+        );
         let ledger = Ledger::new(config.budget_tokens);
         let index_path = log.path().with_extension("sqlite");
         // Rebuild rather than attach incrementally: the index is disposable, and
@@ -405,8 +444,21 @@ impl Kernel {
         // interface, one PDP, one event stream, one audit trail.
         let mut tools = Registry::with_builtins();
         let attached = attach_mcp(&config.cwd, &mut tools)?;
-        let (mcp_note, mcp_clients, prompt_skills) =
+        let (mcp_note, mcp_clients, mut prompt_skills) =
             (attached.note, attached.clients, attached.prompt_skills);
+        // Configuration can disable an entry by identity (ADR-0008 add-only rule:
+        // content is advisory, so a project may switch off an org's skill — and it
+        // is recorded rather than silently dropped).
+        let disabled_config = &config.settings.disable_skills;
+        let mut disabled: Vec<String> = Vec::new();
+        prompt_skills.retain(|skill| {
+            if disabled_config.iter().any(|name| name == &skill.name) {
+                disabled.push(skill.name.clone());
+                false
+            } else {
+                true
+            }
+        });
         let mcp_caller: Option<Arc<KernelMcp>> = (!mcp_clients.is_empty()).then(|| {
             Arc::new(KernelMcp { clients: mcp_clients.clone() })
         });
@@ -414,17 +466,39 @@ impl Kernel {
         // whose body lives on the server (T-15): the model sees the catalogue and
         // asks for a body by name.
         let skills = Arc::new(
-            SkillSet::load(&config.cwd)
+            SkillSet::load_in(&config.cwd, &config.settings.skill_dirs, disabled_config)
                 .map_err(|e| KernelError::Skills(e.to_string()))?
                 .with_external(prompt_skills)
                 .map_err(|e| KernelError::Skills(e.to_string()))?,
         );
+        disabled.extend(skills.disabled.iter().cloned());
+        disabled.sort();
+        disabled.dedup();
         match &mcp_caller {
             Some(caller) => tools.register(SkillTool::with_fetcher(
                 Arc::clone(&skills),
                 Arc::clone(caller) as Arc<dyn PromptFetcher>,
             )),
             None => tools.register(SkillTool::new(Arc::clone(&skills))),
+        }
+
+        // Configuration narrows the ladder before the first decision (ADR-0008 §2:
+        // narrow-only keys, strictest wins — and the rule records which layer won).
+        let mut pdp = Pdp::new();
+        for class in [
+            ActionClass::Investigate,
+            ActionClass::WriteWorkspace,
+            ActionClass::OutOfBounds,
+        ] {
+            if let Some((verdict, layer)) = config.settings.permission_with_source(class) {
+                // The built-in baseline is not "a profile": name it as what it is.
+                let source = match layer {
+                    loong_config::Layer::Builtin => "builtin".to_string(),
+                    other => format!("profile:{}", other.as_str()),
+                };
+                pdp.tighten_from(class, verdict, &source)
+                    .map_err(|e| KernelError::Config(e.to_string()))?;
+            }
         }
 
         let mut kernel;
@@ -456,7 +530,7 @@ impl Kernel {
             log,
             ledger,
             tools,
-            pdp: Pdp::new(),
+            pdp,
             model,
             config,
             messages: Vec::new(),
@@ -470,6 +544,7 @@ impl Kernel {
             mcp_clients,
             mcp_note,
             skills,
+            disabled_skills: disabled,
             mcp_caller,
             index,
             index_path,
@@ -563,6 +638,7 @@ impl Kernel {
                 count: self.skills.skills.len() as u64,
                 tokens: loong_skills::estimate_tokens(&self.skills.catalogue()),
                 names: self.skills.names().join(", "),
+                disabled: self.disabled_skills.join(", "),
             },
         )?;
         Ok(())
@@ -1313,7 +1389,10 @@ mod tests {
         let events = loong_eventlog::replay(&t.log).unwrap().events;
         let policy = events.iter().find(|e| e.kind == ev::POLICY_DECIDED).unwrap();
         assert_eq!(policy.data["verdict"], "allow");
-        assert_eq!(policy.data["rule"], "builtin:write_workspace");
+        assert_eq!(
+            policy.data["rule"], "builtin:investigate",
+            "reading a file inside the workspace is an investigate action"
+        );
         let result = events.iter().find(|e| e.kind == ev::TOOL_RESULT).unwrap();
         assert_eq!(result.data["ok"], true);
         assert!(result.data["output"].as_str().unwrap().contains("hi from the workspace"));
@@ -1867,6 +1946,14 @@ mod tests {
         path
     }
 
+    /// A resolved profile from a real file, so the provenance (which the PDP rule
+    /// string is built from) is the real thing rather than a hand-made struct.
+    fn settings_from(dir: &Path, body: &str) -> Profile {
+        let path = dir.join("profile.toml");
+        std::fs::write(&path, body).unwrap();
+        loong_config::resolve(&[(loong_config::Layer::User, path)], dir).unwrap()
+    }
+
     fn install_command(dir: &Path, name: &str, body: &str) {
         let commands = dir.join(".loongagent/commands");
         std::fs::create_dir_all(&commands).unwrap();
@@ -2039,6 +2126,131 @@ Step one: breathe.
             );
         }
         assert!(!sent.last().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_profile_narrows_the_ladder_and_the_rule_names_the_layer() {
+        let t = Temp::new();
+        std::fs::write(t.dir.join("a.txt"), "content").unwrap();
+        let model = ScriptedModel::new(vec![
+            response(vec![call("c1", "read_file", json!({"path": "a.txt"}))], None),
+            response(vec![], Some("done")),
+        ]);
+        let mut config = KernelConfig::new(&t.dir);
+        config.settings = settings_from(&t.dir, "[permissions]\ninvestigate = \"deny\"\n");
+        let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+        k.submit("read it").unwrap();
+
+        let events = loong_eventlog::replay(&t.log).unwrap().events;
+        let policy = events.iter().find(|e| e.kind == ev::POLICY_DECIDED).unwrap();
+        assert_eq!(policy.data["verdict"], "deny");
+        assert_eq!(
+            policy.data["rule"], "profile:user:investigate",
+            "the rule that fired names the layer that narrowed it"
+        );
+        let result = events.iter().find(|e| e.kind == ev::TOOL_RESULT).unwrap();
+        assert_eq!(result.data["ok"], false);
+        assert!(result.data["output"].as_str().unwrap().contains("denied by policy"));
+    }
+
+    #[test]
+    fn a_profile_can_only_narrow_never_widen() {
+        let t = Temp::new();
+        let model = ScriptedModel::new(vec![
+            response(vec![call("c1", "shell", json!({"command": "curl http://example.invalid"}))], None),
+            response(vec![], Some("done")),
+        ]);
+        let mut config = KernelConfig::new(&t.dir);
+        // The profile asks for out-of-bounds actions to be free. The built-in
+        // baseline is `ask`, and no layer may loosen it.
+        config.settings = settings_from(&t.dir, "[permissions]\nout_of_bounds = \"allow\"\n");
+        let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+        let outcome = k.submit("fetch something").unwrap();
+        assert!(
+            outcome.pending_approval.is_some(),
+            "the request still stops for a human: {:?}",
+            outcome.final_text
+        );
+        let events = loong_eventlog::replay(&t.log).unwrap().events;
+        let policy = events.iter().find(|e| e.kind == ev::POLICY_DECIDED).unwrap();
+        assert_eq!(policy.data["verdict"], "ask");
+        assert_eq!(policy.data["rule"], "builtin:out_of_bounds");
+    }
+
+    #[test]
+    fn narrow_only_numbers_are_the_strictest_of_the_two() {
+        let t = Temp::new();
+        let model = ScriptedModel::new(vec![
+            response(vec![call("c1", "read_file", json!({"path": "a.txt"}))], None),
+            response(vec![call("c2", "read_file", json!({"path": "a.txt"}))], None),
+            response(vec![], Some("done")),
+        ]);
+        std::fs::write(t.dir.join("a.txt"), "x").unwrap();
+        let mut config = KernelConfig::new(&t.dir);
+        config.budget_tokens = Some(50_000);
+        config.max_steps = 8;
+        config.settings = settings_from(
+            &t.dir,
+            "budget_tokens = 1000\nmax_steps = 1\nkeep_newest_tokens = 100\n",
+        );
+        let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+
+        assert_eq!(k.ledger().budget(), Some(1_000), "the config ceiling holds");
+        let outcome = k.submit("go").unwrap();
+        assert_eq!(outcome.steps, 1, "the config's step ceiling holds");
+        let events = loong_eventlog::replay(&t.log).unwrap().events;
+        assert_eq!(
+            events.iter().filter(|e| e.kind == ev::COST_RECORDED).count(),
+            1,
+            "the model was called exactly once"
+        );
+    }
+
+    #[test]
+    fn the_session_may_narrow_but_not_widen_a_config_budget() {
+        let t = Temp::new();
+        let config_from_file = settings_from(&t.dir, "budget_tokens = 1000\n");
+        // The session asks for more than config allows: the ceiling wins.
+        assert_eq!(narrow_budget(Some(50_000), config_from_file.budget_tokens), Some(1_000));
+        // The session asks for less: it gets less.
+        assert_eq!(narrow_budget(Some(100), config_from_file.budget_tokens), Some(100));
+        // The session asks for "unbounded": it still gets the ceiling.
+        assert_eq!(narrow_budget(None, config_from_file.budget_tokens), Some(1_000));
+        // Nothing set anywhere: unbounded stays unbounded.
+        assert_eq!(narrow_budget(None, None), None);
+    }
+
+    #[test]
+    fn a_profile_can_add_skill_roots_and_disable_names_by_identity() {
+        let t = Temp::new();
+        // A workspace skill that config will disable, and a team root that config adds.
+        install_command(&t.dir, "local-loud", "---\ndescription: noisy\n---\nbody\n");
+        let team = t.dir.join("team-skills");
+        std::fs::create_dir_all(team.join("from-team")).unwrap();
+        std::fs::write(
+            team.join("from-team/SKILL.md"),
+            "---\ndescription: From the team profile\n---\nteam body\n",
+        )
+        .unwrap();
+
+        let model = ScriptedModel::saying("hi");
+        let mut config = KernelConfig::new(&t.dir);
+        config.settings = settings_from(
+            &t.dir,
+            "skill_dirs = [\"team-skills\"]\ndisable_skills = [\"local-loud\"]\n",
+        );
+        let k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+
+        assert!(k.skills().names().contains(&"from-team"), "{:?}", k.skills().names());
+        assert!(
+            !k.skills().names().contains(&"local-loud"),
+            "a disabled name is gone: {:?}",
+            k.skills().names()
+        );
+        assert!(!k.skills().catalogue().contains("local-loud"));
+        let events = loong_eventlog::replay(&t.log).unwrap().events;
+        let loaded = events.iter().find(|e| e.kind == ev::SKILLS_LOADED).unwrap();
+        assert_eq!(loaded.data["disabled"], "local-loud", "{:?}", loaded.data);
     }
 
     #[test]

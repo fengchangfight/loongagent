@@ -312,6 +312,7 @@ fields = [
   { name = "count", type = "u64" },
   { name = "tokens", type = "u64", doc = "size of the catalogue that entered context" },
   { name = "names", type = "string" },
+  { name = "disabled", type = "string", doc = "names a lower-authority layer disabled by identity (ADR-0008 add-only rule), or empty" },
 ]
 
 [[types]]

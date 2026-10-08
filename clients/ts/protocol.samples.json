@@ -96,7 +96,8 @@
     "SkillsLoaded": {
       "count": 1,
       "tokens": 1,
-      "names": "<string>"
+      "names": "<string>",
+      "disabled": "<string>"
     },
     "SkillInvoked": {
       "name": "<string>",

@@ -115,7 +115,7 @@ rows below are what "not losing" means concretely.
 
 | CC feature | Our status | Where | Next |
 |---|---|---|---|
-| Mid-session model switch, effort levels | ⚠️ | ADR-0005/0008: switching allowed **within the profile's allowed set** | state the stance explicitly |
+| Mid-session model switch, effort levels | ⚠️ | ADR-0005/0008: switching allowed **within the profile's allowed set**. The profile now *chooses* the model (`model` + `base_url`, resolved from the layers) and `--model` remains the session override | mid-session switching itself is not implemented |
 | Subagent-specific model | ✅ | T-17 + ADR-0005 | — |
 | SDK (Python + TypeScript) over the same loop | ✅ | ADR-0002 (JSON-RPC + schema) | generate bindings |
 | Headless / print mode / CI | ✅ | `loongagent run "…"` (headless) and `loongagent repl` (line mode, works under a pipe) — the line surface exists *because* CI and scripts need a surface that is not a TTY | — |
@@ -138,7 +138,7 @@ rows below are what "not losing" means concretely.
 | B7 | Module hot reload (authoring loop) | DSH, Pi | ❌ | **T-24** |
 | B8 | `ignorable` event envelope (unknown event types are safe to ignore) | DSH | ✅ applied 2026-10-05 | ADR-0003 |
 | B9 | Capability-seam naming discipline (Service Definition pkg + provider pkgs) | DSH | ✅ concept | ADR-0004 wording |
-| B10 | Monotonic denial (`guard`) | DSH, CC | ✅ | ADR-0008 |
+| B10 | Monotonic denial (`guard`) | DSH, CC | ✅ implemented 2026-10-08: `loong-config` merges per key kind (free-override / narrow-only / add-only / reference), the built-in ladder is the ceiling of permissiveness, and the PDP rule names the layer that narrowed it (`profile:project:write_workspace`) | ADR-0008, `loong-config` |
 | B11 | `/btw`, Monitor, cache-hit stats, `/init`, `/doctor`, `@path` imports, description budgets | CC | ❌ | **T-25** |
 | B12 | Skills/commands hot reload for skills authors | Pi | ❌ | **T-24** |
 | B13 | Multi-kind hooks + deterministic-enforcement framing | CC | ✅ (shell + HTTP shipped 2026-10-07; MCP pending T-15) | ADR-0007 §7, `loong-hooks` |
@@ -158,7 +158,7 @@ rows below are what "not losing" means concretely.
 | # | Property | Why CC/DSH structurally can't match it |
 |---|---|---|
 | C1 | **Cost governance as policy**: profiles, local-decides routing, org hard caps enforced as `deny`, escalation as auditable events | CC has subscription windows and `/usage`; DSH leaves budgets to plugins |
-| C2 | **Org policy distribution**: signed packs, monotonic layers, org > project > user | CC has managed settings; DSH has none |
+| C2 | **Org policy distribution**: signed packs, monotonic layers, org > project > user | CC has managed settings; DSH has none. **Layers + monotonicity ship**; the signed envelope does not, so the org layer is a plain file and nothing should be called tamper-resistant yet |
 | C3 | **Control plane for aggregate audit/statistics** (opt-in, allow-listed uplink) | CC is per-user; DSH has no control plane |
 | C4 | **Model-agnostic by design**: any provider, any local model, no vendor lock | CC is Claude-first; DSH is DeepSeek-first |
 | C5 | **Session portability**: export/import bundles with ancestry, approvals never travel (ADR-0014) | CC has local JSONL but no first-class portable bundle |

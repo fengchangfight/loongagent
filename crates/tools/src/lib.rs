@@ -140,6 +140,16 @@ pub fn resolve(cwd: &Path, target: &str) -> PathBuf {
     out
 }
 
+/// The action class of **reading** `target`. A read inside the workspace is an
+/// investigate action — no side effects — which is what makes "investigate free,
+/// write gated" true for reads rather than nominal.
+pub fn classify_read_path(cwd: &Path, target: &str) -> ActionClass {
+    match classify_path(cwd, target) {
+        ActionClass::OutOfBounds => ActionClass::OutOfBounds,
+        _ => ActionClass::Investigate,
+    }
+}
+
 /// The action class of touching `target` (ADR-0007 §4: the *action*, not the
 /// tool, decides the autonomy).
 pub fn classify_path(cwd: &Path, target: &str) -> ActionClass {
@@ -175,7 +185,7 @@ impl Tool for ReadFile {
     }
     fn action_class(&self, args: &Json, cwd: &Path) -> ActionClass {
         match args.get("path").and_then(|v| v.as_str()) {
-            Some(p) => classify_path(cwd, p),
+            Some(p) => classify_read_path(cwd, p),
             None => ActionClass::OutOfBounds,
         }
     }
@@ -571,7 +581,11 @@ mod tests {
         assert_eq!(classify_path(cwd, "../etc/passwd"), ActionClass::OutOfBounds);
         assert_eq!(classify_path(cwd, "/etc/passwd"), ActionClass::OutOfBounds);
         let r = ReadFile;
-        assert_eq!(r.action_class(&json!({"path": "README.md"}), cwd), ActionClass::WriteWorkspace);
+        assert_eq!(
+            r.action_class(&json!({"path": "README.md"}), cwd),
+            ActionClass::Investigate,
+            "reading inside the workspace has no side effects"
+        );
         assert_eq!(r.action_class(&json!({"path": "/etc/shadow"}), cwd), ActionClass::OutOfBounds);
         assert_eq!(r.action_class(&json!({}), cwd), ActionClass::OutOfBounds);
     }

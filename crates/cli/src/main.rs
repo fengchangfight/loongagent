@@ -43,6 +43,8 @@ MODELS (provider doubles, for a first run without keys):
                  LOONGAGENT_MODEL / LOONGAGENT_API_KEY as needed
 
   loongagent sandbox self-test [--cwd DIR]   prove the OS boundary actually denies
+  loongagent config show       [--cwd DIR] [--profile FILE]   every setting, and which layer set it
+  loongagent config explain KEY [--cwd DIR] [--profile FILE]   why that value won
   loongagent skills list       [--cwd DIR]   show the skills and commands available here
   loongagent hooks list        [--cwd DIR]   show the effective hook set and its trust
   loongagent hooks trust       [--cwd DIR]   trust the current hook bytes (per repository)
@@ -61,12 +63,16 @@ fn main() {
 struct Args {
     session: PathBuf,
     cwd: PathBuf,
-    model: String,
+    /// `None` means "not given": the layered configuration decides (ADR-0008).
+    /// Flags are the **session layer**, the most local one.
+    model: Option<String>,
+    /// A profile file used as the session layer.
+    profile: Option<PathBuf>,
     stdio: bool,
-    /// Context budget in tokens; 0 means unbounded (compaction then never runs).
-    budget: u64,
+    /// Context budget in tokens; 0 means unbounded.
+    budget: Option<u64>,
     /// Newest context left verbatim when compaction runs.
-    keep_newest: u64,
+    keep_newest: Option<u64>,
     positional: Vec<String>,
 }
 
@@ -76,12 +82,11 @@ impl Args {
         let mut args = Args {
             session: cwd.join(".loongagent").join("session.jsonl"),
             cwd: cwd.clone(),
-            model: "echo".to_string(),
+            model: None,
+            profile: None,
             stdio: false,
-            // A profile will supply these once profiles exist (ADR-0008); until
-            // then the session gets a sane budget so compaction actually runs.
-            budget: 128_000,
-            keep_newest: 20_000,
+            budget: None,
+            keep_newest: None,
             positional: Vec::new(),
         };
         let mut i = 0;
@@ -97,24 +102,28 @@ impl Args {
                 }
                 "--model" => {
                     i += 1;
-                    args.model = rest.get(i).ok_or("--model needs a name")?.clone();
+                    args.model = Some(rest.get(i).ok_or("--model needs a name")?.clone());
+                }
+                "--profile" => {
+                    i += 1;
+                    args.profile = Some(PathBuf::from(rest.get(i).ok_or("--profile needs a path")?));
                 }
                 "--stdio" => args.stdio = true,
                 "--budget" => {
                     i += 1;
-                    args.budget = rest
-                        .get(i)
-                        .ok_or("--budget needs a token count")?
-                        .parse()
-                        .map_err(|_| "--budget must be a number".to_string())?;
+                    args.budget = Some(
+                        rest.get(i).ok_or("--budget needs a token count")?
+                            .parse()
+                            .map_err(|_| "--budget must be a number".to_string())?,
+                    );
                 }
                 "--keep-newest" => {
                     i += 1;
-                    args.keep_newest = rest
-                        .get(i)
-                        .ok_or("--keep-newest needs a token count")?
-                        .parse()
-                        .map_err(|_| "--keep-newest must be a number".to_string())?;
+                    args.keep_newest = Some(
+                        rest.get(i).ok_or("--keep-newest needs a token count")?
+                            .parse()
+                            .map_err(|_| "--keep-newest must be a number".to_string())?,
+                    );
                 }
                 other if other.starts_with("--") => {
                     return Err(format!("unknown flag {other:?}\n\n{USAGE}"))
@@ -124,6 +133,15 @@ impl Args {
             i += 1;
         }
         Ok(args)
+    }
+
+    /// The layered configuration for this run (ADR-0008): built-in defaults, then
+    /// whatever the org / project / user files say, then `--profile` as the session
+    /// layer. Flags are applied on top of the resolved values, and only ever
+    /// narrow (the kernel enforces the narrow-only arithmetic).
+    fn settings(&self) -> Result<loong_config::Profile, String> {
+        let layers = loong_config::layer_paths(&self.cwd, self.profile.as_deref());
+        loong_config::resolve(&layers, &self.cwd).map_err(|e| e.to_string())
     }
 
     fn session_id(&self) -> String {
@@ -157,6 +175,11 @@ fn run() -> Result<(), String> {
             Some("self-test") => sandbox_self_test(Args::parse(&rest[1..])?),
             Some("probe") => std::process::exit(loong_sandbox::sandbox::probe_main()),
             _ => Err(format!("sandbox self-test | probe\n\n{USAGE}")),
+        },
+        "config" => match rest.first().map(String::as_str) {
+            Some("show") => config_show(Args::parse(&rest[1..])?),
+            Some("explain") => config_explain(Args::parse(&rest[1..])?),
+            _ => Err(format!("config show | config explain <key>\n\n{USAGE}")),
         },
         "skills" => match rest.first().map(String::as_str) {
             Some("list") => skills_list(Args::parse(&rest[1..])?),
@@ -204,9 +227,15 @@ fn serve(args: Args) -> Result<(), String> {
     args.ensure_parent()?;
     // ADR-0007: the boundary is proven before the first tool call. A mechanism
     // that fails to deny is fatal; a platform without one is a loud degradation.
-    match args.budget {
-        0 => eprintln!("[context] unbounded (compaction disabled)"),
-        n => eprintln!("[context] budget {n} tokens, keeping the newest {}", args.keep_newest),
+    let settings = args.settings()?;
+    for row in settings.explain_all() {
+        eprintln!(
+            "[config] {:<28} {:<9} {:<14} {}",
+            row.key,
+            row.value.render(),
+            format!("({})", row.kind.as_str()),
+            row.source
+        );
     }
     match loong_hooks::HookSet::load(&args.cwd) {
         Ok(set) => eprintln!("[hooks] {}", set.summary()),
@@ -236,11 +265,27 @@ fn serve(args: Args) -> Result<(), String> {
             }
         }
     }
-    let model = build_model(&args.model)?;
+    let model = build_model(&args, &settings)?;
     let mut config = KernelConfig::new(&args.cwd);
-    config.max_steps = 8;
-    config.budget_tokens = (args.budget > 0).then_some(args.budget);
-    config.keep_newest_tokens = args.keep_newest;
+    // `--budget 0` means "unbounded", which is the widest: the kernel takes the
+    // strictest of this and the configuration, so a ceiling still holds.
+    config.budget_tokens = match args.budget {
+        Some(0) => None,
+        Some(n) => Some(n),
+        None => settings.budget_tokens,
+    };
+    config.keep_newest_tokens = args.keep_newest.unwrap_or(20_000);
+    if let Some(percent) = settings.compact_at_percent {
+        config.compact_at_percent = percent;
+    }
+    if let Some(steps) = settings.max_steps {
+        config.max_steps = steps;
+    }
+    config.profile = settings
+        .explain("profile")
+        .map(|row| row.value.render())
+        .unwrap_or_else(|| "default".to_string());
+    config.settings = settings;
     let kernel = if args.session.exists() {
         Kernel::open(&args.session, config, model)
     } else {
@@ -250,10 +295,36 @@ fn serve(args: Args) -> Result<(), String> {
     Server::new(kernel, args.session_id()).run_stdio().map_err(|e| e.to_string())
 }
 
-fn build_model(name: &str) -> Result<Box<dyn Model>, String> {
-    match name {
+/// Which provider to build: the session's choice if it made one, else the
+/// configuration's (T-07: engineers pick a profile, not a model), else the `echo`
+/// double so a fresh checkout runs without keys.
+fn build_model(args: &Args, settings: &loong_config::Profile) -> Result<Box<dyn Model>, String> {
+    let kind = args
+        .model
+        .clone()
+        .or_else(|| settings.base_url.as_ref().map(|_| "openai-compat".to_string()))
+        .unwrap_or_else(|| "echo".to_string());
+    match kind.as_str() {
         "echo" => Ok(Box::new(EchoModel)),
-        "openai-compat" => Ok(Box::new(OpenAiCompat::from_env().map_err(|e| e.to_string())?)),
+        "openai-compat" => {
+            let base = resolve_reference(settings.base_url.as_deref())
+                .or_else(|| std::env::var("LOONGAGENT_BASE_URL").ok())
+                .ok_or_else(|| {
+                    "openai-compat needs a base_url: set it in a profile (base_url = \"http://…\" \
+                     or \"env:NAME\") or LOONGAGENT_BASE_URL"
+                        .to_string()
+                })?;
+            let model = settings
+                .model
+                .clone()
+                .or_else(|| std::env::var("LOONGAGENT_MODEL").ok())
+                .unwrap_or_else(|| "local".to_string());
+            let key = match resolve_reference(settings.api_key.as_deref()) {
+                Some(key) => Some(key),
+                None => std::env::var("LOONGAGENT_API_KEY").ok(),
+            };
+            Ok(Box::new(OpenAiCompat::new(base, model, key)))
+        }
         "demo-write" => Ok(Box::new(ScriptedModel::new(vec![
             CompletionResponse {
                 text: None,
@@ -286,8 +357,29 @@ fn build_model(name: &str) -> Result<Box<dyn Model>, String> {
                 usage: Usage { tokens_in: 10, tokens_out: 2 },
             },
         ]))),
-        other => Err(format!("unknown --model {other:?} (echo | demo-write | demo-escape)")),
+        other => Err(format!(
+            "unknown --model {other:?} (echo | demo-write | demo-escape | openai-compat)"
+        )),
     }
+}
+
+/// Resolve a configuration reference (ADR-0008 §5: config carries a reference, not
+/// a secret). A bare value is passed through only for non-secret keys.
+fn resolve_reference(value: Option<&str>) -> Option<String> {
+    let value = value?;
+    if let Some(name) = value.strip_prefix("env:") {
+        return std::env::var(name).ok();
+    }
+    if value.starts_with("keychain:") || value.starts_with("gateway:") {
+        // ADR-0008 §5 says credentials live in the OS store or the control plane.
+        // Neither is wired, and pretending to read them would be worse than saying so.
+        eprintln!(
+            "[config] {value} is a credential reference, and no credential store is wired yet \
+             (ADR-0008 §5) — falling back to the environment"
+        );
+        return None;
+    }
+    Some(value.to_string())
 }
 
 /// The plainest possible provider double: repeats the last user message. Used by
@@ -333,21 +425,30 @@ impl ChildTransport {
             Some(path) => PathBuf::from(path),
             None => std::env::current_exe().map_err(|e| e.to_string())?,
         };
-        let mut child = Command::new(exe)
-            .arg("server")
+        let mut command = Command::new(exe);
+        // The subcommand comes first: flags before it would be read as the command.
+        command.arg("server");
+        // The session layer travels with the child: a profile file the caller named,
+        // and the flags they typed. Everything else the child resolves itself from
+        // the same layers, so the two cannot disagree about the configuration.
+        if let Some(profile) = &args.profile {
+            command.arg("--profile").arg(profile);
+        }
+        if let Some(model) = &args.model {
+            command.arg("--model").arg(model);
+        }
+        if let Some(budget) = args.budget {
+            command.arg("--budget").arg(budget.to_string());
+        }
+        if let Some(keep) = args.keep_newest {
+            command.arg("--keep-newest").arg(keep.to_string());
+        }
+        let mut child = command
             .arg("--stdio")
             .arg("--session")
             .arg(&args.session)
             .arg("--cwd")
             .arg(&args.cwd)
-            .arg("--model")
-            .arg(&args.model)
-            // The client's flags are the session's flags: the server child must
-            // get the same budget, or the client would be lying about the context.
-            .arg("--budget")
-            .arg(args.budget.to_string())
-            .arg("--keep-newest")
-            .arg(args.keep_newest.to_string())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(if capture_notes { Stdio::piped() } else { Stdio::inherit() })
@@ -403,7 +504,23 @@ fn full_screen(args: Args) -> Result<(), String> {
     args.ensure_parent()?;
     let (transport, notes) = ChildTransport::spawn(&args, true)?;
     let mut client = Client::new(transport, args.session_id());
-    let attached = client.attach(&args.cwd.to_string_lossy(), "tui")?;
+    let attached = match client.attach(&args.cwd.to_string_lossy(), "tui") {
+        Ok(attached) => attached,
+        Err(e) => {
+            // The child's own explanation is the useful one (a corrupt log, a bad
+            // profile); without this the user sees only "the connection closed".
+            if let Some(notes) = &notes {
+                let mut tail: Vec<String> = Vec::new();
+                while let Ok(line) = notes.try_recv() {
+                    tail.push(line);
+                }
+                for line in tail.iter().rev().take(5).rev() {
+                    eprintln!("[server] {line}");
+                }
+            }
+            return Err(e);
+        }
+    };
     if attached.existing_events > 0 {
         eprintln!("resuming session {} ({} events)", attached.session_id, attached.existing_events);
     }
@@ -496,9 +613,86 @@ fn mcp_trust(args: Args) -> Result<(), String> {
     Ok(())
 }
 
+/// Every key answers "why is this the value?" (ADR-0008 §4).
+fn config_show(args: Args) -> Result<(), String> {
+    let settings = args.settings()?;
+    for (layer, path) in loong_config::layer_paths(&args.cwd, args.profile.as_deref()) {
+        let mark = if path.exists() { "  " } else { "· " };
+        println!("{mark}{:<8} {}", layer.as_str(), path.display());
+    }
+    println!();
+    println!("{:<30} {:<16} {:<8} {}", "key", "value", "kind", "set by");
+    for row in settings.explain_all() {
+        println!(
+            "{:<30} {:<16} {:<8} {}",
+            row.key,
+            row.value.render(),
+            row.kind.as_str(),
+            row.source
+        );
+    }
+    println!();
+    println!("(· = no such file; built-in defaults come from <defaults>)");
+    Ok(())
+}
+
+/// The same question for one key, including what lost and why.
+fn config_explain(args: Args) -> Result<(), String> {
+    let key = args
+        .positional
+        .first()
+        .cloned()
+        .ok_or_else(|| format!("config explain needs a key\n\n{USAGE}"))?;
+    let settings = args.settings()?;
+    let base = key.split('.').next().unwrap_or(&key);
+    let kind = loong_config::kind_of(base)
+        .ok_or_else(|| format!("unknown key {base:?}"))?;
+    match settings.explain(&key) {
+        Some(row) => {
+            println!("{key} = {}", row.value.render());
+            println!("  kind:   {} ({})", kind.as_str(), explain_kind(kind));
+            println!("  layer:  {}", row.layer.as_str());
+            println!("  source: {}", row.source);
+            if row.overridden.is_empty() {
+                println!("  other layers did not set it");
+            } else {
+                println!("  also set by (and lost):");
+                for (layer, value) in &row.overridden {
+                    println!("    {:<8} {}", layer.as_str(), value.render());
+                }
+            }
+        }
+        None => {
+            println!("{key} is not set by any layer");
+            println!("  kind:   {} ({})", kind.as_str(), explain_kind(kind));
+        }
+    }
+    Ok(())
+}
+
+fn explain_kind(kind: loong_config::Kind) -> &'static str {
+    match kind {
+        loong_config::Kind::FreeOverride => "the most local layer that sets it wins",
+        loong_config::Kind::NarrowOnly => "strictest wins; a lower layer may only narrow",
+        loong_config::Kind::AddOnly => "union across layers",
+        loong_config::Kind::Reference => "names a source; secrets never live in config",
+    }
+}
+
 /// Show what a `/name` in this workspace resolves to.
 fn skills_list(args: Args) -> Result<(), String> {
-    let set = loong_skills::SkillSet::load(&args.cwd).map_err(|e| e.to_string())?;
+    // Honour the layered configuration: what this prints must be what a session
+    // would actually get, or it is worse than not printing it.
+    let settings = args.settings()?;
+    let set = loong_skills::SkillSet::load_in(
+        &args.cwd,
+        &settings.skill_dirs,
+        &settings.disable_skills,
+    )
+    .map_err(|e| e.to_string())?;
+    for name in &set.disabled {
+        println!("disabled by configuration: /{name}");
+    }
     println!("workspace skills and commands (an MCP server's prompts join the");
     println!("catalogue inside a session, namespaced as mcp__<server>__<prompt>):");
     println!();

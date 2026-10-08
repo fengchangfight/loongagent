@@ -928,7 +928,11 @@ fn headless(args: Args, prompt: &str) -> Result<(), String> {
     let (transport, _) = ChildTransport::spawn(&args, false)?;
     let mut client = Client::new(transport, args.session_id());
     client.attach(&args.cwd.to_string_lossy(), "headless")?;
-    for line in print_streaming(&mut client, prompt)? {
+    // Headless output stays in order: the turn's events, then the answer. Streaming
+    // would print the answer before the tool calls that produced it, which is
+    // exactly wrong for a log someone reads afterwards. `repl`, `tui` and `web`
+    // stream, because a human is watching.
+    for line in client.submit(prompt)? {
         println!("{line}");
     }
     if !client.last_accepted() {

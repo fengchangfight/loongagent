@@ -46,7 +46,10 @@ pub struct HookReport {
 
 impl HookReport {
     pub fn allow() -> Self {
-        Self { verdict: Verdict::Allow, outcomes: Vec::new() }
+        Self {
+            verdict: Verdict::Allow,
+            outcomes: Vec::new(),
+        }
     }
 
     /// Did any hook hold the action up (ask or deny)?
@@ -60,7 +63,11 @@ impl HookReport {
             .iter()
             .filter(|o| !matches!(o.verdict, Verdict::Allow))
             .map(|o| {
-                let why = if o.reason.is_empty() { "no reason given" } else { o.reason.as_str() };
+                let why = if o.reason.is_empty() {
+                    "no reason given"
+                } else {
+                    o.reason.as_str()
+                };
                 format!("{} ({why})", o.id)
             })
             .collect::<Vec<_>>()
@@ -83,7 +90,11 @@ pub struct HookRunner {
 
 impl HookRunner {
     pub fn new(workspace: impl Into<PathBuf>, specs: Vec<HookSpec>) -> Self {
-        Self { workspace: workspace.into(), specs, mcp: None }
+        Self {
+            workspace: workspace.into(),
+            specs,
+            mcp: None,
+        }
     }
 
     pub fn with_mcp(mut self, caller: Option<Arc<dyn McpCaller>>) -> Self {
@@ -134,12 +145,19 @@ impl HookRunner {
             .output_limit(8 * 1024);
 
         match loong_proc::run(&run) {
-            Err(e) => outcome(spec, self.fallback(spec, format!("could not run the hook: {e}")), started),
-            Ok(out) if out.timed_out => {
-                outcome(spec, self.fallback(spec, format!("timed out after {:?}", spec.timeout)), started)
-            }
+            Err(e) => outcome(
+                spec,
+                self.fallback(spec, format!("could not run the hook: {e}")),
+                started,
+            ),
+            Ok(out) if out.timed_out => outcome(
+                spec,
+                self.fallback(spec, format!("timed out after {:?}", spec.timeout)),
+                started,
+            ),
             Ok(out) => {
-                let answer = parse_shell_answer(&out.stdout, &out.stderr, out.code(), spec.on_error);
+                let answer =
+                    parse_shell_answer(&out.stdout, &out.stderr, out.code(), spec.on_error);
                 outcome(spec, answer, started)
             }
         }
@@ -149,7 +167,11 @@ impl HookRunner {
         let started = Instant::now();
         let body = payload.to_string();
         match loong_http::post_json(url, &body, None, spec.timeout) {
-            Err(e) => outcome(spec, self.fallback(spec, format!("request failed: {e}")), started),
+            Err(e) => outcome(
+                spec,
+                self.fallback(spec, format!("request failed: {e}")),
+                started,
+            ),
             Ok(response) if !(200..300).contains(&response.status) => outcome(
                 spec,
                 self.fallback(spec, format!("HTTP {} from {url}", response.status)),
@@ -170,12 +192,19 @@ impl HookRunner {
         let Some(caller) = &self.mcp else {
             return outcome(
                 spec,
-                self.fallback(spec, format!("no MCP servers are running, so {server}/{tool} could not be asked")),
+                self.fallback(
+                    spec,
+                    format!("no MCP servers are running, so {server}/{tool} could not be asked"),
+                ),
                 started,
             );
         };
         match caller.call(server, tool, payload) {
-            Err(e) => outcome(spec, self.fallback(spec, format!("calling {server}/{tool}: {e}")), started),
+            Err(e) => outcome(
+                spec,
+                self.fallback(spec, format!("calling {server}/{tool}: {e}")),
+                started,
+            ),
             Ok(body) => outcome(spec, parse_verdict_body(&body, spec.on_error), started),
         }
     }
@@ -218,12 +247,20 @@ fn parse_shell_answer(stdout: &str, stderr: &str, code: Option<i32>, on_error: O
         return answer;
     }
     match code {
-        Some(0) => Answer { verdict: Verdict::Allow, reason: String::new(), answered: true },
+        Some(0) => Answer {
+            verdict: Verdict::Allow,
+            reason: String::new(),
+            answered: true,
+        },
         Some(2) => {
             let reason = stderr.trim();
             Answer {
                 verdict: Verdict::Deny,
-                reason: if reason.is_empty() { "denied by the hook".to_string() } else { reason.to_string() },
+                reason: if reason.is_empty() {
+                    "denied by the hook".to_string()
+                } else {
+                    reason.to_string()
+                },
                 answered: true,
             }
         }
@@ -261,8 +298,16 @@ fn json_verdict(stdout: &str) -> Option<Answer> {
     let value: Value = serde_json::from_str(stdout.trim()).ok()?;
     let text = value.get("verdict")?.as_str()?;
     let verdict: Verdict = serde_json::from_value(json!(text)).ok()?;
-    let reason = value.get("reason").and_then(|r| r.as_str()).unwrap_or("").to_string();
-    Some(Answer { verdict, reason, answered: true })
+    let reason = value
+        .get("reason")
+        .and_then(|r| r.as_str())
+        .unwrap_or("")
+        .to_string();
+    Some(Answer {
+        verdict,
+        reason,
+        answered: true,
+    })
 }
 
 fn fallback_verdict(on_error: OnError) -> Verdict {
@@ -363,11 +408,19 @@ mod tests {
         path
     }
 
-    fn spec(id: &str, event: HookEvent, script_path: PathBuf, on_error: OnError, ms: u64) -> HookSpec {
+    fn spec(
+        id: &str,
+        event: HookEvent,
+        script_path: PathBuf,
+        on_error: OnError,
+        ms: u64,
+    ) -> HookSpec {
         HookSpec {
             id: id.to_string(),
             event,
-            kind: HookKind::Shell { script: script_path },
+            kind: HookKind::Shell {
+                script: script_path,
+            },
             on_error,
             timeout: Duration::from_millis(ms),
         }
@@ -376,15 +429,39 @@ mod tests {
     #[test]
     fn exit_zero_allows_and_exit_two_denies_with_stderr_as_the_reason() {
         let ws = workspace();
-        let allow = spec("a", HookEvent::PreTool, script(&ws, "a.sh", "cat > /dev/null\nexit 0\n"), OnError::Deny, 5_000);
-        let deny = spec("d", HookEvent::PreTool, script(&ws, "d.sh", "cat > /dev/null\necho 'no secrets' >&2\nexit 2\n"), OnError::Deny, 5_000);
+        let allow = spec(
+            "a",
+            HookEvent::PreTool,
+            script(&ws, "a.sh", "cat > /dev/null\nexit 0\n"),
+            OnError::Deny,
+            5_000,
+        );
+        let deny = spec(
+            "d",
+            HookEvent::PreTool,
+            script(
+                &ws,
+                "d.sh",
+                "cat > /dev/null\necho 'no secrets' >&2\nexit 2\n",
+            ),
+            OnError::Deny,
+            5_000,
+        );
         let runner = HookRunner::new(&ws, vec![allow, deny]);
 
         let report = runner.fire(HookEvent::PreTool, &payload(HookEvent::PreTool, json!({})));
         assert_eq!(report.verdict, Verdict::Deny);
         assert!(report.tightening());
-        assert!(report.reason().contains("no secrets"), "{}", report.reason());
-        assert_eq!(report.outcomes.len(), 2, "every hook runs, so the record is complete");
+        assert!(
+            report.reason().contains("no secrets"),
+            "{}",
+            report.reason()
+        );
+        assert_eq!(
+            report.outcomes.len(),
+            2,
+            "every hook runs, so the record is complete"
+        );
         assert!(report.outcomes.iter().all(|o| !o.failed));
     }
 
@@ -401,16 +478,30 @@ mod tests {
         let runner = HookRunner::new(&ws, vec![ask]);
         let report = runner.fire(HookEvent::PreTool, &payload(HookEvent::PreTool, json!({})));
         assert_eq!(report.verdict, Verdict::Ask);
-        assert!(report.reason().contains("looks risky"), "{}", report.reason());
+        assert!(
+            report.reason().contains("looks risky"),
+            "{}",
+            report.reason()
+        );
     }
 
     #[test]
     fn a_broken_hook_fails_closed_by_default_and_says_so() {
         let ws = workspace();
-        let broken = spec("broken", HookEvent::PreTool, script(&ws, "b.sh", "cat > /dev/null\nexit 1\n"), OnError::Deny, 5_000);
+        let broken = spec(
+            "broken",
+            HookEvent::PreTool,
+            script(&ws, "b.sh", "cat > /dev/null\nexit 1\n"),
+            OnError::Deny,
+            5_000,
+        );
         let runner = HookRunner::new(&ws, vec![broken]);
         let report = runner.fire(HookEvent::PreTool, &payload(HookEvent::PreTool, json!({})));
-        assert_eq!(report.verdict, Verdict::Deny, "a guard that cannot answer must not evaporate");
+        assert_eq!(
+            report.verdict,
+            Verdict::Deny,
+            "a guard that cannot answer must not evaporate"
+        );
         assert_eq!(report.failures().len(), 1);
         assert!(report.failures()[0].reason.contains("on_error = deny"));
     }
@@ -418,17 +509,33 @@ mod tests {
     #[test]
     fn on_error_allow_is_possible_but_explicit() {
         let ws = workspace();
-        let flaky = spec("flaky", HookEvent::PreTool, script(&ws, "f.sh", "cat > /dev/null\nexit 1\n"), OnError::Allow, 5_000);
+        let flaky = spec(
+            "flaky",
+            HookEvent::PreTool,
+            script(&ws, "f.sh", "cat > /dev/null\nexit 1\n"),
+            OnError::Allow,
+            5_000,
+        );
         let runner = HookRunner::new(&ws, vec![flaky]);
         let report = runner.fire(HookEvent::PreTool, &payload(HookEvent::PreTool, json!({})));
         assert_eq!(report.verdict, Verdict::Allow);
-        assert_eq!(report.failures().len(), 1, "allowed, but recorded as a failure");
+        assert_eq!(
+            report.failures().len(),
+            1,
+            "allowed, but recorded as a failure"
+        );
     }
 
     #[test]
     fn a_slow_hook_is_cut_off() {
         let ws = workspace();
-        let slow = spec("slow", HookEvent::PreTool, script(&ws, "s.sh", "cat > /dev/null\nsleep 30\n"), OnError::Deny, 250);
+        let slow = spec(
+            "slow",
+            HookEvent::PreTool,
+            script(&ws, "s.sh", "cat > /dev/null\nsleep 30\n"),
+            OnError::Deny,
+            250,
+        );
         let runner = HookRunner::new(&ws, vec![slow]);
         let started = Instant::now();
         let report = runner.fire(HookEvent::PreTool, &payload(HookEvent::PreTool, json!({})));
@@ -458,7 +565,11 @@ mod tests {
             HookEvent::PreTool,
             &payload(HookEvent::PreTool, json!({"tool": "shell"})),
         );
-        assert_eq!(named.verdict, Verdict::Deny, "the payload reached the hook and cwd was the workspace");
+        assert_eq!(
+            named.verdict,
+            Verdict::Deny,
+            "the payload reached the hook and cwd was the workspace"
+        );
 
         let other = runner.fire(
             HookEvent::PreTool,
@@ -470,19 +581,51 @@ mod tests {
     #[test]
     fn hooks_only_fire_for_their_own_event() {
         let ws = workspace();
-        let pre = spec("pre", HookEvent::PreTool, script(&ws, "p.sh", "exit 2\n"), OnError::Deny, 5_000);
+        let pre = spec(
+            "pre",
+            HookEvent::PreTool,
+            script(&ws, "p.sh", "exit 2\n"),
+            OnError::Deny,
+            5_000,
+        );
         let runner = HookRunner::new(&ws, vec![pre]);
         assert_eq!(runner.registered_for(HookEvent::PreTool), 1);
         assert_eq!(runner.registered_for(HookEvent::PostTool), 0);
-        assert_eq!(runner.fire(HookEvent::PostTool, &payload(HookEvent::PostTool, json!({}))).verdict, Verdict::Allow);
+        assert_eq!(
+            runner
+                .fire(
+                    HookEvent::PostTool,
+                    &payload(HookEvent::PostTool, json!({}))
+                )
+                .verdict,
+            Verdict::Allow
+        );
     }
 
     #[test]
     fn aggregation_is_monotonic_and_order_independent() {
         let ws = workspace();
-        let allow = spec("allow", HookEvent::PreTool, script(&ws, "a.sh", "exit 0\n"), OnError::Deny, 5_000);
-        let ask = spec("ask", HookEvent::PreTool, script(&ws, "k.sh", "printf '{\"verdict\":\"ask\"}'\n"), OnError::Deny, 5_000);
-        let deny = spec("deny", HookEvent::PreTool, script(&ws, "d.sh", "exit 2\n"), OnError::Deny, 5_000);
+        let allow = spec(
+            "allow",
+            HookEvent::PreTool,
+            script(&ws, "a.sh", "exit 0\n"),
+            OnError::Deny,
+            5_000,
+        );
+        let ask = spec(
+            "ask",
+            HookEvent::PreTool,
+            script(&ws, "k.sh", "printf '{\"verdict\":\"ask\"}'\n"),
+            OnError::Deny,
+            5_000,
+        );
+        let deny = spec(
+            "deny",
+            HookEvent::PreTool,
+            script(&ws, "d.sh", "exit 2\n"),
+            OnError::Deny,
+            5_000,
+        );
 
         let forward = HookRunner::new(&ws, vec![allow.clone(), ask.clone(), deny.clone()]);
         let reverse = HookRunner::new(&ws, vec![deny, ask.clone(), allow]);
@@ -492,7 +635,12 @@ mod tests {
         assert_eq!(b.verdict, Verdict::Deny);
 
         let only_ask = HookRunner::new(&ws, vec![ask]);
-        assert_eq!(only_ask.fire(HookEvent::PreTool, &payload(HookEvent::PreTool, json!({}))).verdict, Verdict::Ask);
+        assert_eq!(
+            only_ask
+                .fire(HookEvent::PreTool, &payload(HookEvent::PreTool, json!({})))
+                .verdict,
+            Verdict::Ask
+        );
     }
 
     #[test]
@@ -505,14 +653,23 @@ mod tests {
         let hook = HookSpec {
             id: "remote".to_string(),
             event: HookEvent::PreTool,
-            kind: HookKind::Http { url: format!("{base}/policy") },
+            kind: HookKind::Http {
+                url: format!("{base}/policy"),
+            },
             on_error: OnError::Deny,
             timeout: Duration::from_secs(5),
         };
         let runner = HookRunner::new(&ws, vec![hook]);
-        let report = runner.fire(HookEvent::PreTool, &payload(HookEvent::PreTool, json!({"tool": "shell"})));
+        let report = runner.fire(
+            HookEvent::PreTool,
+            &payload(HookEvent::PreTool, json!({"tool": "shell"})),
+        );
         assert_eq!(report.verdict, Verdict::Deny);
-        assert!(report.reason().contains("outside the sandbox"), "{}", report.reason());
+        assert!(
+            report.reason().contains("outside the sandbox"),
+            "{}",
+            report.reason()
+        );
 
         let sent = server.join().unwrap();
         let (_, body) = sent.split_once("\r\n\r\n").unwrap();
@@ -524,13 +681,16 @@ mod tests {
 
     #[test]
     fn an_http_hook_that_misbehaves_falls_back_to_on_error() {
-        let (base, server) =
-            loong_http::testing::fake_server("HTTP/1.1 500 Oops\r\nContent-Type: text/plain\r\n\r\nbroken");
+        let (base, server) = loong_http::testing::fake_server(
+            "HTTP/1.1 500 Oops\r\nContent-Type: text/plain\r\n\r\nbroken",
+        );
         let ws = workspace();
         let hook = HookSpec {
             id: "remote".to_string(),
             event: HookEvent::PreTool,
-            kind: HookKind::Http { url: format!("{base}/policy") },
+            kind: HookKind::Http {
+                url: format!("{base}/policy"),
+            },
             on_error: OnError::Deny,
             timeout: Duration::from_secs(5),
         };
@@ -546,7 +706,9 @@ mod tests {
         let hook = HookSpec {
             id: "remote".to_string(),
             event: HookEvent::PreTool,
-            kind: HookKind::Http { url: format!("{base}/policy") },
+            kind: HookKind::Http {
+                url: format!("{base}/policy"),
+            },
             on_error: OnError::Allow,
             timeout: Duration::from_secs(5),
         };
@@ -573,23 +735,34 @@ mod tests {
         let hook = HookSpec {
             id: "policy".to_string(),
             event: HookEvent::PreTool,
-            kind: HookKind::Mcp { server: "policy".to_string(), tool: "decide".to_string() },
+            kind: HookKind::Mcp {
+                server: "policy".to_string(),
+                tool: "decide".to_string(),
+            },
             on_error: OnError::Deny,
             timeout: Duration::from_secs(5),
         };
         let deny = HookRunner::new(&ws, vec![hook.clone()]).with_mcp(Some(Arc::new(FakeMcp {
             answer: Ok("{\"verdict\":\"deny\",\"reason\":\"no shell here\"}".to_string()),
         })));
-        let report = deny.fire(HookEvent::PreTool, &payload(HookEvent::PreTool, json!({"tool": "shell"})));
+        let report = deny.fire(
+            HookEvent::PreTool,
+            &payload(HookEvent::PreTool, json!({"tool": "shell"})),
+        );
         assert_eq!(report.verdict, Verdict::Deny);
-        assert!(report.reason().contains("no shell here"), "{}", report.reason());
+        assert!(
+            report.reason().contains("no shell here"),
+            "{}",
+            report.reason()
+        );
         assert!(!report.outcomes[0].failed);
 
         let ask = HookRunner::new(&ws, vec![hook.clone()]).with_mcp(Some(Arc::new(FakeMcp {
             answer: Ok("{\"verdict\":\"ask\"}".to_string()),
         })));
         assert_eq!(
-            ask.fire(HookEvent::PreTool, &payload(HookEvent::PreTool, json!({}))).verdict,
+            ask.fire(HookEvent::PreTool, &payload(HookEvent::PreTool, json!({})))
+                .verdict,
             Verdict::Ask
         );
     }
@@ -600,7 +773,10 @@ mod tests {
         let hook = HookSpec {
             id: "policy".to_string(),
             event: HookEvent::PreTool,
-            kind: HookKind::Mcp { server: "policy".to_string(), tool: "decide".to_string() },
+            kind: HookKind::Mcp {
+                server: "policy".to_string(),
+                tool: "decide".to_string(),
+            },
             on_error: OnError::Deny,
             timeout: Duration::from_secs(5),
         };
@@ -608,7 +784,9 @@ mod tests {
         let none = HookRunner::new(&ws, vec![hook.clone()])
             .fire(HookEvent::PreTool, &payload(HookEvent::PreTool, json!({})));
         assert_eq!(none.verdict, Verdict::Deny);
-        assert!(none.failures()[0].reason.contains("no MCP servers are running"));
+        assert!(none.failures()[0]
+            .reason
+            .contains("no MCP servers are running"));
         assert!(none.failures()[0].reason.contains("on_error = deny"));
 
         // A server that answers with something that is not a verdict.
@@ -625,7 +803,9 @@ mod tests {
         })));
         let report = broken.fire(HookEvent::PreTool, &payload(HookEvent::PreTool, json!({})));
         assert_eq!(report.verdict, Verdict::Deny);
-        assert!(report.failures()[0].reason.contains("the tool reported an error"));
+        assert!(report.failures()[0]
+            .reason
+            .contains("the tool reported an error"));
     }
 
     #[test]
@@ -654,7 +834,10 @@ mod tests {
         assert_eq!(trusted.active().len(), 1);
 
         let runner = HookRunner::new(&ws, trusted.active().to_vec());
-        let report = runner.fire(HookEvent::UserPromptSubmit, &payload(HookEvent::UserPromptSubmit, json!({"text": "hi"})));
+        let report = runner.fire(
+            HookEvent::UserPromptSubmit,
+            &payload(HookEvent::UserPromptSubmit, json!({"text": "hi"})),
+        );
         assert_eq!(report.verdict, Verdict::Deny);
     }
 }

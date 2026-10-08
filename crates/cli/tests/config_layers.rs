@@ -22,11 +22,7 @@ fn run(dir: &std::path::Path, args: &[&str]) -> (bool, String, String) {
     run_env(dir, args, &[])
 }
 
-fn run_env(
-    dir: &std::path::Path,
-    args: &[&str],
-    envs: &[(&str, &str)],
-) -> (bool, String, String) {
+fn run_env(dir: &std::path::Path, args: &[&str], envs: &[(&str, &str)]) -> (bool, String, String) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_loongagent"));
     for (key, value) in envs {
         command.env(key, value);
@@ -72,12 +68,21 @@ fn config_show_names_the_layer_that_set_each_value() {
 
     let (ok, stdout, stderr) = run(
         &dir,
-        &["config", "explain", "budget_tokens", "--profile", session.to_str().unwrap()],
+        &[
+            "config",
+            "explain",
+            "budget_tokens",
+            "--profile",
+            session.to_str().unwrap(),
+        ],
     );
     assert!(ok, "{stderr}");
     assert!(stdout.contains("budget_tokens = 60000"), "{stdout}");
     assert!(stdout.contains("also set by (and lost)"), "{stdout}");
-    assert!(stdout.contains("session") && stdout.contains("900000"), "{stdout}");
+    assert!(
+        stdout.contains("session") && stdout.contains("900000"),
+        "{stdout}"
+    );
 }
 
 #[test]

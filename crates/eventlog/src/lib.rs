@@ -26,13 +26,28 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub enum LogError {
     Io(std::io::Error),
     /// The line is not valid JSON, or not a valid event envelope.
-    Malformed { line: usize, detail: String },
+    Malformed {
+        line: usize,
+        detail: String,
+    },
     /// Unknown kind that the envelope says must not be ignored.
-    UnknownCoreEvent { line: usize, kind: String },
+    UnknownCoreEvent {
+        line: usize,
+        kind: String,
+    },
     /// A known kind whose `ignorable` marker contradicts the schema.
-    InconsistentEnvelope { line: usize, kind: String, declared: bool, found: bool },
+    InconsistentEnvelope {
+        line: usize,
+        kind: String,
+        declared: bool,
+        found: bool,
+    },
     /// Sequence numbers must be strictly increasing from 1.
-    SeqOutOfOrder { line: usize, expected: Seq, found: Seq },
+    SeqOutOfOrder {
+        line: usize,
+        expected: Seq,
+        found: Seq,
+    },
 }
 
 impl std::fmt::Display for LogError {
@@ -101,8 +116,16 @@ impl SessionLog {
     /// session).
     pub fn create(path: impl AsRef<Path>) -> Result<Self, LogError> {
         let path = path.as_ref().to_path_buf();
-        let file = OpenOptions::new().create_new(true).append(true).open(&path)?;
-        Ok(Self { path, file, next_seq: 1, ids: BTreeMap::new() })
+        let file = OpenOptions::new()
+            .create_new(true)
+            .append(true)
+            .open(&path)?;
+        Ok(Self {
+            path,
+            file,
+            next_seq: 1,
+            ids: BTreeMap::new(),
+        })
     }
 
     /// Open an existing log for appending, replaying it first so the next
@@ -111,9 +134,18 @@ impl SessionLog {
         let path = path.as_ref().to_path_buf();
         let replay = replay(&path)?;
         let next_seq = replay.events.last().map(|e| e.seq + 1).unwrap_or(1);
-        let ids = replay.events.iter().map(|e| (e.seq, e.id.clone())).collect();
+        let ids = replay
+            .events
+            .iter()
+            .map(|e| (e.seq, e.id.clone()))
+            .collect();
         let file = OpenOptions::new().append(true).open(&path)?;
-        Ok(Self { path, file, next_seq, ids })
+        Ok(Self {
+            path,
+            file,
+            next_seq,
+            ids,
+        })
     }
 
     pub fn path(&self) -> &Path {
@@ -198,7 +230,11 @@ fn read(path: impl AsRef<Path>, lenient: bool) -> Result<Replay, LogError> {
             detail: e.to_string(),
         })?;
         if env.seq != expected {
-            return Err(LogError::SeqOutOfOrder { line: line_no, expected, found: env.seq });
+            return Err(LogError::SeqOutOfOrder {
+                line: line_no,
+                expected,
+                found: env.seq,
+            });
         }
         expected += 1;
         match is_ignorable_event(&env.kind) {
@@ -214,11 +250,17 @@ fn read(path: impl AsRef<Path>, lenient: bool) -> Result<Replay, LogError> {
             Some(_) => out.events.push(env),
             // A kind we do not know: the envelope decides.
             None if env.ignorable && lenient => {
-                out.skipped.push(Skipped { line: line_no, kind: env.kind });
+                out.skipped.push(Skipped {
+                    line: line_no,
+                    kind: env.kind,
+                });
             }
             None if env.ignorable => out.events.push(env),
             None => {
-                return Err(LogError::UnknownCoreEvent { line: line_no, kind: env.kind });
+                return Err(LogError::UnknownCoreEvent {
+                    line: line_no,
+                    kind: env.kind,
+                });
             }
         }
     }
@@ -258,7 +300,8 @@ mod tests {
     fn append_then_replay_roundtrips() {
         let t = Temp::new();
         let mut log = SessionLog::create(t.path()).unwrap();
-        log.append("message.appended", json!({"role": "user", "text": "hi"})).unwrap();
+        log.append("message.appended", json!({"role": "user", "text": "hi"}))
+            .unwrap();
         log.append(
             "tool.call",
             json!({"call_id": "c1", "tool": "read", "args": {}, "action_class": "investigate"}),
@@ -296,7 +339,8 @@ mod tests {
             .unwrap();
         assert_eq!(child.parent_id.as_deref(), Some(first.id.as_str()));
         assert!(
-            log.append_with_parent("message.appended", json!({}), Some("e999".into())).is_err(),
+            log.append_with_parent("message.appended", json!({}), Some("e999".into()))
+                .is_err(),
             "a dangling parent is rejected"
         );
     }
@@ -315,10 +359,20 @@ mod tests {
 
         let lenient = replay_lenient(t.path()).unwrap();
         assert_eq!(lenient.events.len(), 1);
-        assert_eq!(lenient.skipped, vec![Skipped { line: 2, kind: "future.thing".into() }]);
+        assert_eq!(
+            lenient.skipped,
+            vec![Skipped {
+                line: 2,
+                kind: "future.thing".into()
+            }]
+        );
 
         let strict = replay(t.path()).unwrap();
-        assert_eq!(strict.events.len(), 2, "strict readers keep unknown ignorable events");
+        assert_eq!(
+            strict.events.len(),
+            2,
+            "strict readers keep unknown ignorable events"
+        );
     }
 
     #[test]
@@ -349,7 +403,10 @@ mod tests {
             t.path(),
             json!({"seq": 2, "id": "e2", "kind": "message.appended", "ignorable": true, "time_ms": 0, "data": {}}),
         );
-        assert!(matches!(replay_lenient(t.path()), Err(LogError::InconsistentEnvelope { .. })));
+        assert!(matches!(
+            replay_lenient(t.path()),
+            Err(LogError::InconsistentEnvelope { .. })
+        ));
     }
 
     #[test]
@@ -364,7 +421,11 @@ mod tests {
         );
         assert!(matches!(
             replay(t.path()),
-            Err(LogError::SeqOutOfOrder { expected: 2, found: 5, .. })
+            Err(LogError::SeqOutOfOrder {
+                expected: 2,
+                found: 5,
+                ..
+            })
         ));
     }
 

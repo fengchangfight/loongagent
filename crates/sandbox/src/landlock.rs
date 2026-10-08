@@ -208,7 +208,9 @@ impl WorkspacePolicy {
     /// success path performs no allocation.
     pub fn apply(&self) -> Result<(), LandlockError> {
         let abi = abi_version().ok_or(LandlockError::Unsupported)?;
-        let attr = RulesetAttr { handled_access_fs: handled_mask(abi) };
+        let attr = RulesetAttr {
+            handled_access_fs: handled_mask(abi),
+        };
         let ruleset = unsafe {
             syscall(
                 SYS_LANDLOCK_CREATE_RULESET,
@@ -240,7 +242,11 @@ impl WorkspacePolicy {
 
 /// Add a path-beneath rule using raw syscalls only.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-fn add_path_rule_raw(ruleset_fd: i32, path: &std::ffi::CStr, allowed: u64) -> Result<(), LandlockError> {
+fn add_path_rule_raw(
+    ruleset_fd: i32,
+    path: &std::ffi::CStr,
+    allowed: u64,
+) -> Result<(), LandlockError> {
     let fd = unsafe {
         syscall(
             SYS_OPENAT,
@@ -253,7 +259,10 @@ fn add_path_rule_raw(ruleset_fd: i32, path: &std::ffi::CStr, allowed: u64) -> Re
     if fd < 0 {
         return Err(errno("openat"));
     }
-    let attr = PathBeneathAttr { allowed_access: allowed, parent_fd: fd as i32 };
+    let attr = PathBeneathAttr {
+        allowed_access: allowed,
+        parent_fd: fd as i32,
+    };
     let result = unsafe {
         syscall(
             SYS_LANDLOCK_ADD_RULE,
@@ -273,7 +282,11 @@ fn add_path_rule_raw(ruleset_fd: i32, path: &std::ffi::CStr, allowed: u64) -> Re
 }
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-fn add_path_rule_raw(_ruleset_fd: i32, _path: &std::ffi::CStr, _allowed: u64) -> Result<(), LandlockError> {
+fn add_path_rule_raw(
+    _ruleset_fd: i32,
+    _path: &std::ffi::CStr,
+    _allowed: u64,
+) -> Result<(), LandlockError> {
     Err(LandlockError::Failed(
         "no openat syscall number for this architecture".to_string(),
     ))
@@ -293,7 +306,9 @@ pub fn confine_workspace(workspace: &Path) -> Result<(), LandlockError> {
         )));
     }
 
-    let attr = RulesetAttr { handled_access_fs: handled_mask(abi) };
+    let attr = RulesetAttr {
+        handled_access_fs: handled_mask(abi),
+    };
     let ruleset = unsafe {
         syscall(
             SYS_LANDLOCK_CREATE_RULESET,
@@ -330,7 +345,10 @@ fn add_path_rule(ruleset_fd: i32, path: &Path, allowed: u64) -> Result<(), Landl
         .custom_flags(O_PATH | O_CLOEXEC)
         .open(path)
         .map_err(|e| LandlockError::Failed(format!("opening {}: {e}", path.display())))?;
-    let attr = PathBeneathAttr { allowed_access: allowed, parent_fd: file.as_raw_fd() };
+    let attr = PathBeneathAttr {
+        allowed_access: allowed,
+        parent_fd: file.as_raw_fd(),
+    };
     let r = unsafe {
         syscall(
             SYS_LANDLOCK_ADD_RULE,
@@ -384,9 +402,17 @@ mod tests {
         assert_eq!(ro & MAKE_REG, 0, "…nor have files created");
         assert_eq!(rw & WRITE_FILE, WRITE_FILE);
         assert_eq!(rw & REMOVE_FILE, REMOVE_FILE);
-        assert_eq!(rw & TRUNCATE, TRUNCATE, "shell redirection must work inside the workspace");
+        assert_eq!(
+            rw & TRUNCATE,
+            TRUNCATE,
+            "shell redirection must work inside the workspace"
+        );
         assert_eq!(rw & REFER, REFER, "renames inside the workspace must work");
-        assert_eq!(ro & READ_FILE, READ_FILE, "reading stays allowed everywhere");
+        assert_eq!(
+            ro & READ_FILE,
+            READ_FILE,
+            "reading stays allowed everywhere"
+        );
         assert_eq!(rw & EXECUTE, EXECUTE);
     }
 
@@ -400,7 +426,10 @@ mod tests {
                 let _clone = policy.clone();
             }
             Err(LandlockError::Unsupported) => { /* older kernels: reported elsewhere */ }
-            Err(e) => panic!("unexpected failure preparing a policy for {}: {e}", dir.display()),
+            Err(e) => panic!(
+                "unexpected failure preparing a policy for {}: {e}",
+                dir.display()
+            ),
         }
     }
 

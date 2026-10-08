@@ -163,16 +163,22 @@ pub struct Profile {
 
 impl Profile {
     pub fn permission(&self, class: ActionClass) -> Option<Verdict> {
-        self.permissions.iter().find(|(c, _)| *c == class).map(|(_, v)| *v)
+        self.permissions
+            .iter()
+            .find(|(c, _)| *c == class)
+            .map(|(_, v)| *v)
     }
 
     /// The verdict **and** the layer that set it, for the PDP's rule string.
     pub fn permission_with_source(&self, class: ActionClass) -> Option<(Verdict, Layer)> {
-        let key = format!("permissions.{}", match class {
-            ActionClass::Investigate => "investigate",
-            ActionClass::WriteWorkspace => "write_workspace",
-            ActionClass::OutOfBounds => "out_of_bounds",
-        });
+        let key = format!(
+            "permissions.{}",
+            match class {
+                ActionClass::Investigate => "investigate",
+                ActionClass::WriteWorkspace => "write_workspace",
+                ActionClass::OutOfBounds => "out_of_bounds",
+            }
+        );
         let row = self.explain(&key)?;
         match &row.value {
             Value::Verdict(v) => Some((*v, row.layer)),
@@ -227,8 +233,8 @@ impl LayerValues {
     fn from_file(layer: Layer, path: &Path, workspace: Option<&Path>) -> Result<Self, ConfigError> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| ConfigError::Io(format!("{}: {e}", path.display())))?;
-        let raw: RawProfile =
-            toml::from_str(&text).map_err(|e| ConfigError::Parse(format!("{}: {e}", path.display())))?;
+        let raw: RawProfile = toml::from_str(&text)
+            .map_err(|e| ConfigError::Parse(format!("{}: {e}", path.display())))?;
         let source = path.display().to_string();
         let mut values = Vec::new();
 
@@ -320,7 +326,10 @@ impl LayerValues {
                     )));
                 }
             }
-            values.push(("skill_dirs".to_string(), Value::Text(resolved.display().to_string())));
+            values.push((
+                "skill_dirs".to_string(),
+                Value::Text(resolved.display().to_string()),
+            ));
         }
         for name in raw.disable_skills {
             values.push(("disable_skills".to_string(), Value::Text(name)));
@@ -329,10 +338,16 @@ impl LayerValues {
         for (key, _) in &values {
             let base = key.split('.').next().unwrap_or(key);
             if kind_of(base).is_none() {
-                return Err(ConfigError::Invalid(format!("{source}: unknown key {base:?}")));
+                return Err(ConfigError::Invalid(format!(
+                    "{source}: unknown key {base:?}"
+                )));
             }
         }
-        Ok(Self { layer, source, values })
+        Ok(Self {
+            layer,
+            source,
+            values,
+        })
     }
 
     /// The built-in ladder is a *layer*, and it is the ceiling of permissiveness:
@@ -344,9 +359,18 @@ impl LayerValues {
             layer: Layer::Builtin,
             source: "<defaults>".to_string(),
             values: vec![
-                ("permissions.investigate".to_string(), Value::Verdict(Verdict::Allow)),
-                ("permissions.write_workspace".to_string(), Value::Verdict(Verdict::Allow)),
-                ("permissions.out_of_bounds".to_string(), Value::Verdict(Verdict::Ask)),
+                (
+                    "permissions.investigate".to_string(),
+                    Value::Verdict(Verdict::Allow),
+                ),
+                (
+                    "permissions.write_workspace".to_string(),
+                    Value::Verdict(Verdict::Allow),
+                ),
+                (
+                    "permissions.out_of_bounds".to_string(),
+                    Value::Verdict(Verdict::Ask),
+                ),
             ],
         }
     }
@@ -620,12 +644,19 @@ mod tests {
         );
         let row = profile.explain("permissions.out_of_bounds").unwrap();
         assert_eq!(row.layer, Layer::Builtin);
-        assert_eq!(row.overridden.len(), 1, "the widening attempt is on the record");
+        assert_eq!(
+            row.overridden.len(),
+            1,
+            "the widening attempt is on the record"
+        );
 
         // Narrowing the baseline is allowed.
         let strict = write(&ws, "s.toml", "[permissions]\nout_of_bounds = \"deny\"\n");
         let profile = resolve(&[(Layer::User, strict)], &ws).unwrap();
-        assert_eq!(profile.permission(ActionClass::OutOfBounds), Some(Verdict::Deny));
+        assert_eq!(
+            profile.permission(ActionClass::OutOfBounds),
+            Some(Verdict::Deny)
+        );
         assert_eq!(
             profile.explain("permissions.out_of_bounds").unwrap().layer,
             Layer::User
@@ -643,7 +674,10 @@ mod tests {
         let profile = resolve(&[(Layer::User, user)], &ws).unwrap();
         assert_eq!(profile.model.as_deref(), Some("qwen"));
         assert_eq!(profile.budget_tokens, Some(50_000));
-        assert_eq!(profile.permission(ActionClass::WriteWorkspace), Some(Verdict::Ask));
+        assert_eq!(
+            profile.permission(ActionClass::WriteWorkspace),
+            Some(Verdict::Ask)
+        );
 
         let row = profile.explain("model").unwrap();
         assert_eq!(row.layer, Layer::User);
@@ -665,20 +699,34 @@ mod tests {
             "user.toml",
             "budget_tokens = 500000\nmax_steps = 50\n\n[permissions]\ninvestigate = \"allow\"\nwrite_workspace = \"allow\"\n",
         );
-        let profile =
-            resolve(&[(Layer::Org, org), (Layer::User, user)], &ws).unwrap();
+        let profile = resolve(&[(Layer::Org, org), (Layer::User, user)], &ws).unwrap();
 
-        assert_eq!(profile.budget_tokens, Some(100_000), "the org's ceiling holds");
+        assert_eq!(
+            profile.budget_tokens,
+            Some(100_000),
+            "the org's ceiling holds"
+        );
         assert_eq!(profile.max_steps, Some(20));
         assert_eq!(
             profile.permission(ActionClass::Investigate),
             Some(Verdict::Deny),
             "a lower layer cannot loosen a deny"
         );
-        assert_eq!(profile.permission(ActionClass::WriteWorkspace), Some(Verdict::Ask));
+        assert_eq!(
+            profile.permission(ActionClass::WriteWorkspace),
+            Some(Verdict::Ask)
+        );
         let row = profile.explain("budget_tokens").unwrap();
-        assert_eq!(row.layer, Layer::Org, "the strictest value is the one in force");
-        assert_eq!(row.overridden.len(), 1, "and the widening attempt is recorded");
+        assert_eq!(
+            row.layer,
+            Layer::Org,
+            "the strictest value is the one in force"
+        );
+        assert_eq!(
+            row.overridden.len(),
+            1,
+            "and the widening attempt is recorded"
+        );
     }
 
     #[test]
@@ -698,7 +746,11 @@ mod tests {
         let user = write(&ws, "user.toml", "model = \"my-model\"\n");
         let session = write(&ws, "session.toml", "model = \"this-run\"\n");
         let profile = resolve(
-            &[(Layer::Org, org), (Layer::User, user), (Layer::Session, session)],
+            &[
+                (Layer::Org, org),
+                (Layer::User, user),
+                (Layer::Session, session),
+            ],
             &ws,
         )
         .unwrap();
@@ -719,7 +771,9 @@ mod tests {
                     _ => format!("{key} = \"x\"\n"),
                 },
             );
-            let err = resolve(&[(Layer::Project, project)], &ws).unwrap_err().to_string();
+            let err = resolve(&[(Layer::Project, project)], &ws)
+                .unwrap_err()
+                .to_string();
             assert!(
                 err.contains("may not set") || err.contains("must be a reference"),
                 "{key}: {err}"
@@ -736,7 +790,9 @@ mod tests {
 
         // …but reaching out of the tree is not.
         let outside = write(&ws, "p2.toml", "skill_dirs = [\"/etc/skills\"]\n");
-        let err = resolve(&[(Layer::Project, outside)], &ws).unwrap_err().to_string();
+        let err = resolve(&[(Layer::Project, outside)], &ws)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("must stay inside the workspace"), "{err}");
     }
 
@@ -744,7 +800,9 @@ mod tests {
     fn secrets_never_live_in_config() {
         let ws = workspace();
         let literal = write(&ws, "u.toml", "api_key = \"sk-live-abcdef\"\n");
-        let err = resolve(&[(Layer::User, literal)], &ws).unwrap_err().to_string();
+        let err = resolve(&[(Layer::User, literal)], &ws)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("secrets never live in config"), "{err}");
 
         let reference = write(&ws, "u2.toml", "api_key = \"env:LOONG_KEY\"\n");
@@ -770,10 +828,17 @@ mod tests {
         assert_eq!(profile.skill_dirs.len(), 2, "{:?}", profile.skill_dirs);
         // Union in precedence order (project before user), not alphabetically: the
         // order is how a reader sees which layer asked for what.
-        assert_eq!(profile.disable_skills, vec!["org-loud".to_string(), "other".to_string()]);
+        assert_eq!(
+            profile.disable_skills,
+            vec!["org-loud".to_string(), "other".to_string()]
+        );
         let row = profile.explain("skill_dirs").unwrap();
         assert_eq!(row.kind, Kind::AddOnly);
-        assert_eq!(row.layer, Layer::Project, "the first layer that set it owns the row");
+        assert_eq!(
+            row.layer,
+            Layer::Project,
+            "the first layer that set it owns the row"
+        );
     }
 
     #[test]
@@ -782,19 +847,30 @@ mod tests {
         // A typo must be named, not ignored: a guard that silently does not exist
         // is the failure this rule exists to prevent.
         let unknown = write(&ws, "a.toml", "budget_token = 100\n");
-        let err = resolve(&[(Layer::User, unknown)], &ws).unwrap_err().to_string();
-        assert!(err.contains("unknown") && err.contains("budget_token"), "{err}");
+        let err = resolve(&[(Layer::User, unknown)], &ws)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("unknown") && err.contains("budget_token"),
+            "{err}"
+        );
 
         let bad_verdict = write(&ws, "b.toml", "[permissions]\ninvestigate = \"maybe\"\n");
-        let err = resolve(&[(Layer::User, bad_verdict)], &ws).unwrap_err().to_string();
+        let err = resolve(&[(Layer::User, bad_verdict)], &ws)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("allow | ask | deny"), "{err}");
 
         let bad_class = write(&ws, "c.toml", "[permissions]\nwhatever = \"allow\"\n");
-        let err = resolve(&[(Layer::User, bad_class)], &ws).unwrap_err().to_string();
+        let err = resolve(&[(Layer::User, bad_class)], &ws)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("unknown action class"), "{err}");
 
         let bad_url = write(&ws, "d.toml", "base_url = \"ftp://x/y\"\n");
-        let err = resolve(&[(Layer::User, bad_url)], &ws).unwrap_err().to_string();
+        let err = resolve(&[(Layer::User, bad_url)], &ws)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("base_url must be"), "{err}");
 
         let bad_toml = write(&ws, "e.toml", "not toml {{{\n");
@@ -815,7 +891,10 @@ mod tests {
         assert!(profile.skill_dirs.is_empty());
         // …but the built-in ladder is always the baseline of the permission chain.
         assert_eq!(profile.explain_all().len(), 3);
-        assert!(profile.explain_all().iter().all(|row| row.layer == Layer::Builtin));
+        assert!(profile
+            .explain_all()
+            .iter()
+            .all(|row| row.layer == Layer::Builtin));
         assert_eq!(
             profile.permission(ActionClass::OutOfBounds),
             Some(Verdict::Ask),
@@ -826,8 +905,17 @@ mod tests {
     #[test]
     fn every_known_key_declares_a_kind() {
         for key in [
-            "model", "base_url", "profile", "budget_tokens", "keep_newest_tokens", "max_steps",
-            "compact_at_percent", "permissions", "skill_dirs", "disable_skills", "api_key",
+            "model",
+            "base_url",
+            "profile",
+            "budget_tokens",
+            "keep_newest_tokens",
+            "max_steps",
+            "compact_at_percent",
+            "permissions",
+            "skill_dirs",
+            "disable_skills",
+            "api_key",
         ] {
             assert!(kind_of(key).is_some(), "{key} has no kind");
         }
@@ -847,7 +935,10 @@ mod tests {
         let ws = workspace();
         let paths = layer_paths(&ws, Some(Path::new("/tmp/session.toml")));
         let layers: Vec<Layer> = paths.iter().map(|(l, _)| *l).collect();
-        assert_eq!(layers, vec![Layer::Org, Layer::Project, Layer::User, Layer::Session]);
+        assert_eq!(
+            layers,
+            vec![Layer::Org, Layer::Project, Layer::User, Layer::Session]
+        );
         assert_eq!(paths[1].1, ws.join(".loongagent/profile.toml"));
         assert_eq!(paths[3].1, PathBuf::from("/tmp/session.toml"));
     }

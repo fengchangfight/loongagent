@@ -21,9 +21,9 @@ use loong_server::Server;
 use loong_tui::{Client, Transport};
 use serde_json::json;
 use std::io::{BufRead, BufReader, Write};
-use std::sync::mpsc::Receiver;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::mpsc::Receiver;
 
 const USAGE: &str = "\
 loongagent — a firm-internal coding agent
@@ -113,7 +113,8 @@ impl Args {
                 }
                 "--profile" => {
                     i += 1;
-                    args.profile = Some(PathBuf::from(rest.get(i).ok_or("--profile needs a path")?));
+                    args.profile =
+                        Some(PathBuf::from(rest.get(i).ok_or("--profile needs a path")?));
                 }
                 "--stdio" => args.stdio = true,
                 "--bind" => {
@@ -131,7 +132,8 @@ impl Args {
                 "--budget" => {
                     i += 1;
                     args.budget = Some(
-                        rest.get(i).ok_or("--budget needs a token count")?
+                        rest.get(i)
+                            .ok_or("--budget needs a token count")?
                             .parse()
                             .map_err(|_| "--budget must be a number".to_string())?,
                     );
@@ -139,7 +141,8 @@ impl Args {
                 "--keep-newest" => {
                     i += 1;
                     args.keep_newest = Some(
-                        rest.get(i).ok_or("--keep-newest needs a token count")?
+                        rest.get(i)
+                            .ok_or("--keep-newest needs a token count")?
                             .parse()
                             .map_err(|_| "--keep-newest must be a number".to_string())?,
                     );
@@ -180,8 +183,10 @@ impl Args {
 
 fn run() -> Result<(), String> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
-    let (command, rest) =
-        argv.split_first().map(|(c, r)| (c.as_str(), r)).unwrap_or(("", &[]));
+    let (command, rest) = argv
+        .split_first()
+        .map(|(c, r)| (c.as_str(), r))
+        .unwrap_or(("", &[]));
     match command {
         "server" => {
             let args = Args::parse(rest)?;
@@ -281,7 +286,9 @@ fn serve(args: Args) -> Result<(), String> {
                 eprintln!("[sandbox] WARNING: unconfined — {detail}");
             }
             loong_sandbox::SelfTest::Broken { detail } => {
-                return Err(format!("refusing to start: the sandbox self-test is broken — {detail}"));
+                return Err(format!(
+                    "refusing to start: the sandbox self-test is broken — {detail}"
+                ));
             }
         }
     }
@@ -312,7 +319,9 @@ fn serve(args: Args) -> Result<(), String> {
         Kernel::create(&args.session, config, model)
     }
     .map_err(|e| e.to_string())?;
-    Server::new(kernel, args.session_id()).run_stdio().map_err(|e| e.to_string())
+    Server::new(kernel, args.session_id())
+        .run_stdio()
+        .map_err(|e| e.to_string())
 }
 
 /// Which provider to build: the session's choice if it made one, else the
@@ -322,7 +331,12 @@ fn build_model(args: &Args, settings: &loong_config::Profile) -> Result<Box<dyn 
     let kind = args
         .model
         .clone()
-        .or_else(|| settings.base_url.as_ref().map(|_| "openai-compat".to_string()))
+        .or_else(|| {
+            settings
+                .base_url
+                .as_ref()
+                .map(|_| "openai-compat".to_string())
+        })
         .unwrap_or_else(|| "echo".to_string());
     match kind.as_str() {
         "echo" => Ok(Box::new(EchoModel)),
@@ -353,12 +367,18 @@ fn build_model(args: &Args, settings: &loong_config::Profile) -> Result<Box<dyn 
                     tool: "write_file".to_string(),
                     args: json!({"path": "demo.txt", "content": "written by the loongagent vertical slice\n"}),
                 }],
-                usage: Usage { tokens_in: 20, tokens_out: 8 },
+                usage: Usage {
+                    tokens_in: 20,
+                    tokens_out: 8,
+                },
             },
             CompletionResponse {
                 text: Some("wrote demo.txt".to_string()),
                 tool_calls: Vec::new(),
-                usage: Usage { tokens_in: 30, tokens_out: 4 },
+                usage: Usage {
+                    tokens_in: 30,
+                    tokens_out: 4,
+                },
             },
         ]))),
         "demo-escape" => Ok(Box::new(ScriptedModel::new(vec![
@@ -369,12 +389,18 @@ fn build_model(args: &Args, settings: &loong_config::Profile) -> Result<Box<dyn 
                     tool: "write_file".to_string(),
                     args: json!({"path": "/tmp/loongagent-demo-escape.txt", "content": "should never be written\n"}),
                 }],
-                usage: Usage { tokens_in: 20, tokens_out: 8 },
+                usage: Usage {
+                    tokens_in: 20,
+                    tokens_out: 8,
+                },
             },
             CompletionResponse {
                 text: Some("understood".to_string()),
                 tool_calls: Vec::new(),
-                usage: Usage { tokens_in: 10, tokens_out: 2 },
+                usage: Usage {
+                    tokens_in: 10,
+                    tokens_out: 2,
+                },
             },
         ]))),
         other => Err(format!(
@@ -420,7 +446,10 @@ impl Model for EchoModel {
         Ok(CompletionResponse {
             text: Some(format!("echo: {last_user}")),
             tool_calls: Vec::new(),
-            usage: Usage { tokens_in: 3, tokens_out: 3 },
+            usage: Usage {
+                tokens_in: 3,
+                tokens_out: 3,
+            },
         })
     }
 }
@@ -471,7 +500,11 @@ impl ChildTransport {
             .arg(&args.cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(if capture_notes { Stdio::piped() } else { Stdio::inherit() })
+            .stderr(if capture_notes {
+                Stdio::piped()
+            } else {
+                Stdio::inherit()
+            })
             .spawn()
             .map_err(|e| format!("spawning the local server: {e}"))?;
         let stdin = child.stdin.take().ok_or("no stdin on the server child")?;
@@ -492,7 +525,14 @@ impl ChildTransport {
         } else {
             None
         };
-        Ok((Self { child, stdin, stdout }, notes))
+        Ok((
+            Self {
+                child,
+                stdin,
+                stdout,
+            },
+            notes,
+        ))
     }
 }
 
@@ -542,7 +582,10 @@ fn full_screen(args: Args) -> Result<(), String> {
         }
     };
     if attached.existing_events > 0 {
-        eprintln!("resuming session {} ({} events)", attached.session_id, attached.existing_events);
+        eprintln!(
+            "resuming session {} ({} events)",
+            attached.session_id, attached.existing_events
+        );
     }
     loong_tui_app::run(client, attached.session_id, attached.schema_version, notes)
 }
@@ -621,7 +664,12 @@ fn web(args: Args) -> Result<(), String> {
     let (listener, addr) = loong_web::bind(&args.bind, args.port)?;
 
     for row in settings.explain_all() {
-        eprintln!("[config] {:<28} {:<9} {}", row.key, row.value.render(), row.source);
+        eprintln!(
+            "[config] {:<28} {:<9} {}",
+            row.key,
+            row.value.render(),
+            row.source
+        );
     }
     println!("loongagent web — open this URL:");
     println!();
@@ -636,10 +684,7 @@ fn web(args: Args) -> Result<(), String> {
 /// Print a turn's deltas as they arrive, and return the rendered lines that are
 /// not already on screen. A streamed answer would otherwise appear twice: once as
 /// it was written and once when the turn finished.
-fn print_streaming(
-    client: &mut Client<ChildTransport>,
-    text: &str,
-) -> Result<Vec<String>, String> {
+fn print_streaming(client: &mut Client<ChildTransport>, text: &str) -> Result<Vec<String>, String> {
     let mut streamed = String::new();
     let lines = client.submit_with(text, &mut |method, params| {
         if method != loong_schema::generated::notification::MODEL_DELTA {
@@ -727,7 +772,10 @@ fn mcp_list(args: Args) -> Result<(), String> {
     }
     if let loong_mcp::TrustStatus::Untrusted { changed } = &set.trust {
         println!();
-        println!("INERT until trusted — new or changed: {}", changed.join(", "));
+        println!(
+            "INERT until trusted — new or changed: {}",
+            changed.join(", ")
+        );
         println!("A server entry names a command to run, so read it first, then:");
         println!("  loongagent mcp trust --cwd {}", args.cwd.display());
     }
@@ -740,7 +788,11 @@ fn mcp_trust(args: Args) -> Result<(), String> {
         return Err("no mcp.toml in this workspace — nothing to trust".to_string());
     }
     let path = set.trust_now().map_err(|e| e.to_string())?;
-    println!("trusted {} server(s) in {}", set.servers.len(), args.cwd.display());
+    println!(
+        "trusted {} server(s) in {}",
+        set.servers.len(),
+        args.cwd.display()
+    );
     println!("recorded in {}", path.display());
     println!("Editing mcp.toml re-arms the question on the next session.");
     Ok(())
@@ -778,8 +830,7 @@ fn config_explain(args: Args) -> Result<(), String> {
         .ok_or_else(|| format!("config explain needs a key\n\n{USAGE}"))?;
     let settings = args.settings()?;
     let base = key.split('.').next().unwrap_or(&key);
-    let kind = loong_config::kind_of(base)
-        .ok_or_else(|| format!("unknown key {base:?}"))?;
+    let kind = loong_config::kind_of(base).ok_or_else(|| format!("unknown key {base:?}"))?;
     match settings.explain(&key) {
         Some(row) => {
             println!("{key} = {}", row.value.render());
@@ -817,12 +868,9 @@ fn skills_list(args: Args) -> Result<(), String> {
     // Honour the layered configuration: what this prints must be what a session
     // would actually get, or it is worse than not printing it.
     let settings = args.settings()?;
-    let set = loong_skills::SkillSet::load_in(
-        &args.cwd,
-        &settings.skill_dirs,
-        &settings.disable_skills,
-    )
-    .map_err(|e| e.to_string())?;
+    let set =
+        loong_skills::SkillSet::load_in(&args.cwd, &settings.skill_dirs, &settings.disable_skills)
+            .map_err(|e| e.to_string())?;
     for name in &set.disabled {
         println!("disabled by configuration: /{name}");
     }
@@ -848,7 +896,10 @@ fn skills_list(args: Args) -> Result<(), String> {
 fn hooks_list(args: Args) -> Result<(), String> {
     let set = loong_hooks::HookSet::load(&args.cwd).map_err(|e| e.to_string())?;
     println!("workspace: {}", args.cwd.display());
-    println!("manifest:  {}", set.hooks_dir.join(loong_hooks::HOOKS_FILE).display());
+    println!(
+        "manifest:  {}",
+        set.hooks_dir.join(loong_hooks::HOOKS_FILE).display()
+    );
     println!("status:    {}", set.summary());
     if set.specs.is_empty() {
         return Ok(());
@@ -872,9 +923,15 @@ fn hooks_list(args: Args) -> Result<(), String> {
         loong_hooks::TrustStatus::Trusted => {}
         loong_hooks::TrustStatus::Untrusted { changed } => {
             println!();
-            println!("INERT until trusted — new or changed: {}", changed.join(", "));
+            println!(
+                "INERT until trusted — new or changed: {}",
+                changed.join(", ")
+            );
             println!("These hooks ship inside this repository, so they are content from it.");
-            println!("Run `loongagent hooks trust --cwd {}` once you have read them.", args.cwd.display());
+            println!(
+                "Run `loongagent hooks trust --cwd {}` once you have read them.",
+                args.cwd.display()
+            );
         }
         loong_hooks::TrustStatus::NoHooks => {}
     }
@@ -889,7 +946,11 @@ fn hooks_trust(args: Args) -> Result<(), String> {
     }
     let fingerprints = set.fingerprints().map_err(|e| e.to_string())?;
     let path = set.trust_now().map_err(|e| e.to_string())?;
-    println!("trusted {} file(s) in {}", fingerprints.len(), args.cwd.display());
+    println!(
+        "trusted {} file(s) in {}",
+        fingerprints.len(),
+        args.cwd.display()
+    );
     for (name, hash) in &fingerprints {
         println!("  {hash} {name}");
     }
@@ -904,7 +965,11 @@ fn sandbox_self_test(args: Args) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let report = loong_sandbox::sandbox::self_test(&exe, &args.cwd);
     println!("os:        {}", report.capabilities.os);
-    println!("mechanism: {} — {}", report.capabilities.strongest(), report.capabilities.note);
+    println!(
+        "mechanism: {} — {}",
+        report.capabilities.strongest(),
+        report.capabilities.note
+    );
     match &report.result {
         loong_sandbox::SelfTest::Enforced { mechanism, detail } => {
             println!("result:    enforced by {mechanism}");

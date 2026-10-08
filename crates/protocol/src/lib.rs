@@ -51,7 +51,11 @@ impl Request {
     /// the caller never has to invent a code.
     pub fn parse(line: &str) -> Result<Self, Response> {
         let value: Value = serde_json::from_str(line).map_err(|e| {
-            Response::err(Value::Null, codes::PARSE_ERROR, format!("invalid JSON: {e}"))
+            Response::err(
+                Value::Null,
+                codes::PARSE_ERROR,
+                format!("invalid JSON: {e}"),
+            )
         })?;
         let request: Request = serde_json::from_value(value.clone()).map_err(|e| {
             Response::err(
@@ -94,7 +98,12 @@ pub struct Response {
 
 impl Response {
     pub fn ok(id: Value, result: Value) -> Self {
-        Self { jsonrpc: JSONRPC.into(), id, result: Some(result), error: None }
+        Self {
+            jsonrpc: JSONRPC.into(),
+            id,
+            result: Some(result),
+            error: None,
+        }
     }
 
     pub fn err(id: Value, code: i64, message: impl Into<String>) -> Self {
@@ -102,7 +111,11 @@ impl Response {
             jsonrpc: JSONRPC.into(),
             id,
             result: None,
-            error: Some(RpcError { code, message: message.into(), data: None }),
+            error: Some(RpcError {
+                code,
+                message: message.into(),
+                data: None,
+            }),
         }
     }
 
@@ -124,7 +137,11 @@ pub struct Notification {
 
 impl Notification {
     pub fn new(method: &str, params: Value) -> Self {
-        Self { jsonrpc: JSONRPC.into(), method: method.into(), params }
+        Self {
+            jsonrpc: JSONRPC.into(),
+            method: method.into(),
+            params,
+        }
     }
 
     pub fn event(envelope: &Value) -> Self {
@@ -169,7 +186,9 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":1,"method":"prompt.submit","params":{"nope":1}}"#,
         )
         .unwrap();
-        let err = req.params_as::<loong_schema::generated::PromptSubmitParams>().unwrap_err();
+        let err = req
+            .params_as::<loong_schema::generated::PromptSubmitParams>()
+            .unwrap_err();
         let resp = err.error.unwrap();
         assert_eq!(resp.code, codes::INVALID_PARAMS);
         assert!(resp.message.contains("prompt.submit"));
@@ -181,7 +200,10 @@ mod tests {
         let value: Value = serde_json::from_str(&ok.to_line()).unwrap();
         assert_eq!(value["jsonrpc"], "2.0");
         assert_eq!(value["id"], 1);
-        assert!(value.get("error").is_none(), "absent when there is no error");
+        assert!(
+            value.get("error").is_none(),
+            "absent when there is no error"
+        );
         let note = Notification::event(&json!({"seq": 1, "kind": "message.appended"}));
         let value: Value = serde_json::from_str(&note.to_line()).unwrap();
         assert_eq!(value["method"], "event");

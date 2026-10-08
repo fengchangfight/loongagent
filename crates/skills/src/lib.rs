@@ -25,8 +25,8 @@
 //! (`skill.invoked`). A surprising instruction is therefore traceable to a path in
 //! the log rather than being an anonymous part of the prompt.
 
-use loong_tools::{ExecContext, Tool, ToolError};
 use loong_schema::generated::{ActionClass, Json};
+use loong_tools::{ExecContext, Tool, ToolError};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -61,7 +61,11 @@ pub enum Origin {
     /// Provided by the agent itself (`/help`).
     Builtin { body: String },
     /// A prompt on an MCP server, with the argument names it declared.
-    Mcp { server: String, prompt: String, arguments: Vec<String> },
+    Mcp {
+        server: String,
+        prompt: String,
+        arguments: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,7 +189,11 @@ impl SkillSet {
             }
         });
 
-        let set = SkillSet { workspace, skills, disabled: disabled_hits };
+        let set = SkillSet {
+            workspace,
+            skills,
+            disabled: disabled_hits,
+        };
         set.finalize()
     }
 
@@ -199,7 +207,8 @@ impl SkillSet {
     fn finalize(mut self) -> Result<Self, SkillError> {
         // `/help` is regenerated from the final set — including skills that arrived
         // after the first pass — so a stale help entry must not survive.
-        self.skills.retain(|s| !matches!(s.origin, Origin::Builtin { .. }));
+        self.skills
+            .retain(|s| !matches!(s.origin, Origin::Builtin { .. }));
         // A duplicate name is a configuration bug, and picking one at random would
         // make `/name` depend on directory order.
         let mut seen: BTreeMap<String, String> = BTreeMap::new();
@@ -220,7 +229,9 @@ impl SkillSet {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.skills.iter().all(|s| matches!(s.origin, Origin::Builtin { .. }))
+        self.skills
+            .iter()
+            .all(|s| matches!(s.origin, Origin::Builtin { .. }))
     }
 
     pub fn get(&self, name: &str) -> Option<&Skill> {
@@ -254,9 +265,7 @@ impl SkillSet {
     }
 
     fn help_skill(&self) -> Skill {
-        let mut body = String::from(
-            "The skills and commands available in this workspace are:\n\n",
-        );
+        let mut body = String::from("The skills and commands available in this workspace are:\n\n");
         for skill in self.skills.iter() {
             body.push_str(&format!("- {}\n", skill.catalogue_line()));
         }
@@ -393,10 +402,11 @@ fn scan_root(root: &Path) -> Result<Vec<Skill>, SkillError> {
 }
 
 fn read_skill(path: &Path, fallback_name: Option<&str>) -> Result<Skill, SkillError> {
-    let text =
-        std::fs::read_to_string(path).map_err(|e| SkillError::Io(format!("{}: {e}", path.display())))?;
-    let (front, body) = split_frontmatter(&text)
-        .ok_or_else(|| SkillError::Invalid(format!("{}: no `---` frontmatter block", path.display())))?;
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| SkillError::Io(format!("{}: {e}", path.display())))?;
+    let (front, body) = split_frontmatter(&text).ok_or_else(|| {
+        SkillError::Invalid(format!("{}: no `---` frontmatter block", path.display()))
+    })?;
     let fields = parse_frontmatter(front)
         .map_err(|e| SkillError::Invalid(format!("{}: {e}", path.display())))?;
 
@@ -404,7 +414,9 @@ fn read_skill(path: &Path, fallback_name: Option<&str>) -> Result<Skill, SkillEr
         .get("name")
         .cloned()
         .or_else(|| fallback_name.map(|n| n.to_string()))
-        .ok_or_else(|| SkillError::Invalid(format!("{}: no name and no file name", path.display())))?;
+        .ok_or_else(|| {
+            SkillError::Invalid(format!("{}: no name and no file name", path.display()))
+        })?;
     if name.is_empty()
         || !name
             .chars()
@@ -428,7 +440,10 @@ fn read_skill(path: &Path, fallback_name: Option<&str>) -> Result<Skill, SkillEr
         description,
         argument_hint: fields.get("argument-hint").cloned(),
         allowed_tools: fields.get("allowed-tools").cloned(),
-        origin: Origin::File { source: path.to_path_buf(), body: body.to_string() },
+        origin: Origin::File {
+            source: path.to_path_buf(),
+            body: body.to_string(),
+        },
     })
 }
 
@@ -485,14 +500,20 @@ pub struct SkillTool {
 
 impl SkillTool {
     pub fn new(skills: std::sync::Arc<SkillSet>) -> Self {
-        Self { skills, fetcher: None }
+        Self {
+            skills,
+            fetcher: None,
+        }
     }
 
     pub fn with_fetcher(
         skills: std::sync::Arc<SkillSet>,
         fetcher: std::sync::Arc<dyn PromptFetcher>,
     ) -> Self {
-        Self { skills, fetcher: Some(fetcher) }
+        Self {
+            skills,
+            fetcher: Some(fetcher),
+        }
     }
 }
 
@@ -533,7 +554,11 @@ impl Tool for SkillTool {
             Origin::File { body, .. } | Origin::Builtin { body } => {
                 (body.clone(), skill.source_label())
             }
-            Origin::Mcp { server, prompt, arguments } => {
+            Origin::Mcp {
+                server,
+                prompt,
+                arguments,
+            } => {
                 let Some(fetcher) = &self.fetcher else {
                     return Err(ToolError::Refused(format!(
                         "{name} is provided by MCP server {server:?}, which is not reachable in \
@@ -601,9 +626,17 @@ mod tests {
     #[test]
     fn the_older_commands_shape_is_the_same_concept() {
         let ws = workspace();
-        command_file(&ws, "ship", "---\ndescription: Ship the current branch\n---\n\nShip it.\n");
+        command_file(
+            &ws,
+            "ship",
+            "---\ndescription: Ship the current branch\n---\n\nShip it.\n",
+        );
         let set = SkillSet::load(&ws).unwrap();
-        assert!(set.get("ship").is_some(), "names come from the file stem: {:?}", set.names());
+        assert!(
+            set.get("ship").is_some(),
+            "names come from the file stem: {:?}",
+            set.names()
+        );
     }
 
     #[test]
@@ -616,8 +649,14 @@ mod tests {
         );
         let set = SkillSet::load(&ws).unwrap();
         let catalogue = set.catalogue();
-        assert!(catalogue.contains("/release — Cut a release"), "{catalogue}");
-        assert!(!catalogue.contains("SECRET-BODY"), "the body stays out of context: {catalogue}");
+        assert!(
+            catalogue.contains("/release — Cut a release"),
+            "{catalogue}"
+        );
+        assert!(
+            !catalogue.contains("SECRET-BODY"),
+            "the body stays out of context: {catalogue}"
+        );
         // The source is named, so a surprising description is traceable.
         assert!(catalogue.contains("skills/release"), "{catalogue}");
     }
@@ -625,7 +664,11 @@ mod tests {
     #[test]
     fn help_is_always_available_and_lists_what_exists() {
         let ws = workspace();
-        skill_file(&ws, "review", "---\ndescription: Review something\n---\nbody\n");
+        skill_file(
+            &ws,
+            "review",
+            "---\ndescription: Review something\n---\nbody\n",
+        );
         let set = SkillSet::load(&ws).unwrap();
         let help = set.invoke("help", "").expect("/help works");
         assert_eq!(help.source, "<builtin>");
@@ -637,13 +680,17 @@ mod tests {
     #[test]
     fn arguments_substitute_all_forms_and_are_never_dropped() {
         let ws = workspace();
+        skill_file(&ws, "all", "---\ndescription: d\n---\nARGS=[$ARGUMENTS]\n");
         skill_file(
             &ws,
-            "all",
-            "---\ndescription: d\n---\nARGS=[$ARGUMENTS]\n",
+            "positional",
+            "---\ndescription: d\n---\nfirst=$1 second=$2 third=$3\n",
         );
-        skill_file(&ws, "positional", "---\ndescription: d\n---\nfirst=$1 second=$2 third=$3\n");
-        skill_file(&ws, "none", "---\ndescription: d\n---\nNo placeholder here.\n");
+        skill_file(
+            &ws,
+            "none",
+            "---\ndescription: d\n---\nNo placeholder here.\n",
+        );
         let set = SkillSet::load(&ws).unwrap();
 
         let prompt = |name: &str, args: &str| set.invoke(name, args).unwrap().prompt.unwrap();
@@ -653,9 +700,18 @@ mod tests {
         // With no arguments, nothing is appended.
         assert!(!prompt("none", "").contains("Arguments:"));
         // A lone `$` is not a placeholder and must survive.
-        skill_file(&ws, "dollar", "---\ndescription: d\n---\ncost is 5$ today\n");
+        skill_file(
+            &ws,
+            "dollar",
+            "---\ndescription: d\n---\ncost is 5$ today\n",
+        );
         let set = SkillSet::load(&ws).unwrap();
-        assert!(set.invoke("dollar", "").unwrap().prompt.unwrap().contains("5$ today"));
+        assert!(set
+            .invoke("dollar", "")
+            .unwrap()
+            .prompt
+            .unwrap()
+            .contains("5$ today"));
     }
 
     #[test]
@@ -667,9 +723,18 @@ mod tests {
 
     #[test]
     fn invocation_syntax_is_parsed_strictly() {
-        assert_eq!(parse_invocation("/review HEAD~1"), Some(("review".into(), "HEAD~1".into())));
-        assert_eq!(parse_invocation("/help"), Some(("help".into(), String::new())));
-        assert_eq!(parse_invocation("  /a-b_c  x  "), Some(("a-b_c".into(), "x".into())));
+        assert_eq!(
+            parse_invocation("/review HEAD~1"),
+            Some(("review".into(), "HEAD~1".into()))
+        );
+        assert_eq!(
+            parse_invocation("/help"),
+            Some(("help".into(), String::new()))
+        );
+        assert_eq!(
+            parse_invocation("  /a-b_c  x  "),
+            Some(("a-b_c".into(), "x".into()))
+        );
         assert_eq!(parse_invocation("no slash"), None);
         assert_eq!(parse_invocation("/"), None);
         // A sentence about a path is a sentence, not a command.
@@ -681,7 +746,10 @@ mod tests {
     fn broken_skills_are_loud_and_specific() {
         let ws = workspace();
         skill_file(&ws, "no-front", "just a body\n");
-        assert!(SkillSet::load(&ws).unwrap_err().to_string().contains("frontmatter"));
+        assert!(SkillSet::load(&ws)
+            .unwrap_err()
+            .to_string()
+            .contains("frontmatter"));
 
         let ws = workspace();
         skill_file(&ws, "no-description", "---\nname: x\n---\nbody\n");
@@ -689,12 +757,23 @@ mod tests {
         assert!(err.contains("description"), "{err}");
 
         let ws = workspace();
-        skill_file(&ws, "bad-name", "---\nname: has space\ndescription: d\n---\nbody\n");
-        assert!(SkillSet::load(&ws).unwrap_err().to_string().contains("not a usable name"));
+        skill_file(
+            &ws,
+            "bad-name",
+            "---\nname: has space\ndescription: d\n---\nbody\n",
+        );
+        assert!(SkillSet::load(&ws)
+            .unwrap_err()
+            .to_string()
+            .contains("not a usable name"));
 
         let ws = workspace();
         skill_file(&ws, "dup", "---\nname: same\ndescription: one\n---\nbody\n");
-        command_file(&ws, "other", "---\nname: same\ndescription: two\n---\nbody\n");
+        command_file(
+            &ws,
+            "other",
+            "---\nname: same\ndescription: two\n---\nbody\n",
+        );
         let err = SkillSet::load(&ws).unwrap_err().to_string();
         assert!(err.contains("defined twice"), "{err}");
     }
@@ -715,7 +794,11 @@ mod tests {
     #[test]
     fn the_model_can_load_a_body_by_name_and_gets_refused_for_a_bad_one() {
         let ws = workspace();
-        skill_file(&ws, "deploy", "---\ndescription: Deploy it\n---\nStep one: breathe.\n");
+        skill_file(
+            &ws,
+            "deploy",
+            "---\ndescription: Deploy it\n---\nStep one: breathe.\n",
+        );
         let skills = std::sync::Arc::new(SkillSet::load(&ws).unwrap());
         let tool = SkillTool::new(skills);
         let ctx = ExecContext::new(&ws, &loong_tools::NoConfinement);
@@ -724,19 +807,35 @@ mod tests {
         assert_eq!(tool.action_class(&json!({}), &ws), ActionClass::Investigate);
         let output = tool.execute(&json!({"name": "deploy"}), &ctx).unwrap();
         assert!(output.contains("Step one: breathe."), "{output}");
-        assert!(output.contains("skills/deploy"), "the source is named: {output}");
+        assert!(
+            output.contains("skills/deploy"),
+            "the source is named: {output}"
+        );
         assert!(output.contains("/deploy"), "{output}");
 
-        let err = tool.execute(&json!({"name": "absent"}), &ctx).unwrap_err().to_string();
+        let err = tool
+            .execute(&json!({"name": "absent"}), &ctx)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("no skill named"), "{err}");
-        assert!(err.contains("deploy"), "the refusal lists what exists: {err}");
-        assert!(matches!(tool.execute(&json!({}), &ctx), Err(ToolError::Refused(_))));
+        assert!(
+            err.contains("deploy"),
+            "the refusal lists what exists: {err}"
+        );
+        assert!(matches!(
+            tool.execute(&json!({}), &ctx),
+            Err(ToolError::Refused(_))
+        ));
     }
 
     #[test]
     fn an_mcp_prompt_is_a_skill_whose_body_is_fetched_on_invoke() {
         let ws = workspace();
-        skill_file(&ws, "local", "---\ndescription: A local skill\n---\nlocal body\n");
+        skill_file(
+            &ws,
+            "local",
+            "---\ndescription: A local skill\n---\nlocal body\n",
+        );
         let set = SkillSet::load(&ws)
             .unwrap()
             .with_external(vec![Skill {
@@ -754,17 +853,28 @@ mod tests {
 
         // Description in context, body not — and the origin is named.
         let catalogue = set.catalogue();
-        assert!(catalogue.contains("/mcp__policy__review <ref> — Review a diff"), "{catalogue}");
+        assert!(
+            catalogue.contains("/mcp__policy__review <ref> — Review a diff"),
+            "{catalogue}"
+        );
         assert!(catalogue.contains("[mcp:policy/review]"), "{catalogue}");
         assert!(set.get("mcp__policy__review").unwrap().body().is_none());
-        assert_eq!(set.get("mcp__policy__review").unwrap().tokens(), 0, "no made-up size");
+        assert_eq!(
+            set.get("mcp__policy__review").unwrap().tokens(),
+            0,
+            "no made-up size"
+        );
 
         // Invoking yields no body but the coordinates to fetch it.
         let invocation = set.invoke("mcp__policy__review", "HEAD~1").unwrap();
         assert!(invocation.prompt.is_none());
         assert_eq!(invocation.source, "mcp:policy/review");
         match &set.get("mcp__policy__review").unwrap().origin {
-            Origin::Mcp { server, prompt, arguments } => {
+            Origin::Mcp {
+                server,
+                prompt,
+                arguments,
+            } => {
                 assert_eq!(server, "policy");
                 assert_eq!(prompt, "review");
                 assert_eq!(arguments, &vec!["ref".to_string()]);
@@ -788,7 +898,9 @@ mod tests {
             argument_names: &[String],
             args: &str,
         ) -> Result<String, String> {
-            Ok(format!("fetched {server}/{prompt} with {argument_names:?} args={args:?}"))
+            Ok(format!(
+                "fetched {server}/{prompt} with {argument_names:?} args={args:?}"
+            ))
         }
     }
 
@@ -813,16 +925,22 @@ mod tests {
         );
         let ctx = ExecContext::new(&ws, &loong_tools::NoConfinement);
 
-        let with_fetcher =
-            SkillTool::with_fetcher(std::sync::Arc::clone(&set), std::sync::Arc::new(FakeFetcher));
-        let output = with_fetcher.execute(&json!({"name": "mcp__policy__review"}), &ctx).unwrap();
+        let with_fetcher = SkillTool::with_fetcher(
+            std::sync::Arc::clone(&set),
+            std::sync::Arc::new(FakeFetcher),
+        );
+        let output = with_fetcher
+            .execute(&json!({"name": "mcp__policy__review"}), &ctx)
+            .unwrap();
         assert!(output.contains("fetched policy/review"), "{output}");
         assert!(output.contains("mcp:policy/review"), "{output}");
 
         // Without a connection there is no body to give, and pretending otherwise
         // would be worse than refusing.
         let without = SkillTool::new(set);
-        let err = without.execute(&json!({"name": "mcp__policy__review"}), &ctx).unwrap_err();
+        let err = without
+            .execute(&json!({"name": "mcp__policy__review"}), &ctx)
+            .unwrap_err();
         assert!(err.to_string().contains("not reachable"), "{err}");
     }
 
@@ -884,7 +1002,9 @@ mod tests {
     #[test]
     fn a_profile_root_that_does_not_exist_is_loud() {
         let ws = workspace();
-        let err = SkillSet::load_in(&ws, &[ws.join("nope")], &[]).unwrap_err().to_string();
+        let err = SkillSet::load_in(&ws, &[ws.join("nope")], &[])
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("must exist"), "{err}");
     }
 

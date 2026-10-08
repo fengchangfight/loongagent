@@ -10,9 +10,7 @@
 //! later refinement, and pretending to honour it before it is implemented would be
 //! worse than saying so.
 
-use crate::{
-    arg_str, classify_read_path, resolve, ExecContext, Tool, ToolError,
-};
+use crate::{arg_str, classify_read_path, resolve, ExecContext, Tool, ToolError};
 use loong_schema::generated::{ActionClass, Json};
 use regex::RegexBuilder;
 use serde_json::json;
@@ -79,7 +77,10 @@ fn looks_binary(path: &Path) -> bool {
 }
 
 fn relative(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root).unwrap_or(path).to_string_lossy().to_string()
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .to_string()
 }
 
 // ------------------------------------------------------------------- grep
@@ -117,7 +118,11 @@ impl Tool for Grep {
     fn execute(&self, args: &Json, ctx: &ExecContext<'_>) -> Result<String, ToolError> {
         let pattern = arg_str(args, "pattern")?;
         let matcher = RegexBuilder::new(&pattern)
-            .case_insensitive(args.get("ignore_case").and_then(|v| v.as_bool()).unwrap_or(false))
+            .case_insensitive(
+                args.get("ignore_case")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+            )
             .build()
             .map_err(|e| ToolError::Refused(format!("bad regular expression: {e}")))?;
 
@@ -140,16 +145,26 @@ impl Tool for Grep {
         } else if root.is_dir() {
             walk(&root, &mut files).map_err(|e| ToolError::Failed(e.to_string()))?;
         } else {
-            return Err(ToolError::Refused(format!("{} does not exist", root.display())));
+            return Err(ToolError::Refused(format!(
+                "{} does not exist",
+                root.display()
+            )));
         }
 
-        let display_root = if root.is_dir() { root.clone() } else { ctx.cwd.to_path_buf() };
+        let display_root = if root.is_dir() {
+            root.clone()
+        } else {
+            ctx.cwd.to_path_buf()
+        };
         let mut hits = Vec::new();
         let mut searched = 0usize;
         let mut skipped_binary = 0usize;
         for file in files {
             if let Some(pattern) = &filter {
-                let name = file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                let name = file
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
                 let relative_name = relative(&display_root, &file);
                 if !pattern.matches_with(&name, glob_options())
                     && !pattern.matches_with(&relative_name, glob_options())
@@ -174,7 +189,12 @@ impl Tool for Grep {
                     if line.trim_end().chars().count() > MAX_LINE_CHARS {
                         shown.push('…');
                     }
-                    hits.push(format!("{}:{}: {}", relative(&display_root, &file), index + 1, shown));
+                    hits.push(format!(
+                        "{}:{}: {}",
+                        relative(&display_root, &file),
+                        index + 1,
+                        shown
+                    ));
                     if hits.len() >= limit {
                         break;
                     }
@@ -239,9 +259,15 @@ impl Tool for Glob {
         let pattern_text = arg_str(args, "pattern")?;
         let pattern = glob::Pattern::new(&pattern_text)
             .map_err(|e| ToolError::Refused(format!("bad glob {pattern_text:?}: {e}")))?;
-        let root = resolve(ctx.cwd, args.get("path").and_then(|v| v.as_str()).unwrap_or("."));
+        let root = resolve(
+            ctx.cwd,
+            args.get("path").and_then(|v| v.as_str()).unwrap_or("."),
+        );
         if !root.is_dir() {
-            return Err(ToolError::Refused(format!("{} is not a directory", root.display())));
+            return Err(ToolError::Refused(format!(
+                "{} is not a directory",
+                root.display()
+            )));
         }
         let limit = max_results(args)?;
 
@@ -258,7 +284,10 @@ impl Tool for Glob {
         let total = matches.len();
         matches.truncate(limit);
         if matches.is_empty() {
-            return Ok(format!("no files match {pattern_text:?} under {}", root.display()));
+            return Ok(format!(
+                "no files match {pattern_text:?} under {}",
+                root.display()
+            ));
         }
         let mut report = format!("{total} file(s) match {pattern_text:?}");
         if total > limit {
@@ -285,7 +314,11 @@ mod tests {
             N.fetch_add(1, Ordering::SeqCst)
         ));
         std::fs::create_dir_all(dir.join("src/deep")).unwrap();
-        std::fs::write(dir.join("src/main.rs"), "fn main() {\n    let needle = 1;\n}\n").unwrap();
+        std::fs::write(
+            dir.join("src/main.rs"),
+            "fn main() {\n    let needle = 1;\n}\n",
+        )
+        .unwrap();
         std::fs::write(dir.join("src/deep/mod.rs"), "// needle appears here too\n").unwrap();
         std::fs::write(dir.join("README.md"), "# needle in a haystack\n").unwrap();
         std::fs::write(dir.join("notes.txt"), "NEEDLE uppercase\n").unwrap();
@@ -305,7 +338,9 @@ mod tests {
     fn grep_finds_matches_with_file_and_line() {
         let ws = workspace();
         let c = NoConfinement;
-        let out = Grep.execute(&json!({"pattern": "needle"}), &ctx(&ws, &c)).unwrap();
+        let out = Grep
+            .execute(&json!({"pattern": "needle"}), &ctx(&ws, &c))
+            .unwrap();
         assert!(out.contains("src/main.rs:2:"), "{out}");
         assert!(out.contains("src/deep/mod.rs:1:"), "{out}");
         assert!(out.contains("README.md:1:"), "{out}");
@@ -315,8 +350,13 @@ mod tests {
     fn grep_skips_build_output_version_control_and_binaries() {
         let ws = workspace();
         let c = NoConfinement;
-        let out = Grep.execute(&json!({"pattern": "needle"}), &ctx(&ws, &c)).unwrap();
-        assert!(!out.contains("target/junk.rs"), "target/ is not searched: {out}");
+        let out = Grep
+            .execute(&json!({"pattern": "needle"}), &ctx(&ws, &c))
+            .unwrap();
+        assert!(
+            !out.contains("target/junk.rs"),
+            "target/ is not searched: {out}"
+        );
         assert!(!out.contains(".git/config"), ".git is not searched: {out}");
         assert!(!out.contains("blob.bin"), "binary files are skipped: {out}");
     }
@@ -325,15 +365,22 @@ mod tests {
     fn grep_honours_case_and_glob_filters() {
         let ws = workspace();
         let c = NoConfinement;
-        let sensitive = Grep.execute(&json!({"pattern": "needle"}), &ctx(&ws, &c)).unwrap();
+        let sensitive = Grep
+            .execute(&json!({"pattern": "needle"}), &ctx(&ws, &c))
+            .unwrap();
         assert!(!sensitive.contains("notes.txt"), "case matters by default");
 
         let insensitive = Grep
-            .execute(&json!({"pattern": "needle", "ignore_case": true}), &ctx(&ws, &c))
+            .execute(
+                &json!({"pattern": "needle", "ignore_case": true}),
+                &ctx(&ws, &c),
+            )
             .unwrap();
         assert!(insensitive.contains("notes.txt"), "{insensitive}");
 
-        let only_rust = Grep.execute(&json!({"pattern": "needle", "glob": "*.rs"}), &ctx(&ws, &c)).unwrap();
+        let only_rust = Grep
+            .execute(&json!({"pattern": "needle", "glob": "*.rs"}), &ctx(&ws, &c))
+            .unwrap();
         assert!(only_rust.contains("src/main.rs"));
         assert!(!only_rust.contains("README.md"), "{only_rust}");
     }
@@ -343,17 +390,26 @@ mod tests {
         let ws = workspace();
         let c = NoConfinement;
         let out = Grep
-            .execute(&json!({"pattern": "needle", "max_results": 1}), &ctx(&ws, &c))
+            .execute(
+                &json!({"pattern": "needle", "max_results": 1}),
+                &ctx(&ws, &c),
+            )
             .unwrap();
         assert!(out.contains("stopped at max_results=1"), "{out}");
-        assert_eq!(out.lines().count(), 2, "a header plus exactly one match: {out}");
+        assert_eq!(
+            out.lines().count(),
+            2,
+            "a header plus exactly one match: {out}"
+        );
     }
 
     #[test]
     fn grep_reports_no_matches_without_failing() {
         let ws = workspace();
         let c = NoConfinement;
-        let out = Grep.execute(&json!({"pattern": "nothing-here"}), &ctx(&ws, &c)).unwrap();
+        let out = Grep
+            .execute(&json!({"pattern": "nothing-here"}), &ctx(&ws, &c))
+            .unwrap();
         assert!(out.starts_with("no matches"), "{out}");
     }
 
@@ -369,13 +425,19 @@ mod tests {
             Grep.execute(&json!({"pattern": "x", "path": "nope"}), &ctx(&ws, &c)),
             Err(ToolError::Refused(_))
         ));
-        assert!(matches!(Grep.execute(&json!({}), &ctx(&ws, &c)), Err(ToolError::Refused(_))));
+        assert!(matches!(
+            Grep.execute(&json!({}), &ctx(&ws, &c)),
+            Err(ToolError::Refused(_))
+        ));
     }
 
     #[test]
     fn grep_is_an_investigate_action_but_follows_the_path() {
         let cwd = Path::new("/work");
-        assert_eq!(Grep.action_class(&json!({"pattern": "x"}), cwd), ActionClass::Investigate);
+        assert_eq!(
+            Grep.action_class(&json!({"pattern": "x"}), cwd),
+            ActionClass::Investigate
+        );
         assert_eq!(
             Grep.action_class(&json!({"pattern": "x", "path": "/etc"}), cwd),
             ActionClass::OutOfBounds
@@ -386,19 +448,31 @@ mod tests {
     fn glob_matches_at_depth_and_filters() {
         let ws = workspace();
         let c = NoConfinement;
-        let rust = Glob.execute(&json!({"pattern": "**/*.rs"}), &ctx(&ws, &c)).unwrap();
+        let rust = Glob
+            .execute(&json!({"pattern": "**/*.rs"}), &ctx(&ws, &c))
+            .unwrap();
         assert!(rust.contains("src/main.rs"), "{rust}");
         assert!(rust.contains("src/deep/mod.rs"), "{rust}");
         assert!(!rust.contains("README.md"), "{rust}");
-        assert!(!rust.contains("target/junk.rs"), "build output is not listed: {rust}");
+        assert!(
+            !rust.contains("target/junk.rs"),
+            "build output is not listed: {rust}"
+        );
 
-        let top = Glob.execute(&json!({"pattern": "*.txt"}), &ctx(&ws, &c)).unwrap();
+        let top = Glob
+            .execute(&json!({"pattern": "*.txt"}), &ctx(&ws, &c))
+            .unwrap();
         assert!(top.contains("notes.txt"), "{top}");
         assert!(!top.contains("src/deep/mod.rs"), "{top}");
 
-        let single = Glob.execute(&json!({"pattern": "src/*.rs"}), &ctx(&ws, &c)).unwrap();
+        let single = Glob
+            .execute(&json!({"pattern": "src/*.rs"}), &ctx(&ws, &c))
+            .unwrap();
         assert!(single.contains("src/main.rs"), "{single}");
-        assert!(!single.contains("src/deep/mod.rs"), "`*` does not cross directories: {single}");
+        assert!(
+            !single.contains("src/deep/mod.rs"),
+            "`*` does not cross directories: {single}"
+        );
     }
 
     #[test]
@@ -406,11 +480,16 @@ mod tests {
         let ws = workspace();
         let c = NoConfinement;
         let capped = Glob
-            .execute(&json!({"pattern": "**/*.rs", "max_results": 1}), &ctx(&ws, &c))
+            .execute(
+                &json!({"pattern": "**/*.rs", "max_results": 1}),
+                &ctx(&ws, &c),
+            )
             .unwrap();
         assert!(capped.contains("showing the first 1"), "{capped}");
 
-        let none = Glob.execute(&json!({"pattern": "**/*.py"}), &ctx(&ws, &c)).unwrap();
+        let none = Glob
+            .execute(&json!({"pattern": "**/*.py"}), &ctx(&ws, &c))
+            .unwrap();
         assert!(none.starts_with("no files match"), "{none}");
 
         assert!(matches!(
@@ -418,7 +497,10 @@ mod tests {
             Err(ToolError::Refused(_))
         ));
         assert!(matches!(
-            Glob.execute(&json!({"pattern": "**/*.rs", "path": "src/main.rs"}), &ctx(&ws, &c)),
+            Glob.execute(
+                &json!({"pattern": "**/*.rs", "path": "src/main.rs"}),
+                &ctx(&ws, &c)
+            ),
             Err(ToolError::Refused(_))
         ));
     }

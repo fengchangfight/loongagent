@@ -1,0 +1,55 @@
+# The gates, run where they cannot be skipped. `scripts/check.sh` is the same set a
+# developer runs locally, so "it passed here" means one thing.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  # The exact toolchain that produces release artifacts. Cargo.toml pins the
+  # channel (`stable`) so a developer's machine needs no network; CI pins the
+  # version, because an artifact must be traceable to a compiler.
+  RUST_VERSION: "1.99.0"
+  # The mirror this project builds against (see DEVELOPMENT.md).
+  RUSTUP_DIST_SERVER: https://mirrors.tuna.tsinghua.edu.cn/rustup
+  RUSTUP_UPDATE_ROOT: https://mirrors.tuna.tsinghua.edu.cn/rustup/rustup
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal \
+            --component rustfmt --no-self-update
+          rustup default "$RUST_VERSION"
+
+      # Gitea's cache action is optional; without it the job is slower, not wrong.
+
+      - name: a C compiler, for bundled SQLite and the TLS backend
+        run: cc --version
+
+      - name: gates
+        run: ./scripts/check.sh
+
+  # A tag builds the artifact a colleague installs, rather than a binary from
+  # somebody's working tree.
+  release:
+    if: startsWith(gitea.ref, 'refs/tags/v')
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal \
+            --component rustfmt --no-self-update
+          rustup default "$RUST_VERSION"
+      - name: artifact
+        run: ./scripts/release.sh
+      - name: artifact
+        run: ls -la dist/

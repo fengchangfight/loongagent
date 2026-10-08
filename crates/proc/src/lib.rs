@@ -34,7 +34,15 @@ pub struct RunSpec<'a> {
 
 impl<'a> RunSpec<'a> {
     pub fn new(program: &'a str, args: &'a [String], cwd: &'a Path, timeout: Duration) -> Self {
-        Self { program, args, cwd, stdin: None, timeout, output_limit: 64 * 1024, confine: None }
+        Self {
+            program,
+            args,
+            cwd,
+            stdin: None,
+            timeout,
+            output_limit: 64 * 1024,
+            confine: None,
+        }
     }
     pub fn stdin(mut self, bytes: &'a [u8]) -> Self {
         self.stdin = Some(bytes);
@@ -120,7 +128,9 @@ pub fn run(spec: &RunSpec<'_>) -> Result<RunOutput, ProcError> {
         .map_err(|e| ProcError(format!("spawning {}: {e}", spec.program)))?;
     if let Some(bytes) = spec.stdin {
         if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(bytes).map_err(|e| ProcError(format!("writing stdin: {e}")))?;
+            stdin
+                .write_all(bytes)
+                .map_err(|e| ProcError(format!("writing stdin: {e}")))?;
             stdin.flush().ok();
             // Dropped here: the child sees EOF.
         }
@@ -136,7 +146,14 @@ pub fn run(spec: &RunSpec<'_>) -> Result<RunOutput, ProcError> {
 
     let (stdout, stdout_truncated) = read_bounded(&scratch.path("stdout"), spec.output_limit)?;
     let (stderr, stderr_truncated) = read_bounded(&scratch.path("stderr"), spec.output_limit)?;
-    Ok(RunOutput { status, timed_out, stdout, stderr, stdout_truncated, stderr_truncated })
+    Ok(RunOutput {
+        status,
+        timed_out,
+        stdout,
+        stderr,
+        stdout_truncated,
+        stderr_truncated,
+    })
 }
 
 /// Two scratch files plus their directory, removed on drop.
@@ -153,8 +170,7 @@ impl Scratch {
             std::process::id(),
             SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
         ));
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| ProcError(format!("{}: {e}", dir.display())))?;
+        std::fs::create_dir_all(&dir).map_err(|e| ProcError(format!("{}: {e}", dir.display())))?;
         Ok(Self { dir })
     }
     fn path(&self, name: &str) -> PathBuf {
@@ -193,8 +209,8 @@ fn wait_with_timeout(
 }
 
 fn read_bounded(path: &Path, limit: usize) -> Result<(String, bool), ProcError> {
-    let file = std::fs::File::open(path)
-        .map_err(|e| ProcError(format!("{}: {e}", path.display())))?;
+    let file =
+        std::fs::File::open(path).map_err(|e| ProcError(format!("{}: {e}", path.display())))?;
     let mut reader = std::io::BufReader::new(file);
     let mut collected = Vec::new();
     let mut buf = [0u8; 8192];
@@ -217,7 +233,9 @@ fn read_bounded(path: &Path, limit: usize) -> Result<(String, bool), ProcError> 
         }
     }
     if !truncated {
-        truncated = std::fs::metadata(path).map(|m| m.len() as usize > limit).unwrap_or(false);
+        truncated = std::fs::metadata(path)
+            .map(|m| m.len() as usize > limit)
+            .unwrap_or(false);
     }
     Ok((String::from_utf8_lossy(&collected).to_string(), truncated))
 }
@@ -313,10 +331,17 @@ mod tests {
         let args = sh("sleep 5 & echo $! > grandchild.pid; wait");
         let out = run(&RunSpec::new("sh", &args, &cwd, Duration::from_millis(250))).unwrap();
         assert!(out.timed_out, "the timeout fires");
-        assert!(started.elapsed() < Duration::from_secs(3), "and it fires quickly");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "and it fires quickly"
+        );
 
         let pid_file = cwd.join("grandchild.pid");
-        if let Ok(pid) = std::fs::read_to_string(&pid_file).unwrap_or_default().trim().parse::<i32>() {
+        if let Ok(pid) = std::fs::read_to_string(&pid_file)
+            .unwrap_or_default()
+            .trim()
+            .parse::<i32>()
+        {
             std::thread::sleep(Duration::from_millis(200));
             let alive = Path::new(&format!("/proc/{pid}")).exists();
             assert!(!alive, "the grandchild must be dead too");
@@ -335,7 +360,12 @@ mod tests {
     #[test]
     fn a_missing_program_is_an_error_not_a_panic() {
         let cwd = tempdir();
-        let spec = RunSpec::new("definitely-not-a-program", &[], &cwd, Duration::from_secs(5));
+        let spec = RunSpec::new(
+            "definitely-not-a-program",
+            &[],
+            &cwd,
+            Duration::from_secs(5),
+        );
         assert!(run(&spec).unwrap_err().0.contains("spawning"));
     }
 }

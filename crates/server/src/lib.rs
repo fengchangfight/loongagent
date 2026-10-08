@@ -44,7 +44,12 @@ pub struct Server {
 
 impl Server {
     pub fn new(kernel: Kernel, session_id: impl Into<String>) -> Self {
-        Self { kernel, session_id: session_id.into(), last_sent: 0, turns: 0 }
+        Self {
+            kernel,
+            session_id: session_id.into(),
+            last_sent: 0,
+            turns: 0,
+        }
     }
 
     pub fn session_id(&self) -> &str {
@@ -131,7 +136,10 @@ impl Server {
                 if let Some(bad) = self.wrong_session(&params.session_id) {
                     return vec![bad];
                 }
-                let result = gen::PromptSubmitResult { turn_id: self.turns, accepted: params.granted };
+                let result = gen::PromptSubmitResult {
+                    turn_id: self.turns,
+                    accepted: params.granted,
+                };
                 match self.kernel.respond_to_approval(
                     &params.request_id,
                     params.granted,
@@ -176,7 +184,10 @@ impl Server {
             Response::err(
                 Value::Null,
                 codes::INVALID_PARAMS,
-                format!("unknown session {session_id:?} (this server owns {:?})", self.session_id),
+                format!(
+                    "unknown session {session_id:?} (this server owns {:?})",
+                    self.session_id
+                ),
             )
             .to_line()
         })
@@ -258,18 +269,29 @@ mod tests {
             CompletionResponse {
                 text: None,
                 tool_calls: calls,
-                usage: Usage { tokens_in: 11, tokens_out: 4 },
+                usage: Usage {
+                    tokens_in: 11,
+                    tokens_out: 4,
+                },
             },
             CompletionResponse {
                 text: text.map(|t| t.to_string()),
                 tool_calls: vec![],
-                usage: Usage { tokens_in: 5, tokens_out: 2 },
+                usage: Usage {
+                    tokens_in: 5,
+                    tokens_out: 2,
+                },
             },
         ])
     }
 
     fn attach_line() -> String {
-        Request::new(1, gen::method::SESSION_ATTACH, json!({"cwd": "/tmp", "client": "tui"})).to_line()
+        Request::new(
+            1,
+            gen::method::SESSION_ATTACH,
+            json!({"cwd": "/tmp", "client": "tui"}),
+        )
+        .to_line()
     }
 
     fn lines_of(server: &mut Server, line: &str) -> Vec<Value> {
@@ -284,13 +306,20 @@ mod tests {
     fn attach_answers_with_the_session_and_schema_version() {
         let t = Temp::new();
         let model = scripted(vec![], Some("hi"));
-        let kernel =
-            Kernel::create(t.0.join("s.jsonl"), KernelConfig::new(&t.0), Box::new(model)).unwrap();
+        let kernel = Kernel::create(
+            t.0.join("s.jsonl"),
+            KernelConfig::new(&t.0),
+            Box::new(model),
+        )
+        .unwrap();
         let mut server = Server::new(kernel, "s-local");
         let out = lines_of(&mut server, &attach_line());
         // Attaching streams the session's opening events (the skill catalogue),
         // then answers.
-        let response = out.iter().find(|line| line.get("result").is_some()).expect("a response");
+        let response = out
+            .iter()
+            .find(|line| line.get("result").is_some())
+            .expect("a response");
         assert_eq!(response["result"]["session_id"], "s-local");
         assert_eq!(response["result"]["schema_version"], gen::SCHEMA_VERSION);
         assert_eq!(out.last().unwrap(), response, "the response comes last");
@@ -299,7 +328,11 @@ mod tests {
             .filter(|line| line["method"] == "event")
             .map(|line| line["params"]["kind"].as_str().unwrap_or(""))
             .collect();
-        assert_eq!(events, vec!["skills.loaded"], "the opening event, and only it");
+        assert_eq!(
+            events,
+            vec!["skills.loaded"],
+            "the opening event, and only it"
+        );
     }
 
     #[test]
@@ -307,21 +340,37 @@ mod tests {
         let t = Temp::new();
         std::fs::write(t.0.join("a.txt"), "hello").unwrap();
         let model = scripted(
-            vec![ToolCallRequest { call_id: "c1".into(), tool: "read_file".into(), args: json!({"path": "a.txt"}) }],
+            vec![ToolCallRequest {
+                call_id: "c1".into(),
+                tool: "read_file".into(),
+                args: json!({"path": "a.txt"}),
+            }],
             Some("it says hello"),
         );
-        let kernel =
-            Kernel::create(t.0.join("s.jsonl"), KernelConfig::new(&t.0), Box::new(model)).unwrap();
+        let kernel = Kernel::create(
+            t.0.join("s.jsonl"),
+            KernelConfig::new(&t.0),
+            Box::new(model),
+        )
+        .unwrap();
         let mut server = Server::new(kernel, "s-local");
         let out = lines_of(
             &mut server,
-            &Request::new(2, gen::method::PROMPT_SUBMIT, json!({"session_id": "s-local", "text": "read it"})).to_line(),
+            &Request::new(
+                2,
+                gen::method::PROMPT_SUBMIT,
+                json!({"session_id": "s-local", "text": "read it"}),
+            )
+            .to_line(),
         );
         let events: Vec<&Value> = out.iter().filter(|v| v["method"] == "event").collect();
         let responses: Vec<&Value> = out.iter().filter(|v| v.get("result").is_some()).collect();
         assert_eq!(responses.len(), 1, "exactly one response");
         assert_eq!(responses[0]["result"]["accepted"], true);
-        let kinds: Vec<&str> = events.iter().map(|e| e["params"]["kind"].as_str().unwrap()).collect();
+        let kinds: Vec<&str> = events
+            .iter()
+            .map(|e| e["params"]["kind"].as_str().unwrap())
+            .collect();
         assert_eq!(
             kinds,
             vec![
@@ -338,7 +387,11 @@ mod tests {
                 "message.appended",
             ]
         );
-        assert_eq!(out.last().unwrap()["result"]["turn_id"], 1, "responses come last");
+        assert_eq!(
+            out.last().unwrap()["result"]["turn_id"],
+            1,
+            "responses come last"
+        );
     }
 
     #[test]
@@ -354,30 +407,46 @@ mod tests {
             }],
             Some("understood"),
         );
-        let kernel =
-            Kernel::create(t.0.join("s.jsonl"), KernelConfig::new(&t.0), Box::new(model)).unwrap();
+        let kernel = Kernel::create(
+            t.0.join("s.jsonl"),
+            KernelConfig::new(&t.0),
+            Box::new(model),
+        )
+        .unwrap();
         let mut server = Server::new(kernel, "s-local");
         let out = lines_of(
             &mut server,
-            &Request::new(2, gen::method::PROMPT_SUBMIT, json!({"session_id": "s-local", "text": "escape"})).to_line(),
+            &Request::new(
+                2,
+                gen::method::PROMPT_SUBMIT,
+                json!({"session_id": "s-local", "text": "escape"}),
+            )
+            .to_line(),
         );
         let asked = out
             .iter()
             .find(|v| v["method"] == "event" && v["params"]["kind"] == "approval.requested")
             .expect("the client is told an approval is pending");
-        let request_id = asked["params"]["data"]["request_id"].as_str().unwrap().to_string();
+        let request_id = asked["params"]["data"]["request_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
         assert_eq!(asked["params"]["data"]["action_class"], "out_of_bounds");
         assert!(!escape.exists(), "nothing happens before the answer");
 
         let out = lines_of(
             &mut server,
-            &Request::new(3, gen::method::APPROVAL_RESPOND, json!({
-                "session_id": "s-local",
-                "request_id": request_id,
-                "granted": false,
-                "scope": "once",
-                "reason": "no"
-            }))
+            &Request::new(
+                3,
+                gen::method::APPROVAL_RESPOND,
+                json!({
+                    "session_id": "s-local",
+                    "request_id": request_id,
+                    "granted": false,
+                    "scope": "once",
+                    "reason": "no"
+                }),
+            )
             .to_line(),
         );
         let kinds: Vec<&str> = out
@@ -395,7 +464,10 @@ mod tests {
     struct StreamingModel;
 
     impl Model for StreamingModel {
-        fn complete(&mut self, _request: &CompletionRequest) -> Result<CompletionResponse, ModelError> {
+        fn complete(
+            &mut self,
+            _request: &CompletionRequest,
+        ) -> Result<CompletionResponse, ModelError> {
             unreachable!("used only through its streaming path")
         }
         fn complete_streaming(
@@ -409,7 +481,10 @@ mod tests {
             Ok(CompletionResponse {
                 text: Some("the answer arrives".to_string()),
                 tool_calls: Vec::new(),
-                usage: Usage { tokens_in: 5, tokens_out: 4 },
+                usage: Usage {
+                    tokens_in: 5,
+                    tokens_out: 4,
+                },
             })
         }
     }
@@ -417,9 +492,12 @@ mod tests {
     #[test]
     fn deltas_are_written_as_they_arrive_and_never_enter_the_log() {
         let t = Temp::new();
-        let kernel =
-            Kernel::create(t.0.join("s.jsonl"), KernelConfig::new(&t.0), Box::new(StreamingModel))
-                .unwrap();
+        let kernel = Kernel::create(
+            t.0.join("s.jsonl"),
+            KernelConfig::new(&t.0),
+            Box::new(StreamingModel),
+        )
+        .unwrap();
         let mut server = Server::new(kernel, "s-stream");
         assert_eq!(lines_of(&mut server, &attach_line())[0]["method"], "event");
 
@@ -441,7 +519,10 @@ mod tests {
             .collect();
         assert_eq!(deltas.len(), 3, "{deltas:?}");
         assert!(deltas.iter().all(|d| d["method"] == "model.delta"));
-        let pieces: Vec<&str> = deltas.iter().map(|d| d["params"]["text"].as_str().unwrap()).collect();
+        let pieces: Vec<&str> = deltas
+            .iter()
+            .map(|d| d["params"]["text"].as_str().unwrap())
+            .collect();
         assert_eq!(pieces, vec!["the ", "answer ", "arrives"]);
         assert_eq!(deltas[0]["params"]["turn_id"], 1);
 
@@ -464,7 +545,10 @@ mod tests {
         assert_eq!(answer, "the answer arrives");
 
         let logged = std::fs::read_to_string(t.0.join("s.jsonl")).unwrap();
-        assert!(!logged.contains("model.delta"), "the log never holds a delta");
+        assert!(
+            !logged.contains("model.delta"),
+            "the log never holds a delta"
+        );
         assert!(logged.contains("the answer arrives"));
     }
 
@@ -473,13 +557,20 @@ mod tests {
         let t = Temp::new();
         let hooks = t.0.join(".loongagent");
         std::fs::create_dir_all(&hooks).unwrap();
-        std::fs::write(hooks.join("gate.sh"), "cat > /dev/null\necho 'not today' >&2\nexit 2\n").unwrap();
+        std::fs::write(
+            hooks.join("gate.sh"),
+            "cat > /dev/null\necho 'not today' >&2\nexit 2\n",
+        )
+        .unwrap();
         std::fs::write(
             hooks.join("hooks.toml"),
             "[[hook]]\nid = \"gate\"\nevent = \"user_prompt_submit\"\nkind = \"shell\"\nscript = \"gate.sh\"\n",
         )
         .unwrap();
-        loong_hooks::HookSet::load(&t.0).unwrap().trust_now().unwrap();
+        loong_hooks::HookSet::load(&t.0)
+            .unwrap()
+            .trust_now()
+            .unwrap();
 
         // An empty script: if the model were called the turn would fail instead.
         let kernel = Kernel::create(
@@ -490,19 +581,30 @@ mod tests {
         .unwrap();
         let mut server = Server::new(kernel, "s-hooks");
         let attached = lines_of(&mut server, &attach_line());
-        let response = attached.iter().find(|line| line.get("result").is_some()).unwrap();
+        let response = attached
+            .iter()
+            .find(|line| line.get("result").is_some())
+            .unwrap();
         assert_eq!(response["result"]["session_id"], "s-hooks");
 
         let out = lines_of(
             &mut server,
-            &Request::new(2, gen::method::PROMPT_SUBMIT, json!({"session_id": "s-hooks", "text": "refactor everything"})).to_line(),
+            &Request::new(
+                2,
+                gen::method::PROMPT_SUBMIT,
+                json!({"session_id": "s-hooks", "text": "refactor everything"}),
+            )
+            .to_line(),
         );
         let kinds: Vec<&str> = out
             .iter()
             .filter(|line| line["method"] == "event")
             .map(|line| line["params"]["kind"].as_str().unwrap_or(""))
             .collect();
-        assert!(kinds.contains(&"hook.fired"), "the reason travels in the stream: {kinds:?}");
+        assert!(
+            kinds.contains(&"hook.fired"),
+            "the reason travels in the stream: {kinds:?}"
+        );
         assert_eq!(out.last().unwrap()["result"]["accepted"], false, "{out:?}");
         assert_eq!(out.last().unwrap()["result"]["turn_id"], 1);
     }
@@ -517,14 +619,25 @@ mod tests {
         )
         .unwrap();
         let mut server = Server::new(kernel, "s-local");
-        assert_eq!(lines_of(&mut server, "{oops")[0]["error"]["code"], codes::PARSE_ERROR as i64);
         assert_eq!(
-            lines_of(&mut server, &Request::new(9, "nope.method", json!({})).to_line())[0]["error"]["code"],
+            lines_of(&mut server, "{oops")[0]["error"]["code"],
+            codes::PARSE_ERROR as i64
+        );
+        assert_eq!(
+            lines_of(
+                &mut server,
+                &Request::new(9, "nope.method", json!({})).to_line()
+            )[0]["error"]["code"],
             codes::METHOD_NOT_FOUND as i64
         );
         let wrong = lines_of(
             &mut server,
-            &Request::new(10, gen::method::PROMPT_SUBMIT, json!({"session_id": "other", "text": "x"})).to_line(),
+            &Request::new(
+                10,
+                gen::method::PROMPT_SUBMIT,
+                json!({"session_id": "other", "text": "x"}),
+            )
+            .to_line(),
         );
         assert_eq!(wrong[0]["error"]["code"], codes::INVALID_PARAMS as i64);
     }

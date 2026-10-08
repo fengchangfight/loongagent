@@ -22,7 +22,9 @@ pub enum TrustStatus {
     Absent,
     Trusted,
     /// New, changed, or never recorded.
-    Untrusted { changed: Vec<String> },
+    Untrusted {
+        changed: Vec<String>,
+    },
 }
 
 /// FNV-1a over the bytes. Stable, dependency-free, and explicitly not
@@ -60,7 +62,11 @@ pub fn check(trust_file: &Path, sources: &Sources) -> Result<TrustStatus, String
             changed.push(name.clone());
         }
     }
-    Ok(if changed.is_empty() { TrustStatus::Trusted } else { TrustStatus::Untrusted { changed } })
+    Ok(if changed.is_empty() {
+        TrustStatus::Trusted
+    } else {
+        TrustStatus::Untrusted { changed }
+    })
 }
 
 /// Record the current bytes as trusted. The explicit, per-repository opt-in.
@@ -78,10 +84,7 @@ pub fn record(trust_file: &Path, sources: &Sources) -> Result<(), String> {
 /// The line a surface prints when something is inert.
 pub fn inert_message(sources: &Sources, changed: &[String], how_to_trust: &str) -> String {
     let _ = sources;
-    format!(
-        "INERT — untrusted: {} ({how_to_trust})",
-        changed.join(", ")
-    )
+    format!("INERT — untrusted: {} ({how_to_trust})", changed.join(", "))
 }
 
 #[cfg(test)]
@@ -115,7 +118,10 @@ mod tests {
     #[test]
     fn nothing_to_trust_is_absent_not_trusted() {
         let d = dir();
-        assert_eq!(check(&d.join("x.trusted"), &Sources::new()).unwrap(), TrustStatus::Absent);
+        assert_eq!(
+            check(&d.join("x.trusted"), &Sources::new()).unwrap(),
+            TrustStatus::Absent
+        );
     }
 
     #[test]
@@ -123,7 +129,10 @@ mod tests {
         let d = dir();
         let trust = d.join("m.trusted");
         let sources = sources(&d, &[("m.toml", "a = 1"), ("s.sh", "exit 0")]);
-        assert!(matches!(check(&trust, &sources).unwrap(), TrustStatus::Untrusted { .. }));
+        assert!(matches!(
+            check(&trust, &sources).unwrap(),
+            TrustStatus::Untrusted { .. }
+        ));
 
         record(&trust, &sources).unwrap();
         assert_eq!(check(&trust, &sources).unwrap(), TrustStatus::Trusted);

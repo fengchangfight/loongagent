@@ -130,7 +130,9 @@ pub enum TrustStatus {
     NoHooks,
     Trusted,
     /// The manifest or one of its scripts is new or changed.
-    Untrusted { changed: Vec<String> },
+    Untrusted {
+        changed: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -159,8 +161,7 @@ impl HookSet {
         }
         let text = std::fs::read_to_string(&manifest)
             .map_err(|e| ConfigError::Io(format!("{}: {e}", manifest.display())))?;
-        let file: RawFile =
-            toml::from_str(&text).map_err(|e| ConfigError::Parse(e.to_string()))?;
+        let file: RawFile = toml::from_str(&text).map_err(|e| ConfigError::Parse(e.to_string()))?;
 
         let mut specs = Vec::new();
         for (index, raw) in file.hook.iter().enumerate() {
@@ -182,7 +183,9 @@ impl HookSet {
                 }
             };
             let timeout = Duration::from_millis(
-                raw.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS).min(MAX_TIMEOUT_MS),
+                raw.timeout_ms
+                    .unwrap_or(DEFAULT_TIMEOUT_MS)
+                    .min(MAX_TIMEOUT_MS),
             );
 
             let kind = match raw.kind.as_str() {
@@ -236,7 +239,10 @@ impl HookSet {
             };
 
             specs.push(HookSpec {
-                id: raw.id.clone().unwrap_or_else(|| format!("{}-{}", kind.label(), index + 1)),
+                id: raw
+                    .id
+                    .clone()
+                    .unwrap_or_else(|| format!("{}-{}", kind.label(), index + 1)),
                 event,
                 kind,
                 on_error,
@@ -245,13 +251,21 @@ impl HookSet {
         }
 
         let trust = Self::read_trust(&hooks_dir, &specs, &manifest)?;
-        Ok(Self { workspace, hooks_dir, specs, trust })
+        Ok(Self {
+            workspace,
+            hooks_dir,
+            specs,
+            trust,
+        })
     }
 
     /// Every file whose bytes must be trusted, with a change-detection hash.
     pub fn fingerprints(&self) -> Result<Vec<(String, String)>, ConfigError> {
-        let sources =
-            sources_of(&self.hooks_dir, &self.specs, &self.hooks_dir.join(HOOKS_FILE))?;
+        let sources = sources_of(
+            &self.hooks_dir,
+            &self.specs,
+            &self.hooks_dir.join(HOOKS_FILE),
+        )?;
         sources
             .iter()
             .map(|(name, path)| {
@@ -287,7 +301,11 @@ impl HookSet {
 
     /// Record the current bytes as trusted — the explicit, per-repository opt-in.
     pub fn trust_now(&self) -> Result<PathBuf, ConfigError> {
-        let sources = sources_of(&self.hooks_dir, &self.specs, &self.hooks_dir.join(HOOKS_FILE))?;
+        let sources = sources_of(
+            &self.hooks_dir,
+            &self.specs,
+            &self.hooks_dir.join(HOOKS_FILE),
+        )?;
         let path = self.hooks_dir.join(TRUST_FILE);
         loong_manifest::record(&path, &sources).map_err(ConfigError::Io)?;
         Ok(path)
@@ -415,7 +433,11 @@ mod tests {
         assert_eq!(set.specs[0].id, "guard");
         assert_eq!(set.specs[0].event, HookEvent::PreTool);
         assert_eq!(set.specs[0].timeout, Duration::from_millis(250));
-        assert_eq!(set.specs[0].on_error, OnError::Deny, "fail closed by default");
+        assert_eq!(
+            set.specs[0].on_error,
+            OnError::Deny,
+            "fail closed by default"
+        );
         assert!(matches!(set.trust, TrustStatus::Untrusted { .. }));
         assert!(set.active().is_empty(), "untrusted hooks never run");
         assert!(set.summary().contains("INERT"));
@@ -430,7 +452,10 @@ mod tests {
     fn trusting_is_bound_to_content_not_to_a_path() {
         let ws = workspace();
         let script = write_script(&ws, "check.sh", "exit 0\n");
-        write_manifest(&ws, "[[hook]]\nevent = \"pre_tool\"\nkind = \"shell\"\nscript = \"check.sh\"\n");
+        write_manifest(
+            &ws,
+            "[[hook]]\nevent = \"pre_tool\"\nkind = \"shell\"\nscript = \"check.sh\"\n",
+        );
         HookSet::load(&ws).unwrap().trust_now().unwrap();
         assert_eq!(HookSet::load(&ws).unwrap().trust, TrustStatus::Trusted);
 
@@ -448,13 +473,19 @@ mod tests {
             &ws,
             "[[hook]]\nevent = \"pre_tool\"\nkind = \"shell\"\nscript = \"check.sh\"\n# edited\n",
         );
-        assert!(matches!(HookSet::load(&ws).unwrap().trust, TrustStatus::Untrusted { .. }));
+        assert!(matches!(
+            HookSet::load(&ws).unwrap().trust,
+            TrustStatus::Untrusted { .. }
+        ));
     }
 
     #[test]
     fn http_hooks_are_off_unless_the_manifest_opts_in() {
         let ws = workspace();
-        write_manifest(&ws, "[[hook]]\nevent = \"pre_tool\"\nkind = \"http\"\nurl = \"http://127.0.0.1:9/x\"\n");
+        write_manifest(
+            &ws,
+            "[[hook]]\nevent = \"pre_tool\"\nkind = \"http\"\nurl = \"http://127.0.0.1:9/x\"\n",
+        );
         let err = HookSet::load(&ws).unwrap_err().to_string();
         assert!(err.contains("off by default"), "{err}");
 
@@ -472,17 +503,38 @@ mod tests {
         let ws = workspace();
         write_script(&ws, "ok.sh", "exit 0\n");
 
-        write_manifest(&ws, "[[hook]]\nevent = \"pre_tool\"\nkind = \"shell\"\nscript = \"missing.sh\"\n");
-        assert!(HookSet::load(&ws).unwrap_err().to_string().contains("does not exist"));
+        write_manifest(
+            &ws,
+            "[[hook]]\nevent = \"pre_tool\"\nkind = \"shell\"\nscript = \"missing.sh\"\n",
+        );
+        assert!(HookSet::load(&ws)
+            .unwrap_err()
+            .to_string()
+            .contains("does not exist"));
 
-        write_manifest(&ws, "[[hook]]\nevent = \"whenever\"\nkind = \"shell\"\nscript = \"ok.sh\"\n");
-        assert!(HookSet::load(&ws).unwrap_err().to_string().contains("unknown event"));
+        write_manifest(
+            &ws,
+            "[[hook]]\nevent = \"whenever\"\nkind = \"shell\"\nscript = \"ok.sh\"\n",
+        );
+        assert!(HookSet::load(&ws)
+            .unwrap_err()
+            .to_string()
+            .contains("unknown event"));
 
         write_manifest(&ws, "[[hook]]\nevent = \"pre_tool\"\nkind = \"mcp\"\n");
-        assert!(HookSet::load(&ws).unwrap_err().to_string().contains("needs `server`"));
+        assert!(HookSet::load(&ws)
+            .unwrap_err()
+            .to_string()
+            .contains("needs `server`"));
 
-        write_manifest(&ws, "[[hook]]\nevent = \"pre_tool\"\nkind = \"mcp\"\nserver = \"policy\"\n");
-        assert!(HookSet::load(&ws).unwrap_err().to_string().contains("needs `tool`"));
+        write_manifest(
+            &ws,
+            "[[hook]]\nevent = \"pre_tool\"\nkind = \"mcp\"\nserver = \"policy\"\n",
+        );
+        assert!(HookSet::load(&ws)
+            .unwrap_err()
+            .to_string()
+            .contains("needs `tool`"));
 
         write_manifest(
             &ws,
@@ -493,10 +545,16 @@ mod tests {
         assert_eq!(set.specs[0].kind.target(), "policy/decide");
 
         write_manifest(&ws, "[[hook]]\nevent = \"pre_tool\"\nkind = \"shell\"\nscript = \"ok.sh\"\non_error = \"maybe\"\n");
-        assert!(HookSet::load(&ws).unwrap_err().to_string().contains("on_error"));
+        assert!(HookSet::load(&ws)
+            .unwrap_err()
+            .to_string()
+            .contains("on_error"));
 
         write_manifest(&ws, "this is not toml {{{");
-        assert!(matches!(HookSet::load(&ws).unwrap_err(), ConfigError::Parse(_)));
+        assert!(matches!(
+            HookSet::load(&ws).unwrap_err(),
+            ConfigError::Parse(_)
+        ));
     }
 
     #[test]
@@ -509,8 +567,13 @@ mod tests {
             "[[hook]]\nevent = \"pre_tool\"\nkind = \"shell\"\nscript = \"a.sh\"\n\n\
              [[hook]]\nevent = \"post_tool\"\nkind = \"shell\"\nscript = \"b.sh\"\n",
         );
-        let names: Vec<String> =
-            HookSet::load(&ws).unwrap().fingerprints().unwrap().into_iter().map(|(n, _)| n).collect();
+        let names: Vec<String> = HookSet::load(&ws)
+            .unwrap()
+            .fingerprints()
+            .unwrap()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
         assert_eq!(names, vec!["a.sh", "b.sh", "hooks.toml"]);
     }
 
@@ -524,8 +587,12 @@ mod tests {
              [[hook]]\nid = \"b\"\nevent = \"post_tool\"\nkind = \"shell\"\nscript = \"shared.sh\"\n",
         );
         let set = HookSet::load(&ws).unwrap();
-        let names: Vec<String> =
-            set.fingerprints().unwrap().into_iter().map(|(n, _)| n).collect();
+        let names: Vec<String> = set
+            .fingerprints()
+            .unwrap()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
         assert_eq!(names, vec!["hooks.toml", "shared.sh"]);
 
         set.trust_now().unwrap();

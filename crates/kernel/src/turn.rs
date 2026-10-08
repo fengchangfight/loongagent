@@ -12,24 +12,22 @@
 //! scope (ADR-0007 §6).
 
 use crate::ledger::{Category, Ledger, Lifetime};
+use loong_config::Profile;
 use loong_eventlog::{LogError, SessionLog};
-use loong_providers::{
-    ChatMessage, CompletionRequest, Model, ModelError, ToolCallRequest, Usage,
-};
+use loong_hooks::McpCaller;
+use loong_hooks::{payload, HookEvent, HookReport, HookRunner, HookSet};
+use loong_mcp::{McpClient, McpSet, McpTool};
+use loong_providers::{ChatMessage, CompletionRequest, Model, ModelError, ToolCallRequest, Usage};
+use loong_sandbox::landlock::WorkspacePolicy;
 use loong_sandbox::Pdp;
 use loong_schema::generated as gen;
 use loong_schema::generated::{ActionClass, ApprovalScope, Json, Role, Verdict};
-use loong_hooks::{payload, HookEvent, HookReport, HookRunner, HookSet};
-use loong_hooks::McpCaller;
-use loong_mcp::{McpClient, McpSet, McpTool};
-use loong_config::Profile;
 use loong_skills::{parse_invocation, Origin, PromptFetcher, Skill, SkillSet, SkillTool};
-use std::sync::{Arc, Mutex};
-use loong_sandbox::landlock::WorkspacePolicy;
 use loong_tools::{Confinement, ExecContext, NoConfinement, Registry};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug)]
 pub enum KernelError {
@@ -187,8 +185,12 @@ impl PromptFetcher for KernelMcp {
             .find(|c| c.lock().map(|c| c.name() == server).unwrap_or(false))
             .ok_or_else(|| format!("no MCP server named {server:?} is running"))?;
         let arguments = loong_mcp::map_prompt_arguments(argument_names, args);
-        let mut client = client.lock().map_err(|_| format!("the {server} client is poisoned"))?;
-        client.get_prompt(prompt, &arguments).map_err(|e| e.to_string())
+        let mut client = client
+            .lock()
+            .map_err(|_| format!("the {server} client is poisoned"))?;
+        client
+            .get_prompt(prompt, &arguments)
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -199,7 +201,9 @@ impl McpCaller for KernelMcp {
             .iter()
             .find(|c| c.lock().map(|c| c.name() == server).unwrap_or(false))
             .ok_or_else(|| format!("no MCP server named {server:?} is running"))?;
-        let mut client = client.lock().map_err(|_| format!("the {server} client is poisoned"))?;
+        let mut client = client
+            .lock()
+            .map_err(|_| format!("the {server} client is poisoned"))?;
         client.call_tool(tool, args).map_err(|e| e.to_string())
     }
 }
@@ -251,7 +255,10 @@ fn attach_mcp(workspace: &Path, tools: &mut Registry) -> Result<AttachedMcp, Ker
         // body fetched from the server on invoke.
         let prompts = match client.lock() {
             Ok(mut locked) => locked.list_prompts(),
-            Err(_) => Err(loong_mcp::McpError(format!("the {} client is poisoned", spec.name))),
+            Err(_) => Err(loong_mcp::McpError(format!(
+                "the {} client is poisoned",
+                spec.name
+            ))),
         };
         match prompts {
             Ok(prompts) => {
@@ -268,11 +275,7 @@ fn attach_mcp(workspace: &Path, tools: &mut Registry) -> Result<AttachedMcp, Ker
                             names
                                 .iter()
                                 .map(|n| {
-                                    if prompt
-                                        .arguments
-                                        .iter()
-                                        .any(|a| &a.name == n && a.required)
-                                    {
+                                    if prompt.arguments.iter().any(|a| &a.name == n && a.required) {
                                         format!("<{n}>")
                                     } else {
                                         format!("[{n}]")
@@ -304,7 +307,11 @@ fn attach_mcp(workspace: &Path, tools: &mut Registry) -> Result<AttachedMcp, Ker
         clients.push(client);
         note.push_str(&format!("; {} exposed {count} tool(s)", spec.name));
     }
-    Ok(AttachedMcp { note, clients, prompt_skills })
+    Ok(AttachedMcp {
+        note,
+        clients,
+        prompt_skills,
+    })
 }
 
 /// The strictest of a caller's budget and the configuration's: `None` means
@@ -460,7 +467,9 @@ impl Kernel {
             }
         });
         let mcp_caller: Option<Arc<KernelMcp>> = (!mcp_clients.is_empty()).then(|| {
-            Arc::new(KernelMcp { clients: mcp_clients.clone() })
+            Arc::new(KernelMcp {
+                clients: mcp_clients.clone(),
+            })
         });
         // Skills are one concept with commands (T-18) — and MCP prompts are skills
         // whose body lives on the server (T-15): the model sees the catalogue and
@@ -509,10 +518,7 @@ impl Kernel {
                     Box::new(LandlockConfinement { policy }),
                     "landlock: writes are confined to the workspace".to_string(),
                 ),
-                Err(e) => (
-                    Box::new(NoConfinement),
-                    format!("unconfined: {e}"),
-                ),
+                Err(e) => (Box::new(NoConfinement), format!("unconfined: {e}")),
             };
         // A malformed manifest stopped a guard from existing: that is fatal, not
         // a warning. Untrusted hooks load but do not run (see `HookSet::active`).
@@ -523,8 +529,7 @@ impl Kernel {
         let caller: Option<Arc<dyn McpCaller>> = mcp_caller
             .as_ref()
             .map(|caller| Arc::clone(caller) as Arc<dyn McpCaller>);
-        let hooks =
-            HookRunner::new(&config.cwd, hook_set.active().to_vec()).with_mcp(caller);
+        let hooks = HookRunner::new(&config.cwd, hook_set.active().to_vec()).with_mcp(caller);
         let session_start_fields = json!({"cwd": config.cwd, "profile": config.profile});
         kernel = Self {
             log,
@@ -605,12 +610,22 @@ impl Kernel {
 
     /// Fetch an MCP prompt's body for a command invocation, naming its arguments.
     fn fetch_mcp_prompt(&self, name: &str, args: &str) -> Result<(String, u64), String> {
-        let skill = self.skills.get(name).ok_or_else(|| format!("no skill named {name:?}"))?;
-        let Origin::Mcp { server, prompt, arguments } = &skill.origin else {
+        let skill = self
+            .skills
+            .get(name)
+            .ok_or_else(|| format!("no skill named {name:?}"))?;
+        let Origin::Mcp {
+            server,
+            prompt,
+            arguments,
+        } = &skill.origin
+        else {
             return Err(format!("{name} has no body to fetch"));
         };
         let Some(caller) = &self.mcp_caller else {
-            return Err(format!("MCP server {server:?} is not running in this session"));
+            return Err(format!(
+                "MCP server {server:?} is not running in this session"
+            ));
         };
         let body = caller.fetch(server, prompt, arguments, args)?;
         Ok((body.clone(), loong_skills::estimate_tokens(&body)))
@@ -628,8 +643,13 @@ impl Kernel {
         );
         // Pinned and Persistent: system prompt tokens are never evicted, and
         // compaction must not touch them (ADR-0006).
-        let entry =
-            self.ledger.add(Category::SystemPrompt, "system", &body, Lifetime::Persistent, true);
+        let entry = self.ledger.add(
+            Category::SystemPrompt,
+            "system",
+            &body,
+            Lifetime::Persistent,
+            true,
+        );
         self.messages.insert(0, ChatMessage::System { text: body });
         self.entry_of.insert(0, Some(entry));
         self.append(
@@ -691,7 +711,10 @@ impl Kernel {
     }
 
     /// Children of an event — the event tree inside a session (ADR-0015).
-    pub fn event_children(&self, parent_id: &str) -> Result<Vec<loong_index::EventRow>, KernelError> {
+    pub fn event_children(
+        &self,
+        parent_id: &str,
+    ) -> Result<Vec<loong_index::EventRow>, KernelError> {
         self.require_fresh_index()?;
         Ok(self.index.children(parent_id)?)
     }
@@ -798,7 +821,10 @@ impl Kernel {
                                 steps: 0,
                                 final_text: None,
                                 pending_approval: None,
-                                refused: Some(format!("/{} could not be loaded: {e}", expansion.name)),
+                                refused: Some(format!(
+                                    "/{} could not be loaded: {e}",
+                                    expansion.name
+                                )),
                                 events: vec![event],
                             });
                         }
@@ -814,7 +840,9 @@ impl Kernel {
                             source: "<none>".to_string(),
                             args,
                             tokens: 0,
-                            error: Some(format!("no skill named {name:?}; /help lists what exists")),
+                            error: Some(format!(
+                                "no skill named {name:?}; /help lists what exists"
+                            )),
                         },
                     )?;
                     return Ok(TurnOutcome {
@@ -1189,7 +1217,10 @@ impl Kernel {
             return 0;
         }
         // The system prompt is not an exchange: it stays for the session's life.
-        let start = usize::from(matches!(self.messages.first(), Some(ChatMessage::System { .. })));
+        let start = usize::from(matches!(
+            self.messages.first(),
+            Some(ChatMessage::System { .. })
+        ));
         let end = self
             .messages
             .iter()
@@ -1227,10 +1258,17 @@ impl Kernel {
     fn record_user(&mut self, text: &str) -> Result<u64, KernelError> {
         let seq = self.append(
             gen::event::MESSAGE_APPENDED,
-            &gen::MessageAppended { role: Role::User, text: text.to_string() },
+            &gen::MessageAppended {
+                role: Role::User,
+                text: text.to_string(),
+            },
         )?;
-        self.messages.push(ChatMessage::User { text: text.to_string() });
-        let entry = self.ledger.add(Category::History, "user", text, Lifetime::Session, false);
+        self.messages.push(ChatMessage::User {
+            text: text.to_string(),
+        });
+        let entry = self
+            .ledger
+            .add(Category::History, "user", text, Lifetime::Session, false);
         self.entry_of.push(Some(entry));
         Ok(seq)
     }
@@ -1251,12 +1289,19 @@ impl Kernel {
         // calls: the call payloads cost tokens too (ADR-0006 accounting).
         let accounting = match (text, calls.first()) {
             (Some(t), None) => t.to_string(),
-            (Some(t), Some(_)) => format!("{t}{}", serde_json::to_string(calls).unwrap_or_default()),
+            (Some(t), Some(_)) => {
+                format!("{t}{}", serde_json::to_string(calls).unwrap_or_default())
+            }
             (None, Some(_)) => serde_json::to_string(calls).unwrap_or_default(),
             (None, None) => String::new(),
         };
-        let entry =
-            self.ledger.add(Category::History, "assistant", &accounting, Lifetime::Session, false);
+        let entry = self.ledger.add(
+            Category::History,
+            "assistant",
+            &accounting,
+            Lifetime::Session,
+            false,
+        );
         self.entry_of.push(Some(entry));
         self.messages.push(ChatMessage::Assistant {
             text: text.map(|t| t.to_string()),
@@ -1273,7 +1318,11 @@ impl Kernel {
     ) -> Result<u64, KernelError> {
         let seq = self.append(
             gen::event::TOOL_RESULT,
-            &gen::ToolResult { call_id: call_id.to_string(), ok, output: output.to_string() },
+            &gen::ToolResult {
+                call_id: call_id.to_string(),
+                ok,
+                output: output.to_string(),
+            },
         )?;
         // Tool output is the first thing compaction clears, so it carries a
         // turn-scoped lifetime (ADR-0006 §4).
@@ -1285,8 +1334,10 @@ impl Kernel {
             false,
         );
         self.entry_of.push(Some(entry));
-        self.messages
-            .push(ChatMessage::Tool { call_id: call_id.to_string(), output: output.to_string() });
+        self.messages.push(ChatMessage::Tool {
+            call_id: call_id.to_string(),
+            output: output.to_string(),
+        });
         Ok(seq)
     }
 
@@ -1307,11 +1358,13 @@ impl Kernel {
         self.tools
             .specs()
             .into_iter()
-            .map(|(name, description, parameters)| loong_providers::ToolSpec {
-                name,
-                description,
-                parameters,
-            })
+            .map(
+                |(name, description, parameters)| loong_providers::ToolSpec {
+                    name,
+                    description,
+                    parameters,
+                },
+            )
             .collect()
     }
 }
@@ -1319,11 +1372,13 @@ impl Kernel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loong_providers::{CompletionRequest, CompletionResponse, Model, ModelError, ScriptedModel};
-    use std::sync::{Arc, Mutex};
+    use loong_providers::{
+        CompletionRequest, CompletionResponse, Model, ModelError, ScriptedModel,
+    };
     use loong_schema::generated::event as ev;
     use serde_json::json;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
 
     static N: AtomicU64 = AtomicU64::new(0);
 
@@ -1359,24 +1414,39 @@ mod tests {
         }
         std::fs::write(hooks.join("hooks.toml"), manifest).unwrap();
         if trust {
-            loong_hooks::HookSet::load(dir).unwrap().trust_now().unwrap();
+            loong_hooks::HookSet::load(dir)
+                .unwrap()
+                .trust_now()
+                .unwrap();
         }
     }
 
     fn call(id: &str, tool: &str, args: serde_json::Value) -> ToolCallRequest {
-        ToolCallRequest { call_id: id.into(), tool: tool.into(), args }
+        ToolCallRequest {
+            call_id: id.into(),
+            tool: tool.into(),
+            args,
+        }
     }
 
     fn response(calls: Vec<ToolCallRequest>, text: Option<&str>) -> CompletionResponse {
         CompletionResponse {
             text: text.map(|t| t.to_string()),
             tool_calls: calls,
-            usage: Usage { tokens_in: 7, tokens_out: 3 },
+            usage: Usage {
+                tokens_in: 7,
+                tokens_out: 3,
+            },
         }
     }
 
     fn kinds(log: &Path) -> Vec<String> {
-        loong_eventlog::replay(log).unwrap().events.into_iter().map(|e| e.kind).collect()
+        loong_eventlog::replay(log)
+            .unwrap()
+            .events
+            .into_iter()
+            .map(|e| e.kind)
+            .collect()
     }
 
     #[test]
@@ -1384,7 +1454,10 @@ mod tests {
         let t = Temp::new();
         std::fs::write(t.dir.join("hello.txt"), "hi from the workspace").unwrap();
         let model = ScriptedModel::new(vec![
-            response(vec![call("c1", "read_file", json!({"path": "hello.txt"}))], None),
+            response(
+                vec![call("c1", "read_file", json!({"path": "hello.txt"}))],
+                None,
+            ),
             response(vec![], Some("the file says hi")),
         ]);
         let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
@@ -1409,7 +1482,10 @@ mod tests {
             ]
         );
         let events = loong_eventlog::replay(&t.log).unwrap().events;
-        let policy = events.iter().find(|e| e.kind == ev::POLICY_DECIDED).unwrap();
+        let policy = events
+            .iter()
+            .find(|e| e.kind == ev::POLICY_DECIDED)
+            .unwrap();
         assert_eq!(policy.data["verdict"], "allow");
         assert_eq!(
             policy.data["rule"], "builtin:investigate",
@@ -1417,7 +1493,10 @@ mod tests {
         );
         let result = events.iter().find(|e| e.kind == ev::TOOL_RESULT).unwrap();
         assert_eq!(result.data["ok"], true);
-        assert!(result.data["output"].as_str().unwrap().contains("hi from the workspace"));
+        assert!(result.data["output"]
+            .as_str()
+            .unwrap()
+            .contains("hi from the workspace"));
     }
 
     #[test]
@@ -1427,7 +1506,11 @@ mod tests {
         let _ = std::fs::remove_file(&escape);
         let model = ScriptedModel::new(vec![
             response(
-                vec![call("c1", "write_file", json!({"path": escape.to_string_lossy(), "content": "x"}))],
+                vec![call(
+                    "c1",
+                    "write_file",
+                    json!({"path": escape.to_string_lossy(), "content": "x"}),
+                )],
                 None,
             ),
             response(vec![], Some("understood")),
@@ -1440,16 +1523,24 @@ mod tests {
         assert_eq!(pending.rule, "builtin:out_of_bounds");
         assert!(!escape.exists(), "nothing is written before the answer");
 
-        let resumed = k.respond_to_approval(&pending.request_id, false, ApprovalScope::Once, Some("no"))
+        let resumed = k
+            .respond_to_approval(&pending.request_id, false, ApprovalScope::Once, Some("no"))
             .unwrap();
         assert_eq!(resumed.final_text.as_deref(), Some("understood"));
         assert!(!escape.exists());
         let events = loong_eventlog::replay(&t.log).unwrap().events;
-        let decided = events.iter().find(|e| e.kind == ev::APPROVAL_DECIDED).unwrap();
+        let decided = events
+            .iter()
+            .find(|e| e.kind == ev::APPROVAL_DECIDED)
+            .unwrap();
         assert_eq!(decided.data["granted"], false);
         assert_eq!(decided.data["scope"], "once");
         assert_eq!(decided.data["reason"], "no");
-        let denied = events.iter().filter(|e| e.kind == ev::TOOL_RESULT).next().unwrap();
+        let denied = events
+            .iter()
+            .filter(|e| e.kind == ev::TOOL_RESULT)
+            .next()
+            .unwrap();
         assert_eq!(denied.data["ok"], false);
     }
 
@@ -1460,38 +1551,57 @@ mod tests {
         let _ = std::fs::remove_file(&escape);
         let model = ScriptedModel::new(vec![
             response(
-                vec![call("c1", "write_file", json!({"path": escape.to_string_lossy(), "content": "x"}))],
+                vec![call(
+                    "c1",
+                    "write_file",
+                    json!({"path": escape.to_string_lossy(), "content": "x"}),
+                )],
                 None,
             ),
             response(vec![], Some("ok")),
         ]);
         let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
         let pending = k.submit("write outside").unwrap().pending_approval.unwrap();
-        k.respond_to_approval(&pending.request_id, true, ApprovalScope::Once, None).unwrap();
+        k.respond_to_approval(&pending.request_id, true, ApprovalScope::Once, None)
+            .unwrap();
         assert!(!escape.exists(), "the tool is the second line of defence");
         let events = loong_eventlog::replay(&t.log).unwrap().events;
         let result = events.iter().find(|e| e.kind == ev::TOOL_RESULT).unwrap();
         assert_eq!(result.data["ok"], false);
-        assert!(result.data["output"].as_str().unwrap().contains("outside the workspace"));
+        assert!(result.data["output"]
+            .as_str()
+            .unwrap()
+            .contains("outside the workspace"));
     }
 
     #[test]
     fn a_tightened_policy_denies_without_asking() {
         let t = Temp::new();
         let model = ScriptedModel::new(vec![
-            response(vec![call("c1", "read_file", json!({"path": "/etc/hostname"}))], None),
+            response(
+                vec![call("c1", "read_file", json!({"path": "/etc/hostname"}))],
+                None,
+            ),
             response(vec![], Some("could not read that")),
         ]);
         let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
-        k.pdp_mut().tighten(ActionClass::OutOfBounds, Verdict::Deny).unwrap();
+        k.pdp_mut()
+            .tighten(ActionClass::OutOfBounds, Verdict::Deny)
+            .unwrap();
         let out = k.submit("read /etc/hostname").unwrap();
         assert!(out.pending_approval.is_none(), "deny never asks");
         let events = loong_eventlog::replay(&t.log).unwrap().events;
-        let policy = events.iter().find(|e| e.kind == ev::POLICY_DECIDED).unwrap();
+        let policy = events
+            .iter()
+            .find(|e| e.kind == ev::POLICY_DECIDED)
+            .unwrap();
         assert_eq!(policy.data["verdict"], "deny");
         assert_eq!(policy.data["rule"], "session:out_of_bounds");
         let result = events.iter().find(|e| e.kind == ev::TOOL_RESULT).unwrap();
-        assert!(result.data["output"].as_str().unwrap().contains("denied by policy"));
+        assert!(result.data["output"]
+            .as_str()
+            .unwrap()
+            .contains("denied by policy"));
     }
 
     #[test]
@@ -1506,14 +1616,18 @@ mod tests {
         assert_eq!(out.final_text.as_deref(), Some("fine"));
         let events = loong_eventlog::replay(&t.log).unwrap().events;
         let result = events.iter().find(|e| e.kind == ev::TOOL_RESULT).unwrap();
-        assert!(result.data["output"].as_str().unwrap().contains("unknown tool"));
+        assert!(result.data["output"]
+            .as_str()
+            .unwrap()
+            .contains("unknown tool"));
     }
 
     #[test]
     fn the_step_limit_stops_a_spinning_model() {
         let t = Temp::new();
         std::fs::write(t.dir.join("a.txt"), "x").unwrap();
-        let spin = |_: usize| response(vec![call("c", "read_file", json!({"path": "a.txt"}))], None);
+        let spin =
+            |_: usize| response(vec![call("c", "read_file", json!({"path": "a.txt"}))], None);
         let model = ScriptedModel::new((0..10).map(spin).collect());
         let mut config = KernelConfig::new(&t.dir);
         config.max_steps = 3;
@@ -1528,7 +1642,10 @@ mod tests {
         let t = Temp::new();
         std::fs::write(t.dir.join("a.txt"), "x").unwrap();
         let model = ScriptedModel::new(vec![
-            response(vec![call("c1", "read_file", json!({"path": "a.txt"}))], None),
+            response(
+                vec![call("c1", "read_file", json!({"path": "a.txt"}))],
+                None,
+            ),
             response(vec![], Some("done")),
         ]);
         let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
@@ -1550,7 +1667,10 @@ mod tests {
     #[test]
     fn the_pep_stops_an_escape_the_classifier_cannot_see() {
         let t = Temp::new();
-        let escaped_name = format!("{}-escaped.txt", t.dir.file_name().unwrap().to_string_lossy());
+        let escaped_name = format!(
+            "{}-escaped.txt",
+            t.dir.file_name().unwrap().to_string_lossy()
+        );
         let escape = t.dir.parent().unwrap().join(&escaped_name);
         let _ = std::fs::remove_file(&escape);
 
@@ -1570,7 +1690,10 @@ mod tests {
         k.submit("try to write outside").unwrap();
 
         let events = loong_eventlog::replay(&t.log).unwrap().events;
-        let policy = events.iter().find(|e| e.kind == ev::POLICY_DECIDED).unwrap();
+        let policy = events
+            .iter()
+            .find(|e| e.kind == ev::POLICY_DECIDED)
+            .unwrap();
         assert_eq!(policy.data["verdict"], "allow", "the classifier allowed it");
         assert_eq!(policy.data["action_class"], "write_workspace");
         let result = events.iter().find(|e| e.kind == ev::TOOL_RESULT).unwrap();
@@ -1584,12 +1707,22 @@ mod tests {
     fn the_pep_still_allows_a_workspace_write_through_the_shell() {
         let t = Temp::new();
         let model = ScriptedModel::new(vec![
-            response(vec![call("c1", "shell", json!({"command": "touch inside-control.txt"}))], None),
+            response(
+                vec![call(
+                    "c1",
+                    "shell",
+                    json!({"command": "touch inside-control.txt"}),
+                )],
+                None,
+            ),
             response(vec![], Some("done")),
         ]);
         let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
         k.submit("write a file inside").unwrap();
-        assert!(t.dir.join("inside-control.txt").exists(), "the allowed write happened");
+        assert!(
+            t.dir.join("inside-control.txt").exists(),
+            "the allowed write happened"
+        );
         let events = loong_eventlog::replay(&t.log).unwrap().events;
         let result = events.iter().find(|e| e.kind == ev::TOOL_RESULT).unwrap();
         assert_eq!(result.data["ok"], true, "{:?}", result.data["output"]);
@@ -1600,17 +1733,26 @@ mod tests {
         let t = Temp::new();
         std::fs::write(t.dir.join("a.txt"), "content here").unwrap();
         let model = ScriptedModel::new(vec![
-            response(vec![call("c1", "shell", json!({"command": "cat a.txt"}))], None),
+            response(
+                vec![call("c1", "shell", json!({"command": "cat a.txt"}))],
+                None,
+            ),
             response(vec![], Some("read")),
         ]);
         let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
         k.submit("show me a.txt").unwrap();
         let events = loong_eventlog::replay(&t.log).unwrap().events;
-        let policy = events.iter().find(|e| e.kind == ev::POLICY_DECIDED).unwrap();
+        let policy = events
+            .iter()
+            .find(|e| e.kind == ev::POLICY_DECIDED)
+            .unwrap();
         assert_eq!(policy.data["action_class"], "investigate");
         assert_eq!(policy.data["verdict"], "allow");
         let result = events.iter().find(|e| e.kind == ev::TOOL_RESULT).unwrap();
-        assert!(result.data["output"].as_str().unwrap().contains("content here"));
+        assert!(result.data["output"]
+            .as_str()
+            .unwrap()
+            .contains("content here"));
     }
 
     fn fake_mcp() -> PathBuf {
@@ -1623,7 +1765,11 @@ mod tests {
 
     fn install_mcp_mode(dir: &Path, action_class: &str, trust: bool, mode: &str) -> bool {
         let script = fake_mcp();
-        if !script.exists() || std::process::Command::new("python3").arg("--version").output().is_err()
+        if !script.exists()
+            || std::process::Command::new("python3")
+                .arg("--version")
+                .output()
+                .is_err()
         {
             return false;
         }
@@ -1655,7 +1801,11 @@ mod tests {
         let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
 
         // The catalogue advertises the server's prompts as commands…
-        assert!(k.skills().names().contains(&"mcp__fake__review"), "{:?}", k.skills().names());
+        assert!(
+            k.skills().names().contains(&"mcp__fake__review"),
+            "{:?}",
+            k.skills().names()
+        );
         let sent = seen.lock().unwrap();
         assert!(sent.is_empty(), "nothing has been asked of the model yet");
         drop(sent);
@@ -1667,7 +1817,10 @@ mod tests {
         let invoked = events.iter().find(|e| e.kind == ev::SKILL_INVOKED).unwrap();
         assert_eq!(invoked.data["name"], "mcp__fake__review");
         assert_eq!(invoked.data["source"], "mcp:fake/review");
-        assert!(invoked.data["tokens"].as_u64().unwrap() > 0, "the fetched body is accounted for");
+        assert!(
+            invoked.data["tokens"].as_u64().unwrap() > 0,
+            "the fetched body is accounted for"
+        );
         assert!(invoked.data["error"].is_null());
 
         let sent = seen.lock().unwrap();
@@ -1691,7 +1844,10 @@ mod tests {
             return;
         }
         let model = ScriptedModel::new(vec![
-            response(vec![call("c1", "skill", json!({"name": "mcp__fake__review"}))], None),
+            response(
+                vec![call("c1", "skill", json!({"name": "mcp__fake__review"}))],
+                None,
+            ),
             response(vec![], Some("loaded")),
         ]);
         let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
@@ -1701,8 +1857,14 @@ mod tests {
         let result = events.iter().find(|e| e.kind == ev::TOOL_RESULT).unwrap();
         assert_eq!(result.data["ok"], true, "{:?}", result.data["output"]);
         let output = result.data["output"].as_str().unwrap();
-        assert!(output.contains("Review HEAD and report ONLY real bugs"), "{output}");
-        assert!(output.contains("mcp:fake/review"), "the origin is named: {output}");
+        assert!(
+            output.contains("Review HEAD and report ONLY real bugs"),
+            "{output}"
+        );
+        assert!(
+            output.contains("mcp:fake/review"),
+            "the origin is named: {output}"
+        );
     }
 
     #[test]
@@ -1757,14 +1919,19 @@ mod tests {
         assert!(k.skills().names().contains(&"mcp__fake__broken"));
 
         let outcome = k.submit("/mcp__fake__broken").unwrap();
-        let refused = outcome.refused.expect("a prompt that cannot load is refused");
+        let refused = outcome
+            .refused
+            .expect("a prompt that cannot load is refused");
         assert!(refused.contains("could not be loaded"), "{refused}");
 
         let events = loong_eventlog::replay(&t.log).unwrap().events;
         let invoked = events.iter().find(|e| e.kind == ev::SKILL_INVOKED).unwrap();
         assert_eq!(invoked.data["name"], "mcp__fake__broken");
         assert!(
-            invoked.data["error"].as_str().unwrap().contains("prompt handler is broken"),
+            invoked.data["error"]
+                .as_str()
+                .unwrap()
+                .contains("prompt handler is broken"),
             "{:?}",
             invoked.data
         );
@@ -1782,7 +1949,10 @@ mod tests {
             return;
         }
         let model = ScriptedModel::new(vec![
-            response(vec![call("c1", "mcp__fake__ping", json!({"message": "hello"}))], None),
+            response(
+                vec![call("c1", "mcp__fake__ping", json!({"message": "hello"}))],
+                None,
+            ),
             response(vec![], Some("done")),
         ]);
         let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
@@ -1796,11 +1966,17 @@ mod tests {
         let call_event = events.iter().find(|e| e.kind == ev::TOOL_CALL).unwrap();
         assert_eq!(call_event.data["tool"], "mcp__fake__ping");
         assert_eq!(call_event.data["action_class"], "investigate");
-        let policy = events.iter().find(|e| e.kind == ev::POLICY_DECIDED).unwrap();
+        let policy = events
+            .iter()
+            .find(|e| e.kind == ev::POLICY_DECIDED)
+            .unwrap();
         assert_eq!(policy.data["verdict"], "allow");
         let result = events.iter().find(|e| e.kind == ev::TOOL_RESULT).unwrap();
         assert_eq!(result.data["ok"], true, "{:?}", result.data["output"]);
-        assert!(result.data["output"].as_str().unwrap().contains("pong: hello"));
+        assert!(result.data["output"]
+            .as_str()
+            .unwrap()
+            .contains("pong: hello"));
     }
 
     #[test]
@@ -1809,16 +1985,22 @@ mod tests {
         if !install_mcp(&t.dir, "out_of_bounds", true) {
             return;
         }
-        let model = ScriptedModel::new(vec![
-            response(vec![call("c1", "mcp__fake__ping", json!({"message": "hi"}))], None),
-        ]);
+        let model = ScriptedModel::new(vec![response(
+            vec![call("c1", "mcp__fake__ping", json!({"message": "hi"}))],
+            None,
+        )]);
         let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
         let outcome = k.submit("ping").unwrap();
         let pending = outcome.pending_approval.expect("the cautious default asks");
-        assert!(pending.reason.contains("out_of_bounds"), "{}", pending.reason);
+        assert!(
+            pending.reason.contains("out_of_bounds"),
+            "{}",
+            pending.reason
+        );
 
         // Answering resumes through the same seam as any built-in tool.
-        k.respond_to_approval(&pending.request_id, true, ApprovalScope::Once, None).unwrap();
+        k.respond_to_approval(&pending.request_id, true, ApprovalScope::Once, None)
+            .unwrap();
         let events = loong_eventlog::replay(&t.log).unwrap().events;
         let result = events.iter().find(|e| e.kind == ev::TOOL_RESULT).unwrap();
         assert_eq!(result.data["ok"], true, "{:?}", result.data["output"]);
@@ -1839,26 +2021,41 @@ mod tests {
             true,
         );
         let model = ScriptedModel::new(vec![
-            response(vec![call("c1", "shell", json!({"command": "touch gated.txt"}))], None),
+            response(
+                vec![call("c1", "shell", json!({"command": "touch gated.txt"}))],
+                None,
+            ),
             response(vec![], Some("understood")),
         ]);
         let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
         k.submit("go").unwrap();
 
         let events = loong_eventlog::replay(&t.log).unwrap().events;
-        let fired = events.iter().find(|e| e.kind == ev::HOOK_FIRED).expect("the hook answered");
+        let fired = events
+            .iter()
+            .find(|e| e.kind == ev::HOOK_FIRED)
+            .expect("the hook answered");
         assert_eq!(fired.data["kind"], "mcp");
         assert_eq!(fired.data["hook_id"], "policy-svc");
         assert_eq!(fired.data["verdict"], "deny");
         assert_eq!(fired.data["failed"], false);
-        assert!(fired.data["reason"].as_str().unwrap().contains("policy service says deny"));
+        assert!(fired.data["reason"]
+            .as_str()
+            .unwrap()
+            .contains("policy service says deny"));
 
         // A built-in tool, classified as an ordinary workspace write, stopped by an
         // external service — and the log says which one.
-        let policy = events.iter().find(|e| e.kind == ev::POLICY_DECIDED).unwrap();
+        let policy = events
+            .iter()
+            .find(|e| e.kind == ev::POLICY_DECIDED)
+            .unwrap();
         assert_eq!(policy.data["verdict"], "deny");
         assert_eq!(policy.data["rule"], "hook:policy-svc");
-        assert!(!t.dir.join("gated.txt").exists(), "the gated tool never ran");
+        assert!(
+            !t.dir.join("gated.txt").exists(),
+            "the gated tool never ran"
+        );
     }
 
     #[test]
@@ -1873,7 +2070,10 @@ mod tests {
             true,
         );
         let model = ScriptedModel::new(vec![
-            response(vec![call("c1", "shell", json!({"command": "touch nope.txt"}))], None),
+            response(
+                vec![call("c1", "shell", json!({"command": "touch nope.txt"}))],
+                None,
+            ),
             response(vec![], Some("understood")),
         ]);
         let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
@@ -1908,7 +2108,10 @@ mod tests {
             "[[server]]\nname = \"broken\"\ncommand = \"definitely-not-a-program\"\n",
         )
         .unwrap();
-        loong_mcp::McpSet::load(&t.dir).unwrap().trust_now().unwrap();
+        loong_mcp::McpSet::load(&t.dir)
+            .unwrap()
+            .trust_now()
+            .unwrap();
         let model = ScriptedModel::saying("hi");
         let err = match Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)) {
             Ok(_) => panic!("a required server that cannot start must be fatal"),
@@ -1927,7 +2130,10 @@ mod tests {
             "[[server]]\nname = \"broken\"\ncommand = \"definitely-not-a-program\"\nrequired = false\n",
         )
         .unwrap();
-        loong_mcp::McpSet::load(&t.dir).unwrap().trust_now().unwrap();
+        loong_mcp::McpSet::load(&t.dir)
+            .unwrap()
+            .trust_now()
+            .unwrap();
         let model = ScriptedModel::saying("hi");
         let k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
         assert_eq!(k.mcp_servers(), 0);
@@ -1945,14 +2151,20 @@ mod tests {
         fn new(responses: Vec<CompletionResponse>) -> (Self, Arc<Mutex<Vec<Vec<ChatMessage>>>>) {
             let seen = Arc::new(Mutex::new(Vec::new()));
             (
-                Self { responses: responses.into(), seen: Arc::clone(&seen) },
+                Self {
+                    responses: responses.into(),
+                    seen: Arc::clone(&seen),
+                },
                 seen,
             )
         }
     }
 
     impl Model for RecordingModel {
-        fn complete(&mut self, request: &CompletionRequest) -> Result<CompletionResponse, ModelError> {
+        fn complete(
+            &mut self,
+            request: &CompletionRequest,
+        ) -> Result<CompletionResponse, ModelError> {
             self.seen.lock().unwrap().push(request.messages.clone());
             self.responses
                 .pop_front()
@@ -1962,7 +2174,9 @@ mod tests {
 
     /// A file big enough that its output has to be cleared.
     fn big_file(dir: &Path, name: &str, lines: usize) -> PathBuf {
-        let body: String = (0..lines).map(|i| format!("line {i} of a large file\n")).collect();
+        let body: String = (0..lines)
+            .map(|i| format!("line {i} of a large file\n"))
+            .collect();
         let path = dir.join(name);
         std::fs::write(&path, body).unwrap();
         path
@@ -2000,10 +2214,16 @@ Look at $ARGUMENTS and report only real bugs.
         k.submit("/review HEAD~1").unwrap();
 
         let events = loong_eventlog::replay(&t.log).unwrap().events;
-        let invoked = events.iter().find(|e| e.kind == ev::SKILL_INVOKED).expect("skill.invoked");
+        let invoked = events
+            .iter()
+            .find(|e| e.kind == ev::SKILL_INVOKED)
+            .expect("skill.invoked");
         assert_eq!(invoked.data["name"], "review");
         assert_eq!(invoked.data["args"], "HEAD~1");
-        assert!(invoked.data["source"].as_str().unwrap().ends_with("review.md"));
+        assert!(invoked.data["source"]
+            .as_str()
+            .unwrap()
+            .ends_with("review.md"));
         assert!(invoked.data["tokens"].as_u64().unwrap() > 0);
 
         // What the model received is the body, with the arguments substituted — and
@@ -2017,7 +2237,10 @@ Look at $ARGUMENTS and report only real bugs.
                 _ => None,
             })
             .unwrap();
-        assert!(user.contains("Look at HEAD~1 and report only real bugs."), "{user}");
+        assert!(
+            user.contains("Look at HEAD~1 and report only real bugs."),
+            "{user}"
+        );
     }
 
     #[test]
@@ -2035,7 +2258,10 @@ Look at $ARGUMENTS and report only real bugs.
         let events = loong_eventlog::replay(&t.log).unwrap().events;
         let invoked = events.iter().find(|e| e.kind == ev::SKILL_INVOKED).unwrap();
         assert!(
-            invoked.data["error"].as_str().unwrap().contains("no skill named"),
+            invoked.data["error"]
+                .as_str()
+                .unwrap()
+                .contains("no skill named"),
             "{:?}",
             invoked.data
         );
@@ -2050,11 +2276,14 @@ Look at $ARGUMENTS and report only real bugs.
         let t = Temp::new();
         let (model, seen) = RecordingModel::new(vec![response(vec![], Some("noted"))]);
         let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
-        k.submit("/etc/hosts is misconfigured, please look").unwrap();
+        k.submit("/etc/hosts is misconfigured, please look")
+            .unwrap();
 
         let sent = seen.lock().unwrap();
         assert!(
-            sent[0].iter().any(|m| matches!(m, ChatMessage::User { text } if text.starts_with("/etc/hosts"))),
+            sent[0]
+                .iter()
+                .any(|m| matches!(m, ChatMessage::User { text } if text.starts_with("/etc/hosts"))),
             "a path sentence reaches the model as itself"
         );
         let events = loong_eventlog::replay(&t.log).unwrap().events;
@@ -2085,11 +2314,17 @@ SECRET-BODY-STEPS
         };
         assert!(system.contains("/release — Cut a release"), "{system}");
         assert!(system.contains("/help"), "{system}");
-        assert!(!system.contains("SECRET-BODY-STEPS"), "bodies load on invoke only: {system}");
+        assert!(
+            !system.contains("SECRET-BODY-STEPS"),
+            "bodies load on invoke only: {system}"
+        );
 
         // …and the catalogue is accounted for as a pinned ledger entry.
         let explain = k.ledger().explain();
-        let row = explain.iter().find(|r| r.source == "system").expect("the system prompt");
+        let row = explain
+            .iter()
+            .find(|r| r.source == "system")
+            .expect("the system prompt");
         assert!(row.pinned);
         let events = loong_eventlog::replay(&t.log).unwrap().events;
         let loaded = events.iter().find(|e| e.kind == ev::SKILLS_LOADED).unwrap();
@@ -2119,9 +2354,18 @@ Step one: breathe.
         let events = loong_eventlog::replay(&t.log).unwrap().events;
         let result = events.iter().find(|e| e.kind == ev::TOOL_RESULT).unwrap();
         assert_eq!(result.data["ok"], true, "{:?}", result.data["output"]);
-        assert!(result.data["output"].as_str().unwrap().contains("Step one: breathe."));
-        let policy = events.iter().find(|e| e.kind == ev::POLICY_DECIDED).unwrap();
-        assert_eq!(policy.data["action_class"], "investigate", "loading a body is read-only");
+        assert!(result.data["output"]
+            .as_str()
+            .unwrap()
+            .contains("Step one: breathe."));
+        let policy = events
+            .iter()
+            .find(|e| e.kind == ev::POLICY_DECIDED)
+            .unwrap();
+        assert_eq!(
+            policy.data["action_class"], "investigate",
+            "loading a body is read-only"
+        );
     }
 
     #[test]
@@ -2155,7 +2399,10 @@ Step one: breathe.
     }
 
     impl Model for StreamingModel {
-        fn complete(&mut self, _request: &CompletionRequest) -> Result<CompletionResponse, ModelError> {
+        fn complete(
+            &mut self,
+            _request: &CompletionRequest,
+        ) -> Result<CompletionResponse, ModelError> {
             unreachable!("this model is only used through its streaming path")
         }
         fn complete_streaming(
@@ -2169,7 +2416,10 @@ Step one: breathe.
             Ok(CompletionResponse {
                 text: Some(self.pieces.concat()),
                 tool_calls: Vec::new(),
-                usage: Usage { tokens_in: 3, tokens_out: 9 },
+                usage: Usage {
+                    tokens_in: 3,
+                    tokens_out: 9,
+                },
             })
         }
     }
@@ -2183,14 +2433,23 @@ Step one: breathe.
         let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
 
         let mut seen = Vec::new();
-        let outcome = k.submit_with("say hi", &mut |piece| seen.push(piece.to_string())).unwrap();
-        assert_eq!(seen, vec!["Hel", "lo, ", "world"], "in the order they were written");
+        let outcome = k
+            .submit_with("say hi", &mut |piece| seen.push(piece.to_string()))
+            .unwrap();
+        assert_eq!(
+            seen,
+            vec!["Hel", "lo, ", "world"],
+            "in the order they were written"
+        );
         assert_eq!(outcome.final_text.as_deref(), Some("Hello, world"));
 
         // The record is the message, not the fragments: nothing in the log mentions
         // a delta, and the assistant message holds the whole answer.
         let events = loong_eventlog::replay(&t.log).unwrap().events;
-        assert!(events.iter().all(|e| e.kind != "model.delta"), "deltas are not logged");
+        assert!(
+            events.iter().all(|e| e.kind != "model.delta"),
+            "deltas are not logged"
+        );
         let answer = events
             .iter()
             .filter(|e| e.kind == ev::MESSAGE_APPENDED && e.data["role"] == "assistant")
@@ -2212,7 +2471,10 @@ Step one: breathe.
         let t = Temp::new();
         std::fs::write(t.dir.join("a.txt"), "content").unwrap();
         let model = ScriptedModel::new(vec![
-            response(vec![call("c1", "read_file", json!({"path": "a.txt"}))], None),
+            response(
+                vec![call("c1", "read_file", json!({"path": "a.txt"}))],
+                None,
+            ),
             response(vec![], Some("done")),
         ]);
         let mut config = KernelConfig::new(&t.dir);
@@ -2221,7 +2483,10 @@ Step one: breathe.
         k.submit("read it").unwrap();
 
         let events = loong_eventlog::replay(&t.log).unwrap().events;
-        let policy = events.iter().find(|e| e.kind == ev::POLICY_DECIDED).unwrap();
+        let policy = events
+            .iter()
+            .find(|e| e.kind == ev::POLICY_DECIDED)
+            .unwrap();
         assert_eq!(policy.data["verdict"], "deny");
         assert_eq!(
             policy.data["rule"], "profile:user:investigate",
@@ -2229,14 +2494,24 @@ Step one: breathe.
         );
         let result = events.iter().find(|e| e.kind == ev::TOOL_RESULT).unwrap();
         assert_eq!(result.data["ok"], false);
-        assert!(result.data["output"].as_str().unwrap().contains("denied by policy"));
+        assert!(result.data["output"]
+            .as_str()
+            .unwrap()
+            .contains("denied by policy"));
     }
 
     #[test]
     fn a_profile_can_only_narrow_never_widen() {
         let t = Temp::new();
         let model = ScriptedModel::new(vec![
-            response(vec![call("c1", "shell", json!({"command": "curl http://example.invalid"}))], None),
+            response(
+                vec![call(
+                    "c1",
+                    "shell",
+                    json!({"command": "curl http://example.invalid"}),
+                )],
+                None,
+            ),
             response(vec![], Some("done")),
         ]);
         let mut config = KernelConfig::new(&t.dir);
@@ -2251,7 +2526,10 @@ Step one: breathe.
             outcome.final_text
         );
         let events = loong_eventlog::replay(&t.log).unwrap().events;
-        let policy = events.iter().find(|e| e.kind == ev::POLICY_DECIDED).unwrap();
+        let policy = events
+            .iter()
+            .find(|e| e.kind == ev::POLICY_DECIDED)
+            .unwrap();
         assert_eq!(policy.data["verdict"], "ask");
         assert_eq!(policy.data["rule"], "builtin:out_of_bounds");
     }
@@ -2260,8 +2538,14 @@ Step one: breathe.
     fn narrow_only_numbers_are_the_strictest_of_the_two() {
         let t = Temp::new();
         let model = ScriptedModel::new(vec![
-            response(vec![call("c1", "read_file", json!({"path": "a.txt"}))], None),
-            response(vec![call("c2", "read_file", json!({"path": "a.txt"}))], None),
+            response(
+                vec![call("c1", "read_file", json!({"path": "a.txt"}))],
+                None,
+            ),
+            response(
+                vec![call("c2", "read_file", json!({"path": "a.txt"}))],
+                None,
+            ),
             response(vec![], Some("done")),
         ]);
         std::fs::write(t.dir.join("a.txt"), "x").unwrap();
@@ -2279,7 +2563,10 @@ Step one: breathe.
         assert_eq!(outcome.steps, 1, "the config's step ceiling holds");
         let events = loong_eventlog::replay(&t.log).unwrap().events;
         assert_eq!(
-            events.iter().filter(|e| e.kind == ev::COST_RECORDED).count(),
+            events
+                .iter()
+                .filter(|e| e.kind == ev::COST_RECORDED)
+                .count(),
             1,
             "the model was called exactly once"
         );
@@ -2290,11 +2577,20 @@ Step one: breathe.
         let t = Temp::new();
         let config_from_file = settings_from(&t.dir, "budget_tokens = 1000\n");
         // The session asks for more than config allows: the ceiling wins.
-        assert_eq!(narrow_budget(Some(50_000), config_from_file.budget_tokens), Some(1_000));
+        assert_eq!(
+            narrow_budget(Some(50_000), config_from_file.budget_tokens),
+            Some(1_000)
+        );
         // The session asks for less: it gets less.
-        assert_eq!(narrow_budget(Some(100), config_from_file.budget_tokens), Some(100));
+        assert_eq!(
+            narrow_budget(Some(100), config_from_file.budget_tokens),
+            Some(100)
+        );
         // The session asks for "unbounded": it still gets the ceiling.
-        assert_eq!(narrow_budget(None, config_from_file.budget_tokens), Some(1_000));
+        assert_eq!(
+            narrow_budget(None, config_from_file.budget_tokens),
+            Some(1_000)
+        );
         // Nothing set anywhere: unbounded stays unbounded.
         assert_eq!(narrow_budget(None, None), None);
     }
@@ -2320,7 +2616,11 @@ Step one: breathe.
         );
         let k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
 
-        assert!(k.skills().names().contains(&"from-team"), "{:?}", k.skills().names());
+        assert!(
+            k.skills().names().contains(&"from-team"),
+            "{:?}",
+            k.skills().names()
+        );
         assert!(
             !k.skills().names().contains(&"local-loud"),
             "a disabled name is gone: {:?}",
@@ -2337,8 +2637,12 @@ Step one: breathe.
         let t = Temp::new();
         let dir = t.dir.join(".loongagent/skills/broken");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("SKILL.md"), "no frontmatter at all
-").unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "no frontmatter at all
+",
+        )
+        .unwrap();
         let model = ScriptedModel::saying("hi");
         let err = match Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)) {
             Ok(_) => panic!("a malformed skill must be fatal, not silently skipped"),
@@ -2353,9 +2657,18 @@ Step one: breathe.
         let t = Temp::new();
         big_file(&t.dir, "big.txt", 400); // ~4000 chars ≈ 1000 tokens
         let (model, seen) = RecordingModel::new(vec![
-            response(vec![call("c1", "read_file", json!({"path": "big.txt"}))], None),
-            response(vec![call("c2", "read_file", json!({"path": "big.txt"}))], None),
-            response(vec![call("c3", "read_file", json!({"path": "big.txt"}))], None),
+            response(
+                vec![call("c1", "read_file", json!({"path": "big.txt"}))],
+                None,
+            ),
+            response(
+                vec![call("c2", "read_file", json!({"path": "big.txt"}))],
+                None,
+            ),
+            response(
+                vec![call("c3", "read_file", json!({"path": "big.txt"}))],
+                None,
+            ),
             response(vec![], Some("read three times")),
         ]);
         let mut config = KernelConfig::new(&t.dir);
@@ -2369,8 +2682,15 @@ Step one: breathe.
             .iter()
             .find(|e| e.kind == ev::COMPACTION_APPLIED)
             .expect("a compaction event");
-        assert!(compaction.data["cleared_tool_outputs"].as_u64().unwrap() >= 1, "{:?}", compaction.data);
-        assert_eq!(compaction.data["dropped_messages"], 0, "clearing alone was enough");
+        assert!(
+            compaction.data["cleared_tool_outputs"].as_u64().unwrap() >= 1,
+            "{:?}",
+            compaction.data
+        );
+        assert_eq!(
+            compaction.data["dropped_messages"], 0,
+            "clearing alone was enough"
+        );
         assert!(
             compaction.data["tokens_after"].as_u64().unwrap()
                 < compaction.data["tokens_before"].as_u64().unwrap(),
@@ -2390,7 +2710,9 @@ Step one: breathe.
             })
             .collect();
         assert!(
-            outputs.iter().any(|o| o.contains("cleared to save context")),
+            outputs
+                .iter()
+                .any(|o| o.contains("cleared to save context")),
             "a stale tool output is cleared: {outputs:?}"
         );
         assert!(
@@ -2404,9 +2726,18 @@ Step one: breathe.
         let t = Temp::new();
         big_file(&t.dir, "big.txt", 400);
         let (model, seen) = RecordingModel::new(vec![
-            response(vec![call("c1", "read_file", json!({"path": "big.txt"}))], None),
-            response(vec![call("c2", "read_file", json!({"path": "big.txt"}))], None),
-            response(vec![call("c3", "read_file", json!({"path": "big.txt"}))], None),
+            response(
+                vec![call("c1", "read_file", json!({"path": "big.txt"}))],
+                None,
+            ),
+            response(
+                vec![call("c2", "read_file", json!({"path": "big.txt"}))],
+                None,
+            ),
+            response(
+                vec![call("c3", "read_file", json!({"path": "big.txt"}))],
+                None,
+            ),
             response(vec![], Some("done")),
         ]);
         let mut config = KernelConfig::new(&t.dir);
@@ -2439,7 +2770,10 @@ Step one: breathe.
                     _ => {}
                 }
             }
-            assert!(!messages.is_empty(), "turn {turn}: the prompt was never dropped");
+            assert!(
+                !messages.is_empty(),
+                "turn {turn}: the prompt was never dropped"
+            );
         }
     }
 
@@ -2473,7 +2807,8 @@ Step one: breathe.
         assert!(seen.iter().all(|messages| !messages.is_empty()));
         let last = seen.last().unwrap();
         assert!(
-            last.iter().any(|m| matches!(m, ChatMessage::User { text } if text.contains("turn three"))),
+            last.iter()
+                .any(|m| matches!(m, ChatMessage::User { text } if text.contains("turn three"))),
             "the current prompt survives compaction"
         );
     }
@@ -2488,7 +2823,10 @@ Step one: breathe.
         let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
         k.submit("a single long turn that cannot fit").unwrap();
         let seen = seen.lock().unwrap();
-        assert!(!seen[0].is_empty(), "the prompt we are answering is never dropped");
+        assert!(
+            !seen[0].is_empty(),
+            "the prompt we are answering is never dropped"
+        );
     }
 
     #[test]
@@ -2501,7 +2839,10 @@ Step one: breathe.
             true,
         );
         let model = ScriptedModel::new(vec![
-            response(vec![call("c1", "shell", json!({"command": "touch made.txt"}))], None),
+            response(
+                vec![call("c1", "shell", json!({"command": "touch made.txt"}))],
+                None,
+            ),
             response(vec![], Some("understood")),
         ]);
         let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
@@ -2509,20 +2850,32 @@ Step one: breathe.
         k.submit("go").unwrap();
 
         let events = loong_eventlog::replay(&t.log).unwrap().events;
-        let fired = events.iter().find(|e| e.kind == ev::HOOK_FIRED).expect("a hook.fired event");
+        let fired = events
+            .iter()
+            .find(|e| e.kind == ev::HOOK_FIRED)
+            .expect("a hook.fired event");
         assert_eq!(fired.data["hook_id"], "guard");
         assert_eq!(fired.data["verdict"], "deny");
         assert_eq!(fired.data["failed"], false);
-        assert!(fired.data["reason"].as_str().unwrap().contains("no shell commands"));
+        assert!(fired.data["reason"]
+            .as_str()
+            .unwrap()
+            .contains("no shell commands"));
 
         // The classifier said write_workspace and the PDP would have allowed it:
         // the hook is what changed the outcome, and the rule names it.
-        let policy = events.iter().find(|e| e.kind == ev::POLICY_DECIDED).unwrap();
+        let policy = events
+            .iter()
+            .find(|e| e.kind == ev::POLICY_DECIDED)
+            .unwrap();
         assert_eq!(policy.data["verdict"], "deny");
         assert_eq!(policy.data["rule"], "hook:guard");
         let result = events.iter().find(|e| e.kind == ev::TOOL_RESULT).unwrap();
         assert_eq!(result.data["ok"], false);
-        assert!(!t.dir.join("made.txt").exists(), "the denied tool must never run");
+        assert!(
+            !t.dir.join("made.txt").exists(),
+            "the denied tool must never run"
+        );
     }
 
     #[test]
@@ -2541,20 +2894,34 @@ Step one: breathe.
             true,
         );
         let model = ScriptedModel::new(vec![
-            response(vec![call("c1", "shell", json!({"command": "touch asked.txt"}))], None),
+            response(
+                vec![call("c1", "shell", json!({"command": "touch asked.txt"}))],
+                None,
+            ),
             response(vec![], Some("done")),
         ]);
         let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
         let outcome = k.submit("go").unwrap();
 
-        let pending = outcome.pending_approval.expect("the hook asked, so the turn stops");
-        assert!(pending.reason.contains("double-check"), "{}", pending.reason);
+        let pending = outcome
+            .pending_approval
+            .expect("the hook asked, so the turn stops");
+        assert!(
+            pending.reason.contains("double-check"),
+            "{}",
+            pending.reason
+        );
         assert_eq!(pending.rule, "hook:checker");
-        assert!(!t.dir.join("asked.txt").exists(), "nothing runs before the answer");
+        assert!(
+            !t.dir.join("asked.txt").exists(),
+            "nothing runs before the answer"
+        );
 
         // The approval path is the same one the PDP uses, so answering resumes.
         let request_id = pending.request_id.clone();
-        let resumed = k.respond_to_approval(&request_id, true, ApprovalScope::Once, None).unwrap();
+        let resumed = k
+            .respond_to_approval(&request_id, true, ApprovalScope::Once, None)
+            .unwrap();
         assert!(resumed.pending_approval.is_none());
         assert!(t.dir.join("asked.txt").exists(), "the granted call ran");
 
@@ -2571,7 +2938,12 @@ Step one: breathe.
             .collect();
         assert_eq!(
             fired,
-            vec!["pre_tool", "permission_requested", "permission_decided", "post_tool"]
+            vec![
+                "pre_tool",
+                "permission_requested",
+                "permission_decided",
+                "post_tool"
+            ]
         );
     }
 
@@ -2585,7 +2957,10 @@ Step one: breathe.
             false,
         );
         let model = ScriptedModel::new(vec![
-            response(vec![call("c1", "shell", json!({"command": "touch ran.txt"}))], None),
+            response(
+                vec![call("c1", "shell", json!({"command": "touch ran.txt"}))],
+                None,
+            ),
             response(vec![], Some("ok")),
         ]);
         let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
@@ -2630,7 +3005,10 @@ Step one: breathe.
             .iter()
             .filter(|e| e.kind == ev::MESSAGE_APPENDED && e.data["role"] == "user")
             .count();
-        assert_eq!(user_turns, 1, "the prompt itself is still recorded as the truth");
+        assert_eq!(
+            user_turns, 1,
+            "the prompt itself is still recorded as the truth"
+        );
     }
 
     #[test]
@@ -2645,7 +3023,10 @@ Step one: breathe.
         let model = ScriptedModel::saying("hi");
         let _k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
         let events = loong_eventlog::replay(&t.log).unwrap().events;
-        let fired = events.iter().find(|e| e.kind == ev::HOOK_FIRED).expect("session_start fired");
+        let fired = events
+            .iter()
+            .find(|e| e.kind == ev::HOOK_FIRED)
+            .expect("session_start fired");
         assert_eq!(fired.data["event"], "session_start");
         assert_eq!(fired.data["verdict"], "allow");
     }
@@ -2668,14 +3049,23 @@ Step one: breathe.
         let t = Temp::new();
         std::fs::write(t.dir.join("a.txt"), "needle in the workspace").unwrap();
         let model = ScriptedModel::new(vec![
-            response(vec![call("c1", "read_file", json!({"path": "a.txt"}))], None),
+            response(
+                vec![call("c1", "read_file", json!({"path": "a.txt"}))],
+                None,
+            ),
             response(vec![], Some("read it")),
         ]);
         let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
         k.submit("read a.txt").unwrap();
 
-        assert!(k.index_stale().is_none(), "a healthy session keeps a fresh index");
-        assert!(t.log.with_extension("sqlite").exists(), "the index sits beside the log");
+        assert!(
+            k.index_stale().is_none(),
+            "a healthy session keeps a fresh index"
+        );
+        assert!(
+            t.log.with_extension("sqlite").exists(),
+            "the index sits beside the log"
+        );
         let hits = k.search("needle in the workspace").unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].kind, "tool.result");
@@ -2693,7 +3083,10 @@ Step one: breathe.
         assert!(matches!(k.search("hello"), Err(KernelError::OutOfOrder(_))));
         k.rebuild_index().unwrap();
         assert!(k.index_stale().is_none());
-        assert!(!k.search("hello").unwrap().is_empty(), "rebuilt from the log alone");
+        assert!(
+            !k.search("hello").unwrap().is_empty(),
+            "rebuilt from the log alone"
+        );
     }
 
     #[test]
@@ -2709,7 +3102,10 @@ Step one: breathe.
         let model = ScriptedModel::saying("second");
         let mut k = Kernel::open(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
         assert!(k.index_stale().is_none());
-        assert!(!k.search("one").unwrap().is_empty(), "the old turn is indexed again");
+        assert!(
+            !k.search("one").unwrap().is_empty(),
+            "the old turn is indexed again"
+        );
         let out = k.submit("two").unwrap();
         assert_eq!(out.final_text.as_deref(), Some("second"));
     }
@@ -2719,7 +3115,14 @@ Step one: breathe.
         let t = Temp::new();
         let escape = t.dir.parent().unwrap().join("loong-escape-3.txt");
         let model = ScriptedModel::new(vec![
-            response(vec![call("c1", "write_file", json!({"path": escape.to_string_lossy(), "content": "x"}))], None),
+            response(
+                vec![call(
+                    "c1",
+                    "write_file",
+                    json!({"path": escape.to_string_lossy(), "content": "x"}),
+                )],
+                None,
+            ),
             response(vec![], Some("ok")),
         ]);
         let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
@@ -2729,6 +3132,7 @@ Step one: breathe.
             k.respond_to_approval("appr-999", false, ApprovalScope::Once, None),
             Err(KernelError::OutOfOrder(_))
         ));
-        k.respond_to_approval(&pending.request_id, false, ApprovalScope::Once, None).unwrap();
+        k.respond_to_approval(&pending.request_id, false, ApprovalScope::Once, None)
+            .unwrap();
     }
 }

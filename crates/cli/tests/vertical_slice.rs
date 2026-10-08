@@ -60,7 +60,13 @@ impl Session {
             .expect("the server binary starts");
         let stdin = child.stdin.take().unwrap();
         let stdout = BufReader::new(child.stdout.take().unwrap());
-        let mut session = Session { child, stdin, stdout, next_id: 1, session_id: String::new() };
+        let mut session = Session {
+            child,
+            stdin,
+            stdout,
+            next_id: 1,
+            session_id: String::new(),
+        };
         let (_, result) = session.call(
             "session.attach",
             json!({"cwd": dir.to_string_lossy(), "client": "test"}),
@@ -103,7 +109,10 @@ impl Session {
 
     fn prompt(&mut self, text: &str) -> (Vec<Value>, Value) {
         let session_id = self.session_id.clone();
-        self.call("prompt.submit", json!({"session_id": session_id, "text": text}))
+        self.call(
+            "prompt.submit",
+            json!({"session_id": session_id, "text": text}),
+        )
     }
 
     fn respond(&mut self, request_id: &str, granted: bool) -> (Vec<Value>, Value) {
@@ -123,14 +132,22 @@ impl Drop for Session {
 }
 
 fn kinds(events: &[Value]) -> Vec<String> {
-    events.iter().map(|e| e["kind"].as_str().unwrap().to_string()).collect()
+    events
+        .iter()
+        .map(|e| e["kind"].as_str().unwrap().to_string())
+        .collect()
 }
 
 fn logged_kinds(dir: &Path) -> Vec<String> {
     std::fs::read_to_string(dir.join("session.jsonl"))
         .unwrap()
         .lines()
-        .map(|l| serde_json::from_str::<Value>(l).unwrap()["kind"].as_str().unwrap().to_string())
+        .map(|l| {
+            serde_json::from_str::<Value>(l).unwrap()["kind"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
         .collect()
 }
 
@@ -147,7 +164,10 @@ fn a_tool_runs_inside_the_workspace_and_the_log_is_the_same_truth() {
     assert!(seen.contains(&"policy.decided".to_string()));
     assert!(seen.contains(&"tool.result".to_string()));
 
-    let policy = events.iter().find(|e| e["kind"] == "policy.decided").unwrap();
+    let policy = events
+        .iter()
+        .find(|e| e["kind"] == "policy.decided")
+        .unwrap();
     assert_eq!(policy["data"]["verdict"], "allow");
     let tool_result = events.iter().find(|e| e["kind"] == "tool.result").unwrap();
     assert_eq!(tool_result["data"]["ok"], true);
@@ -165,9 +185,15 @@ fn a_tool_runs_inside_the_workspace_and_the_log_is_the_same_truth() {
         &seen[..],
         "stream == truth"
     );
-    for line in std::fs::read_to_string(t.path().join("session.jsonl")).unwrap().lines() {
+    for line in std::fs::read_to_string(t.path().join("session.jsonl"))
+        .unwrap()
+        .lines()
+    {
         let envelope: Value = serde_json::from_str(line).unwrap();
-        assert!(envelope["ignorable"].is_boolean(), "every event carries the envelope");
+        assert!(
+            envelope["ignorable"].is_boolean(),
+            "every event carries the envelope"
+        );
         assert!(envelope["seq"].is_u64());
     }
 }
@@ -185,12 +211,21 @@ fn an_out_of_bounds_write_asks_before_it_touches_anything() {
         .expect("the boundary asks");
     assert_eq!(asked["data"]["action_class"], "out_of_bounds");
     let request_id = asked["data"]["request_id"].as_str().unwrap().to_string();
-    assert!(asked["data"]["reason"].as_str().unwrap().contains("out_of_bounds"));
-    assert!(!Path::new(ESCAPE).exists(), "nothing is written before the answer");
+    assert!(asked["data"]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("out_of_bounds"));
+    assert!(
+        !Path::new(ESCAPE).exists(),
+        "nothing is written before the answer"
+    );
 
     let (events, result) = session.respond(&request_id, false);
     assert_eq!(result["accepted"], false);
-    let decided = events.iter().find(|e| e["kind"] == "approval.decided").unwrap();
+    let decided = events
+        .iter()
+        .find(|e| e["kind"] == "approval.decided")
+        .unwrap();
     assert_eq!(decided["data"]["granted"], false);
     assert_eq!(decided["data"]["scope"], "once");
     let tool_result = events.iter().find(|e| e["kind"] == "tool.result").unwrap();
@@ -217,8 +252,15 @@ fn the_tui_client_drives_a_real_server() {
         .arg("echo")
         .output()
         .unwrap();
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("echo: hello from the client"), "got: {stdout}");
+    assert!(
+        stdout.contains("echo: hello from the client"),
+        "got: {stdout}"
+    );
     assert!(t.path().join("session.jsonl").exists());
 }

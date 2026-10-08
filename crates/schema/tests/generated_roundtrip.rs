@@ -9,12 +9,18 @@ where
 {
     let value: Value = serde_json::from_str(json).expect("sample parses");
     let typed: T = serde_json::from_value(value.clone()).expect("sample deserializes");
-    assert_eq!(serde_json::to_value(&typed).unwrap(), value, "round-trip is lossless");
+    assert_eq!(
+        serde_json::to_value(&typed).unwrap(),
+        value,
+        "round-trip is lossless"
+    );
 }
 
 #[test]
 fn roundtrip_event_envelope() {
-    roundtrip::<g::EventEnvelope>(r#"{"seq": 1,"id": "<string>","parent_id": "<string>","kind": "<string>","ignorable": true,"time_ms": 1,"data": {}}"#);
+    roundtrip::<g::EventEnvelope>(
+        r#"{"seq": 1,"id": "<string>","parent_id": "<string>","kind": "<string>","ignorable": true,"time_ms": 1,"data": {}}"#,
+    );
 }
 
 #[test]
@@ -24,7 +30,9 @@ fn roundtrip_message_appended() {
 
 #[test]
 fn roundtrip_tool_call() {
-    roundtrip::<g::ToolCall>(r#"{"call_id": "<string>","tool": "<string>","args": {},"action_class": "investigate"}"#);
+    roundtrip::<g::ToolCall>(
+        r#"{"call_id": "<string>","tool": "<string>","args": {},"action_class": "investigate"}"#,
+    );
 }
 
 #[test]
@@ -34,32 +42,44 @@ fn roundtrip_tool_result() {
 
 #[test]
 fn roundtrip_approval_requested() {
-    roundtrip::<g::ApprovalRequested>(r#"{"request_id": "<string>","action_class": "investigate","reason": "<string>"}"#);
+    roundtrip::<g::ApprovalRequested>(
+        r#"{"request_id": "<string>","action_class": "investigate","reason": "<string>"}"#,
+    );
 }
 
 #[test]
 fn roundtrip_approval_decided() {
-    roundtrip::<g::ApprovalDecided>(r#"{"request_id": "<string>","granted": true,"scope": "once","reason": "<string>"}"#);
+    roundtrip::<g::ApprovalDecided>(
+        r#"{"request_id": "<string>","granted": true,"scope": "once","reason": "<string>"}"#,
+    );
 }
 
 #[test]
 fn roundtrip_policy_decided() {
-    roundtrip::<g::PolicyDecided>(r#"{"action_class": "investigate","verdict": "allow","rule": "<string>"}"#);
+    roundtrip::<g::PolicyDecided>(
+        r#"{"action_class": "investigate","verdict": "allow","rule": "<string>"}"#,
+    );
 }
 
 #[test]
 fn roundtrip_cost_recorded() {
-    roundtrip::<g::CostRecorded>(r#"{"profile": "<string>","tokens_in": 1,"tokens_out": 1,"usd_micros": 1}"#);
+    roundtrip::<g::CostRecorded>(
+        r#"{"profile": "<string>","tokens_in": 1,"tokens_out": 1,"usd_micros": 1}"#,
+    );
 }
 
 #[test]
 fn roundtrip_hook_fired() {
-    roundtrip::<g::HookFired>(r#"{"event": "<string>","hook_id": "<string>","kind": "<string>","verdict": "allow","reason": "<string>","duration_ms": 1,"failed": true}"#);
+    roundtrip::<g::HookFired>(
+        r#"{"event": "<string>","hook_id": "<string>","kind": "<string>","verdict": "allow","reason": "<string>","duration_ms": 1,"failed": true}"#,
+    );
 }
 
 #[test]
 fn roundtrip_compaction_applied() {
-    roundtrip::<g::CompactionApplied>(r#"{"tokens_before": 1,"tokens_after": 1,"kept_tokens": 1,"cleared_tool_outputs": 1,"dropped_messages": 1,"summary": "<string>"}"#);
+    roundtrip::<g::CompactionApplied>(
+        r#"{"tokens_before": 1,"tokens_after": 1,"kept_tokens": 1,"cleared_tool_outputs": 1,"dropped_messages": 1,"summary": "<string>"}"#,
+    );
 }
 
 #[test]
@@ -69,7 +89,9 @@ fn roundtrip_session_attach_params() {
 
 #[test]
 fn roundtrip_session_attach_result() {
-    roundtrip::<g::SessionAttachResult>(r#"{"session_id": "<string>","schema_version": "<string>","existing_events": 1}"#);
+    roundtrip::<g::SessionAttachResult>(
+        r#"{"session_id": "<string>","schema_version": "<string>","existing_events": 1}"#,
+    );
 }
 
 #[test]
@@ -84,7 +106,9 @@ fn roundtrip_prompt_submit_result() {
 
 #[test]
 fn roundtrip_approval_respond_params() {
-    roundtrip::<g::ApprovalRespondParams>(r#"{"session_id": "<string>","request_id": "<string>","granted": true,"scope": "once","reason": "<string>"}"#);
+    roundtrip::<g::ApprovalRespondParams>(
+        r#"{"session_id": "<string>","request_id": "<string>","granted": true,"scope": "once","reason": "<string>"}"#,
+    );
 }
 
 #[test]
@@ -94,12 +118,16 @@ fn roundtrip_rpc_error() {
 
 #[test]
 fn roundtrip_skills_loaded() {
-    roundtrip::<g::SkillsLoaded>(r#"{"count": 1,"tokens": 1,"names": "<string>","disabled": "<string>"}"#);
+    roundtrip::<g::SkillsLoaded>(
+        r#"{"count": 1,"tokens": 1,"names": "<string>","disabled": "<string>"}"#,
+    );
 }
 
 #[test]
 fn roundtrip_skill_invoked() {
-    roundtrip::<g::SkillInvoked>(r#"{"name": "<string>","source": "<string>","args": "<string>","tokens": 1,"error": "<string>"}"#);
+    roundtrip::<g::SkillInvoked>(
+        r#"{"name": "<string>","source": "<string>","args": "<string>","tokens": 1,"error": "<string>"}"#,
+    );
 }
 
 #[test]
@@ -126,14 +154,32 @@ fn declared_events_match_the_envelope_table() {
 #[test]
 fn every_event_payload_roundtrips() {
     roundtrip::<g::MessageAppended>(r#"{"role": "user","text": "<string>"}"#);
-    roundtrip::<g::ToolCall>(r#"{"call_id": "<string>","tool": "<string>","args": {},"action_class": "investigate"}"#);
+    roundtrip::<g::ToolCall>(
+        r#"{"call_id": "<string>","tool": "<string>","args": {},"action_class": "investigate"}"#,
+    );
     roundtrip::<g::ToolResult>(r#"{"call_id": "<string>","ok": true,"output": "<string>"}"#);
-    roundtrip::<g::ApprovalRequested>(r#"{"request_id": "<string>","action_class": "investigate","reason": "<string>"}"#);
-    roundtrip::<g::ApprovalDecided>(r#"{"request_id": "<string>","granted": true,"scope": "once","reason": "<string>"}"#);
-    roundtrip::<g::PolicyDecided>(r#"{"action_class": "investigate","verdict": "allow","rule": "<string>"}"#);
-    roundtrip::<g::CostRecorded>(r#"{"profile": "<string>","tokens_in": 1,"tokens_out": 1,"usd_micros": 1}"#);
-    roundtrip::<g::CompactionApplied>(r#"{"tokens_before": 1,"tokens_after": 1,"kept_tokens": 1,"cleared_tool_outputs": 1,"dropped_messages": 1,"summary": "<string>"}"#);
-    roundtrip::<g::HookFired>(r#"{"event": "<string>","hook_id": "<string>","kind": "<string>","verdict": "allow","reason": "<string>","duration_ms": 1,"failed": true}"#);
-    roundtrip::<g::SkillsLoaded>(r#"{"count": 1,"tokens": 1,"names": "<string>","disabled": "<string>"}"#);
-    roundtrip::<g::SkillInvoked>(r#"{"name": "<string>","source": "<string>","args": "<string>","tokens": 1,"error": "<string>"}"#);
+    roundtrip::<g::ApprovalRequested>(
+        r#"{"request_id": "<string>","action_class": "investigate","reason": "<string>"}"#,
+    );
+    roundtrip::<g::ApprovalDecided>(
+        r#"{"request_id": "<string>","granted": true,"scope": "once","reason": "<string>"}"#,
+    );
+    roundtrip::<g::PolicyDecided>(
+        r#"{"action_class": "investigate","verdict": "allow","rule": "<string>"}"#,
+    );
+    roundtrip::<g::CostRecorded>(
+        r#"{"profile": "<string>","tokens_in": 1,"tokens_out": 1,"usd_micros": 1}"#,
+    );
+    roundtrip::<g::CompactionApplied>(
+        r#"{"tokens_before": 1,"tokens_after": 1,"kept_tokens": 1,"cleared_tool_outputs": 1,"dropped_messages": 1,"summary": "<string>"}"#,
+    );
+    roundtrip::<g::HookFired>(
+        r#"{"event": "<string>","hook_id": "<string>","kind": "<string>","verdict": "allow","reason": "<string>","duration_ms": 1,"failed": true}"#,
+    );
+    roundtrip::<g::SkillsLoaded>(
+        r#"{"count": 1,"tokens": 1,"names": "<string>","disabled": "<string>"}"#,
+    );
+    roundtrip::<g::SkillInvoked>(
+        r#"{"name": "<string>","source": "<string>","args": "<string>","tokens": 1,"error": "<string>"}"#,
+    );
 }

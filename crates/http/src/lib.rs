@@ -100,7 +100,8 @@ pub fn parse_http_url(url: &str) -> Result<(String, u16, String, bool), HttpErro
     let (host, port) = match authority.rsplit_once(':') {
         Some((h, p)) => (
             h,
-            p.parse::<u16>().map_err(|_| err(format!("bad port in {url}")))?,
+            p.parse::<u16>()
+                .map_err(|_| err(format!("bad port in {url}")))?,
         ),
         None => (authority, default_port),
     };
@@ -158,7 +159,10 @@ pub fn post_sse(
     // A server (or a proxy in front of one) may ignore `stream` and answer with an
     // ordinary JSON body. Handing that body over in one piece keeps the caller
     // working instead of returning an empty answer.
-    if !content_type.to_ascii_lowercase().contains("text/event-stream") {
+    if !content_type
+        .to_ascii_lowercase()
+        .contains("text/event-stream")
+    {
         let mut whole = String::new();
         reader
             .read_to_string(&mut whole)
@@ -286,9 +290,21 @@ fn read_head(stream: &mut Transport) -> Result<(u16, String, BodyReader<'_>), Ht
     let content_type = head
         .lines()
         .find(|line| line.to_ascii_lowercase().starts_with("content-type:"))
-        .map(|line| line.split_once(':').map(|(_, v)| v.trim().to_string()).unwrap_or_default())
+        .map(|line| {
+            line.split_once(':')
+                .map(|(_, v)| v.trim().to_string())
+                .unwrap_or_default()
+        })
         .unwrap_or_default();
-    Ok((status, content_type, BodyReader { stream, chunked, done: false }))
+    Ok((
+        status,
+        content_type,
+        BodyReader {
+            stream,
+            chunked,
+            done: false,
+        },
+    ))
 }
 
 /// The body of a response: plain, or chunked (which every streamed reply is).
@@ -370,7 +386,10 @@ fn read_chunk_size(stream: &mut Transport) -> std::io::Result<Option<usize>> {
     let text = String::from_utf8_lossy(&line);
     let size = text.split(';').next().unwrap_or("").trim();
     usize::from_str_radix(size, 16).map(Some).map_err(|_| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, format!("chunk size {text:?}"))
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("chunk size {text:?}"),
+        )
     })
 }
 
@@ -423,7 +442,10 @@ pub mod testing {
             sock.flush().unwrap();
             request
         });
-        (format!("http://127.0.0.1:{}/v1/chat/completions", addr.port()), handle)
+        (
+            format!("http://127.0.0.1:{}/v1/chat/completions", addr.port()),
+            handle,
+        )
     }
 
     fn read_request(sock: &mut std::net::TcpStream) -> String {
@@ -498,7 +520,9 @@ mod tests {
                     response.status
                 );
             }
-            Err(HttpError(message)) if message.contains("connecting") || message.contains("resolving") => {
+            Err(HttpError(message))
+                if message.contains("connecting") || message.contains("resolving") =>
+            {
                 eprintln!("skipping: no route to a public host ({message})");
             }
             Err(e) => panic!("TLS itself failed: {e}"),
@@ -516,7 +540,10 @@ mod tests {
             Duration::from_secs(20),
         );
         match response {
-            Ok(response) => panic!("a mismatched certificate must not be accepted: {}", response.status),
+            Ok(response) => panic!(
+                "a mismatched certificate must not be accepted: {}",
+                response.status
+            ),
             Err(e) => {
                 let message = e.0;
                 let network = message.contains("resolving") || message.contains("connecting");
@@ -532,7 +559,13 @@ mod tests {
     fn a_post_round_trips_and_carries_the_bearer_token() {
         let (url, server) =
             fake_server("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"ok\":true}");
-        let response = post_json(&url, "{\"hello\":1}", Some("secret"), Duration::from_secs(5)).unwrap();
+        let response = post_json(
+            &url,
+            "{\"hello\":1}",
+            Some("secret"),
+            Duration::from_secs(5),
+        )
+        .unwrap();
         assert_eq!(response.status, 200);
         assert_eq!(response.body, "{\"ok\":true}");
 
@@ -546,9 +579,8 @@ mod tests {
 
     #[test]
     fn a_non_2xx_status_is_returned_not_hidden() {
-        let (url, server) = fake_server(
-            "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\n\r\nbusy",
-        );
+        let (url, server) =
+            fake_server("HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\n\r\nbusy");
         let response = post_json(&url, "{}", None, Duration::from_secs(5)).unwrap();
         assert_eq!(response.status, 503);
         assert_eq!(response.body, "busy");
@@ -570,7 +602,10 @@ mod tests {
         assert_eq!(status, 200);
         assert_eq!(seen, vec!["{\"n\":1}".to_string(), "{\"n\":2}".to_string()]);
         let sent = server.join().unwrap();
-        assert!(sent.contains("Accept: text/event-stream"), "we ask for a stream: {sent}");
+        assert!(
+            sent.contains("Accept: text/event-stream"),
+            "we ask for a stream: {sent}"
+        );
     }
 
     #[test]
@@ -586,7 +621,11 @@ mod tests {
             seen.push(data.to_string());
         })
         .unwrap();
-        assert_eq!(seen, vec!["{\"text\":\"hello\"}".to_string()], "one event, reassembled");
+        assert_eq!(
+            seen,
+            vec!["{\"text\":\"hello\"}".to_string()],
+            "one event, reassembled"
+        );
         server.join().unwrap();
     }
 
@@ -608,8 +647,13 @@ mod tests {
 
     #[test]
     fn a_dead_endpoint_is_an_error_not_a_hang() {
-        let err = post_json("http://127.0.0.1:1/v1", "{}", None, Duration::from_millis(500))
-            .unwrap_err();
+        let err = post_json(
+            "http://127.0.0.1:1/v1",
+            "{}",
+            None,
+            Duration::from_millis(500),
+        )
+        .unwrap_err();
         assert!(err.0.contains("connecting"), "{err}");
     }
 }

@@ -212,8 +212,10 @@ impl Session for Echo {
         for line in self.0.clone() {
             sink(line)?;
         }
-        sink(json!({"jsonrpc": "2.0", "id": id, "result": {"accepted": true, "turn_id": 1}})
-            .to_string())
+        sink(
+            json!({"jsonrpc": "2.0", "id": id, "result": {"accepted": true, "turn_id": 1}})
+                .to_string(),
+        )
     }
 }
 
@@ -244,7 +246,10 @@ mod tests {
         stream.read_to_string(&mut body).unwrap();
         assert!(body.starts_with("HTTP/1.1 200 OK"), "{body}");
         assert!(body.contains("text/html"), "{body}");
-        assert!(body.contains("loongagent"), "the page identifies itself: {body}");
+        assert!(
+            body.contains("loongagent"),
+            "the page identifies itself: {body}"
+        );
     }
 
     #[test]
@@ -253,8 +258,9 @@ mod tests {
             json!({"jsonrpc": "2.0", "method": "event", "params": {"kind": "message.appended", "data": {"role": "assistant", "text": "hello from the brain"}}}).to_string(),
         ])));
         let (addr, token) = start(session);
-        let request =
-            format!("ws://{addr}/ws?token={token}").into_client_request().unwrap();
+        let request = format!("ws://{addr}/ws?token={token}")
+            .into_client_request()
+            .unwrap();
         let (mut socket, _) = tungstenite::connect(request).unwrap();
 
         socket
@@ -265,7 +271,10 @@ mod tests {
 
         let first = socket.read().unwrap().into_text().unwrap().to_string();
         let second = socket.read().unwrap().into_text().unwrap().to_string();
-        assert!(first.contains("message.appended"), "the event came first: {first}");
+        assert!(
+            first.contains("message.appended"),
+            "the event came first: {first}"
+        );
         assert!(second.contains("\"id\":7"), "then the response: {second}");
         assert!(second.contains("accepted"), "{second}");
     }
@@ -278,7 +287,10 @@ mod tests {
         match tungstenite::connect(request) {
             Err(e) => {
                 let message = e.to_string();
-                assert!(message.contains("401") || message.contains("token"), "{message}");
+                assert!(
+                    message.contains("401") || message.contains("token"),
+                    "{message}"
+                );
             }
             Ok(_) => panic!("a connection without the token must not be accepted"),
         }
@@ -294,22 +306,33 @@ mod tests {
                 sink: &mut dyn FnMut(String) -> Result<(), String>,
             ) -> Result<(), String> {
                 for piece in ["one", "two"] {
-                    sink(json!({"jsonrpc": "2.0", "method": "model.delta",
-                                "params": {"turn_id": 1, "text": piece}}).to_string())?;
+                    sink(
+                        json!({"jsonrpc": "2.0", "method": "model.delta",
+                                "params": {"turn_id": 1, "text": piece}})
+                        .to_string(),
+                    )?;
                 }
                 sink(json!({"jsonrpc": "2.0", "id": 1, "result": {"accepted": true}}).to_string())
             }
         }
         let (addr, token) = start(Arc::new(Mutex::new(Trickle)));
-        let request = format!("ws://{addr}/ws?token={token}").into_client_request().unwrap();
+        let request = format!("ws://{addr}/ws?token={token}")
+            .into_client_request()
+            .unwrap();
         let (mut socket, _) = tungstenite::connect(request).unwrap();
         socket.send(Message::text("{}")).unwrap();
         let first = socket.read().unwrap().into_text().unwrap().to_string();
         let second = socket.read().unwrap().into_text().unwrap().to_string();
         let third = socket.read().unwrap().into_text().unwrap().to_string();
-        assert!(first.contains("model.delta") && first.contains("one"), "{first}");
+        assert!(
+            first.contains("model.delta") && first.contains("one"),
+            "{first}"
+        );
         assert!(second.contains("two"), "{second}");
-        assert!(third.contains("accepted"), "the response still comes last: {third}");
+        assert!(
+            third.contains("accepted"),
+            "the response still comes last: {third}"
+        );
     }
 
     #[test]
@@ -325,13 +348,17 @@ mod tests {
             }
         }
         let (addr, token) = start(Arc::new(Mutex::new(Broken)));
-        let request =
-            format!("ws://{addr}/ws?token={token}").into_client_request().unwrap();
+        let request = format!("ws://{addr}/ws?token={token}")
+            .into_client_request()
+            .unwrap();
         let (mut socket, _) = tungstenite::connect(request).unwrap();
         socket.send(Message::text("{}")).unwrap();
         let notice = socket.read().unwrap().into_text().unwrap().to_string();
         assert!(notice.contains("client.error"), "{notice}");
-        assert!(notice.contains("the server closed the connection"), "{notice}");
+        assert!(
+            notice.contains("the server closed the connection"),
+            "{notice}"
+        );
     }
 
     #[test]

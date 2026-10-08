@@ -99,10 +99,19 @@ impl McpClient {
             command.process_group(0);
         }
         let mut child = command.spawn().map_err(|e| {
-            err(format!("starting MCP server {:?} ({}): {e}", spec.name, spec.command))
+            err(format!(
+                "starting MCP server {:?} ({}): {e}",
+                spec.name, spec.command
+            ))
         })?;
-        let stdin = child.stdin.take().ok_or_else(|| err("no stdin on the server"))?;
-        let stdout = child.stdout.take().ok_or_else(|| err("no stdout on the server"))?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| err("no stdin on the server"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| err("no stdout on the server"))?;
 
         // A reader thread turns "the server is thinking" into a deadline rather
         // than a hang.
@@ -228,7 +237,11 @@ impl McpClient {
             .ok_or_else(|| err(format!("prompt {name:?} returned no messages")))?;
         let mut parts: Vec<(String, String)> = Vec::new();
         for message in messages {
-            let role = message.get("role").and_then(|r| r.as_str()).unwrap_or("user").to_string();
+            let role = message
+                .get("role")
+                .and_then(|r| r.as_str())
+                .unwrap_or("user")
+                .to_string();
             let text = match message.get("content") {
                 Some(Value::Array(blocks)) => blocks
                     .iter()
@@ -292,8 +305,15 @@ impl McpClient {
     /// the model sees a failed call rather than a successful one with bad news.
     pub fn call_tool(&mut self, tool: &str, args: &Json) -> Result<String, McpError> {
         let result = self.request("tools/call", json!({"name": tool, "arguments": args}))?;
-        if result.get("isError").and_then(|v| v.as_bool()).unwrap_or(false) {
-            return Err(err(format!("{tool} reported an error: {}", flatten(&result))));
+        if result
+            .get("isError")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            return Err(err(format!(
+                "{tool} reported an error: {}",
+                flatten(&result)
+            )));
         }
         let text = flatten(&result);
         if text.is_empty() {
@@ -327,7 +347,10 @@ impl McpClient {
                     )))
                 }
                 Err(RecvTimeoutError::Disconnected) => {
-                    return Err(err(format!("MCP server {:?} closed the connection", self.name)))
+                    return Err(err(format!(
+                        "MCP server {:?} closed the connection",
+                        self.name
+                    )))
                 }
             };
             // Notifications and server-initiated requests are not ours to answer
@@ -343,7 +366,10 @@ impl McpClient {
             let response = Response::parse(&line)
                 .map_err(|e| err(format!("{method}: unparseable reply: {e}")))?;
             if let Some(error) = response.error {
-                return Err(err(format!("{method}: server error {}: {}", error.code, error.message)));
+                return Err(err(format!(
+                    "{method}: server error {}: {}",
+                    error.code, error.message
+                )));
             }
             return Ok(response.result.unwrap_or(Value::Null));
         }
@@ -365,7 +391,10 @@ impl McpClient {
 /// value (and `unwrap_err()` in tests stays available).
 impl std::fmt::Debug for McpClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("McpClient").field("name", &self.name).field("pid", &self.child.id()).finish()
+        f.debug_struct("McpClient")
+            .field("name", &self.name)
+            .field("pid", &self.child.id())
+            .finish()
     }
 }
 
@@ -417,7 +446,11 @@ fn flatten(result: &Value) -> String {
     content
         .iter()
         .map(|block| match block.get("type").and_then(|t| t.as_str()) {
-            Some("text") => block.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string(),
+            Some("text") => block
+                .get("text")
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .to_string(),
             Some(other) => format!("[{other} content omitted]"),
             None => "[unrecognised content block]".to_string(),
         })
@@ -471,7 +504,11 @@ impl Tool for McpTool {
         self.schema.clone()
     }
     /// Declared by configuration, never guessed (see `mcp::config`).
-    fn action_class(&self, _args: &Json, _cwd: &std::path::Path) -> loong_schema::generated::ActionClass {
+    fn action_class(
+        &self,
+        _args: &Json,
+        _cwd: &std::path::Path,
+    ) -> loong_schema::generated::ActionClass {
         self.action_class
     }
     fn execute(&self, args: &Json, _ctx: &ExecContext<'_>) -> Result<String, ToolError> {
@@ -479,7 +516,9 @@ impl Tool for McpTool {
             .client
             .lock()
             .map_err(|_| ToolError::Failed(format!("the {} client is poisoned", self.server)))?;
-        client.call_tool(&self.tool, args).map_err(|e| ToolError::Failed(e.to_string()))
+        client
+            .call_tool(&self.tool, args)
+            .map_err(|e| ToolError::Failed(e.to_string()))
     }
 }
 
@@ -497,17 +536,15 @@ mod tests {
     /// test the client, and MCP servers are typically scripts anyway.
     fn fake_server() -> Option<PathBuf> {
         let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fake_mcp_server.py");
-        let python = ["python3", "python"]
-            .into_iter()
-            .find(|p| {
-                std::process::Command::new(p)
-                    .arg("--version")
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false)
-            })?;
+        let python = ["python3", "python"].into_iter().find(|p| {
+            std::process::Command::new(p)
+                .arg("--version")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        })?;
         let _ = python;
         script.exists().then_some(script)
     }
@@ -533,12 +570,18 @@ mod tests {
         };
         let mut client = McpClient::start(&spec(&script, "normal")).expect("the server starts");
         let tools = client.list_tools().unwrap();
-        assert_eq!(tools.len(), 4, "the fixture exposes ping, fail and two verdict tools: {tools:?}");
+        assert_eq!(
+            tools.len(),
+            4,
+            "the fixture exposes ping, fail and two verdict tools: {tools:?}"
+        );
         assert_eq!(tools[0].name, "ping");
         assert!(tools[0].description.contains("round-trip"));
         assert_eq!(tools[0].input_schema["type"], "object");
 
-        let out = client.call_tool("ping", &json!({"message": "hello"})).unwrap();
+        let out = client
+            .call_tool("ping", &json!({"message": "hello"}))
+            .unwrap();
         assert_eq!(out, "pong: hello");
     }
 
@@ -546,7 +589,10 @@ mod tests {
     fn prompts_are_listed_and_fetched() {
         let Some(script) = fake_server() else { return };
         let mut client = McpClient::start(&spec(&script, "normal")).unwrap();
-        assert!(client.capabilities().prompts, "the fixture advertises prompts");
+        assert!(
+            client.capabilities().prompts,
+            "the fixture advertises prompts"
+        );
         let prompts = client.list_prompts().unwrap();
         assert_eq!(prompts.len(), 3, "{prompts:?}");
         assert_eq!(prompts[0].name, "review");
@@ -557,11 +603,19 @@ mod tests {
         let mut arguments = serde_json::Map::new();
         arguments.insert("ref".to_string(), json!("HEAD~1"));
         let text = client.get_prompt("review", &arguments).unwrap();
-        assert_eq!(text, "Review HEAD~1 and report ONLY real bugs, each with file:line.");
+        assert_eq!(
+            text,
+            "Review HEAD~1 and report ONLY real bugs, each with file:line."
+        );
 
         // A multi-message prompt keeps its speakers.
-        let text = client.get_prompt("release", &serde_json::Map::new()).unwrap();
-        assert!(text.contains("[user] Walk the release checklist."), "{text}");
+        let text = client
+            .get_prompt("release", &serde_json::Map::new())
+            .unwrap();
+        assert!(
+            text.contains("[user] Walk the release checklist."),
+            "{text}"
+        );
         assert!(text.contains("[assistant] Understood."), "{text}");
     }
 
@@ -573,7 +627,10 @@ mod tests {
         assert_eq!(mapped["focus"], "security");
 
         let by_name = map_prompt_arguments(&names, "focus=perf HEAD~2");
-        assert_eq!(by_name["ref"], "HEAD~2", "the positional token fills the free slot");
+        assert_eq!(
+            by_name["ref"], "HEAD~2",
+            "the positional token fills the free slot"
+        );
         assert_eq!(by_name["focus"], "perf");
 
         // An undeclared `key=value` is a positional argument, not a silent drop.
@@ -587,14 +644,21 @@ mod tests {
         let Some(script) = fake_server() else { return };
         let mut client = McpClient::start(&spec(&script, "no-prompts")).unwrap();
         assert!(!client.capabilities().prompts);
-        assert_eq!(client.list_prompts().unwrap(), Vec::new(), "no prompts, no error");
+        assert_eq!(
+            client.list_prompts().unwrap(),
+            Vec::new(),
+            "no prompts, no error"
+        );
     }
 
     #[test]
     fn a_tool_that_reports_an_error_is_an_error() {
         let Some(script) = fake_server() else { return };
         let mut client = McpClient::start(&spec(&script, "normal")).unwrap();
-        let err = client.call_tool("fail", &json!({})).unwrap_err().to_string();
+        let err = client
+            .call_tool("fail", &json!({}))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("reported an error"), "{err}");
         assert!(err.contains("this tool always fails"), "{err}");
     }
@@ -603,7 +667,10 @@ mod tests {
     fn an_unknown_method_is_an_error_not_a_hang() {
         let Some(script) = fake_server() else { return };
         let mut client = McpClient::start(&spec(&script, "normal")).unwrap();
-        let err = client.request("does/not/exist", json!({})).unwrap_err().to_string();
+        let err = client
+            .request("does/not/exist", json!({}))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("server error"), "{err}");
     }
 
@@ -621,8 +688,13 @@ mod tests {
     #[test]
     fn a_server_that_dies_is_reported() {
         let Some(script) = fake_server() else { return };
-        let err = McpClient::start(&spec(&script, "die")).unwrap_err().to_string();
-        assert!(err.contains("closed the connection") || err.contains("no answer"), "{err}");
+        let err = McpClient::start(&spec(&script, "die"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("closed the connection") || err.contains("no answer"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -637,13 +709,20 @@ mod tests {
     #[test]
     fn tools_are_namespaced_and_keep_their_declared_class() {
         let Some(script) = fake_server() else { return };
-        let client = Arc::new(Mutex::new(McpClient::start(&spec(&script, "normal")).unwrap()));
+        let client = Arc::new(Mutex::new(
+            McpClient::start(&spec(&script, "normal")).unwrap(),
+        ));
         let info = McpToolInfo {
             name: "ping".to_string(),
             description: "round-trip".to_string(),
             input_schema: json!({"type": "object"}),
         };
-        let tool = McpTool::new("fake", info.clone(), loong_schema::generated::ActionClass::Investigate, client.clone());
+        let tool = McpTool::new(
+            "fake",
+            info.clone(),
+            loong_schema::generated::ActionClass::Investigate,
+            client.clone(),
+        );
         assert_eq!(tool.name(), "mcp__fake__ping");
         assert_eq!(tool.server(), "fake");
         assert_eq!(
@@ -651,7 +730,10 @@ mod tests {
             loong_schema::generated::ActionClass::Investigate
         );
         let ctx = ExecContext::new(std::path::Path::new("/tmp"), &loong_tools::NoConfinement);
-        assert_eq!(tool.execute(&json!({"message": "hi"}), &ctx).unwrap(), "pong: hi");
+        assert_eq!(
+            tool.execute(&json!({"message": "hi"}), &ctx).unwrap(),
+            "pong: hi"
+        );
     }
 
     #[test]

@@ -112,7 +112,11 @@ pub struct Ledger {
 
 impl Ledger {
     pub fn new(budget: Option<u64>) -> Self {
-        Self { entries: Vec::new(), next_id: 1, budget }
+        Self {
+            entries: Vec::new(),
+            next_id: 1,
+            budget,
+        }
     }
 
     pub fn budget(&self) -> Option<u64> {
@@ -275,15 +279,33 @@ mod tests {
 
     fn ledger_with_budget(b: u64) -> Ledger {
         let mut l = Ledger::new(Some(b));
-        l.add(Category::SystemPrompt, "system", &"s".repeat(40), Lifetime::Session, true);
+        l.add(
+            Category::SystemPrompt,
+            "system",
+            &"s".repeat(40),
+            Lifetime::Session,
+            true,
+        );
         l
     }
 
     #[test]
     fn tokens_are_counted_and_attributed() {
         let mut l = Ledger::new(None);
-        l.add(Category::SystemPrompt, "system", &"a".repeat(40), Lifetime::Session, true);
-        l.add(Category::Rules, "AGENTS.md", &"b".repeat(8), Lifetime::Session, false);
+        l.add(
+            Category::SystemPrompt,
+            "system",
+            &"a".repeat(40),
+            Lifetime::Session,
+            true,
+        );
+        l.add(
+            Category::Rules,
+            "AGENTS.md",
+            &"b".repeat(8),
+            Lifetime::Session,
+            false,
+        );
         assert_eq!(l.total_tokens(), 10 + 2);
         let by = l.tokens_by_category();
         assert_eq!(by["system_prompt"], 10);
@@ -293,7 +315,13 @@ mod tests {
     #[test]
     fn eviction_drops_history_before_the_system_prompt() {
         let mut l = ledger_with_budget(40);
-        l.add(Category::History, "tool:read_file", &"h".repeat(400), Lifetime::Session, false);
+        l.add(
+            Category::History,
+            "tool:read_file",
+            &"h".repeat(400),
+            Lifetime::Session,
+            false,
+        );
         assert!(l.total_tokens() > 40);
         let report = l.evict_to_budget();
         assert_eq!(report.removed.len(), 1);
@@ -306,7 +334,13 @@ mod tests {
     #[test]
     fn pinned_entries_are_never_evicted_and_the_report_says_so() {
         let mut l = ledger_with_budget(5); // the pinned system prompt alone is 10
-        l.add(Category::History, "h", &"x".repeat(400), Lifetime::Session, false);
+        l.add(
+            Category::History,
+            "h",
+            &"x".repeat(400),
+            Lifetime::Session,
+            false,
+        );
         let report = l.evict_to_budget();
         assert!(report.still_over_budget, "only pinned entries remain");
         assert_eq!(l.len(), 1);
@@ -316,7 +350,13 @@ mod tests {
     #[test]
     fn explain_answers_why_each_entry_is_present() {
         let mut l = Ledger::new(None);
-        l.add(Category::Retrieval, "repo-map", "abc", Lifetime::Turn, false);
+        l.add(
+            Category::Retrieval,
+            "repo-map",
+            "abc",
+            Lifetime::Turn,
+            false,
+        );
         let rows = l.explain();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].category, "retrieval");
@@ -328,8 +368,20 @@ mod tests {
     #[test]
     fn retrieval_is_evicted_before_rules() {
         let mut l = Ledger::new(Some(4));
-        l.add(Category::Rules, "rules", &"r".repeat(8), Lifetime::Session, false); // 2
-        l.add(Category::Retrieval, "map", &"m".repeat(40), Lifetime::Turn, false); // 10
+        l.add(
+            Category::Rules,
+            "rules",
+            &"r".repeat(8),
+            Lifetime::Session,
+            false,
+        ); // 2
+        l.add(
+            Category::Retrieval,
+            "map",
+            &"m".repeat(40),
+            Lifetime::Turn,
+            false,
+        ); // 10
         let report = l.evict_to_budget();
         assert_eq!(report.removed.len(), 1);
         assert_eq!(report.removed[0].category, Category::Retrieval);

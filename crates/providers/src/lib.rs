@@ -131,7 +131,10 @@ pub struct ScriptedModel {
 
 impl ScriptedModel {
     pub fn new(responses: Vec<CompletionResponse>) -> Self {
-        Self { responses, cursor: 0 }
+        Self {
+            responses,
+            cursor: 0,
+        }
     }
 
     /// A model that immediately answers with text and no tool calls.
@@ -139,7 +142,10 @@ impl ScriptedModel {
         Self::new(vec![CompletionResponse {
             text: Some(text.to_string()),
             tool_calls: Vec::new(),
-            usage: Usage { tokens_in: 1, tokens_out: 1 },
+            usage: Usage {
+                tokens_in: 1,
+                tokens_out: 1,
+            },
         }])
     }
 
@@ -152,11 +158,15 @@ impl ScriptedModel {
 
 impl Model for ScriptedModel {
     fn complete(&mut self, _req: &CompletionRequest) -> Result<CompletionResponse, ModelError> {
-        let response = self.responses.get(self.cursor).cloned().unwrap_or(CompletionResponse {
-            text: Some("done".to_string()),
-            tool_calls: Vec::new(),
-            usage: Usage::default(),
-        });
+        let response = self
+            .responses
+            .get(self.cursor)
+            .cloned()
+            .unwrap_or(CompletionResponse {
+                text: Some("done".to_string()),
+                tool_calls: Vec::new(),
+                usage: Usage::default(),
+            });
         self.cursor += 1;
         Ok(response)
     }
@@ -176,9 +186,15 @@ mod tests {
                 tool: "read_file".into(),
                 args: json!({"path": "a.txt"}),
             }],
-            usage: Usage { tokens_in: 10, tokens_out: 2 },
+            usage: Usage {
+                tokens_in: 10,
+                tokens_out: 2,
+            },
         }]);
-        let req = CompletionRequest { messages: vec![], tools: vec![] };
+        let req = CompletionRequest {
+            messages: vec![],
+            tools: vec![],
+        };
         let first = m.complete(&req).unwrap();
         assert_eq!(first.tool_calls.len(), 1);
         assert_eq!(first.tool_calls[0].tool, "read_file");
@@ -190,9 +206,11 @@ mod tests {
 
     #[test]
     fn chat_messages_are_tagged_on_the_wire() {
-        let wire =
-            serde_json::to_value(ChatMessage::Tool { call_id: "c1".into(), output: "ok".into() })
-                .unwrap();
+        let wire = serde_json::to_value(ChatMessage::Tool {
+            call_id: "c1".into(),
+            output: "ok".into(),
+        })
+        .unwrap();
         assert_eq!(wire["role"], "tool");
         let assistant = serde_json::to_value(ChatMessage::Assistant {
             text: Some("hi".into()),

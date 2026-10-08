@@ -89,30 +89,42 @@ impl McpSet {
         let mut servers = Vec::new();
         let mut seen = std::collections::BTreeSet::new();
         for (index, raw) in file.server.iter().enumerate() {
-            let where_ = raw.name.clone().unwrap_or_else(|| format!("#{}", index + 1));
+            let where_ = raw
+                .name
+                .clone()
+                .unwrap_or_else(|| format!("#{}", index + 1));
             let name = raw
                 .name
                 .clone()
                 .ok_or_else(|| ConfigError::Invalid(format!("{where_}: a server needs a name")))?;
             if !seen.insert(name.clone()) {
-                return Err(ConfigError::Invalid(format!("{name}: duplicate server name")));
+                return Err(ConfigError::Invalid(format!(
+                    "{name}: duplicate server name"
+                )));
             }
             if name.contains("__") || name.contains(' ') {
                 return Err(ConfigError::Invalid(format!(
                     "{name}: a server name may not contain \"__\" or spaces (it namespaces tool names)"
                 )));
             }
-            let command = raw.command.clone().filter(|c| !c.trim().is_empty()).ok_or_else(|| {
-                ConfigError::Invalid(format!("{name}: a server needs a command"))
-            })?;
+            let command = raw
+                .command
+                .clone()
+                .filter(|c| !c.trim().is_empty())
+                .ok_or_else(|| ConfigError::Invalid(format!("{name}: a server needs a command")))?;
 
-            let action_class = parse_class(&name, raw.action_class.as_deref().unwrap_or("out_of_bounds"))?;
+            let action_class = parse_class(
+                &name,
+                raw.action_class.as_deref().unwrap_or("out_of_bounds"),
+            )?;
             let mut tools = BTreeMap::new();
             for (tool, class) in &raw.tools {
                 tools.insert(tool.clone(), parse_class(&name, class)?);
             }
             let timeout = Duration::from_millis(
-                raw.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS).min(MAX_TIMEOUT_MS),
+                raw.timeout_ms
+                    .unwrap_or(DEFAULT_TIMEOUT_MS)
+                    .min(MAX_TIMEOUT_MS),
             );
 
             servers.push(McpServerSpec {
@@ -128,9 +140,14 @@ impl McpSet {
         }
 
         let sources = sources_of(&dir, &manifest, &servers);
-        let trust = loong_manifest::check(&dir.join(MCP_TRUST_FILE), &sources)
-            .map_err(ConfigError::Io)?;
-        Ok(Self { workspace, dir, servers, trust })
+        let trust =
+            loong_manifest::check(&dir.join(MCP_TRUST_FILE), &sources).map_err(ConfigError::Io)?;
+        Ok(Self {
+            workspace,
+            dir,
+            servers,
+            trust,
+        })
     }
 
     /// The servers that may actually run: none until the bytes are trusted.
@@ -154,18 +171,16 @@ impl McpSet {
             loong_manifest::TrustStatus::Trusted => {
                 format!("{} MCP server(s), trusted", self.servers.len())
             }
-            loong_manifest::TrustStatus::Untrusted { changed } => {
-                loong_manifest::inert_message(&loong_manifest::Sources::new(), changed, "run `loongagent mcp trust`")
-            }
+            loong_manifest::TrustStatus::Untrusted { changed } => loong_manifest::inert_message(
+                &loong_manifest::Sources::new(),
+                changed,
+                "run `loongagent mcp trust`",
+            ),
         }
     }
 }
 
-fn sources_of(
-    dir: &Path,
-    manifest: &Path,
-    servers: &[McpServerSpec],
-) -> loong_manifest::Sources {
+fn sources_of(dir: &Path, manifest: &Path, servers: &[McpServerSpec]) -> loong_manifest::Sources {
     let _ = (dir, servers);
     vec![(MCP_FILE.to_string(), manifest.to_path_buf())]
 }
@@ -257,9 +272,18 @@ mod tests {
         write(&ws, "[[server]]\nname = \"fs\"\ncommand = \"node\"\n");
         let set = McpSet::load(&ws).unwrap();
         assert_eq!(set.servers[0].action_class, ActionClass::OutOfBounds);
-        assert_eq!(set.servers[0].class_for("anything"), ActionClass::OutOfBounds);
-        assert!(set.servers[0].required, "a configured server is required by default");
-        assert_eq!(set.servers[0].timeout, Duration::from_millis(DEFAULT_TIMEOUT_MS));
+        assert_eq!(
+            set.servers[0].class_for("anything"),
+            ActionClass::OutOfBounds
+        );
+        assert!(
+            set.servers[0].required,
+            "a configured server is required by default"
+        );
+        assert_eq!(
+            set.servers[0].timeout,
+            Duration::from_millis(DEFAULT_TIMEOUT_MS)
+        );
     }
 
     #[test]
@@ -282,25 +306,46 @@ mod tests {
         let ws = workspace();
 
         write(&ws, "[[server]]\ncommand = \"node\"\n");
-        assert!(McpSet::load(&ws).unwrap_err().to_string().contains("needs a name"));
+        assert!(McpSet::load(&ws)
+            .unwrap_err()
+            .to_string()
+            .contains("needs a name"));
 
         write(&ws, "[[server]]\nname = \"a b\"\ncommand = \"node\"\n");
-        assert!(McpSet::load(&ws).unwrap_err().to_string().contains("namespace"));
+        assert!(McpSet::load(&ws)
+            .unwrap_err()
+            .to_string()
+            .contains("namespace"));
 
         write(&ws, "[[server]]\nname = \"a\"\n");
-        assert!(McpSet::load(&ws).unwrap_err().to_string().contains("needs a command"));
+        assert!(McpSet::load(&ws)
+            .unwrap_err()
+            .to_string()
+            .contains("needs a command"));
 
-        write(&ws, "[[server]]\nname = \"a\"\ncommand = \"node\"\naction_class = \"whatever\"\n");
-        assert!(McpSet::load(&ws).unwrap_err().to_string().contains("unknown action_class"));
+        write(
+            &ws,
+            "[[server]]\nname = \"a\"\ncommand = \"node\"\naction_class = \"whatever\"\n",
+        );
+        assert!(McpSet::load(&ws)
+            .unwrap_err()
+            .to_string()
+            .contains("unknown action_class"));
 
         write(
             &ws,
             "[[server]]\nname = \"a\"\ncommand = \"node\"\n\n[[server]]\nname = \"a\"\ncommand = \"node\"\n",
         );
-        assert!(McpSet::load(&ws).unwrap_err().to_string().contains("duplicate"));
+        assert!(McpSet::load(&ws)
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate"));
 
         write(&ws, "not toml {{{");
-        assert!(matches!(McpSet::load(&ws).unwrap_err(), ConfigError::Parse(_)));
+        assert!(matches!(
+            McpSet::load(&ws).unwrap_err(),
+            ConfigError::Parse(_)
+        ));
     }
 
     #[test]
@@ -308,9 +353,15 @@ mod tests {
         let ws = workspace();
         write(&ws, "[[server]]\nname = \"a\"\ncommand = \"node\"\n");
         McpSet::load(&ws).unwrap().trust_now().unwrap();
-        assert_eq!(McpSet::load(&ws).unwrap().trust, loong_manifest::TrustStatus::Trusted);
+        assert_eq!(
+            McpSet::load(&ws).unwrap().trust,
+            loong_manifest::TrustStatus::Trusted
+        );
 
-        write(&ws, "[[server]]\nname = \"a\"\ncommand = \"node\"\nargs = [\"--evil\"]\n");
+        write(
+            &ws,
+            "[[server]]\nname = \"a\"\ncommand = \"node\"\nargs = [\"--evil\"]\n",
+        );
         match McpSet::load(&ws).unwrap().trust {
             loong_manifest::TrustStatus::Untrusted { changed } => {
                 assert_eq!(changed, vec![MCP_FILE.to_string()])

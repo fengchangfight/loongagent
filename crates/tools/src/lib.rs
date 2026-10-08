@@ -11,8 +11,8 @@
 pub mod search;
 
 use loong_schema::generated::{ActionClass, Json};
-use serde_json::json;
 use search::{Glob, Grep};
+use serde_json::json;
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -116,7 +116,13 @@ impl Registry {
     pub fn specs(&self) -> Vec<(String, String, Json)> {
         self.tools
             .values()
-            .map(|t| (t.name().to_string(), t.description().to_string(), t.parameters()))
+            .map(|t| {
+                (
+                    t.name().to_string(),
+                    t.description().to_string(),
+                    t.parameters(),
+                )
+            })
             .collect()
     }
 }
@@ -126,7 +132,11 @@ impl Registry {
 /// that do not exist yet (a write target).
 pub fn resolve(cwd: &Path, target: &str) -> PathBuf {
     let p = Path::new(target);
-    let joined = if p.is_absolute() { p.to_path_buf() } else { cwd.join(p) };
+    let joined = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        cwd.join(p)
+    };
     let mut out = PathBuf::new();
     for c in joined.components() {
         match c {
@@ -231,7 +241,11 @@ impl Tool for WriteFile {
             std::fs::create_dir_all(dir).map_err(|e| ToolError::Failed(e.to_string()))?;
         }
         std::fs::write(&path, &content).map_err(|e| ToolError::Failed(e.to_string()))?;
-        Ok(format!("wrote {} bytes to {}", content.len(), path.display()))
+        Ok(format!(
+            "wrote {} bytes to {}",
+            content.len(),
+            path.display()
+        ))
     }
 }
 
@@ -286,11 +300,13 @@ impl Tool for Edit {
                 "old_string and new_string are identical — there is nothing to do".into(),
             ));
         }
-        let replace_all = args.get("replace_all").and_then(|v| v.as_bool()).unwrap_or(false);
+        let replace_all = args
+            .get("replace_all")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
-        let original = std::fs::read_to_string(&path).map_err(|e| {
-            ToolError::Failed(format!("reading {}: {e}", path.display()))
-        })?;
+        let original = std::fs::read_to_string(&path)
+            .map_err(|e| ToolError::Failed(format!("reading {}: {e}", path.display())))?;
         let occurrences = original.matches(&old).count();
         if occurrences == 0 {
             return Err(ToolError::Refused(format!(
@@ -314,9 +330,8 @@ impl Tool for Edit {
         };
         let lines_before = original.lines().count();
         let lines_after = replaced.lines().count();
-        std::fs::write(&path, &replaced).map_err(|e| {
-            ToolError::Failed(format!("writing {}: {e}", path.display()))
-        })?;
+        std::fs::write(&path, &replaced)
+            .map_err(|e| ToolError::Failed(format!("writing {}: {e}", path.display())))?;
 
         let at = line_numbers(&original, &old);
         Ok(format!(
@@ -327,7 +342,13 @@ impl Tool for Edit {
             if at.is_empty() {
                 String::new()
             } else {
-                format!(" at line {}", at.iter().map(|l| l.to_string()).collect::<Vec<_>>().join(", "))
+                format!(
+                    " at line {}",
+                    at.iter()
+                        .map(|l| l.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
             },
             lines_before,
             lines_after
@@ -363,25 +384,86 @@ pub struct Shell {
 
 impl Default for Shell {
     fn default() -> Self {
-        Self { timeout: Duration::from_secs(120), output_limit: 64 * 1024 }
+        Self {
+            timeout: Duration::from_secs(120),
+            output_limit: 64 * 1024,
+        }
     }
 }
 
 /// Commands that are read-only by intent.
 const READ_ONLY: &[&str] = &[
-    "ls", "cat", "head", "tail", "grep", "rg", "find", "wc", "pwd", "which", "env", "echo",
-    "stat", "file", "du", "df", "date", "whoami", "git status", "git diff", "git log", "git show",
-    "git branch", "git remote", "git describe", "git rev-parse", "cargo metadata", "cargo tree",
+    "ls",
+    "cat",
+    "head",
+    "tail",
+    "grep",
+    "rg",
+    "find",
+    "wc",
+    "pwd",
+    "which",
+    "env",
+    "echo",
+    "stat",
+    "file",
+    "du",
+    "df",
+    "date",
+    "whoami",
+    "git status",
+    "git diff",
+    "git log",
+    "git show",
+    "git branch",
+    "git remote",
+    "git describe",
+    "git rev-parse",
+    "cargo metadata",
+    "cargo tree",
 ];
 
 /// Commands that reach the network, touch devices, escalate privilege, or are
 /// destructive on sight.
 const OUT_OF_BOUNDS: &[&str] = &[
-    "curl", "wget", "ssh ", "scp ", "sftp ", "nc ", "ncat", "telnet", "rsync ", "git push",
-    "git fetch", "git clone", "npm install", "npm i ", "npm publish", "pnpm add", "pnpm install",
-    "yarn add", "pip install", "pip3 install", "cargo install", "cargo publish", "docker pull",
-    "docker run", "apt install", "apt-get install", "sudo", "doas ", "mkfs", "dd if=", "shutdown",
-    "reboot", "poweroff", "chmod -r 777 /", "chown -r ", ":(){", "> /dev/sd", "> /dev/null 2>&1;",
+    "curl",
+    "wget",
+    "ssh ",
+    "scp ",
+    "sftp ",
+    "nc ",
+    "ncat",
+    "telnet",
+    "rsync ",
+    "git push",
+    "git fetch",
+    "git clone",
+    "npm install",
+    "npm i ",
+    "npm publish",
+    "pnpm add",
+    "pnpm install",
+    "yarn add",
+    "pip install",
+    "pip3 install",
+    "cargo install",
+    "cargo publish",
+    "docker pull",
+    "docker run",
+    "apt install",
+    "apt-get install",
+    "sudo",
+    "doas ",
+    "mkfs",
+    "dd if=",
+    "shutdown",
+    "reboot",
+    "poweroff",
+    "chmod -r 777 /",
+    "chown -r ",
+    ":(){",
+    "> /dev/sd",
+    "> /dev/null 2>&1;",
 ];
 
 /// Verbs that mutate the filesystem.
@@ -438,7 +520,9 @@ pub fn classify_command(command: &str, cwd: &Path) -> ActionClass {
         if !segments.is_empty()
             && segments.iter().all(|s| {
                 let s = s.to_lowercase();
-                READ_ONLY.iter().any(|r| s == *r || s.starts_with(&format!("{r} ")))
+                READ_ONLY
+                    .iter()
+                    .any(|r| s == *r || s.starts_with(&format!("{r} ")))
             })
         {
             return ActionClass::Investigate;
@@ -564,21 +648,43 @@ mod tests {
         let cwd = tempdir();
         let c = NoConfinement;
         let w = WriteFile;
-        let ok = w.execute(&json!({"path": "sub/a.txt", "content": "hi"}), &ctx(&cwd, &c)).unwrap();
+        let ok = w
+            .execute(
+                &json!({"path": "sub/a.txt", "content": "hi"}),
+                &ctx(&cwd, &c),
+            )
+            .unwrap();
         assert!(ok.contains("2 bytes"));
-        assert_eq!(std::fs::read_to_string(cwd.join("sub/a.txt")).unwrap(), "hi");
+        assert_eq!(
+            std::fs::read_to_string(cwd.join("sub/a.txt")).unwrap(),
+            "hi"
+        );
 
-        let outside =
-            w.execute(&json!({"path": "/tmp/loong-escape.txt", "content": "x"}), &ctx(&cwd, &c));
-        assert!(matches!(outside, Err(ToolError::Refused(_))), "a write outside is refused");
+        let outside = w.execute(
+            &json!({"path": "/tmp/loong-escape.txt", "content": "x"}),
+            &ctx(&cwd, &c),
+        );
+        assert!(
+            matches!(outside, Err(ToolError::Refused(_))),
+            "a write outside is refused"
+        );
     }
 
     #[test]
     fn action_class_follows_the_path_not_the_tool() {
         let cwd = Path::new("/work");
-        assert_eq!(classify_path(cwd, "src/main.rs"), ActionClass::WriteWorkspace);
-        assert_eq!(classify_path(cwd, "/work/src/x"), ActionClass::WriteWorkspace);
-        assert_eq!(classify_path(cwd, "../etc/passwd"), ActionClass::OutOfBounds);
+        assert_eq!(
+            classify_path(cwd, "src/main.rs"),
+            ActionClass::WriteWorkspace
+        );
+        assert_eq!(
+            classify_path(cwd, "/work/src/x"),
+            ActionClass::WriteWorkspace
+        );
+        assert_eq!(
+            classify_path(cwd, "../etc/passwd"),
+            ActionClass::OutOfBounds
+        );
         assert_eq!(classify_path(cwd, "/etc/passwd"), ActionClass::OutOfBounds);
         let r = ReadFile;
         assert_eq!(
@@ -586,7 +692,10 @@ mod tests {
             ActionClass::Investigate,
             "reading inside the workspace has no side effects"
         );
-        assert_eq!(r.action_class(&json!({"path": "/etc/shadow"}), cwd), ActionClass::OutOfBounds);
+        assert_eq!(
+            r.action_class(&json!({"path": "/etc/shadow"}), cwd),
+            ActionClass::OutOfBounds
+        );
         assert_eq!(r.action_class(&json!({}), cwd), ActionClass::OutOfBounds);
     }
 
@@ -602,7 +711,10 @@ mod tests {
             WriteFile.execute(&json!({"path": "a"}), &ctx(&cwd, &c)),
             Err(ToolError::Refused(_))
         ));
-        assert!(matches!(Shell::default().execute(&json!({}), &ctx(&cwd, &c)), Err(ToolError::Refused(_))));
+        assert!(matches!(
+            Shell::default().execute(&json!({}), &ctx(&cwd, &c)),
+            Err(ToolError::Refused(_))
+        ));
     }
 
     #[test]
@@ -618,7 +730,10 @@ mod tests {
             .unwrap();
         assert!(out.contains("replaced 1 of 1"), "{out}");
         assert!(out.contains("line 2"), "{out}");
-        assert_eq!(std::fs::read_to_string(cwd.join("a.txt")).unwrap(), "one\nTWO\nthree\n");
+        assert_eq!(
+            std::fs::read_to_string(cwd.join("a.txt")).unwrap(),
+            "one\nTWO\nthree\n"
+        );
     }
 
     #[test]
@@ -633,7 +748,10 @@ mod tests {
             )
             .unwrap_err();
         assert!(err.to_string().contains("was not found"), "{err}");
-        assert_eq!(std::fs::read_to_string(cwd.join("a.txt")).unwrap(), "content\n");
+        assert_eq!(
+            std::fs::read_to_string(cwd.join("a.txt")).unwrap(),
+            "content\n"
+        );
     }
 
     #[test]
@@ -642,12 +760,18 @@ mod tests {
         std::fs::write(cwd.join("a.txt"), "dup\nmid\ndup\n").unwrap();
         let c = NoConfinement;
         let err = Edit
-            .execute(&json!({"path": "a.txt", "old_string": "dup", "new_string": "x"}), &ctx(&cwd, &c))
+            .execute(
+                &json!({"path": "a.txt", "old_string": "dup", "new_string": "x"}),
+                &ctx(&cwd, &c),
+            )
             .unwrap_err();
         let message = err.to_string();
         assert!(message.contains("occurs 2 times"), "{message}");
         assert!(message.contains("lines 1, 3"), "{message}");
-        assert_eq!(std::fs::read_to_string(cwd.join("a.txt")).unwrap(), "dup\nmid\ndup\n");
+        assert_eq!(
+            std::fs::read_to_string(cwd.join("a.txt")).unwrap(),
+            "dup\nmid\ndup\n"
+        );
     }
 
     #[test]
@@ -662,7 +786,10 @@ mod tests {
             )
             .unwrap();
         assert!(out.contains("replaced 2 of 2"), "{out}");
-        assert_eq!(std::fs::read_to_string(cwd.join("a.txt")).unwrap(), "x\nmid\nx\n");
+        assert_eq!(
+            std::fs::read_to_string(cwd.join("a.txt")).unwrap(),
+            "x\nmid\nx\n"
+        );
     }
 
     #[test]
@@ -678,10 +805,16 @@ mod tests {
         ));
         std::fs::write(cwd.join("a.txt"), "same\n").unwrap();
         assert!(matches!(
-            Edit.execute(&json!({"path": "a.txt", "old_string": "same", "new_string": "same"}), &ctx(&cwd, &c)),
+            Edit.execute(
+                &json!({"path": "a.txt", "old_string": "same", "new_string": "same"}),
+                &ctx(&cwd, &c)
+            ),
             Err(ToolError::Refused(_))
         ));
-        assert!(matches!(Edit.execute(&json!({}), &ctx(&cwd, &c)), Err(ToolError::Refused(_))));
+        assert!(matches!(
+            Edit.execute(&json!({}), &ctx(&cwd, &c)),
+            Err(ToolError::Refused(_))
+        ));
     }
 
     #[test]
@@ -694,17 +827,27 @@ mod tests {
             &ctx(&cwd, &c),
         )
         .unwrap();
-        assert_eq!(std::fs::read_to_string(cwd.join("a.rs")).unwrap(), "fn a() -> i32 {\n    1\n}\n");
+        assert_eq!(
+            std::fs::read_to_string(cwd.join("a.rs")).unwrap(),
+            "fn a() -> i32 {\n    1\n}\n"
+        );
     }
 
     #[test]
     fn registry_exposes_specs_for_the_model() {
         let r = Registry::with_builtins();
-        assert_eq!(r.names(), vec!["edit", "glob", "grep", "read_file", "shell", "write_file"]);
+        assert_eq!(
+            r.names(),
+            vec!["edit", "glob", "grep", "read_file", "shell", "write_file"]
+        );
         let specs = r.specs();
         assert_eq!(specs.len(), 6);
-        assert!(specs.iter().any(|(n, d, _)| n == "read_file" && !d.is_empty()));
-        assert!(specs.iter().all(|(_, d, p)| !d.is_empty() && p["type"] == "object"));
+        assert!(specs
+            .iter()
+            .any(|(n, d, _)| n == "read_file" && !d.is_empty()));
+        assert!(specs
+            .iter()
+            .all(|(_, d, p)| !d.is_empty() && p["type"] == "object"));
     }
 
     // ------------------------------------------------------- the classifier
@@ -714,21 +857,54 @@ mod tests {
         let cwd = Path::new("/work");
         // read-only → investigate (no prompt)
         assert_eq!(classify_command("ls -la", cwd), ActionClass::Investigate);
-        assert_eq!(classify_command("cat src/main.rs | grep fn", cwd), ActionClass::Investigate);
-        assert_eq!(classify_command("git status --short", cwd), ActionClass::Investigate);
+        assert_eq!(
+            classify_command("cat src/main.rs | grep fn", cwd),
+            ActionClass::Investigate
+        );
+        assert_eq!(
+            classify_command("git status --short", cwd),
+            ActionClass::Investigate
+        );
         // writes inside the workspace → workspace write
-        assert_eq!(classify_command("echo hi > inside.txt", cwd), ActionClass::WriteWorkspace);
-        assert_eq!(classify_command("cargo test --workspace", cwd), ActionClass::WriteWorkspace);
-        assert_eq!(classify_command("rm -rf target/", cwd), ActionClass::WriteWorkspace);
+        assert_eq!(
+            classify_command("echo hi > inside.txt", cwd),
+            ActionClass::WriteWorkspace
+        );
+        assert_eq!(
+            classify_command("cargo test --workspace", cwd),
+            ActionClass::WriteWorkspace
+        );
+        assert_eq!(
+            classify_command("rm -rf target/", cwd),
+            ActionClass::WriteWorkspace
+        );
         // out of bounds: leaving the workspace, the network, privilege, destructiveness
-        assert_eq!(classify_command("echo hi > /etc/passwd", cwd), ActionClass::OutOfBounds);
+        assert_eq!(
+            classify_command("echo hi > /etc/passwd", cwd),
+            ActionClass::OutOfBounds
+        );
         assert_eq!(classify_command("rm -rf /", cwd), ActionClass::OutOfBounds);
-        assert_eq!(classify_command("curl https://example.com", cwd), ActionClass::OutOfBounds);
-        assert_eq!(classify_command("git push origin main", cwd), ActionClass::OutOfBounds);
-        assert_eq!(classify_command("sudo rm -rf /var", cwd), ActionClass::OutOfBounds);
-        assert_eq!(classify_command("cp secrets.txt /elsewhere/", cwd), ActionClass::OutOfBounds);
+        assert_eq!(
+            classify_command("curl https://example.com", cwd),
+            ActionClass::OutOfBounds
+        );
+        assert_eq!(
+            classify_command("git push origin main", cwd),
+            ActionClass::OutOfBounds
+        );
+        assert_eq!(
+            classify_command("sudo rm -rf /var", cwd),
+            ActionClass::OutOfBounds
+        );
+        assert_eq!(
+            classify_command("cp secrets.txt /elsewhere/", cwd),
+            ActionClass::OutOfBounds
+        );
         // an unknown command is conservatively a workspace write
-        assert_eq!(classify_command("./deploy.sh", cwd), ActionClass::WriteWorkspace);
+        assert_eq!(
+            classify_command("./deploy.sh", cwd),
+            ActionClass::WriteWorkspace
+        );
         assert_eq!(classify_command("", cwd), ActionClass::Investigate);
     }
 
@@ -739,8 +915,13 @@ mod tests {
         let cwd = tempdir();
         std::fs::write(cwd.join("a.txt"), "hello from a file").unwrap();
         let c = NoConfinement;
-        let shell = Shell { timeout: Duration::from_secs(10), output_limit: 4096 };
-        let out = shell.execute(&json!({"command": "cat a.txt"}), &ctx(&cwd, &c)).unwrap();
+        let shell = Shell {
+            timeout: Duration::from_secs(10),
+            output_limit: 4096,
+        };
+        let out = shell
+            .execute(&json!({"command": "cat a.txt"}), &ctx(&cwd, &c))
+            .unwrap();
         assert!(out.contains("exit 0"), "{out}");
         assert!(out.contains("hello from a file"), "{out}");
         assert!(out.contains("--- stdout ---"), "{out}");
@@ -750,7 +931,10 @@ mod tests {
     fn a_failing_command_reports_the_exit_code_and_stderr() {
         let cwd = tempdir();
         let c = NoConfinement;
-        let shell = Shell { timeout: Duration::from_secs(10), output_limit: 4096 };
+        let shell = Shell {
+            timeout: Duration::from_secs(10),
+            output_limit: 4096,
+        };
         let err = shell
             .execute(&json!({"command": "echo boom >&2; exit 3"}), &ctx(&cwd, &c))
             .unwrap_err();
@@ -763,31 +947,54 @@ mod tests {
     fn output_is_bounded_per_stream() {
         let cwd = tempdir();
         let c = NoConfinement;
-        let shell = Shell { timeout: Duration::from_secs(20), output_limit: 2048 };
+        let shell = Shell {
+            timeout: Duration::from_secs(20),
+            output_limit: 2048,
+        };
         let out = shell
-            .execute(&json!({"command": "yes aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa | head -n 500"}), &ctx(&cwd, &c))
+            .execute(
+                &json!({"command": "yes aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa | head -n 500"}),
+                &ctx(&cwd, &c),
+            )
             .unwrap();
         assert!(out.contains("output truncated at 2048 bytes"), "{out}");
-        assert!(out.len() < 6000, "the report stays small: {} bytes", out.len());
+        assert!(
+            out.len() < 6000,
+            "the report stays small: {} bytes",
+            out.len()
+        );
     }
 
     #[test]
     fn a_hung_command_is_killed_by_the_timeout() {
         let cwd = tempdir();
         let c = NoConfinement;
-        let shell = Shell { timeout: Duration::from_millis(300), output_limit: 4096 };
+        let shell = Shell {
+            timeout: Duration::from_millis(300),
+            output_limit: 4096,
+        };
         let started = Instant::now();
-        let err = shell.execute(&json!({"command": "sleep 30"}), &ctx(&cwd, &c)).unwrap_err();
+        let err = shell
+            .execute(&json!({"command": "sleep 30"}), &ctx(&cwd, &c))
+            .unwrap_err();
         assert!(err.to_string().contains("timed out"), "{err}");
-        assert!(started.elapsed() < Duration::from_secs(10), "the timeout actually fires");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the timeout actually fires"
+        );
     }
 
     #[test]
     fn a_command_runs_in_the_workspace() {
         let cwd = tempdir();
         let c = NoConfinement;
-        let shell = Shell { timeout: Duration::from_secs(10), output_limit: 4096 };
-        let out = shell.execute(&json!({"command": "pwd"}), &ctx(&cwd, &c)).unwrap();
+        let shell = Shell {
+            timeout: Duration::from_secs(10),
+            output_limit: 4096,
+        };
+        let out = shell
+            .execute(&json!({"command": "pwd"}), &ctx(&cwd, &c))
+            .unwrap();
         let canonical = std::fs::canonicalize(&cwd).unwrap();
         assert!(out.contains(canonical.to_string_lossy().as_ref()), "{out}");
     }

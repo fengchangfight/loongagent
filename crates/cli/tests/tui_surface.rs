@@ -23,10 +23,16 @@ fn the_full_screen_surface_refuses_a_pipe_and_points_at_the_line_mode() {
         .stderr(Stdio::piped())
         .output()
         .expect("the binary runs");
-    assert!(!out.status.success(), "a full-screen UI must not pretend to run in a pipe");
+    assert!(
+        !out.status.success(),
+        "a full-screen UI must not pretend to run in a pipe"
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("no terminal on stdout"), "stderr: {stderr}");
-    assert!(stderr.contains("loongagent repl"), "the way out is named: {stderr}");
+    assert!(
+        stderr.contains("loongagent repl"),
+        "the way out is named: {stderr}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -58,6 +64,9 @@ fn the_line_mode_surface_works_under_a_pipe() {
     let out = child.wait_with_output().unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("loongagent — session"), "stdout: {stdout}");
-    assert!(stdout.contains("echo: hello from a pipe"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("echo: hello from a pipe"),
+        "stdout: {stdout}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

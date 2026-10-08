@@ -35,7 +35,9 @@ fn fake_model() -> (String, std::thread::JoinHandle<()>) {
             let mut buffer = [0u8; 4096];
             let mut wanted = usize::MAX;
             loop {
-                let Ok(read) = stream.read(&mut buffer) else { break };
+                let Ok(read) = stream.read(&mut buffer) else {
+                    break;
+                };
                 if read == 0 {
                     break;
                 }
@@ -129,20 +131,30 @@ impl Web {
                 break;
             }
         }
-        assert!(port > 0 && !token.is_empty(), "the banner names the URL and token");
+        assert!(
+            port > 0 && !token.is_empty(),
+            "the banner names the URL and token"
+        );
         // Keep draining stdout so the child never blocks on a full pipe.
         std::thread::spawn(move || {
             let mut sink = String::new();
             let _ = reader.read_to_string(&mut sink);
         });
-        Web { child, port, token, _dir: dir.to_path_buf() }
+        Web {
+            child,
+            port,
+            token,
+            _dir: dir.to_path_buf(),
+        }
     }
 
     fn connect(&self) -> tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>> {
         let request = format!("ws://127.0.0.1:{}/ws?token={}", self.port, self.token)
             .into_client_request()
             .unwrap();
-        tungstenite::connect(request).expect("the token is accepted").0
+        tungstenite::connect(request)
+            .expect("the token is accepted")
+            .0
     }
 }
 
@@ -212,9 +224,15 @@ fn a_browser_can_drive_a_session_with_a_model_behind_it() {
         json!({"cwd": "", "client": "web"}),
     );
     assert!(response["error"].is_null(), "{response}");
-    let session_id = response["result"]["session_id"].as_str().unwrap().to_string();
+    let session_id = response["result"]["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let kinds: Vec<&str> = events.iter().map(|e| e["kind"].as_str().unwrap()).collect();
-    assert!(kinds.contains(&"skills.loaded"), "the catalogue streams on attach: {kinds:?}");
+    assert!(
+        kinds.contains(&"skills.loaded"),
+        "the catalogue streams on attach: {kinds:?}"
+    );
 
     let (events, methods, response) = exchange_verbose(
         &mut socket,
@@ -226,13 +244,25 @@ fn a_browser_can_drive_a_session_with_a_model_behind_it() {
     // The browser sees the answer *and* the fact that it was written: a delta
     // notification reaches it before the response, while the log keeps only the
     // finished message (asserted on the server side).
-    assert!(methods.contains(&"model.delta".to_string()), "deltas reach the browser: {methods:?}");
+    assert!(
+        methods.contains(&"model.delta".to_string()),
+        "deltas reach the browser: {methods:?}"
+    );
     let first_delta = methods.iter().position(|m| m == "model.delta").unwrap();
     assert_eq!(first_delta, 0, "before anything else: {methods:?}");
 
     let kinds: Vec<&str> = events.iter().map(|e| e["kind"].as_str().unwrap()).collect();
-    for expected in ["message.appended", "tool.call", "policy.decided", "tool.result", "cost.recorded"] {
-        assert!(kinds.contains(&expected), "{expected} must reach the browser: {kinds:?}");
+    for expected in [
+        "message.appended",
+        "tool.call",
+        "policy.decided",
+        "tool.result",
+        "cost.recorded",
+    ] {
+        assert!(
+            kinds.contains(&expected),
+            "{expected} must reach the browser: {kinds:?}"
+        );
     }
     let call = events.iter().find(|e| e["kind"] == "tool.call").unwrap();
     assert_eq!(call["data"]["tool"], "read_file");
@@ -252,7 +282,10 @@ fn a_browser_can_drive_a_session_with_a_model_behind_it() {
         .unwrap();
     let mut page = String::new();
     stream.read_to_string(&mut page).unwrap();
-    assert!(page.contains("<!DOCTYPE html>"), "a page, not a protocol error");
+    assert!(
+        page.contains("<!DOCTYPE html>"),
+        "a page, not a protocol error"
+    );
     assert!(page.contains("loongagent"));
 
     let _ = std::fs::remove_dir_all(&dir);

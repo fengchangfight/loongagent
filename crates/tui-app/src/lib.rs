@@ -35,7 +35,9 @@ pub enum FromWorker {
     Delta(String),
     Lines(Vec<String>),
     /// A turn finished (or stopped for approval), so the UI can update.
-    State { pending: Option<String> },
+    State {
+        pending: Option<String>,
+    },
     Failed(String),
 }
 
@@ -206,7 +208,10 @@ impl App {
         )]);
         self.busy = true;
         self.error = None;
-        Action::Send(ToWorker::Respond { request_id, granted })
+        Action::Send(ToWorker::Respond {
+            request_id,
+            granted,
+        })
     }
 
     /// The scrollback the reader should see at this height.
@@ -214,12 +219,17 @@ impl App {
         let total = self.lines.len();
         let end = total.saturating_sub(self.scroll);
         let start = end.saturating_sub(height.max(1));
-        let mut shown: Vec<Line<'static>> =
-            self.lines[start..end].iter().map(|l| Line::from(l.clone())).collect();
+        let mut shown: Vec<Line<'static>> = self.lines[start..end]
+            .iter()
+            .map(|l| Line::from(l.clone()))
+            .collect();
         // What is being written right now goes below the finished output.
         if !self.streaming.is_empty() {
             shown.extend(self.streaming.split('\n').map(|piece| {
-                Line::from(Span::styled(piece.to_string(), Style::default().fg(Color::Gray)))
+                Line::from(Span::styled(
+                    piece.to_string(),
+                    Style::default().fg(Color::Gray),
+                ))
             }));
         }
         shown
@@ -287,7 +297,10 @@ impl App {
             )));
         }
         if let Some(error) = &self.error {
-            hints.push(Span::styled(format!("  ! {error}"), Style::default().fg(Color::Red)));
+            hints.push(Span::styled(
+                format!("  ! {error}"),
+                Style::default().fg(Color::Red),
+            ));
         }
         frame.render_widget(Paragraph::new(Line::from(hints)), areas[3]);
     }
@@ -314,7 +327,10 @@ pub fn spawn_worker<T: Transport + Send + 'static>(
                         }
                     })
                 }
-                ToWorker::Respond { request_id, granted } => client.respond(
+                ToWorker::Respond {
+                    request_id,
+                    granted,
+                } => client.respond(
                     &request_id,
                     granted,
                     loong_schema::generated::ApprovalScope::Once,
@@ -381,7 +397,9 @@ pub fn run<T: Transport + Send + 'static>(
                     app.push_note(note);
                 }
             }
-            terminal.draw(|frame| app.draw(frame)).map_err(|e| e.to_string())?;
+            terminal
+                .draw(|frame| app.draw(frame))
+                .map_err(|e| e.to_string())?;
 
             if event::poll(std::time::Duration::from_millis(80)).map_err(|e| e.to_string())? {
                 if let event::Event::Key(key) = event::read().map_err(|e| e.to_string())? {
@@ -463,8 +481,16 @@ mod tests {
         );
         assert!(app.input.is_empty());
         assert!(app.busy);
-        assert!(app.lines.iter().any(|l| l == "you: do it"), "{:?}", app.lines);
-        assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::None, "empty is not a prompt");
+        assert!(
+            app.lines.iter().any(|l| l == "you: do it"),
+            "{:?}",
+            app.lines
+        );
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            Action::None,
+            "empty is not a prompt"
+        );
     }
 
     #[test]
@@ -473,7 +499,11 @@ mod tests {
         type_text(&mut app, "ab");
         app.handle_key(key(KeyCode::Backspace));
         assert_eq!(app.input, "a");
-        assert_eq!(app.handle_key(key(KeyCode::Char('d'))), Action::None, "plain 'd' types");
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('d'))),
+            Action::None,
+            "plain 'd' types"
+        );
         assert_eq!(
             app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
             Action::Quit
@@ -490,14 +520,24 @@ mod tests {
         assert!(screen.contains("[a]pprove / [d]eny"), "{screen}");
 
         app.handle_key(key(KeyCode::Char('z')));
-        assert!(app.input.is_empty(), "a prompt cannot be typed while the question is open");
+        assert!(
+            app.input.is_empty(),
+            "a prompt cannot be typed while the question is open"
+        );
 
         assert_eq!(
             app.handle_key(key(KeyCode::Char('a'))),
-            Action::Send(ToWorker::Respond { request_id: "appr-1".to_string(), granted: true })
+            Action::Send(ToWorker::Respond {
+                request_id: "appr-1".to_string(),
+                granted: true
+            })
         );
         assert!(app.pending.is_none());
-        assert!(app.lines.iter().any(|l| l.contains("approved appr-1")), "{:?}", app.lines);
+        assert!(
+            app.lines.iter().any(|l| l.contains("approved appr-1")),
+            "{:?}",
+            app.lines
+        );
     }
 
     #[test]
@@ -505,7 +545,10 @@ mod tests {
         let mut app = App::new("s", "v");
         type_text(&mut app, "/rev");
         let screen = draw(&mut app, 70, 16);
-        assert!(screen.contains("command — /help lists the skills available here"), "{screen}");
+        assert!(
+            screen.contains("command — /help lists the skills available here"),
+            "{screen}"
+        );
         // And it is only a hint: the text is still a normal prompt buffer.
         assert_eq!(app.input, "/rev");
     }
@@ -516,7 +559,10 @@ mod tests {
         app.pending = Some("appr-2".to_string());
         assert_eq!(
             app.handle_key(key(KeyCode::Char('d'))),
-            Action::Send(ToWorker::Respond { request_id: "appr-2".to_string(), granted: false })
+            Action::Send(ToWorker::Respond {
+                request_id: "appr-2".to_string(),
+                granted: false
+            })
         );
         assert!(app.lines.iter().any(|l| l.contains("denied appr-2")));
     }
@@ -558,11 +604,18 @@ mod tests {
         let (to_app, from_worker) = channel::<FromWorker>();
         let mut app = App::new("s", "v");
         app.busy = true;
-        to_app.send(FromWorker::Failed("the server closed the connection".to_string())).unwrap();
+        to_app
+            .send(FromWorker::Failed(
+                "the server closed the connection".to_string(),
+            ))
+            .unwrap();
         to_app.send(FromWorker::State { pending: None }).unwrap();
         app.drain(&from_worker);
         assert!(!app.busy);
-        assert_eq!(app.error.as_deref(), Some("the server closed the connection"));
+        assert_eq!(
+            app.error.as_deref(),
+            Some("the server closed the connection")
+        );
         assert!(draw(&mut app, 80, 16).contains("the server closed the connection"));
     }
 
@@ -576,7 +629,10 @@ mod tests {
         app.drain(&from_worker);
         assert_eq!(app.streaming, "Writing…");
         let screen = draw(&mut app, 40, 12);
-        assert!(screen.contains("Writing…"), "the fragment is on screen: {screen}");
+        assert!(
+            screen.contains("Writing…"),
+            "the fragment is on screen: {screen}"
+        );
 
         // The finished message arrives: one line, and the fragments are gone.
         to_app
@@ -584,10 +640,17 @@ mod tests {
             .unwrap();
         to_app.send(FromWorker::State { pending: None }).unwrap();
         app.drain(&from_worker);
-        assert!(app.streaming.is_empty(), "the preview is cleared by the record");
+        assert!(
+            app.streaming.is_empty(),
+            "the preview is cleared by the record"
+        );
         let screen = draw(&mut app, 40, 12);
         assert!(screen.contains("Writing the answer."), "{screen}");
-        assert_eq!(screen.matches("Writing").count(), 1, "and it is not shown twice: {screen}");
+        assert_eq!(
+            screen.matches("Writing").count(),
+            1,
+            "and it is not shown twice: {screen}"
+        );
     }
 
     #[test]
@@ -618,7 +681,9 @@ mod tests {
         }
         let client = Client::new(Echo, "s-worker");
         let (to_worker, from_worker) = spawn_worker(client);
-        to_worker.send(ToWorker::Submit("hello".to_string())).unwrap();
+        to_worker
+            .send(ToWorker::Submit("hello".to_string()))
+            .unwrap();
         let mut app = App::new("s-worker", "v");
         app.busy = true;
         // Wait for the worker to report back.
@@ -629,5 +694,4 @@ mod tests {
         }
         assert!(!app.busy, "the worker reported a state change");
     }
-
 }

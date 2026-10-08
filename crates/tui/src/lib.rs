@@ -56,10 +56,14 @@ impl<T: Transport> Client<T> {
     }
 
     pub fn attach(&mut self, cwd: &str, client: &str) -> Result<gen::SessionAttachResult, String> {
-        let params =
-            gen::SessionAttachParams { cwd: cwd.to_string(), client: client.to_string() };
-        let (_, result) =
-            self.call(gen::method::SESSION_ATTACH, serde_json::to_value(params).unwrap())?;
+        let params = gen::SessionAttachParams {
+            cwd: cwd.to_string(),
+            client: client.to_string(),
+        };
+        let (_, result) = self.call(
+            gen::method::SESSION_ATTACH,
+            serde_json::to_value(params).unwrap(),
+        )?;
         let attached: gen::SessionAttachResult =
             serde_json::from_value(result).map_err(|e| format!("attach result: {e}"))?;
         self.session_id = attached.session_id.clone();
@@ -80,8 +84,10 @@ impl<T: Transport> Client<T> {
         text: &str,
         on_notification: &mut dyn FnMut(&str, &Value),
     ) -> Result<Vec<String>, String> {
-        let params =
-            gen::PromptSubmitParams { session_id: self.session_id.clone(), text: text.to_string() };
+        let params = gen::PromptSubmitParams {
+            session_id: self.session_id.clone(),
+            text: text.to_string(),
+        };
         let (lines, result) = self.call_with(
             gen::method::PROMPT_SUBMIT,
             serde_json::to_value(params).unwrap(),
@@ -184,12 +190,19 @@ impl<T: Transport> Client<T> {
             gen::event::TOOL_CALL => Some(format!(
                 "→ {} {}",
                 data.get("tool").and_then(|t| t.as_str()).unwrap_or("?"),
-                truncate(&data.get("args").cloned().unwrap_or(Value::Null).to_string(), 60)
+                truncate(
+                    &data.get("args").cloned().unwrap_or(Value::Null).to_string(),
+                    60
+                )
             )),
             gen::event::TOOL_RESULT => {
                 let ok = data.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
                 let output = data.get("output").and_then(|o| o.as_str()).unwrap_or("");
-                Some(format!("← {} {}", if ok { "ok" } else { "failed" }, truncate(output, 120)))
+                Some(format!(
+                    "← {} {}",
+                    if ok { "ok" } else { "failed" },
+                    truncate(output, 120)
+                ))
             }
             gen::event::POLICY_DECIDED => Some(format!(
                 "· policy: {} by {}",
@@ -197,18 +210,27 @@ impl<T: Transport> Client<T> {
                 data.get("rule").and_then(|v| v.as_str()).unwrap_or("?")
             )),
             gen::event::APPROVAL_REQUESTED => {
-                let request_id = data.get("request_id").and_then(|v| v.as_str()).unwrap_or("");
+                let request_id = data
+                    .get("request_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 self.pending_approval = Some(request_id.to_string());
                 Some(format!(
                     "! approval required ({}): {} [{}]",
-                    data.get("action_class").and_then(|v| v.as_str()).unwrap_or("?"),
+                    data.get("action_class")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?"),
                     data.get("reason").and_then(|v| v.as_str()).unwrap_or(""),
                     request_id
                 ))
             }
             gen::event::APPROVAL_DECIDED => Some(format!(
                 "· approval {} ({})",
-                if data.get("granted").and_then(|v| v.as_bool()).unwrap_or(false) {
+                if data
+                    .get("granted")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
                     "granted"
                 } else {
                     "denied"
@@ -236,9 +258,15 @@ impl<T: Transport> Client<T> {
             gen::event::HOOK_FIRED => {
                 let id = data.get("hook_id").and_then(|v| v.as_str()).unwrap_or("?");
                 let fired = data.get("event").and_then(|v| v.as_str()).unwrap_or("?");
-                let verdict = data.get("verdict").and_then(|v| v.as_str()).unwrap_or("allow");
+                let verdict = data
+                    .get("verdict")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("allow");
                 let reason = data.get("reason").and_then(|v| v.as_str()).unwrap_or("");
-                let failed = data.get("failed").and_then(|v| v.as_bool()).unwrap_or(false);
+                let failed = data
+                    .get("failed")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 match verdict {
                     "allow" => Some(format!("· hook {id} allowed ({fired})")),
                     _ => Some(format!(
@@ -253,7 +281,8 @@ impl<T: Transport> Client<T> {
                 data.get("tokens_out").and_then(|v| v.as_u64()).unwrap_or(0),
                 data.get("profile").and_then(|v| v.as_str()).unwrap_or("?")
             )),
-            gen::event::COMPACTION_APPLIED => Some(format!(
+            gen::event::COMPACTION_APPLIED => {
+                Some(format!(
                 "· compacted: {} -> {} tokens (cleared {} tool output(s), dropped {} message(s), \
                  newest {} kept)",
                 data.get("tokens_before").and_then(|v| v.as_u64()).unwrap_or(0),
@@ -261,7 +290,8 @@ impl<T: Transport> Client<T> {
                 data.get("cleared_tool_outputs").and_then(|v| v.as_u64()).unwrap_or(0),
                 data.get("dropped_messages").and_then(|v| v.as_u64()).unwrap_or(0),
                 data.get("kept_tokens").and_then(|v| v.as_u64()).unwrap_or(0)
-            )),
+            ))
+            }
             other => Some(format!("· {other}")),
         }
     }
@@ -301,7 +331,10 @@ mod tests {
 
     impl Fake {
         fn with(lines: Vec<Value>) -> Self {
-            Self { inbound: lines.into_iter().map(|v| v.to_string()).collect(), outbound: Vec::new() }
+            Self {
+                inbound: lines.into_iter().map(|v| v.to_string()).collect(),
+                outbound: Vec::new(),
+            }
         }
     }
 
@@ -341,11 +374,31 @@ mod tests {
     #[test]
     fn a_turn_renders_the_events_then_the_answer() {
         let fake = Fake::with(vec![
-            event(1, "message.appended", json!({"role": "user", "text": "read it"})),
-            event(2, "tool.call", json!({"call_id": "c1", "tool": "read_file", "args": {"path": "a.txt"}, "action_class": "write_workspace"})),
-            event(3, "policy.decided", json!({"action_class": "write_workspace", "verdict": "allow", "rule": "builtin:write_workspace"})),
-            event(4, "tool.result", json!({"call_id": "c1", "ok": true, "output": "hello"})),
-            event(5, "message.appended", json!({"role": "assistant", "text": "it says hello"})),
+            event(
+                1,
+                "message.appended",
+                json!({"role": "user", "text": "read it"}),
+            ),
+            event(
+                2,
+                "tool.call",
+                json!({"call_id": "c1", "tool": "read_file", "args": {"path": "a.txt"}, "action_class": "write_workspace"}),
+            ),
+            event(
+                3,
+                "policy.decided",
+                json!({"action_class": "write_workspace", "verdict": "allow", "rule": "builtin:write_workspace"}),
+            ),
+            event(
+                4,
+                "tool.result",
+                json!({"call_id": "c1", "ok": true, "output": "hello"}),
+            ),
+            event(
+                5,
+                "message.appended",
+                json!({"role": "assistant", "text": "it says hello"}),
+            ),
             response(2, json!({"turn_id": 1, "accepted": true})),
         ]);
         let mut client = Client::new(fake, "s-1");
@@ -365,7 +418,11 @@ mod tests {
     #[test]
     fn an_approval_request_is_captured() {
         let fake = Fake::with(vec![
-            event(1, "approval.requested", json!({"request_id": "appr-1", "action_class": "out_of_bounds", "reason": "curl: out_of_bounds is Ask"})),
+            event(
+                1,
+                "approval.requested",
+                json!({"request_id": "appr-1", "action_class": "out_of_bounds", "reason": "curl: out_of_bounds is Ask"}),
+            ),
             response(2, json!({"turn_id": 1, "accepted": true})),
         ]);
         let mut client = Client::new(fake, "s-1");
@@ -377,8 +434,16 @@ mod tests {
     #[test]
     fn a_command_invocation_and_an_unknown_one_are_both_visible() {
         let fake = Fake::with(vec![
-            event(1, "skill.invoked", json!({"name": "review", "source": "/w/.loongagent/commands/review.md", "args": "HEAD~1", "tokens": 120})),
-            event(2, "skill.invoked", json!({"name": "reveiw", "source": "<none>", "args": "", "tokens": 0, "error": "no skill named \"reveiw\"; /help lists what exists"})),
+            event(
+                1,
+                "skill.invoked",
+                json!({"name": "review", "source": "/w/.loongagent/commands/review.md", "args": "HEAD~1", "tokens": 120}),
+            ),
+            event(
+                2,
+                "skill.invoked",
+                json!({"name": "reveiw", "source": "<none>", "args": "", "tokens": 0, "error": "no skill named \"reveiw\"; /help lists what exists"}),
+            ),
             response(3, json!({"turn_id": 1, "accepted": true})),
         ]);
         let mut client = Client::new(fake, "s-1");
@@ -391,13 +456,21 @@ mod tests {
     #[test]
     fn a_hook_refusal_is_visible_and_marks_the_turn_unaccepted() {
         let fake = Fake::with(vec![
-            event(1, "hook.fired", json!({"event": "user_prompt_submit", "hook_id": "gate", "kind": "shell", "verdict": "deny", "reason": "this repository is read-only today", "duration_ms": 3, "failed": false})),
+            event(
+                1,
+                "hook.fired",
+                json!({"event": "user_prompt_submit", "hook_id": "gate", "kind": "shell", "verdict": "deny", "reason": "this repository is read-only today", "duration_ms": 3, "failed": false}),
+            ),
             response(2, json!({"turn_id": 1, "accepted": false})),
         ]);
         let mut client = Client::new(fake, "s-1");
         let lines = client.submit("refactor everything").unwrap();
         assert_eq!(lines.len(), 1);
-        assert!(lines[0].starts_with("! hook gate deny on user_prompt_submit"), "{}", lines[0]);
+        assert!(
+            lines[0].starts_with("! hook gate deny on user_prompt_submit"),
+            "{}",
+            lines[0]
+        );
         assert!(lines[0].contains("read-only today"));
         assert!(!client.last_accepted());
     }
@@ -405,7 +478,11 @@ mod tests {
     #[test]
     fn a_hook_that_could_not_answer_says_so() {
         let fake = Fake::with(vec![
-            event(1, "hook.fired", json!({"event": "pre_tool", "hook_id": "flaky", "kind": "http", "verdict": "deny", "reason": "request failed (on_error = deny)", "duration_ms": 1, "failed": true})),
+            event(
+                1,
+                "hook.fired",
+                json!({"event": "pre_tool", "hook_id": "flaky", "kind": "http", "verdict": "deny", "reason": "request failed (on_error = deny)", "duration_ms": 1, "failed": true}),
+            ),
             response(2, json!({"turn_id": 1, "accepted": true})),
         ]);
         let mut client = Client::new(fake, "s-1");
@@ -416,13 +493,21 @@ mod tests {
     #[test]
     fn compaction_is_rendered_with_its_numbers() {
         let fake = Fake::with(vec![
-            event(1, "compaction.applied", json!({"tokens_before": 90000, "tokens_after": 40000, "kept_tokens": 20000, "cleared_tool_outputs": 7, "dropped_messages": 2, "summary": "x"})),
+            event(
+                1,
+                "compaction.applied",
+                json!({"tokens_before": 90000, "tokens_after": 40000, "kept_tokens": 20000, "cleared_tool_outputs": 7, "dropped_messages": 2, "summary": "x"}),
+            ),
             response(2, json!({"turn_id": 1, "accepted": true})),
         ]);
         let mut client = Client::new(fake, "s-1");
         let lines = client.submit("go").unwrap();
         assert!(lines[0].contains("90000 -> 40000 tokens"), "{}", lines[0]);
-        assert!(lines[0].contains("cleared 7 tool output(s)"), "{}", lines[0]);
+        assert!(
+            lines[0].contains("cleared 7 tool output(s)"),
+            "{}",
+            lines[0]
+        );
     }
 
     #[test]

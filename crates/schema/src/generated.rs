@@ -285,5 +285,8 @@ pub const EVENT_KINDS: &[(&str, bool)] = &[
 /// Readers MUST skip unknown kinds when ignorable, and fail loudly
 /// otherwise — never render a session they do not understand.
 pub fn is_ignorable_event(kind: &str) -> Option<bool> {
-    EVENT_KINDS.iter().find(|(k, _)| *k == kind).map(|(_, i)| *i)
+    EVENT_KINDS
+        .iter()
+        .find(|(k, _)| *k == kind)
+        .map(|(_, i)| *i)
 }

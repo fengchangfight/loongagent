@@ -68,7 +68,11 @@ impl Ladder {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyError {
     /// The requested change would loosen a higher layer's decision.
-    WouldWiden { class: ActionClass, from: Verdict, to: Verdict },
+    WouldWiden {
+        class: ActionClass,
+        from: Verdict,
+        to: Verdict,
+    },
 }
 
 impl std::fmt::Display for PolicyError {
@@ -143,7 +147,11 @@ impl Pdp {
     ) -> Result<(), PolicyError> {
         let from = self.effective.get(class);
         if rank(verdict) < rank(from) {
-            return Err(PolicyError::WouldWiden { class, from, to: verdict });
+            return Err(PolicyError::WouldWiden {
+                class,
+                from,
+                to: verdict,
+            });
         }
         self.effective.set(class, verdict);
         self.rules[Self::slot(class)] = format!("{source}:{}", class_name(class));
@@ -180,7 +188,11 @@ mod tests {
         let p = Pdp::new();
         assert_eq!(p.ladder().investigate, Verdict::Allow);
         assert_eq!(p.ladder().write_workspace, Verdict::Allow);
-        assert_eq!(p.ladder().out_of_bounds, Verdict::Ask, "out of bounds always asks");
+        assert_eq!(
+            p.ladder().out_of_bounds,
+            Verdict::Ask,
+            "out of bounds always asks"
+        );
     }
 
     #[test]
@@ -189,7 +201,10 @@ mod tests {
         p.tighten(ActionClass::OutOfBounds, Verdict::Deny).unwrap();
         let r = p.decide(ActionClass::OutOfBounds, "curl");
         assert_eq!(r.verdict, Verdict::Deny);
-        assert_eq!(r.rule, "session:out_of_bounds", "the rule that fired is recorded");
+        assert_eq!(
+            r.rule, "session:out_of_bounds",
+            "the rule that fired is recorded"
+        );
         assert!(r.reason.contains("out_of_bounds"));
     }
 
@@ -197,7 +212,9 @@ mod tests {
     fn a_lower_layer_may_not_widen() {
         let mut p = Pdp::new();
         p.tighten(ActionClass::OutOfBounds, Verdict::Deny).unwrap();
-        let err = p.tighten(ActionClass::OutOfBounds, Verdict::Allow).unwrap_err();
+        let err = p
+            .tighten(ActionClass::OutOfBounds, Verdict::Allow)
+            .unwrap_err();
         assert_eq!(
             err,
             PolicyError::WouldWiden {
@@ -206,21 +223,34 @@ mod tests {
                 to: Verdict::Allow
             }
         );
-        assert_eq!(p.decide(ActionClass::OutOfBounds, "x").verdict, Verdict::Deny);
+        assert_eq!(
+            p.decide(ActionClass::OutOfBounds, "x").verdict,
+            Verdict::Deny
+        );
     }
 
     #[test]
     fn classes_are_independent() {
         let mut p = Pdp::new();
-        p.tighten(ActionClass::WriteWorkspace, Verdict::Ask).unwrap();
-        assert_eq!(p.decide(ActionClass::WriteWorkspace, "write_file").verdict, Verdict::Ask);
-        assert_eq!(p.decide(ActionClass::Investigate, "read_file").verdict, Verdict::Allow);
+        p.tighten(ActionClass::WriteWorkspace, Verdict::Ask)
+            .unwrap();
+        assert_eq!(
+            p.decide(ActionClass::WriteWorkspace, "write_file").verdict,
+            Verdict::Ask
+        );
+        assert_eq!(
+            p.decide(ActionClass::Investigate, "read_file").verdict,
+            Verdict::Allow
+        );
     }
 
     #[test]
     fn tightening_to_the_same_verdict_is_allowed_and_renames_the_rule() {
         let mut p = Pdp::new();
         p.tighten(ActionClass::Investigate, Verdict::Allow).unwrap();
-        assert_eq!(p.decide(ActionClass::Investigate, "read").rule, "session:investigate");
+        assert_eq!(
+            p.decide(ActionClass::Investigate, "read").rule,
+            "session:investigate"
+        );
     }
 }

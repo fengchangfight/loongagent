@@ -16,7 +16,10 @@ Usage:
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 import sys
+import tempfile
 import tomllib
 from pathlib import Path
 
@@ -367,12 +370,48 @@ class Schema:
         ) + "\n"
 
 
+def rustfmt(text: str) -> str:
+    """Generated Rust is written formatted, so `cargo fmt --check` and this
+    generator cannot disagree about the same file.
+
+    rustfmt is required (not optional): silently skipping it would make the check
+    pass on a machine that cannot produce the same bytes, which is the opposite of
+    what a check is for.
+    """
+    exe = shutil.which("rustfmt")
+    if not exe:
+        print(
+            "gen-schema: rustfmt is not installed; generated Rust would not be checked\n"
+            "  run: rustup component add rustfmt",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    with tempfile.NamedTemporaryFile("w", suffix=".rs", delete=False) as handle:
+        handle.write(text)
+        path = handle.name
+    try:
+        # In place, not `--emit stdout`: that mode prefixes the output with the input
+        # file name, which a random temp path would bake into a generated file.
+        subprocess.run(
+            [exe, "--edition", "2021", path],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return Path(path).read_text()
+    except subprocess.CalledProcessError as error:
+        print(f"gen-schema: rustfmt failed: {error.stderr}", file=sys.stderr)
+        raise SystemExit(2) from error
+    finally:
+        Path(path).unlink(missing_ok=True)
+
+
 def main() -> int:
     check = "--check" in sys.argv[1:]
     schema = Schema(tomllib.loads(IDL.read_text()))
     outputs = {
-        RUST_OUT: schema.rust(),
-        TEST_OUT: schema.test(),
+        RUST_OUT: rustfmt(schema.rust()),
+        TEST_OUT: rustfmt(schema.test()),
         TS_OUT: schema.ts(),
         SAMPLES_OUT: schema.samples(),
     }

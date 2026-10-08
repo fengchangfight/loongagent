@@ -76,7 +76,9 @@ impl Index {
     }
 
     pub fn in_memory() -> Result<Self, IndexError> {
-        let index = Self { conn: Connection::open_in_memory()? };
+        let index = Self {
+            conn: Connection::open_in_memory()?,
+        };
         index.init()?;
         Ok(index)
     }
@@ -156,7 +158,9 @@ impl Index {
     }
 
     pub fn count(&self) -> Result<u64, IndexError> {
-        let n: i64 = self.conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))?;
+        let n: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))?;
         Ok(n as u64)
     }
 
@@ -165,7 +169,10 @@ impl Index {
             .conn
             .prepare("SELECT kind, COUNT(*) FROM events GROUP BY kind ORDER BY kind")?;
         let rows = stmt.query_map([], |r| {
-            Ok(KindCount { kind: r.get(0)?, count: r.get::<_, i64>(1)? as u64 })
+            Ok(KindCount {
+                kind: r.get(0)?,
+                count: r.get::<_, i64>(1)? as u64,
+            })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
@@ -226,12 +233,19 @@ mod tests {
     fn sample_log(path: &Path) -> (String, String) {
         let mut log = SessionLog::create(path).unwrap();
         let first = log
-            .append("message.appended", json!({"role": "user", "text": "find the widget"}))
+            .append(
+                "message.appended",
+                json!({"role": "user", "text": "find the widget"}),
+            )
             .unwrap();
         log.append("tool.call", json!({"call_id": "c1", "tool": "read_file", "args": {"path": "a"}, "action_class": "investigate"}))
             .unwrap();
         let child = log
-            .append_with_parent("message.appended", json!({"role": "assistant", "text": "ok"}), Some(first.id.clone()))
+            .append_with_parent(
+                "message.appended",
+                json!({"role": "assistant", "text": "ok"}),
+                Some(first.id.clone()),
+            )
             .unwrap();
         (first.id, child.id)
     }
@@ -243,8 +257,20 @@ mod tests {
         let index = Index::rebuild(&path).unwrap();
         assert_eq!(index.count().unwrap(), 3);
         let kinds = index.kinds().unwrap();
-        assert_eq!(kinds[0], KindCount { kind: "message.appended".into(), count: 2 });
-        assert_eq!(kinds[1], KindCount { kind: "tool.call".into(), count: 1 });
+        assert_eq!(
+            kinds[0],
+            KindCount {
+                kind: "message.appended".into(),
+                count: 2
+            }
+        );
+        assert_eq!(
+            kinds[1],
+            KindCount {
+                kind: "tool.call".into(),
+                count: 1
+            }
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -258,7 +284,11 @@ mod tests {
         assert_eq!(hits[0].kind, "message.appended");
         assert!(hits[0].data.contains("widget"));
         let children = index.children(&first_id).unwrap();
-        assert_eq!(children.len(), 1, "the parented event is reachable via the tree");
+        assert_eq!(
+            children.len(),
+            1,
+            "the parented event is reachable via the tree"
+        );
         assert_eq!(children[0].data, r#"{"role":"assistant","text":"ok"}"#);
         let _ = std::fs::remove_file(&path);
     }
@@ -284,12 +314,19 @@ mod tests {
     fn the_index_trails_the_log_until_it_is_told() {
         let path = temp_log();
         let mut log = SessionLog::create(&path).unwrap();
-        log.append("message.appended", json!({"role": "user", "text": "one"})).unwrap();
+        log.append("message.appended", json!({"role": "user", "text": "one"}))
+            .unwrap();
         let mut index = Index::rebuild(&path).unwrap();
         assert_eq!(index.count().unwrap(), 1);
 
-        let second = log.append("message.appended", json!({"role": "user", "text": "two"})).unwrap();
-        assert_eq!(index.count().unwrap(), 1, "the index is derived, not the truth");
+        let second = log
+            .append("message.appended", json!({"role": "user", "text": "two"}))
+            .unwrap();
+        assert_eq!(
+            index.count().unwrap(),
+            1,
+            "the index is derived, not the truth"
+        );
 
         index.insert(&second).unwrap();
         assert_eq!(index.count().unwrap(), 2);

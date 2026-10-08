@@ -59,7 +59,11 @@ fn a_workspace_at_the_temp_root_is_still_probed_honestly() {
         "the probe target was chosen inside the workspace:\n{stdout}\n{stderr}"
     );
     // On this platform an outside candidate exists (/var/tmp), so it must prove enforcement.
-    assert_eq!(out.status.code(), Some(0), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
     assert!(stdout.contains("enforced"), "stdout: {stdout}");
 }
 
@@ -72,7 +76,11 @@ fn a_broken_boundary_would_be_reported_not_hidden() {
         .arg("probe")
         .output()
         .expect("the binary runs");
-    assert_ne!(out.status.code(), Some(0), "an unconfigured probe must not claim success");
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "an unconfigured probe must not claim success"
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("required"), "stderr: {stderr}");
 }

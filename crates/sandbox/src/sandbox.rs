@@ -34,10 +34,17 @@ impl Capabilities {
         let bubblewrap = which("bwrap");
         let note = match (landlock_abi, &bubblewrap) {
             (Some(v), _) => format!("landlock ABI {v} (unprivileged, inherited by children)"),
-            (None, Some(_)) => "no landlock; bubblewrap present (needs user namespaces)".to_string(),
+            (None, Some(_)) => {
+                "no landlock; bubblewrap present (needs user namespaces)".to_string()
+            }
             (None, None) => "no OS confinement available on this platform".to_string(),
         };
-        Self { os: std::env::consts::OS, landlock_abi, bubblewrap, note }
+        Self {
+            os: std::env::consts::OS,
+            landlock_abi,
+            bubblewrap,
+            note,
+        }
     }
 
     pub fn strongest(&self) -> &'static str {
@@ -119,12 +126,17 @@ pub fn self_test(probe_exe: &Path, workspace: &Path) -> SelfTestReport {
     match child {
         Err(e) => SelfTestReport {
             capabilities,
-            result: SelfTest::Broken { detail: format!("could not run the probe: {e}") },
+            result: SelfTest::Broken {
+                detail: format!("could not run the probe: {e}"),
+            },
         },
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
             let result = interpret(&capabilities, out.status.code(), &stderr, workspace);
-            SelfTestReport { capabilities, result }
+            SelfTestReport {
+                capabilities,
+                result,
+            }
         }
     }
 }
@@ -193,9 +205,10 @@ pub fn interpret(
 /// directions. Exit codes: 0 enforced, 2 could not confine, 3 escaped,
 /// 4 over-restricted.
 pub fn probe_main() -> i32 {
-    let (Some(workspace), Some(outside)) =
-        (std::env::var_os(PROBE_WORKSPACE), std::env::var_os(PROBE_OUTSIDE))
-    else {
+    let (Some(workspace), Some(outside)) = (
+        std::env::var_os(PROBE_WORKSPACE),
+        std::env::var_os(PROBE_OUTSIDE),
+    ) else {
         eprintln!("probe: {PROBE_WORKSPACE} and {PROBE_OUTSIDE} are required");
         return 2;
     };
@@ -264,8 +277,14 @@ mod tests {
     fn the_exit_codes_mean_what_the_self_test_says() {
         let c = caps(Some(8), false);
         let ws = Path::new("/work");
-        assert!(matches!(interpret(&c, Some(0), "", ws), SelfTest::Enforced { .. }));
-        assert!(matches!(interpret(&c, Some(2), "no", ws), SelfTest::Unavailable { .. }));
+        assert!(matches!(
+            interpret(&c, Some(0), "", ws),
+            SelfTest::Enforced { .. }
+        ));
+        assert!(matches!(
+            interpret(&c, Some(2), "no", ws),
+            SelfTest::Unavailable { .. }
+        ));
         match interpret(&c, Some(3), "escaped", ws) {
             SelfTest::Broken { detail } => assert!(detail.contains("OUTSIDE"), "{detail}"),
             other => panic!("expected Broken, got {other:?}"),
@@ -274,7 +293,10 @@ mod tests {
             SelfTest::Broken { detail } => assert!(detail.contains("too strict"), "{detail}"),
             other => panic!("expected Broken, got {other:?}"),
         }
-        assert!(matches!(interpret(&c, None, "killed", ws), SelfTest::Broken { .. }));
+        assert!(matches!(
+            interpret(&c, None, "killed", ws),
+            SelfTest::Broken { .. }
+        ));
     }
 
     #[test]
@@ -287,7 +309,12 @@ mod tests {
         // not acceptable, and a real alternative must be found.
         assert!(!is_outside(&temp, &temp.join("loong-sandbox-probe-1")));
         let chosen = outside_candidate(&temp).expect("somewhere outside the temp dir exists");
-        assert!(is_outside(&temp, &chosen), "{} should be outside {}", chosen.display(), temp.display());
+        assert!(
+            is_outside(&temp, &chosen),
+            "{} should be outside {}",
+            chosen.display(),
+            temp.display()
+        );
         // Prefix traps: `/tmpfoo` is a different directory from `/tmp`.
         assert!(is_outside(Path::new("/tmp"), Path::new("/tmpfoo/x")));
         assert!(!is_outside(Path::new("/tmp"), Path::new("/tmp/x")));
@@ -298,12 +325,17 @@ mod tests {
     fn a_platform_without_a_mechanism_reports_unavailable_not_enforced() {
         let report = SelfTestReport {
             capabilities: caps(None, false),
-            result: SelfTest::Unavailable { detail: "none".into() },
+            result: SelfTest::Unavailable {
+                detail: "none".into(),
+            },
         };
         assert!(!report.ok(), "unavailable must never count as enforced");
         assert!(SelfTestReport {
             capabilities: caps(Some(8), false),
-            result: SelfTest::Enforced { mechanism: "landlock".into(), detail: String::new() },
+            result: SelfTest::Enforced {
+                mechanism: "landlock".into(),
+                detail: String::new()
+            },
         }
         .ok());
     }

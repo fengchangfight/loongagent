@@ -59,6 +59,13 @@ pub enum Action {
     Quit,
 }
 
+/// The seal: red ground, gold character — the traditional 龍, which is what a firm
+/// mark looks like. Three rows so the character sits *in* the square rather than
+/// beside it.
+const SEAL_ROWS: u16 = 3;
+const SEAL_RED: Color = Color::Rgb(150, 24, 24);
+const SEAL_GOLD: Color = Color::Rgb(255, 206, 84);
+
 /// How tall the input box may grow. Beyond this it scrolls, so a pasted file cannot
 /// take the whole screen away from the conversation.
 const MAX_INPUT_ROWS: u16 = 8;
@@ -73,6 +80,8 @@ pub struct App {
     pub pending: Option<String>,
     /// Diagnostics from the server process (its stderr): startup notes, warnings.
     pub notes: Vec<String>,
+    /// Whether the mark is drawn at the top (`/logo` turns it off).
+    pub logo: bool,
     /// What the running turn is doing, and since when — the interface's answer to "is
     /// it stuck, or working?".
     pub activity: Option<String>,
@@ -103,6 +112,7 @@ impl App {
             schema: schema.into(),
             busy: false,
             error: None,
+            logo: true,
             activity: None,
             busy_since: None,
             debug: false,
@@ -116,6 +126,60 @@ impl App {
     /// The debug panel: what the next request will carry, where the tokens went, and
     /// what has been cleared. Read-only by construction — asking for it records
     /// nothing, so looking cannot change what you are looking at.
+    /// Whether there is room for the mark. A logo that squeezes the conversation is a
+    /// decoration that costs more than it gives, so a small terminal simply has none.
+    fn show_banner(&self, area: ratatui::layout::Rect) -> bool {
+        self.logo && area.height >= 18 && area.width >= 44
+    }
+
+    /// The seal, and the name beside it.
+    fn draw_banner(&self, frame: &mut Frame, area: ratatui::layout::Rect) {
+        let seal = Style::default()
+            .bg(SEAL_RED)
+            .fg(SEAL_GOLD)
+            .add_modifier(Modifier::BOLD);
+        let ground = Style::default().bg(SEAL_RED);
+        // Ten columns wide, three rows tall: a red ground with the character centred in
+        // it, which is what a seal is.
+        let rows = [
+            Line::from(Span::styled("██████████", ground)),
+            Line::from(vec![
+                Span::styled("███ ", ground),
+                Span::styled("龍", seal),
+                Span::styled(" ███", ground),
+            ]),
+            Line::from(Span::styled("██████████", ground)),
+        ];
+        let mut lines: Vec<Line> = Vec::new();
+        for (index, row) in rows.into_iter().enumerate() {
+            // The middle two rows carry the name, so the mark and the word sit on one
+            // baseline instead of the text floating beside a block.
+            let companion = match index {
+                0 => Some((
+                    "loongagent".to_string(),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                1 => Some((
+                    "a firm-internal coding agent".to_string(),
+                    Style::default().fg(Color::DarkGray),
+                )),
+                _ => None,
+            };
+            match companion {
+                Some((text, style)) => {
+                    let mut spans = row.spans;
+                    spans.push(Span::raw("  "));
+                    spans.push(Span::styled(text, style));
+                    lines.push(Line::from(spans));
+                }
+                None => lines.push(row),
+            }
+        }
+        frame.render_widget(Paragraph::new(lines), area);
+    }
+
     fn draw_context(&self, frame: &mut Frame, area: ratatui::layout::Rect) {
         let mut lines: Vec<Line> = Vec::new();
         match &self.context {
@@ -225,6 +289,13 @@ impl App {
                 self.input.clear();
                 self.cursor = 0;
                 Some(Action::Quit)
+            }
+            // The mark is decoration: worth having, and worth being able to put away.
+            "/logo" => {
+                self.input.clear();
+                self.cursor = 0;
+                self.logo = !self.logo;
+                Some(Action::None)
             }
             _ => None,
         }
@@ -581,6 +652,11 @@ impl App {
         let areas = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
+                Constraint::Length(if self.show_banner(conversation) {
+                    SEAL_ROWS + 1
+                } else {
+                    0
+                }),
                 Constraint::Length(if self.notes.is_empty() { 0 } else { 2 }),
                 Constraint::Min(3),
                 Constraint::Length(input_rows + 2),
@@ -588,22 +664,26 @@ impl App {
             ])
             .split(conversation);
 
+        if self.show_banner(conversation) {
+            self.draw_banner(frame, areas[0]);
+        }
+
         if !self.notes.is_empty() {
             let latest = self.notes.last().cloned().unwrap_or_default();
             let widget = Paragraph::new(latest)
                 .style(Style::default().fg(Color::DarkGray))
                 .wrap(Wrap { trim: true });
-            frame.render_widget(widget, areas[0]);
+            frame.render_widget(widget, areas[1]);
         }
 
-        let height = areas[1].height.saturating_sub(2) as usize;
+        let height = areas[2].height.saturating_sub(2) as usize;
         let body = Paragraph::new(self.visible_lines(height))
             .block(Block::default().borders(Borders::ALL).title(format!(
                 "loongagent — session {} (schema {})",
                 self.session, self.schema
             )))
             .wrap(Wrap { trim: false });
-        frame.render_widget(body, areas[1]);
+        frame.render_widget(body, areas[2]);
 
         let (title, style) = match &self.pending {
             Some(request_id) => (
@@ -635,13 +715,16 @@ impl App {
                     "/exit" | "/quit" | "/q" | "/exi" | "/qui" => {
                         "enter leaves loongagent (ctrl-c does too)".to_string()
                     }
-                    _ => "command — /help lists the skills, /exit leaves".to_string(),
+                    "/logo" => "enter shows or hides the mark".to_string(),
+                    _ => {
+                        "command — /help lists the skills, /exit leaves, /logo the mark".to_string()
+                    }
                 },
                 Style::default().fg(Color::Green),
             ),
             None => ("prompt".to_string(), Style::default()),
         };
-        let inner_width = areas[2].width.saturating_sub(2);
+        let inner_width = areas[3].width.saturating_sub(2);
         let (lines, (caret_row, caret_column)) = self.wrapped_input(inner_width);
         // Show the end of the text when it is taller than the box, so the line being
         // typed is always the one on screen.
@@ -656,13 +739,13 @@ impl App {
         let input = Paragraph::new(visible)
             .block(Block::default().borders(Borders::ALL).title(title))
             .style(style);
-        frame.render_widget(input, areas[2]);
+        frame.render_widget(input, areas[3]);
         // Show where typing goes. Without this the prompt is a guess, and the
         // terminal's own cursor stays hidden.
         if self.pending.is_none() {
             frame.set_cursor_position((
-                areas[2].x + 1 + caret_column,
-                areas[2].y + 1 + (caret_row - offset as u16),
+                areas[3].x + 1 + caret_column,
+                areas[3].y + 1 + (caret_row - offset as u16),
             ));
         }
 
@@ -698,7 +781,7 @@ impl App {
                 Style::default().fg(Color::Red),
             ));
         }
-        frame.render_widget(Paragraph::new(Line::from(hints)), areas[3]);
+        frame.render_widget(Paragraph::new(Line::from(hints)), areas[4]);
     }
 }
 
@@ -1213,6 +1296,10 @@ mod tests {
             "{screen}"
         );
         assert!(screen.contains("/exit leaves"), "and the way out: {screen}");
+        assert!(
+            screen.contains("/logo the mark"),
+            "and what else is here: {screen}"
+        );
         // And it is only a hint: the text is still a normal prompt buffer.
         assert_eq!(app.input, "/rev");
     }
@@ -1679,6 +1766,50 @@ mod tests {
         assert_eq!(app.scroll, 0);
         app.handle_mouse(ratatui::crossterm::event::MouseEventKind::ScrollDown);
         assert_eq!(app.scroll, 0, "and it stops at the bottom");
+    }
+
+    #[test]
+    fn the_mark_is_drawn_and_can_be_put_away() {
+        let mut app = App::new("s", "v");
+        let screen = draw(&mut app, 100, 30);
+        assert!(
+            screen.contains("龍"),
+            "the traditional character:\n{screen}"
+        );
+        assert!(screen.contains("loongagent"), "{screen}");
+        assert!(
+            screen.contains("firm-internal coding agent"),
+            "and what it is:\n{screen}"
+        );
+        // The character sits inside a seal, not beside it: the interior row is
+        // `███ 龍 ███`.
+        // The cell buffer pads the wide character with a continuation cell, so the
+        // rendered string has an extra space after 龍; the seal's left edge is what
+        // proves it is inside the square rather than beside it.
+        assert!(
+            screen.lines().any(|line| line.contains("███ 龍")),
+            "{screen}"
+        );
+
+        // `/logo` puts it away, and nothing else moves.
+        type_text(&mut app, "/logo");
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::None);
+        assert!(!app.logo);
+        let screen = draw(&mut app, 100, 30);
+        assert!(!screen.contains("龍"), "{screen}");
+        assert!(
+            screen.contains("enter send"),
+            "the box and keys remain:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn a_small_terminal_gets_no_mark() {
+        // A logo that squeezes the conversation costs more than it gives.
+        let mut app = App::new("s", "v");
+        let screen = draw(&mut app, 36, 12);
+        assert!(!screen.contains("龍"), "{screen}");
+        assert!(screen.contains("enter send"), "{screen}");
     }
 
     #[test]

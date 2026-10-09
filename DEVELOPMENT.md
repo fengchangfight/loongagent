@@ -195,6 +195,15 @@ renders live events. Reopening a session used to give an empty screen that was q
 appending to yesterday's conversation; the test that caught it is the one that reopens a
 session and asserts the earlier prompt is on screen.
 
+### The mark
+
+Three rows at the top when the terminal is at least 44 columns and 18 rows: a red seal
+with the traditional **龍** in gold, the wordmark beside it. The character is the
+terminal's own glyph rather than hand-drawn blocks — a font renders 龍 better than any
+fixed bitmap this repository could carry, and the seal gives it the frame that makes it a
+mark rather than a floating character. `/logo` puts it away; a small terminal never gets
+it, because a logo that squeezes the conversation costs more than it gives.
+
 ### Watching a turn happen
 
 A turn streams. The kernel calls a sink for **every event the moment it is written**
@@ -225,6 +234,7 @@ asked for works.
 | `enter` | send the line |
 | *(long input)* | wraps at the box edge; the box grows to as many rows as needed (at most eight), and the caret stays on screen |
 | `/exit`, `/quit`, `/q` | leave — handled by the **interface**, never sent to the agent |
+| `/logo` | show or hide the mark at the top |
 | `ctrl-c`, `ctrl-d` | leave |
 | `f2` | the context panel |
 | `pgup`/`pgdn`, mouse wheel | scroll the conversation; `ctrl-pgup`/`ctrl-pgdn` jump to the ends |

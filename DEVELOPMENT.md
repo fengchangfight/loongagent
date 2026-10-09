@@ -195,6 +195,29 @@ renders live events. Reopening a session used to give an empty screen that was q
 appending to yesterday's conversation; the test that caught it is the one that reopens a
 session and asserts the earlier prompt is on screen.
 
+### Watching a turn happen
+
+A turn streams. The kernel calls a sink for **every event the moment it is written**
+(`Kernel::set_event_sink`), and the server puts that event and the model's deltas on the
+connection immediately, so a surface can show work while it is still happening rather than
+when it is over. Two rules keep it honest:
+
+- nothing is announced that was not written first — the event is durable before the sink
+  sees it, so a client can never show a decision the log does not have (ADR-0009);
+- a **delta** is still transient: written to the connection and nowhere else, because the
+  log holds the finished message and a client that misses a fragment has missed nothing.
+
+`Server::handle_line` keeps its old contract for tests and small programs — it collects
+through an in-memory connection and hands back everything in order, response last — while
+`handle_line_streaming(line, &Out)` writes as it goes and returns only the response.
+
+In the TUI that shows up as the work appearing line by line (`→ read_file note.txt`,
+`← ok …`) and an input title that says what is running and for how long (`working 12s ·
+→ shell cargo test`), because "working…" for two minutes tells nobody whether it is
+thinking or stuck. `run` and `repl` still print the turn when it finishes; handing them
+the same live callback is a small change, deliberately left until the surface that was
+asked for works.
+
 ### What the TUI answers to
 
 | Key / command | What it does |

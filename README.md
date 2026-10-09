@@ -85,7 +85,7 @@ log entry — a client that misses one has missed nothing.
 | Command | What it is |
 |---|---|
 | `loongagent web` | a browser UI on loopback; the URL carries a token in its fragment, and the socket refuses anything without it |
-| `loongagent tui` | the same client, full-screen in a terminal (ratatui) |
+| `loongagent tui` | the same client, full-screen in a terminal (ratatui); work is shown as it happens |
 | `loongagent repl` | line mode — works under a pipe, so CI and scripts are not left out |
 | `loongagent run "…"` | headless: prints the turn and exits (exit 3 when a human is needed) |
 | `loongagent sessions` | list this project's sessions (`--all` for every project) |

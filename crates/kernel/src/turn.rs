@@ -379,6 +379,8 @@ pub struct Kernel {
     /// The typed conversation the model sees. Kept in step with the ledger by
     /// construction: every mutation goes through `record_*`.
     messages: Vec<ChatMessage>,
+    /// Called for every event the moment it is written (the server's liveness hook).
+    event_sink: Option<Box<dyn FnMut(&gen::EventEnvelope)>>,
     /// Ledger entry per message, in lockstep with `messages` (ADR-0006: the
     /// ledger decides, the wire view follows).
     entry_of: Vec<Option<u64>>,
@@ -592,6 +594,7 @@ impl Kernel {
             selected_model,
             config,
             messages: Vec::new(),
+            event_sink: None,
             entry_of: Vec::new(),
             pending: None,
             approvals: 0,
@@ -1674,7 +1677,21 @@ impl Kernel {
                 self.index_stale = Some(e.to_string());
             }
         }
+        // Whoever is watching hears about it **now**, at the moment it became true —
+        // not when the turn is over. This is what lets a surface show the work as it
+        // happens (ADR-0009), and it is the same guarantee the log gives: nothing is
+        // announced that was not written first.
+        if let Some(sink) = self.event_sink.as_mut() {
+            sink(&envelope);
+        }
         Ok(envelope.seq)
+    }
+
+    /// Watch events as they are recorded. Scoped by the caller (the server installs one
+    /// for the duration of a turn and clears it afterwards), because a sink that
+    /// outlives its transport would write into nothing.
+    pub fn set_event_sink(&mut self, sink: Option<Box<dyn FnMut(&gen::EventEnvelope)>>) {
+        self.event_sink = sink;
     }
 
     fn record_user(&mut self, text: &str) -> Result<u64, KernelError> {

@@ -26,6 +26,145 @@ pub struct Client<T: Transport> {
     last_accepted: bool,
 }
 
+/// Presentation only: turn one event into a line for a human.
+///
+/// Free rather than a method so a caller can render **inside** the notification
+/// callback — which is how a surface shows work while it is still happening.
+pub fn render_event(envelope: &Value) -> Option<String> {
+    let kind = envelope.get("kind")?.as_str()?;
+    let data = envelope.get("data").cloned().unwrap_or(Value::Null);
+    match kind {
+        gen::event::MESSAGE_APPENDED => {
+            let role = data.get("role").and_then(|r| r.as_str()).unwrap_or("?");
+            let text = data.get("text").and_then(|t| t.as_str()).unwrap_or("");
+            match role {
+                "assistant" if !text.is_empty() => Some(text.to_string()),
+                "user" => Some(format!("you: {text}")),
+                _ => None,
+            }
+        }
+        // What the tool is doing, in the words of its own argument: a path, a
+        // command, a pattern. Raw JSON buries the one thing worth reading.
+        gen::event::TOOL_CALL => {
+            let tool = data.get("tool").and_then(|t| t.as_str()).unwrap_or("?");
+            let args = data.get("args").cloned().unwrap_or(Value::Null);
+            let detail = [
+                "command", "path", "pattern", "query", "url", "name", "prompt",
+            ]
+            .iter()
+            .find_map(|key| args.get(*key).and_then(|value| value.as_str()))
+            .map(|text| text.to_string())
+            .unwrap_or_else(|| truncate(&args.to_string(), 60));
+            Some(format!("→ {tool} {}", truncate(&detail, 80)))
+        }
+        gen::event::TOOL_RESULT => {
+            let ok = data.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+            let output = data.get("output").and_then(|o| o.as_str()).unwrap_or("");
+            Some(format!(
+                "← {} {}",
+                if ok { "ok" } else { "failed" },
+                truncate(output, 120)
+            ))
+        }
+        gen::event::POLICY_DECIDED => Some(format!(
+            "· policy: {} by {}",
+            data.get("verdict").and_then(|v| v.as_str()).unwrap_or("?"),
+            data.get("rule").and_then(|v| v.as_str()).unwrap_or("?")
+        )),
+        gen::event::APPROVAL_REQUESTED => {
+            let request_id = data
+                .get("request_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            Some(format!(
+                "! approval required ({}): {} [{}]",
+                data.get("action_class")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?"),
+                data.get("reason").and_then(|v| v.as_str()).unwrap_or(""),
+                request_id
+            ))
+        }
+        gen::event::APPROVAL_DECIDED => Some(format!(
+            "· approval {} ({})",
+            if data
+                .get("granted")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                "granted"
+            } else {
+                "denied"
+            },
+            data.get("scope").and_then(|v| v.as_str()).unwrap_or("?")
+        )),
+        gen::event::SKILLS_LOADED => Some(format!(
+            "· skills available ({}): {}",
+            data.get("count").and_then(|v| v.as_u64()).unwrap_or(0),
+            data.get("names").and_then(|v| v.as_str()).unwrap_or("")
+        )),
+        gen::event::SKILL_INVOKED => {
+            let name = data.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+            if let Some(error) = data.get("error").and_then(|v| v.as_str()) {
+                Some(format!("! /{name}: {error}"))
+            } else {
+                let args = data.get("args").and_then(|v| v.as_str()).unwrap_or("");
+                Some(format!(
+                    "· /{name} {args} ({} tokens from {})",
+                    data.get("tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+                    data.get("source").and_then(|v| v.as_str()).unwrap_or("?")
+                ))
+            }
+        }
+        gen::event::HOOK_FIRED => {
+            let id = data.get("hook_id").and_then(|v| v.as_str()).unwrap_or("?");
+            let fired = data.get("event").and_then(|v| v.as_str()).unwrap_or("?");
+            let verdict = data
+                .get("verdict")
+                .and_then(|v| v.as_str())
+                .unwrap_or("allow");
+            let reason = data.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+            let failed = data
+                .get("failed")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            match verdict {
+                "allow" => Some(format!("· hook {id} allowed ({fired})")),
+                _ => Some(format!(
+                    "! hook {id} {verdict}{} on {fired}: {reason}",
+                    if failed { " (could not answer)" } else { "" }
+                )),
+            }
+        }
+        gen::event::COST_RECORDED => Some(format!(
+            "· tokens {} in / {} out ({})",
+            data.get("tokens_in").and_then(|v| v.as_u64()).unwrap_or(0),
+            data.get("tokens_out").and_then(|v| v.as_u64()).unwrap_or(0),
+            data.get("profile").and_then(|v| v.as_str()).unwrap_or("?")
+        )),
+        gen::event::COMPACTION_APPLIED => Some(format!(
+            "· compacted: {} -> {} tokens (cleared {} tool output(s), dropped {} message(s), \
+             newest {} kept)",
+            data.get("tokens_before")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            data.get("tokens_after")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            data.get("cleared_tool_outputs")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            data.get("dropped_messages")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            data.get("kept_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+        )),
+        other => Some(format!("· {other}")),
+    }
+}
+
 impl<T: Transport> Client<T> {
     pub fn new(transport: T, session_id: impl Into<String>) -> Self {
         Self {
@@ -86,7 +225,7 @@ impl<T: Transport> Client<T> {
         Ok(replay
             .events
             .iter()
-            .filter_map(|event| self.render_event(event))
+            .filter_map(|event| render_event(event))
             .collect())
     }
 
@@ -196,136 +335,24 @@ impl<T: Transport> Client<T> {
                 // `event` carries it in `params.kind`.
                 on_notification(&notification.method, &notification.params);
                 if notification.method == loong_protocol::EVENT_NOTIFICATION {
-                    if let Some(text) = self.render_event(&notification.params) {
+                    // State the connection needs to keep, which rendering does not own.
+                    if notification.params.get("kind").and_then(|k| k.as_str())
+                        == Some(gen::event::APPROVAL_REQUESTED)
+                    {
+                        self.pending_approval = notification
+                            .params
+                            .get("data")
+                            .and_then(|data| data.get("request_id"))
+                            .and_then(|id| id.as_str())
+                            .map(|id| id.to_string());
+                    }
+                    if let Some(text) = render_event(&notification.params) {
                         rendered.push(text);
                     }
                 }
                 continue;
             }
             return Err(format!("unparseable line from the server: {line}"));
-        }
-    }
-
-    /// Presentation only: turn one event into a line for a human.
-    fn render_event(&mut self, envelope: &Value) -> Option<String> {
-        let kind = envelope.get("kind")?.as_str()?;
-        let data = envelope.get("data").cloned().unwrap_or(Value::Null);
-        match kind {
-            gen::event::MESSAGE_APPENDED => {
-                let role = data.get("role").and_then(|r| r.as_str()).unwrap_or("?");
-                let text = data.get("text").and_then(|t| t.as_str()).unwrap_or("");
-                match role {
-                    "assistant" if !text.is_empty() => Some(text.to_string()),
-                    "user" => Some(format!("you: {text}")),
-                    _ => None,
-                }
-            }
-            gen::event::TOOL_CALL => Some(format!(
-                "→ {} {}",
-                data.get("tool").and_then(|t| t.as_str()).unwrap_or("?"),
-                truncate(
-                    &data.get("args").cloned().unwrap_or(Value::Null).to_string(),
-                    60
-                )
-            )),
-            gen::event::TOOL_RESULT => {
-                let ok = data.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
-                let output = data.get("output").and_then(|o| o.as_str()).unwrap_or("");
-                Some(format!(
-                    "← {} {}",
-                    if ok { "ok" } else { "failed" },
-                    truncate(output, 120)
-                ))
-            }
-            gen::event::POLICY_DECIDED => Some(format!(
-                "· policy: {} by {}",
-                data.get("verdict").and_then(|v| v.as_str()).unwrap_or("?"),
-                data.get("rule").and_then(|v| v.as_str()).unwrap_or("?")
-            )),
-            gen::event::APPROVAL_REQUESTED => {
-                let request_id = data
-                    .get("request_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                self.pending_approval = Some(request_id.to_string());
-                Some(format!(
-                    "! approval required ({}): {} [{}]",
-                    data.get("action_class")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("?"),
-                    data.get("reason").and_then(|v| v.as_str()).unwrap_or(""),
-                    request_id
-                ))
-            }
-            gen::event::APPROVAL_DECIDED => Some(format!(
-                "· approval {} ({})",
-                if data
-                    .get("granted")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false)
-                {
-                    "granted"
-                } else {
-                    "denied"
-                },
-                data.get("scope").and_then(|v| v.as_str()).unwrap_or("?")
-            )),
-            gen::event::SKILLS_LOADED => Some(format!(
-                "· skills available ({}): {}",
-                data.get("count").and_then(|v| v.as_u64()).unwrap_or(0),
-                data.get("names").and_then(|v| v.as_str()).unwrap_or("")
-            )),
-            gen::event::SKILL_INVOKED => {
-                let name = data.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-                if let Some(error) = data.get("error").and_then(|v| v.as_str()) {
-                    Some(format!("! /{name}: {error}"))
-                } else {
-                    let args = data.get("args").and_then(|v| v.as_str()).unwrap_or("");
-                    Some(format!(
-                        "· /{name} {args} ({} tokens from {})",
-                        data.get("tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-                        data.get("source").and_then(|v| v.as_str()).unwrap_or("?")
-                    ))
-                }
-            }
-            gen::event::HOOK_FIRED => {
-                let id = data.get("hook_id").and_then(|v| v.as_str()).unwrap_or("?");
-                let fired = data.get("event").and_then(|v| v.as_str()).unwrap_or("?");
-                let verdict = data
-                    .get("verdict")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("allow");
-                let reason = data.get("reason").and_then(|v| v.as_str()).unwrap_or("");
-                let failed = data
-                    .get("failed")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                match verdict {
-                    "allow" => Some(format!("· hook {id} allowed ({fired})")),
-                    _ => Some(format!(
-                        "! hook {id} {verdict}{} on {fired}: {reason}",
-                        if failed { " (could not answer)" } else { "" }
-                    )),
-                }
-            }
-            gen::event::COST_RECORDED => Some(format!(
-                "· tokens {} in / {} out ({})",
-                data.get("tokens_in").and_then(|v| v.as_u64()).unwrap_or(0),
-                data.get("tokens_out").and_then(|v| v.as_u64()).unwrap_or(0),
-                data.get("profile").and_then(|v| v.as_str()).unwrap_or("?")
-            )),
-            gen::event::COMPACTION_APPLIED => {
-                Some(format!(
-                "· compacted: {} -> {} tokens (cleared {} tool output(s), dropped {} message(s), \
-                 newest {} kept)",
-                data.get("tokens_before").and_then(|v| v.as_u64()).unwrap_or(0),
-                data.get("tokens_after").and_then(|v| v.as_u64()).unwrap_or(0),
-                data.get("cleared_tool_outputs").and_then(|v| v.as_u64()).unwrap_or(0),
-                data.get("dropped_messages").and_then(|v| v.as_u64()).unwrap_or(0),
-                data.get("kept_tokens").and_then(|v| v.as_u64()).unwrap_or(0)
-            ))
-            }
-            other => Some(format!("· {other}")),
         }
     }
 }
@@ -440,7 +467,8 @@ mod tests {
             lines,
             vec![
                 "you: read it".to_string(),
-                "→ read_file {\"path\":\"a.txt\"}".to_string(),
+                // The tool's own argument, not the JSON wrapped around it.
+                "→ read_file a.txt".to_string(),
                 "· policy: allow by builtin:write_workspace".to_string(),
                 "← ok hello".to_string(),
                 "it says hello".to_string(),

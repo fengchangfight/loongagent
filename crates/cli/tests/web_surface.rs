@@ -261,7 +261,20 @@ fn a_browser_can_drive_a_session_with_a_model_behind_it() {
         "deltas reach the browser: {methods:?}"
     );
     let first_delta = methods.iter().position(|m| m == "model.delta").unwrap();
-    assert_eq!(first_delta, 0, "before anything else: {methods:?}");
+    // The work reaches the browser as it is recorded, so the writing is no longer the
+    // first thing it sees: the session's opening events and the turn's own arrive
+    // first, in order, and the delta follows. What matters is that nothing but events
+    // precedes it and that at least one did.
+    assert!(
+        methods[..first_delta]
+            .iter()
+            .all(|method| method == "event"),
+        "only events precede the first delta: {methods:?}"
+    );
+    assert!(
+        !methods[..first_delta].is_empty(),
+        "and the work is visible before the answer: {methods:?}"
+    );
 
     let kinds: Vec<&str> = events.iter().map(|e| e["kind"].as_str().unwrap()).collect();
     for expected in [

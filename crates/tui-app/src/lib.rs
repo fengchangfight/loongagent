@@ -45,6 +45,9 @@ pub enum FromWorker {
     },
     /// What the next request will carry: the debug panel's data.
     Context(Box<loong_schema::generated::ContextExplain>),
+    /// What the turn is doing right now ("shell: cargo test"), so the interface can say
+    /// so while it is happening rather than after.
+    Working(String),
     Failed(String),
 }
 
@@ -70,6 +73,10 @@ pub struct App {
     pub pending: Option<String>,
     /// Diagnostics from the server process (its stderr): startup notes, warnings.
     pub notes: Vec<String>,
+    /// What the running turn is doing, and since when — the interface's answer to "is
+    /// it stuck, or working?".
+    pub activity: Option<String>,
+    pub busy_since: Option<std::time::Instant>,
     /// Whether the context panel is open (F2), and what it last showed.
     pub debug: bool,
     pub context: Option<Box<loong_schema::generated::ContextExplain>>,
@@ -96,6 +103,8 @@ impl App {
             schema: schema.into(),
             busy: false,
             error: None,
+            activity: None,
+            busy_since: None,
             debug: false,
             context: None,
             streaming: String::new(),
@@ -334,6 +343,7 @@ impl App {
             match worker.try_recv() {
                 Ok(FromWorker::Delta(piece)) => self.streaming.push_str(&piece),
                 Ok(FromWorker::Context(explained)) => self.context = Some(explained),
+                Ok(FromWorker::Working(what)) => self.activity = Some(what),
                 Ok(FromWorker::Lines(lines)) => {
                     // The finished message supersedes the fragments on screen, and it
                     // is the only one of the two that exists in the log.
@@ -343,10 +353,14 @@ impl App {
                 Ok(FromWorker::State { pending }) => {
                     self.pending = pending;
                     self.busy = false;
+                    self.busy_since = None;
+                    self.activity = None;
                     self.streaming.clear();
                 }
                 Ok(FromWorker::Failed(message)) => {
                     self.busy = false;
+                    self.busy_since = None;
+                    self.activity = None;
                     self.error = Some(message.clone());
                     self.push_lines(vec![format!("! {message}")]);
                 }
@@ -488,6 +502,8 @@ impl App {
                 self.cursor = 0;
                 self.push_lines(vec![format!("you: {text}")]);
                 self.busy = true;
+                self.busy_since = Some(std::time::Instant::now());
+                self.activity = None;
                 self.error = None;
                 Action::Send(ToWorker::Submit(text))
             }
@@ -594,7 +610,23 @@ impl App {
                 format!("approval required: {request_id} — [a]pprove / [d]eny"),
                 Style::default().fg(Color::Yellow),
             ),
-            None if self.busy => ("working…".to_string(), Style::default().fg(Color::Cyan)),
+            // Busy: what it is doing and for how long. "working…" for two minutes
+            // tells nobody whether it is thinking or stuck.
+            None if self.busy => {
+                let secs = self
+                    .busy_since
+                    .map(|since| since.elapsed().as_secs())
+                    .unwrap_or(0);
+                let doing = self
+                    .activity
+                    .as_deref()
+                    .map(|what| format!(" · {what}"))
+                    .unwrap_or_default();
+                (
+                    format!("working {secs}s{doing}"),
+                    Style::default().fg(Color::Cyan),
+                )
+            }
             // A leading `/` is a command: say where the list of them is.
             None if self.input.starts_with('/') => (
                 match self.input.trim() {
@@ -683,14 +715,27 @@ pub fn spawn_worker<T: Transport + Send + 'static>(
                 ToWorker::Submit(text) => {
                     // Deltas go out as they arrive; the finished lines follow.
                     let _ = events.send(FromWorker::Lines(Vec::new()));
-                    client.submit_with(&text, &mut |method, params| {
-                        if method != loong_schema::generated::notification::MODEL_DELTA {
+                    let outcome = client.submit_with(&text, &mut |method, params| {
+                        if method == loong_schema::generated::notification::MODEL_DELTA {
+                            if let Some(piece) = params.get("text").and_then(|t| t.as_str()) {
+                                let _ = events.send(FromWorker::Delta(piece.to_string()));
+                            }
                             return;
                         }
-                        if let Some(piece) = params.get("text").and_then(|t| t.as_str()) {
-                            let _ = events.send(FromWorker::Delta(piece.to_string()));
+                        // The work itself, the moment it is recorded — this is the
+                        // difference between watching an agent and waiting for one.
+                        if let Some(line) = loong_tui::render_event(params) {
+                            if params.get("kind").and_then(|k| k.as_str())
+                                == Some(loong_schema::generated::event::TOOL_CALL)
+                            {
+                                let _ = events.send(FromWorker::Working(line.clone()));
+                            }
+                            let _ = events.send(FromWorker::Lines(vec![line]));
                         }
-                    })
+                    });
+                    // Everything above was already sent as it happened; the returned
+                    // lines are the same ones, and sending them again would double them.
+                    outcome.map(|_| Vec::new())
                 }
                 ToWorker::Respond {
                     request_id,

@@ -11,7 +11,55 @@ use loong_kernel::{Kernel, KernelError};
 use loong_protocol::{codes, Notification, Request, Response};
 use loong_schema::generated as gen;
 use serde_json::Value;
+use std::cell::RefCell;
 use std::io::{BufRead, Write};
+use std::rc::Rc;
+
+/// The outbound side of one connection, shareable so that work **in progress** can write
+/// to it. A turn runs inside a single call, so a sink borrowed for that call cannot reach
+/// the wire; this can, because it is a handle rather than a borrow.
+#[derive(Clone)]
+pub struct Out(Rc<RefCell<Box<dyn Write>>>);
+
+impl Out {
+    pub fn stdout() -> Self {
+        Self(Rc::new(RefCell::new(Box::new(std::io::stdout()))))
+    }
+
+    /// A connection that keeps what was written, for tests and for callers that would
+    /// rather collect than stream.
+    pub fn memory() -> (Self, Rc<RefCell<Vec<String>>>) {
+        let collected: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        struct Lines(Rc<RefCell<Vec<String>>>, String);
+        impl Write for Lines {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.1.push_str(&String::from_utf8_lossy(buf));
+                while let Some(index) = self.1.find('\n') {
+                    let line = self.1[..index].to_string();
+                    self.1.drain(..=index);
+                    self.0.borrow_mut().push(line);
+                }
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let out = Self(Rc::new(RefCell::new(Box::new(Lines(
+            Rc::clone(&collected),
+            String::new(),
+        )))));
+        (out, collected)
+    }
+
+    /// One line, on the wire now. Flushing matters more than batching here: the point of
+    /// streaming is that a person watching sees it before the turn ends.
+    pub fn line(&self, line: &str) {
+        let mut writer = self.0.borrow_mut();
+        let _ = writeln!(writer, "{line}");
+        let _ = writer.flush();
+    }
+}
 
 #[derive(Debug)]
 pub enum ServerError {
@@ -39,6 +87,12 @@ pub struct Server {
     session_id: String,
     /// Highest sequence already streamed to the client.
     last_sent: u64,
+    /// The connection this call is writing to, so a response can stream the events it
+    /// drained instead of returning them.
+    connection: Option<Out>,
+    /// Lines with nowhere to go yet (no connection, which only tests and programs using
+    /// `handle_line` hit).
+    pending_lines: Vec<String>,
     turns: u64,
 }
 
@@ -48,6 +102,8 @@ impl Server {
             kernel,
             session_id: session_id.into(),
             last_sent: 0,
+            connection: None,
+            pending_lines: Vec::new(),
             turns: 0,
         }
     }
@@ -60,29 +116,40 @@ impl Server {
     /// event notifications first, then exactly one response for a request.
     /// Pure enough to test without any transport at all.
     pub fn handle_line(&mut self, line: &str) -> Vec<String> {
-        self.handle_line_streaming(line, &mut |_| {})
+        // Collect rather than stream, then hand back everything in order: the response
+        // last, as this API has always promised. Streaming callers use the method below.
+        let (out, collected) = Out::memory();
+        let mut responses = self.handle_line_streaming(line, &out);
+        let mut lines = collected.borrow().clone();
+        lines.append(&mut responses);
+        lines
     }
 
-    /// As [`Server::handle_line`], but handing the model's **deltas** to `sink` as
-    /// they arrive instead of returning them at the end.
+    /// As [`Server::handle_line`], but writing to the connection **while the turn runs**
+    /// and returning only the response.
     ///
-    /// A delta is a `model.delta` notification: it is written to the client
-    /// immediately (so the operator sees the answer being written) and nowhere else
-    /// — the event stream returned by this call, and the log behind it, carry only
-    /// the finished message. That asymmetry is deliberate: the log stays the truth,
-    /// and a client that misses a delta has missed nothing.
-    pub fn handle_line_streaming(
-        &mut self,
-        line: &str,
-        sink: &mut dyn FnMut(String),
-    ) -> Vec<String> {
+    /// Two kinds of thing go out this way. A **delta** is a `model.delta` notification:
+    /// written immediately and nowhere else — the log carries only the finished message,
+    /// and a client that misses a delta has missed nothing. An **event** is different:
+    /// it was written to the log first and then announced, which is what lets a surface
+    /// show the work as it happens without ever seeing a decision the log does not
+    /// have (ADR-0009).
+    pub fn handle_line_streaming(&mut self, line: &str, out: &Out) -> Vec<String> {
+        // So `respond` and `fail` can put what they drained on the same wire.
+        self.connection = Some(out.clone());
+        let result = self.handle_request(line);
+        self.connection = None;
+        result
+    }
+
+    fn handle_request(&mut self, line: &str) -> Vec<String> {
         match Request::parse(line) {
-            Ok(request) => self.dispatch(request, sink),
+            Ok(request) => self.dispatch(request),
             Err(response) => vec![response.to_line()],
         }
     }
 
-    fn dispatch(&mut self, request: Request, sink: &mut dyn FnMut(String)) -> Vec<String> {
+    fn dispatch(&mut self, request: Request) -> Vec<String> {
         let id = request.id.clone().unwrap_or(Value::Null);
         match request.method.as_str() {
             gen::method::SESSION_ATTACH => {
@@ -147,13 +214,34 @@ impl Server {
                 }
                 self.turns += 1;
                 let turn_id = self.turns;
-                match self.kernel.submit_with(&params.text, &mut |piece| {
+                // While this turn runs, its events go out as they happen and its deltas
+                // go out as they arrive. `last_sent` travels with the sink so the final
+                // response does not repeat what was already streamed.
+                let sent = Rc::new(std::cell::Cell::new(self.last_sent));
+                {
+                    let out = self.connection.clone().unwrap_or_else(|| Out::memory().0);
+                    let sent = Rc::clone(&sent);
+                    self.kernel.set_event_sink(Some(Box::new(
+                        move |event: &gen::EventEnvelope| {
+                            match serde_json::to_value(event) {
+                                Ok(value) => out.line(&Notification::event(&value).to_line()),
+                                Err(_) => return,
+                            }
+                            sent.set(sent.get().max(event.seq));
+                        },
+                    )));
+                }
+                let deltas = self.connection.clone().unwrap_or_else(|| Out::memory().0);
+                let outcome = self.kernel.submit_with(&params.text, &mut |piece| {
                     let notification = Notification::new(
                         gen::notification::MODEL_DELTA,
                         serde_json::json!({"turn_id": turn_id, "text": piece}),
                     );
-                    sink(notification.to_line());
-                }) {
+                    deltas.line(&notification.to_line());
+                });
+                self.kernel.set_event_sink(None);
+                self.last_sent = self.last_sent.max(sent.get());
+                match outcome {
                     Ok(outcome) => {
                         // A `user_prompt_submit` hook can refuse the turn before
                         // the model runs; the reason travels as hook.fired events
@@ -200,16 +288,28 @@ impl Server {
 
     /// `<T>`: stream the events this call produced, then the response.
     fn respond<T: serde::Serialize>(&mut self, id: Value, result: T, _method: &str) -> Vec<String> {
-        let mut lines = self.drain_events();
+        self.stream_drained();
         match serde_json::to_value(&result) {
-            Ok(value) => lines.push(Response::ok(id, value).to_line()),
-            Err(e) => lines.push(Response::err(id, codes::INTERNAL_ERROR, e.to_string()).to_line()),
+            Ok(value) => vec![Response::ok(id, value).to_line()],
+            Err(e) => vec![Response::err(id, codes::INTERNAL_ERROR, e.to_string()).to_line()],
         }
-        lines
+    }
+
+    /// Events recorded since the last one sent go to the connection now: they are news,
+    /// and news arrives when it happens (ADR-0009). A caller with no connection to write
+    /// to — `handle_line` collects through an in-memory one — gets them in its list.
+    fn stream_drained(&mut self) {
+        for line in self.drain_events() {
+            match &self.connection {
+                Some(out) => out.line(&line),
+                None => self.pending_lines.push(line),
+            }
+        }
     }
 
     fn fail(&mut self, id: Value, error: KernelError) -> Vec<String> {
-        let mut lines = self.drain_events();
+        self.stream_drained();
+        let mut lines: Vec<String> = std::mem::take(&mut self.pending_lines);
         let code = match error {
             KernelError::OutOfOrder(_) => codes::INVALID_PARAMS,
             _ => codes::INTERNAL_ERROR,
@@ -252,18 +352,16 @@ impl Server {
     pub fn run_stdio(mut self) -> Result<(), ServerError> {
         let stdin = std::io::stdin();
         let mut stdout = std::io::stdout();
+        // One handle for the whole connection: progress is written and flushed the moment
+        // it happens, and the final response goes through the same door.
+        let connection = Out::stdout();
         for line in stdin.lock().lines() {
             let line = line?;
             if line.trim().is_empty() {
                 continue;
             }
-            let responses = self.handle_line_streaming(&line, &mut |delta| {
-                // Written and flushed on arrival: buffered, it would defeat the point.
-                let _ = writeln!(stdout, "{delta}");
-                let _ = stdout.flush();
-            });
-            for out in responses {
-                writeln!(stdout, "{out}")?;
+            for response in self.handle_line_streaming(&line, &connection) {
+                writeln!(stdout, "{response}")?;
             }
             stdout.flush()?;
         }
@@ -413,9 +511,9 @@ mod tests {
         assert_eq!(
             kinds,
             vec![
-                // The session's opening event streams to whoever attaches, then the
-                // turn's own events in order.
-                "skills.loaded",
+                // The turn's own events, in order. The session's *opening* events
+                // (`skills.loaded` and friends) belong to `session.attach`, which drains
+                // them when it answers — each call streams what it caused.
                 "message.appended",
                 "cost.recorded",
                 "message.appended",
@@ -526,6 +624,92 @@ mod tests {
                 },
             })
         }
+    }
+
+    #[test]
+    fn a_turn_reports_its_work_before_it_is_over() {
+        // The difference between watching an agent and waiting for one: the events reach
+        // the connection while the turn is still running, in the order they happened,
+        // and the response comes last.
+        let t = Temp::new();
+        std::fs::write(t.0.join("a.txt"), "hello").unwrap();
+        let model = scripted(
+            vec![ToolCallRequest {
+                call_id: "c1".to_string(),
+                tool: "read_file".to_string(),
+                args: json!({"path": "a.txt"}),
+            }],
+            Some("done"),
+        );
+        let kernel = Kernel::create(
+            t.0.join("c.jsonl"),
+            KernelConfig::new(&t.0),
+            Box::new(model),
+        )
+        .unwrap();
+        let mut server = Server::new(kernel, "s-live");
+
+        let (out, written) = Out::memory();
+        let responses = server.handle_line_streaming(&attach_line(), &out);
+        assert_eq!(
+            responses.len(),
+            1,
+            "just the response: the events were streamed"
+        );
+
+        let (out, written) = Out::memory();
+        let responses = server.handle_line_streaming(
+            &Request::new(
+                2,
+                gen::method::PROMPT_SUBMIT,
+                json!({"session_id": "s-live", "text": "read it"}),
+            )
+            .to_line(),
+            &out,
+        );
+        let lines = written.borrow().clone();
+        let kinds: Vec<String> = lines
+            .iter()
+            .filter(|line| line.contains("\"method\":\"event\""))
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter_map(|value| {
+                value["params"]["kind"]
+                    .as_str()
+                    .map(|kind| kind.to_string())
+            })
+            .collect();
+        assert!(
+            kinds.contains(&gen::event::TOOL_CALL.to_string()),
+            "{kinds:?}"
+        );
+        assert!(
+            kinds.contains(&gen::event::TOOL_RESULT.to_string()),
+            "{kinds:?}"
+        );
+        assert!(
+            kinds.contains(&gen::event::MESSAGE_APPENDED.to_string()),
+            "the answer is announced too: {kinds:?}"
+        );
+        let tool_call = kinds
+            .iter()
+            .position(|k| k == gen::event::TOOL_CALL)
+            .unwrap();
+        let tool_result = kinds
+            .iter()
+            .position(|k| k == gen::event::TOOL_RESULT)
+            .unwrap();
+        assert!(tool_call < tool_result, "in the order they happened");
+        assert_eq!(responses.len(), 1);
+        assert!(
+            responses[0].contains("\"result\""),
+            "and the response is the only thing left over"
+        );
+        // Nothing was streamed twice.
+        assert_eq!(
+            kinds.iter().filter(|k| *k == gen::event::TOOL_CALL).count(),
+            1,
+            "{kinds:?}"
+        );
     }
 
     #[test]
@@ -667,21 +851,23 @@ mod tests {
         let mut server = Server::new(kernel, "s-stream");
         assert_eq!(lines_of(&mut server, &attach_line())[0]["method"], "event");
 
-        let mut deltas = Vec::new();
-        let out = server.handle_line_streaming(
+        let (live, streamed) = Out::memory();
+        let responses = server.handle_line_streaming(
             &Request::new(
                 2,
                 gen::method::PROMPT_SUBMIT,
                 json!({"session_id": "s-stream", "text": "say something"}),
             )
             .to_line(),
-            &mut |line| deltas.push(line),
+            &live,
         );
 
-        // The deltas reached the sink, in order, as `model.delta` notifications.
-        let deltas: Vec<Value> = deltas
+        // The deltas reached the connection, in order, as `model.delta` notifications.
+        let streamed = streamed.borrow().clone();
+        let deltas: Vec<Value> = streamed
             .iter()
             .map(|line| serde_json::from_str(line).expect("JSON"))
+            .filter(|value: &Value| value["method"] == "model.delta")
             .collect();
         assert_eq!(deltas.len(), 3, "{deltas:?}");
         assert!(deltas.iter().all(|d| d["method"] == "model.delta"));
@@ -692,15 +878,17 @@ mod tests {
         assert_eq!(pieces, vec!["the ", "answer ", "arrives"]);
         assert_eq!(deltas[0]["params"]["turn_id"], 1);
 
-        // The returned stream (and the log) hold the finished message, not fragments.
-        let out: Vec<Value> = out
+        // The connection (and the log) hold the finished message, not fragments.
+        let out: Vec<Value> = streamed
             .iter()
             .map(|line| serde_json::from_str(line).expect("JSON"))
             .collect();
         assert!(
-            out.iter().all(|line| line["method"] != "model.delta"),
-            "a delta is not part of the event stream: {out:?}"
+            out.iter()
+                .all(|line| line["method"] != "event" || line["params"]["kind"] != "model.delta"),
+            "a delta is never an event: {out:?}"
         );
+        assert_eq!(responses.len(), 1, "only the response is returned now");
         let answer = out
             .iter()
             .filter(|line| line["method"] == "event")

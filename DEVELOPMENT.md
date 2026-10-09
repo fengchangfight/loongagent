@@ -200,6 +200,7 @@ session and asserts the earlier prompt is on screen.
 | Key / command | What it does |
 |---|---|
 | `enter` | send the line |
+| *(long input)* | wraps at the box edge; the box grows to as many rows as needed (at most eight), and the caret stays on screen |
 | `/exit`, `/quit`, `/q` | leave — handled by the **interface**, never sent to the agent |
 | `ctrl-c`, `ctrl-d` | leave |
 | `f2` | the context panel |

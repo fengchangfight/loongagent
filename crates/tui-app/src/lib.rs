@@ -56,6 +56,10 @@ pub enum Action {
     Quit,
 }
 
+/// How tall the input box may grow. Beyond this it scrolls, so a pasted file cannot
+/// take the whole screen away from the conversation.
+const MAX_INPUT_ROWS: u16 = 8;
+
 pub struct App {
     /// The rendered conversation, oldest first.
     pub lines: Vec<String>,
@@ -253,22 +257,57 @@ impl App {
     /// The input line as it should be drawn at this width, plus the caret's column
     /// inside the box. Long input scrolls horizontally so the caret stays visible —
     /// without that, typing past the edge looks like the keys stopped working.
-    pub fn input_view(&self, inner_width: u16) -> (String, u16) {
-        use unicode_width::UnicodeWidthStr;
-        let width = inner_width.max(1) as usize;
-        let before: String = self.input.chars().take(self.cursor).collect();
-        let caret = before.width();
-        let offset = caret.saturating_sub(width.saturating_sub(1));
-        let mut visible = String::new();
+    /// How tall the input box has to be for what is in it: one row, or as many as the
+    /// text wraps to. Capped, because a pasted file should not eat the conversation.
+    pub fn input_rows(&self, inner_width: u16) -> u16 {
+        self.wrapped_input(inner_width)
+            .0
+            .len()
+            .clamp(1, MAX_INPUT_ROWS as usize) as u16
+    }
+
+    /// The input, wrapped to `inner_width` **display columns**, plus where the caret
+    /// lands in that layout.
+    ///
+    /// By display width, not by character count: a CJK character is two columns wide, so
+    /// counting characters would let a line of them run past the border. And wrapped
+    /// here rather than by the widget, because the terminal cursor has to be placed at
+    /// the caret: two wrappers would disagree eventually, and the caret would drift.
+    pub fn wrapped_input(&self, inner_width: u16) -> (Vec<String>, (u16, u16)) {
+        use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+        let width = (inner_width.max(1)) as usize;
+        let mut lines: Vec<String> = vec![String::new()];
         let mut used = 0usize;
+        let mut caret = (0u16, 0u16);
         for (index, ch) in self.input.chars().enumerate() {
-            let ch_width = ch.to_string().width();
-            if index >= offset && used + ch_width <= width {
-                visible.push(ch);
-                used += ch_width;
+            if index == self.cursor {
+                caret = (
+                    (lines.len() - 1) as u16,
+                    lines.last().map(|line| line.width()).unwrap_or(0) as u16,
+                );
             }
+            // An explicit newline is a hard break: Enter sends, but a pasted block can
+            // still contain them.
+            if ch == '\n' {
+                lines.push(String::new());
+                used = 0;
+                continue;
+            }
+            let char_width = ch.width().unwrap_or(0);
+            if used + char_width > width && used > 0 {
+                lines.push(String::new());
+                used = 0;
+            }
+            lines.last_mut().unwrap().push(ch);
+            used += char_width;
         }
-        (visible, (caret - offset) as u16)
+        if self.cursor >= self.input.chars().count() {
+            caret = (
+                (lines.len() - 1) as u16,
+                lines.last().map(|line| line.width()).unwrap_or(0) as u16,
+            );
+        }
+        (lines, caret)
     }
 
     pub fn push_lines(&mut self, lines: impl IntoIterator<Item = String>) {
@@ -520,12 +559,15 @@ impl App {
         } else {
             (frame.area(), None)
         };
+        // The input's height comes from what is in it: a long prompt wraps and the box
+        // grows, instead of running off the right edge where it cannot be read.
+        let input_rows = self.input_rows(conversation.width.saturating_sub(2));
         let areas = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(if self.notes.is_empty() { 0 } else { 2 }),
                 Constraint::Min(3),
-                Constraint::Length(3),
+                Constraint::Length(input_rows + 2),
                 Constraint::Length(1),
             ])
             .split(conversation);
@@ -568,7 +610,17 @@ impl App {
             None => ("prompt".to_string(), Style::default()),
         };
         let inner_width = areas[2].width.saturating_sub(2);
-        let (visible, caret) = self.input_view(inner_width);
+        let (lines, (caret_row, caret_column)) = self.wrapped_input(inner_width);
+        // Show the end of the text when it is taller than the box, so the line being
+        // typed is always the one on screen.
+        let window = input_rows as usize;
+        let offset = (caret_row as usize + 1).saturating_sub(window);
+        let visible: Vec<Line> = lines
+            .into_iter()
+            .skip(offset)
+            .take(window)
+            .map(Line::from)
+            .collect();
         let input = Paragraph::new(visible)
             .block(Block::default().borders(Borders::ALL).title(title))
             .style(style);
@@ -576,7 +628,10 @@ impl App {
         // Show where typing goes. Without this the prompt is a guess, and the
         // terminal's own cursor stays hidden.
         if self.pending.is_none() {
-            frame.set_cursor_position((areas[2].x + 1 + caret, areas[2].y + 1));
+            frame.set_cursor_position((
+                areas[2].x + 1 + caret_column,
+                areas[2].y + 1 + (caret_row - offset as u16),
+            ));
         }
 
         if let Some(panel) = panel {
@@ -1495,17 +1550,78 @@ mod tests {
     }
 
     #[test]
-    fn a_long_line_scrolls_so_the_caret_stays_visible() {
+    fn a_long_prompt_wraps_instead_of_running_off_the_edge() {
         let mut app = App::new("s", "v");
         type_text(&mut app, "0123456789");
-        let (visible, caret) = app.input_view(6);
-        assert_eq!(visible, "56789", "the tail is shown");
-        assert_eq!(caret, 5, "and the caret sits at its end");
+        let (lines, caret) = app.wrapped_input(6);
+        assert_eq!(lines, vec!["012345".to_string(), "6789".to_string()]);
+        assert_eq!(
+            caret,
+            (1, 4),
+            "the caret is on the second row, after the text"
+        );
+        assert_eq!(app.input_rows(6), 2, "so the box is two rows tall");
 
+        // The caret's row is where editing happens, wherever it is.
         app.handle_key(key(KeyCode::Home));
-        let (visible, caret) = app.input_view(6);
-        assert_eq!(visible, "012345", "moving home scrolls back");
-        assert_eq!(caret, 0);
+        let (lines, caret) = app.wrapped_input(6);
+        assert_eq!(
+            lines,
+            vec!["012345".to_string(), "6789".to_string()],
+            "the text stays put"
+        );
+        assert_eq!(caret, (0, 0), "the caret moved, the layout did not");
+    }
+
+    #[test]
+    fn wrapping_counts_display_columns_so_cjk_fits_the_border() {
+        // Two columns each: four of them are eight columns, which is two rows of four
+        // columns — not eight characters on one row that overflows.
+        let mut app = App::new("s", "v");
+        type_text(&mut app, "中文中文中文");
+        let (lines, caret) = app.wrapped_input(4);
+        assert_eq!(
+            lines,
+            vec!["中文".to_string(), "中文".to_string(), "中文".to_string()]
+        );
+        assert_eq!(caret, (2, 4));
+
+        // And a wide character that would straddle the edge starts the next row.
+        let mut app = App::new("s", "v");
+        type_text(&mut app, "ab中");
+        let (lines, _) = app.wrapped_input(3);
+        assert_eq!(lines, vec!["ab".to_string(), "中".to_string()]);
+    }
+
+    #[test]
+    fn a_pasted_newline_is_a_hard_break() {
+        let mut app = App::new("s", "v");
+        type_text(&mut app, "first\nsecond");
+        let (lines, caret) = app.wrapped_input(40);
+        assert_eq!(lines, vec!["first".to_string(), "second".to_string()]);
+        assert_eq!(caret, (1, 6));
+    }
+
+    #[test]
+    fn the_input_box_stops_growing_and_keeps_the_caret_on_screen() {
+        let mut app = App::new("s", "v");
+        type_text(&mut app, &"x".repeat(200));
+        assert_eq!(
+            app.input_rows(10),
+            MAX_INPUT_ROWS,
+            "capped, so the conversation survives"
+        );
+
+        // What the drawing code does: show the window that contains the caret.
+        let (lines, (caret_row, _)) = app.wrapped_input(10);
+        let window = app.input_rows(10) as usize;
+        let offset = (caret_row as usize + 1).saturating_sub(window);
+        assert_eq!(lines.len(), 20, "200 characters at 10 columns");
+        assert_eq!(
+            offset + window,
+            lines.len(),
+            "the window is at the end, with the caret"
+        );
     }
 
     #[test]
@@ -1521,16 +1637,57 @@ mod tests {
     }
 
     #[test]
+    fn the_drawn_box_grows_with_a_long_prompt() {
+        let mut app = App::new("s", "v");
+        type_text(&mut app, &"abcd ".repeat(12));
+        let screen = draw(&mut app, 40, 20);
+        let rows: Vec<&str> = screen
+            .lines()
+            .filter(|line| line.contains("abcd"))
+            .collect();
+        assert!(
+            rows.len() >= 2,
+            "the prompt is on more than one row:\n{screen}"
+        );
+        // The box's bottom border is still above the hint line, so the layout held.
+        let hint = screen
+            .lines()
+            .position(|line| line.contains("enter send"))
+            .expect("the hint line is drawn");
+        let last_text = screen
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| line.contains("abcd"))
+            .map(|(index, _)| index)
+            .last()
+            .unwrap();
+        assert!(
+            last_text < hint,
+            "the input stays above the keys:\n{screen}"
+        );
+
+        // A short prompt is still one row: the box does not always take the space.
+        let mut app = App::new("s", "v");
+        type_text(&mut app, "hi");
+        let screen = draw(&mut app, 40, 20);
+        assert_eq!(
+            screen.lines().filter(|line| line.contains("hi")).count(),
+            1,
+            "{screen}"
+        );
+    }
+
+    #[test]
     fn the_caret_is_drawn_where_the_next_character_goes() {
         // The terminal cursor is not part of the rendered buffer, so this checks the
         // arithmetic the drawing code uses.
         let mut app = App::new("s", "v");
         type_text(&mut app, "abc");
-        let (_, caret) = app.input_view(20);
-        assert_eq!(caret, 3);
+        let (_, caret) = app.wrapped_input(20);
+        assert_eq!(caret, (0, 3));
         app.handle_key(key(KeyCode::Home));
-        let (_, caret) = app.input_view(20);
-        assert_eq!(caret, 0);
+        let (_, caret) = app.wrapped_input(20);
+        assert_eq!(caret, (0, 0));
     }
 
     #[test]

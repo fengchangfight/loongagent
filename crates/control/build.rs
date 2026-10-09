@@ -13,7 +13,9 @@ fn main() {
             .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
     };
     let commit = git(&["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "unknown".to_string());
-    let dirty = git(&["status", "--porcelain"]).map(|out| !out.is_empty()).unwrap_or(false);
+    let dirty = git(&["status", "--porcelain"])
+        .map(|out| !out.is_empty())
+        .unwrap_or(false);
     println!(
         "cargo:rustc-env=LOONG_COMMIT={commit}{}",
         if dirty { "+dirty" } else { "" }

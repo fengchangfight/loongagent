@@ -82,6 +82,9 @@ struct Args {
     control_url: Option<String>,
     control_key: Option<String>,
     control_token: Option<String>,
+    /// `setup --system`: write the machine-wide file (needs root) instead of the
+    /// user's own.
+    control_system: bool,
     port: u16,
     stdio: bool,
     /// Context budget in tokens; 0 means unbounded.
@@ -104,6 +107,7 @@ impl Args {
             control_url: None,
             control_key: None,
             control_token: None,
+            control_system: false,
             port: 8737,
             stdio: false,
             budget: None,
@@ -146,6 +150,7 @@ impl Args {
                     i += 1;
                     args.control_token = Some(rest.get(i).ok_or("--token needs a value")?.clone());
                 }
+                "--system" => args.control_system = true,
                 "--offline" => args.offline = true,
                 "--bind" => {
                     i += 1;
@@ -274,7 +279,7 @@ fn ask(prompt: &str, default: Option<&str>, lines: &mut dyn Iterator<Item = Stri
 /// The client's side of the control plane: where it is, and the key this install
 /// pinned. Deliberately *not* the layered profile config — this is machine
 /// configuration, delivered with the binary (ADR-0016 §3).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct ControlFile {
     url: String,
     /// Hex, the org's public key. The signature is what makes an org layer an org
@@ -285,28 +290,82 @@ struct ControlFile {
     token: Option<String>,
 }
 
-fn control_path() -> PathBuf {
+/// The machine's control-plane configuration: who this installation talks to, and
+/// the key it pinned. Root-owned and delivered with the binary (image, MDM) — the
+/// one value a user must not be able to change is the pin (ADR-0016 §3).
+fn system_control_path() -> PathBuf {
+    PathBuf::from("/etc/loongagent/control.toml")
+}
+
+/// The user's own file. On an unmanaged install it is the whole configuration; on a
+/// managed one only `token` may come from here, so each user can keep their own copy
+/// of the read token (the machine file lives in a root-only directory).
+fn user_control_path() -> PathBuf {
     config_dir().join("control.toml")
 }
 
-fn load_control() -> Result<Option<ControlFile>, String> {
-    let path = control_path();
+fn read_control_file(path: &Path) -> Result<Option<ControlFile>, String> {
     if !path.exists() {
         return Ok(None);
     }
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let file: ControlFile =
         toml::from_str(&text).map_err(|e| format!("{} is not valid TOML: {e}", path.display()))?;
     Ok(Some(file))
 }
 
-fn save_control(file: &ControlFile) -> Result<PathBuf, String> {
-    let path = control_path();
+/// Where the two files disagree, the machine file wins for the address and the key,
+/// and the user file may only supply the token. A user who could re-pin the key would
+/// make the pin advisory, and a user who could not supply a token would have to be
+/// able to read a root-only file.
+fn merge_control(system: Option<ControlFile>, user: Option<ControlFile>) -> Option<ControlFile> {
+    match (system, user) {
+        (Some(system), Some(user)) => Some(ControlFile {
+            url: system.url,
+            public_key: system.public_key,
+            token: user.token.or(system.token),
+        }),
+        (Some(system), None) => Some(system),
+        (None, Some(user)) => Some(user),
+        (None, None) => None,
+    }
+}
+
+fn load_control() -> Result<Option<ControlFile>, String> {
+    let system = read_control_file(&system_control_path())?;
+    let user = read_control_file(&user_control_path())?;
+    Ok(merge_control(system, user))
+}
+
+/// Write the configuration. `system` needs root, and is what an image or a
+/// configuration-management run uses; otherwise it goes to the user's own file.
+fn save_control(file: &ControlFile, system: bool) -> Result<PathBuf, String> {
+    let path = if system {
+        system_control_path()
+    } else {
+        user_control_path()
+    };
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+        std::fs::create_dir_all(parent).map_err(|e| {
+            format!(
+                "{}: {e} (writing the machine-wide file needs root)",
+                parent.display()
+            )
+        })?;
     }
     let text = toml::to_string(file).map_err(|e| e.to_string())?;
-    std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
+    std::fs::write(&path, text).map_err(|e| {
+        format!(
+            "{}: {e}{}",
+            path.display(),
+            if system {
+                " (the machine-wide file needs root: try with sudo, or drop --system to write \
+                 the user's own file)"
+            } else {
+                ""
+            }
+        )
+    })?;
     Ok(path)
 }
 
@@ -481,8 +540,13 @@ fn cached_pack_state(args: &Args) -> Result<Option<PackState>, String> {
 /// trusts. Model endpoints and routing are not a user's to set (T-07, ADR-0016).
 fn setup(args: Args) -> Result<(), String> {
     let existing = load_control()?;
+    let target = if args.control_system {
+        system_control_path()
+    } else {
+        user_control_path()
+    };
     println!("loongagent setup — connect this install to your firm's control plane");
-    println!("  configuration: {}", control_path().display());
+    println!("  configuration: {}", target.display());
     if let Some(file) = &existing {
         println!(
             "  currently:     {} (key {}…)",
@@ -568,8 +632,15 @@ fn setup(args: Args) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
     let pack = loong_config::profiles_from_payload(&synced.envelope.payload)
         .map_err(|e| format!("the pack is not usable: {e}"))?;
-    let path = save_control(&file)?;
+    let path = save_control(&file, args.control_system)?;
     println!("wrote {}", path.display());
+    if !args.control_system && system_control_path().exists() {
+        println!(
+            "note: {} exists, so it decides the address and the pinned key; this file only \
+             supplies the token",
+            system_control_path().display()
+        );
+    }
     println!();
     println!(
         "verified pack: {} {} (key {}), {} profiles",
@@ -617,6 +688,26 @@ fn control(args: Args, rest: &[String]) -> Result<(), String> {
         "status" => {
             let (config, token) = control_config(&file)?;
             let cache = pack_cache(&config);
+            let system = system_control_path();
+            let user = user_control_path();
+            println!(
+                "machine file:  {} {}",
+                system.display(),
+                if system.exists() {
+                    "(present — it decides the address and key)"
+                } else {
+                    "(absent)"
+                }
+            );
+            println!(
+                "user file:     {} {}",
+                user.display(),
+                if user.exists() {
+                    "(present)"
+                } else {
+                    "(absent)"
+                }
+            );
             println!("control plane: {}", file.url);
             println!(
                 "pinned key:    {}…",
@@ -1966,6 +2057,36 @@ mod tests {
             resolve_reference(literal.token.as_deref(), Path::new("/tmp")),
             Some("a-real-secret".to_string())
         );
+    }
+
+    #[test]
+    fn a_user_file_may_supply_a_token_but_not_a_different_pin() {
+        let machine = ControlFile {
+            url: "https://control.acme.internal".to_string(),
+            public_key: "ab".repeat(32),
+            token: None,
+        };
+        let mine = ControlFile {
+            url: "https://control.evil.invalid".to_string(),
+            public_key: "cd".repeat(32),
+            token: Some("file:/home/me/.config/loongagent/client.token".to_string()),
+        };
+        let merged = merge_control(Some(machine.clone()), Some(mine.clone())).unwrap();
+        assert_eq!(
+            merged.url, machine.url,
+            "the machine decides who we talk to"
+        );
+        assert_eq!(merged.public_key, machine.public_key, "and what we trust");
+        assert_eq!(
+            merged.token, mine.token,
+            "the user supplies their own token"
+        );
+
+        // An unmanaged install is the user's file, whole.
+        assert_eq!(merge_control(None, Some(mine.clone())).unwrap(), mine);
+        // A managed one with no user file is the machine's, whole.
+        assert_eq!(merge_control(Some(machine.clone()), None).unwrap(), machine);
+        assert!(merge_control(None, None).is_none());
     }
 
     #[test]

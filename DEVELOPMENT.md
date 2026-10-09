@@ -60,21 +60,26 @@ Bringing one up (layout, key, tokens, systemd, troubleshooting):
 **[docs/runbooks/control-plane.md](runbooks/control-plane.md)**, and
 `scripts/control-plane-init.sh` writes the layout and prints the next commands.
 
+The two programs keep their files in two roots, and a **draft pack is neither**: it
+is versioned configuration, so it lives in the administrator's repository.
+
 ```bash
-# once, by the profile administrator
-loongagent-control keygen --out /etc/loongagent/control      # private key, mode 0600
-#   prints the public key to pin in every install
+# once, on the control-plane host
+./scripts/control-plane-init.sh --issuer acme-platform \
+    --starter ~/config/loongagent/profiles.toml
+#   /etc/loongagent-control/{control-key.pkcs8,client.token,admin.token}  mode 0600
+#   /var/lib/loongagent-control/                                          the served pack
 
-# the control plane holds that key and signs what administrators publish
-CLIENT_TOKEN=… ADMIN_TOKEN=… loongagent-control serve \
-    --dir /var/lib/loongagent/control --key /etc/loongagent/control/control-key.pkcs8 \
-    --issuer acme-platform --client-token-env CLIENT_TOKEN --admin-token-env ADMIN_TOKEN
+# the control plane holds the key and signs what administrators publish
+loongagent-control serve --dir /var/lib/loongagent-control \
+    --key /etc/loongagent-control/control-key.pkcs8 --issuer acme-platform \
+    --client-token-file /etc/loongagent-control/client.token \
+    --admin-token-file  /etc/loongagent-control/admin.token
 
-# an administrator writes profiles.toml and publishes the draft; the key stays on the server
-ADMIN_TOKEN=… loongagent-control publish --url https://control.acme.internal \
-    --pack profiles.toml --token-env ADMIN_TOKEN --version 2026.10.09-1
-ADMIN_TOKEN=… loongagent-control show --url https://control.acme.internal \
-    --token-env ADMIN_TOKEN --public-key <hex>      # verify what is being served
+# an administrator publishes the draft from their repository; the key stays on the server
+loongagent-control publish --url https://control.acme.internal \
+    --pack ~/config/loongagent/profiles.toml \
+    --token-file /etc/loongagent-control/admin.token --version 2026.10.09-1
 
 # on each machine
 loongagent setup --url https://control.acme.internal --public-key <hex> --token env:CLIENT_TOKEN

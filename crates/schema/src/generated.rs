@@ -253,6 +253,16 @@ pub struct ContextCategory {
     pub tokens: u64,
 }
 
+/// A session's own record that it is a child: which session it came from, how, and where in that session. ADR-0015's second tree level. The child stores none of the parent's events — it references them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionForked {
+    /// fork | delegation | import
+    pub origin: String,
+    pub parent_session: String,
+    /// the parent's event the child continues from, inclusive
+    pub parent_seq: u64,
+}
+
 /// What the workspace offered as skills/commands (T-18). Names and descriptions enter context; bodies do not.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillsLoaded {
@@ -334,6 +344,7 @@ pub mod method {
 
 /// Event kind names (ADR-0003).
 pub mod event {
+    pub const SESSION_FORKED: &str = "session.forked";
     pub const MESSAGE_APPENDED: &str = "message.appended";
     pub const TOOL_CALL: &str = "tool.call";
     pub const TOOL_RESULT: &str = "tool.result";
@@ -362,6 +373,7 @@ pub mod notification {
 
 /// Event kinds. The bool is the `ignorable` envelope marker (ADR-0003).
 pub const EVENT_KINDS: &[(&str, bool)] = &[
+    ("session.forked", false),
     ("message.appended", false),
     ("tool.call", false),
     ("tool.result", false),

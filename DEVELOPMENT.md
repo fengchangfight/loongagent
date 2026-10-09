@@ -147,6 +147,29 @@ look, and `--session` takes the id, an unambiguous prefix, `latest`, or a path.
 - a session from another project can be reopened by id; the workspace stays where the
   command was run, which is worth knowing before editing.
 
+**Forking is how a child session is made** (ADR-0015, level 2):
+
+```bash
+loongagent fork              # a child of the newest session here
+loongagent fork <id> --at 42 # a child continuing from the parent's event 42
+```
+
+The child records its origin as its **first event** —
+`session.forked { origin, parent_session, parent_seq }` — and **stores none of the
+parent's events**: opening it replays the ancestors' prefix (up to their fork points,
+oldest first) and then its own log. A child lives beside its parent, which is what makes
+the reference a file name instead of a path that can rot; a missing ancestor refuses the
+session and names the whole chain (ADR-0014: inoperable, not merely unexplained). The
+listing's `from` column shows `parent@seq`.
+
+**Opening a session replays it.** The log is the record, so `Kernel::build` rebuilds the
+conversation from it — ancestors first, then the session's own events — before any turn
+runs. This was missing until 2026-10-09 and the symptom was quiet: a resumed session
+appended to a conversation the model could not see, and answered "this is the first
+message in our conversation" when asked what it had been told. Compaction replays from
+the counts in its own event rather than re-deciding, so a changed policy cannot rewrite
+what happened.
+
 **Attaching replays the past.** `session.attach` reports how many events exist, and the
 client then asks for them (`session.replay`) and renders them with the same code that
 renders live events. Reopening a session used to give an empty screen that was quietly

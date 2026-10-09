@@ -329,6 +329,21 @@ result = "PromptSubmitResult"
 
 # -------------------------------------------------------------------- events
 
+[[types]]
+name = "SessionForked"
+kind = "struct"
+doc = "A session's own record that it is a child: which session it came from, how, and where in that session. ADR-0015's second tree level. The child stores none of the parent's events — it references them."
+fields = [
+  { name = "origin", type = "string", doc = "fork | delegation | import" },
+  { name = "parent_session", type = "string" },
+  { name = "parent_seq", type = "u64", doc = "the parent's event the child continues from, inclusive" },
+]
+
+[[events]]
+name = "session.forked"
+payload = "SessionForked"
+ignorable = false
+
 [[events]]
 name = "message.appended"
 payload = "MessageAppended"

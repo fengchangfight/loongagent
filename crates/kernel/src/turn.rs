@@ -46,6 +46,10 @@ pub enum KernelError {
     Skills(String),
     /// Configuration contradicts itself (a layer tried to widen a cap).
     Config(String),
+    /// The session's own record cannot be honoured: a payload that does not match its
+    /// kind, an orphan tool call, a missing ancestor, a cycle in the lineage. Saying so
+    /// beats continuing with a context that is quietly wrong.
+    Session(String),
 }
 
 impl std::fmt::Display for KernelError {
@@ -60,6 +64,7 @@ impl std::fmt::Display for KernelError {
             KernelError::Mcp(m) => write!(f, "mcp: {m}"),
             KernelError::Skills(m) => write!(f, "skills: {m}"),
             KernelError::Config(m) => write!(f, "config: {m}"),
+            KernelError::Session(m) => write!(f, "session: {m}"),
         }
     }
 }
@@ -605,6 +610,10 @@ impl Kernel {
         };
         // The catalogue enters context before any work does.
         kernel.seat_system_prompt()?;
+        // Then the conversation the log already holds — its own events, preceded by any
+        // ancestor prefix (ADR-0015). Without this, resuming a session hands the model a
+        // conversation it cannot see and an instruction to carry on.
+        kernel.replay_history()?;
         // The session's first moment (ADR-0007 §7): what a guard sees before any
         // work happens.
         let mut startup = Vec::new();
@@ -801,6 +810,298 @@ impl Kernel {
             .into_iter()
             .filter(|e| e.seq > seq)
             .collect())
+    }
+
+    /// Rebuild the conversation the log already holds, plus any ancestor prefix.
+    ///
+    /// The log is the record (ADR-0003), so a kernel that starts with empty `messages`
+    /// continues the session *and forgets it*: the model is asked to carry on a
+    /// conversation it cannot see. This is the fix, and it is also what ADR-0015's
+    /// lineage needs — a child's context is its ancestors' prefix stitched to its own
+    /// events, and both are replayed by exactly this code.
+    fn replay_history(&mut self) -> Result<(), KernelError> {
+        let chain = self.lineage()?;
+        let depth = chain.len();
+        for (index, (path, upto)) in chain.into_iter().enumerate() {
+            // History that came from an ancestor says so (ADR-0015): the panel can then
+            // answer "where did this come from?" for a session that inherited it.
+            let from = (index + 1 < depth).then(|| {
+                path.file_stem()
+                    .map(|stem| {
+                        let stem = stem.to_string_lossy().to_string();
+                        if stem == "session" {
+                            "default".to_string()
+                        } else {
+                            stem
+                        }
+                    })
+                    .unwrap_or_else(|| "ancestor".to_string())
+            });
+            let replay = loong_eventlog::replay_lenient(&path)?;
+            let mut pending: Option<(Option<String>, Vec<loong_providers::ToolCallRequest>)> = None;
+            for event in replay.events {
+                if event.seq > upto {
+                    break;
+                }
+                match event.kind.as_str() {
+                    gen::event::SESSION_FORKED => {}
+                    gen::event::MESSAGE_APPENDED => {
+                        // The assistant message and its tool calls are recorded as
+                        // separate events (the call payloads carry the args), so an
+                        // assistant turn is held back until its calls are known — the
+                        // alternative is a tool result with no matching call, which is
+                        // not a conversation a provider will accept.
+                        self.flush_pending(&mut pending)?;
+                        let appended: gen::MessageAppended =
+                            serde_json::from_value(event.data.clone()).map_err(|e| {
+                                KernelError::Session(format!(
+                                    "{} at seq {} does not match its kind: {e}",
+                                    event.kind, event.seq
+                                ))
+                            })?;
+                        match appended.role {
+                            gen::Role::User => {
+                                self.messages.push(ChatMessage::User {
+                                    text: appended.text.clone(),
+                                });
+                                let source = match &from {
+                                    Some(ancestor) => format!("user from {ancestor}"),
+                                    None => "user".to_string(),
+                                };
+                                let entry = self.ledger.add(
+                                    Category::History,
+                                    &source,
+                                    &appended.text,
+                                    Lifetime::Session,
+                                    false,
+                                );
+                                self.entry_of.push(Some(entry));
+                            }
+                            gen::Role::Assistant => {
+                                pending = Some((
+                                    (!appended.text.is_empty()).then(|| appended.text.clone()),
+                                    Vec::new(),
+                                ));
+                            }
+                            // The log records only what the conversation holds: a user
+                            // turn and an assistant turn. Anything else here is a
+                            // schema change this replay has not been taught.
+                            other => {
+                                return Err(KernelError::Session(format!(
+                                    "message.appended at seq {} has role {other:?}, which is \
+                                     not part of a conversation",
+                                    event.seq
+                                )));
+                            }
+                        }
+                    }
+                    gen::event::TOOL_CALL => {
+                        let call: gen::ToolCall = serde_json::from_value(event.data.clone())
+                            .map_err(|e| {
+                                KernelError::Session(format!(
+                                    "tool.call at seq {} is malformed: {e}",
+                                    event.seq
+                                ))
+                            })?;
+                        // Attach it to the assistant turn it belongs to; a call with no
+                        // assistant message in front of it is a broken log, and saying
+                        // so beats inventing one.
+                        let Some((_, calls)) = pending.as_mut() else {
+                            return Err(KernelError::Session(format!(
+                                "tool.call {} at seq {} has no assistant message before it",
+                                call.call_id, event.seq
+                            )));
+                        };
+                        calls.push(loong_providers::ToolCallRequest {
+                            call_id: call.call_id.clone(),
+                            tool: call.tool.clone(),
+                            args: call.args.clone(),
+                        });
+                    }
+                    gen::event::TOOL_RESULT => {
+                        let result: gen::ToolResult = serde_json::from_value(event.data.clone())
+                            .map_err(|e| {
+                                KernelError::Session(format!(
+                                    "{} at seq {} does not match its kind: {e}",
+                                    event.kind, event.seq
+                                ))
+                            })?;
+                        let (text, calls) = pending.take().unwrap_or((None, Vec::new()));
+                        self.push_assistant(from.as_deref(), text.clone(), &calls);
+                        self.push_tool_result(from.as_deref(), &result.call_id, &result.output);
+                    }
+                    gen::event::COMPACTION_APPLIED => {
+                        let applied: gen::CompactionApplied =
+                            serde_json::from_value(event.data.clone()).map_err(|e| {
+                                KernelError::Session(format!(
+                                    "{} at seq {} does not match its kind: {e}",
+                                    event.kind, event.seq
+                                ))
+                            })?;
+                        self.replay_compaction(&applied);
+                    }
+                    // Provenance, cost, approvals, hooks: records of what happened
+                    // around the conversation, not parts of it.
+                    _ => {}
+                }
+            }
+            self.flush_pending(&mut pending)?;
+        }
+        Ok(())
+    }
+
+    /// Push the assistant turn that was being held, now that its calls are known.
+    fn flush_pending(
+        &mut self,
+        pending: &mut Option<(Option<String>, Vec<loong_providers::ToolCallRequest>)>,
+    ) -> Result<(), KernelError> {
+        if let Some((text, calls)) = pending.take() {
+            self.push_assistant(None, text, &calls);
+        }
+        Ok(())
+    }
+
+    /// The same ledger accounting, message push and index bookkeeping the live turn
+    /// does — one implementation, so a replayed session and a live one cannot drift.
+    fn push_assistant(
+        &mut self,
+        from: Option<&str>,
+        text: Option<String>,
+        calls: &[loong_providers::ToolCallRequest],
+    ) {
+        let accounting = match (text.as_deref(), calls.first()) {
+            (Some(t), None) => t.to_string(),
+            (Some(t), Some(_)) => {
+                format!("{t}{}", serde_json::to_string(calls).unwrap_or_default())
+            }
+            (None, Some(_)) => serde_json::to_string(calls).unwrap_or_default(),
+            (None, None) => String::new(),
+        };
+        let source = match from {
+            Some(ancestor) => format!("assistant from {ancestor}"),
+            None => "assistant".to_string(),
+        };
+        let entry = self.ledger.add(
+            Category::History,
+            &source,
+            &accounting,
+            Lifetime::Session,
+            false,
+        );
+        self.entry_of.push(Some(entry));
+        self.messages.push(ChatMessage::Assistant {
+            text,
+            tool_calls: calls.to_vec(),
+        });
+    }
+
+    fn push_tool_result(&mut self, from: Option<&str>, call_id: &str, output: &str) {
+        let source = match from {
+            Some(ancestor) => format!("tool:{call_id} from {ancestor}"),
+            None => format!("tool:{call_id}"),
+        };
+        let entry = self
+            .ledger
+            .add(Category::History, &source, output, Lifetime::Turn, false);
+        self.entry_of.push(Some(entry));
+        self.messages.push(ChatMessage::Tool {
+            call_id: call_id.to_string(),
+            output: output.to_string(),
+        });
+    }
+
+    /// Reproduce a compaction exactly: the event records how many tool outputs were
+    /// cleared and how many messages dropped, so a replay does not have to guess at a
+    /// policy that may since have changed.
+    fn replay_compaction(&mut self, applied: &gen::CompactionApplied) {
+        let marker = |entry: &crate::ledger::Entry| {
+            format!(
+                "[output of {} cleared to save context — re-run the command if you need it again]",
+                entry.source
+            )
+        };
+        let cleared = self.ledger.clear_tool_outputs(applied.kept_tokens, marker);
+        for entry in cleared
+            .cleared
+            .iter()
+            .take(applied.cleared_tool_outputs as usize)
+        {
+            if let Some(index) = self.entry_of.iter().position(|id| *id == Some(entry.id)) {
+                let call_id = match &self.messages[index] {
+                    ChatMessage::Tool { call_id, .. } => call_id.clone(),
+                    _ => continue,
+                };
+                self.messages[index] = ChatMessage::Tool {
+                    call_id,
+                    output: format!(
+                        "[output of {} cleared to save context — re-run the command if you need it again]",
+                        entry.source
+                    ),
+                };
+            }
+        }
+        for _ in 0..applied.dropped_messages {
+            if self.drop_oldest_exchange() == 0 {
+                break;
+            }
+        }
+    }
+
+    /// Where this session came from, oldest ancestor first. A child stores the
+    /// reference (ADR-0015), so the chain is read from the child's own first event and
+    /// each ancestor's own first event after it. A missing ancestor is fatal and named:
+    /// without its prefix the session is not merely unexplained, it is inoperable.
+    fn lineage(&self) -> Result<Vec<(std::path::PathBuf, u64)>, KernelError> {
+        let mut chain: Vec<(std::path::PathBuf, u64)> = Vec::new();
+        let mut path = self.log.path().to_path_buf();
+        let mut seen: Vec<String> = Vec::new();
+        loop {
+            let replay = loong_eventlog::replay_lenient(&path)?;
+            let first = replay.events.first();
+            let Some(first) = first else { break };
+            if first.kind != gen::event::SESSION_FORKED {
+                break;
+            }
+            let forked: gen::SessionForked = serde_json::from_value(first.data.clone())
+                .map_err(|e| KernelError::Session(format!("session.forked is malformed: {e}")))?;
+            if seen.contains(&forked.parent_session) {
+                return Err(KernelError::Session(format!(
+                    "session lineage is cyclic: {} appears twice",
+                    forked.parent_session
+                )));
+            }
+            seen.push(forked.parent_session.clone());
+            let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+            // A child lives beside its parent, which is what makes the reference a file
+            // name rather than a path that could go stale.
+            let parent = if forked.parent_session == "default" {
+                dir.join("session.jsonl")
+            } else {
+                dir.join(format!("{}.jsonl", forked.parent_session))
+            };
+            if !parent.exists() {
+                let mut named: Vec<String> = seen.clone();
+                named.reverse();
+                return Err(KernelError::Session(format!(
+                    "{} is a child of {}, which is not in {}: the chain is {}{} — export the \
+                     ancestors with it (ADR-0014)",
+                    path.file_name().unwrap_or_default().to_string_lossy(),
+                    forked.parent_session,
+                    dir.display(),
+                    named.join(" -> "),
+                    format!(
+                        " -> {}",
+                        path.file_name().unwrap_or_default().to_string_lossy()
+                    )
+                )));
+            }
+            chain.push((parent.clone(), forked.parent_seq));
+            path = parent;
+        }
+        // Oldest first: the prefix has to be in place before what came after it.
+        chain.reverse();
+        chain.push((self.log.path().to_path_buf(), u64::MAX));
+        Ok(chain)
     }
 
     /// What the next request will actually carry, and why — the debug view behind a
@@ -2655,6 +2956,204 @@ Step one: breathe.
             .filter(|e| e.source == "assistant")
             .count();
         assert_eq!(history, 1, "one assistant entry, not one per delta");
+    }
+
+    /// Write the child the way `loongagent fork` does: one lineage event, nothing copied.
+    fn fork_log(child: &Path, parent_id: &str, at: u64) {
+        let mut log = loong_eventlog::SessionLog::create(child).unwrap();
+        log.append(
+            gen::event::SESSION_FORKED,
+            serde_json::json!({
+                "origin": "fork",
+                "parent_session": parent_id,
+                "parent_seq": at,
+            }),
+        )
+        .unwrap();
+    }
+
+    fn saw(seen: &Arc<Mutex<Vec<Vec<ChatMessage>>>>, needle: &str) -> bool {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .flatten()
+            .any(|message| match message {
+                ChatMessage::User { text } => text == needle,
+                ChatMessage::Assistant { text, .. } => text.as_deref() == Some(needle),
+                ChatMessage::Tool { output, .. } => output == needle,
+                ChatMessage::System { text } => text == needle,
+            })
+    }
+
+    #[test]
+    fn a_reopened_session_hands_the_model_its_own_history() {
+        // The bug this exists for: `messages` started empty, so resuming a session
+        // asked the model to carry on a conversation it could not see. It answered
+        // "this is the first message in our conversation" — correctly.
+        let t = Temp::new();
+        let (model, _) = RecordingModel::new(vec![response(vec![], Some("stored"))]);
+        let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        k.submit("remember 4242").unwrap();
+        drop(k);
+
+        let (model, seen) = RecordingModel::new(vec![response(vec![], Some("4242"))]);
+        let mut k = Kernel::open(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        k.submit("what number?").unwrap();
+
+        assert!(saw(&seen, "remember 4242"), "the earlier user turn");
+        assert!(saw(&seen, "stored"), "and the answer to it");
+        assert!(saw(&seen, "what number?"), "and the new turn");
+        // The context view agrees with the messages.
+        assert!(k
+            .context_explain()
+            .entries
+            .iter()
+            .any(|entry| entry.source == "user"));
+    }
+
+    #[test]
+    fn a_child_sees_its_parents_prefix_without_copying_it() {
+        let t = Temp::new();
+        let parent = t.dir.join("parent.jsonl");
+        let (model, _) = RecordingModel::new(vec![response(vec![], Some("stored"))]);
+        let mut k = Kernel::create(&parent, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        k.submit("remember 4242").unwrap();
+        let at = k.last_seq();
+        drop(k);
+
+        let child = t.dir.join("child.jsonl");
+        fork_log(&child, "parent", at);
+        assert_eq!(
+            loong_eventlog::replay(&child).unwrap().events.len(),
+            1,
+            "a child references; it does not copy"
+        );
+
+        let (model, seen) = RecordingModel::new(vec![response(vec![], Some("4242"))]);
+        let mut k = Kernel::open(&child, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        k.submit("what number?").unwrap();
+        assert!(saw(&seen, "remember 4242"), "the parent's prefix");
+        assert!(saw(&seen, "what number?"), "and the child's own turn");
+
+        // And the panel can say where the inherited history came from.
+        assert!(
+            k.context_explain()
+                .entries
+                .iter()
+                .any(|entry| entry.source == "user from parent"),
+            "{:?}",
+            k.context_explain()
+                .entries
+                .iter()
+                .map(|e| e.source.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn forking_earlier_leaves_the_later_parent_turns_behind() {
+        let t = Temp::new();
+        let parent = t.dir.join("parent.jsonl");
+        let (model, _) = RecordingModel::new(vec![
+            response(vec![], Some("first")),
+            response(vec![], Some("second")),
+        ]);
+        let mut k = Kernel::create(&parent, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        k.submit("turn one").unwrap();
+        let early = k.last_seq();
+        k.submit("turn two").unwrap();
+        drop(k);
+
+        let child = t.dir.join("child.jsonl");
+        fork_log(&child, "parent", early);
+        let (model, seen) = RecordingModel::new(vec![response(vec![], Some("ok"))]);
+        let mut k = Kernel::open(&child, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        k.submit("continue").unwrap();
+        assert!(saw(&seen, "turn one"), "what the fork point includes");
+        assert!(!saw(&seen, "turn two"), "and what it does not");
+    }
+
+    #[test]
+    fn a_chain_of_children_is_stitched_oldest_first() {
+        let t = Temp::new();
+        let a = t.dir.join("a.jsonl");
+        let (model, _) = RecordingModel::new(vec![response(vec![], Some("a-answer"))]);
+        let mut k = Kernel::create(&a, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        k.submit("from a").unwrap();
+        let a_at = k.last_seq();
+        drop(k);
+
+        let b = t.dir.join("b.jsonl");
+        fork_log(&b, "a", a_at);
+        let (model, _) = RecordingModel::new(vec![response(vec![], Some("b-answer"))]);
+        let mut k = Kernel::open(&b, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        k.submit("from b").unwrap();
+        let b_at = k.last_seq();
+        drop(k);
+
+        let c = t.dir.join("c.jsonl");
+        fork_log(&c, "b", b_at);
+        let (model, seen) = RecordingModel::new(vec![response(vec![], Some("c-answer"))]);
+        let mut k = Kernel::open(&c, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        k.submit("from c").unwrap();
+
+        {
+            let requests = seen.lock().unwrap();
+            let last = requests.last().unwrap();
+            let texts: Vec<String> = last
+                .iter()
+                .filter_map(|message| match message {
+                    ChatMessage::User { text } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(texts, vec!["from a", "from b", "from c"], "oldest first");
+        }
+        // And the provenance is per ancestor, not one anonymous prefix.
+        let sources: Vec<String> = k
+            .context_explain()
+            .entries
+            .iter()
+            .map(|entry| entry.source.clone())
+            .collect();
+        assert!(sources.iter().any(|s| s == "user from a"), "{sources:?}");
+        assert!(sources.iter().any(|s| s == "user from b"), "{sources:?}");
+    }
+
+    #[test]
+    fn a_child_without_its_parent_says_which_chain_is_broken() {
+        let t = Temp::new();
+        let child = t.dir.join("child.jsonl");
+        fork_log(&child, "long-gone", 7);
+        let error = match Kernel::open(
+            &child,
+            KernelConfig::new(&t.dir),
+            Box::new(ScriptedModel::new(vec![])),
+        ) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a child without its parent must refuse to open"),
+        };
+        assert!(error.contains("long-gone"), "{error}");
+        assert!(error.contains("child.jsonl"), "names the child: {error}");
+        assert!(error.contains("ADR-0014"), "and the way out: {error}");
+    }
+
+    #[test]
+    fn a_cycle_in_the_lineage_is_refused() {
+        let t = Temp::new();
+        let a = t.dir.join("a.jsonl");
+        let b = t.dir.join("b.jsonl");
+        fork_log(&b, "a", 1);
+        fork_log(&a, "b", 1);
+        let error = match Kernel::open(
+            &a,
+            KernelConfig::new(&t.dir),
+            Box::new(ScriptedModel::new(vec![])),
+        ) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a cyclic lineage must refuse to open"),
+        };
+        assert!(error.contains("cyclic"), "{error}");
     }
 
     #[test]

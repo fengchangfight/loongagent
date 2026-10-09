@@ -195,6 +195,15 @@ export interface ContextCategory {
   tokens: number;
 }
 
+/** A session's own record that it is a child: which session it came from, how, and where in that session. ADR-0015's second tree level. The child stores none of the parent's events — it references them. */
+export interface SessionForked {
+  /** fork | delegation | import */
+  origin: string;
+  parent_session: string;
+  /** the parent's event the child continues from, inclusive */
+  parent_seq: number;
+}
+
 /** What the workspace offered as skills/commands (T-18). Names and descriptions enter context; bodies do not. */
 export interface SkillsLoaded {
   count: number;
@@ -263,6 +272,7 @@ export const METHODS = {
 } as const;
 
 export const EVENTS = {
+  sessionForked: "session.forked",
   messageAppended: "message.appended",
   toolCall: "tool.call",
   toolResult: "tool.result",

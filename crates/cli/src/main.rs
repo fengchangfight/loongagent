@@ -16,6 +16,7 @@ use loong_providers::{
     ChatMessage, CompletionRequest, CompletionResponse, Model, ModelError, OpenAiCompat,
     ScriptedModel, ToolCallRequest, Usage,
 };
+use loong_schema::generated as gen;
 use loong_schema::generated::ApprovalScope;
 use loong_server::Server;
 use loong_tui::{Client, Transport};
@@ -35,6 +36,7 @@ USAGE:
   loongagent tui            [--session ID|PATH] [--cwd DIR] [--new]        full-screen
   loongagent resume [ID]    [--cwd DIR]                                    reopen one (default: latest)
   loongagent sessions       [--all] [--limit N] [--cwd DIR]                list them
+  loongagent fork [ID]      [--at SEQ] [--cwd DIR]                         a child session
   loongagent repl           [--session PATH] [--cwd DIR] [--model NAME]   line mode (any pipe)
   loongagent web            [--session PATH] [--cwd DIR] [--model NAME] [--port N] [--bind IP]
   loongagent run \"PROMPT\"   [--session PATH] [--cwd DIR] [--model NAME] [--budget N] [--keep-newest N]
@@ -980,8 +982,13 @@ fn new_session_id(cwd: &Path) -> String {
 }
 
 fn new_session_id_in(root: &Path, cwd: &Path) -> String {
+    new_session_id_in_dir(&session_dir_in(root, cwd))
+}
+
+/// The same, for a directory named directly: `fork` puts the child beside its parent,
+/// which may be a project other than the one this command was run in.
+fn new_session_id_in_dir(dir: &Path) -> String {
     const ALPHABET: &[u8] = b"23456789abcdefghjkmnpqrstuvwxyz";
-    let dir = session_dir_in(root, cwd);
     for attempt in 0..256u64 {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1018,6 +1025,8 @@ struct SessionSummary {
     events: u64,
     turns: u64,
     first_prompt: Option<String>,
+    /// Where this session came from, if it is a child (ADR-0015).
+    parent: Option<(String, u64)>,
 }
 
 fn session_summaries_in(dir: &Path, project: &str) -> Vec<SessionSummary> {
@@ -1040,6 +1049,7 @@ fn session_summaries_in(dir: &Path, project: &str) -> Vec<SessionSummary> {
         let mut events = 0u64;
         let mut turns = 0u64;
         let mut first_prompt = None;
+        let mut parent = None;
         for line in text.lines() {
             if line.trim().is_empty() {
                 continue;
@@ -1048,7 +1058,22 @@ fn session_summaries_in(dir: &Path, project: &str) -> Vec<SessionSummary> {
                 continue;
             };
             events += 1;
-            if value.get("kind").and_then(|k| k.as_str()) != Some("message.appended") {
+            let kind = value
+                .get("kind")
+                .and_then(|k| k.as_str())
+                .unwrap_or_default();
+            // Lineage is recorded once, as the child's first event.
+            if kind == gen::event::SESSION_FORKED && events == 1 {
+                let data = value.get("data").cloned().unwrap_or_default();
+                if let Some(id) = data.get("parent_session").and_then(|v| v.as_str()) {
+                    parent = Some((
+                        id.to_string(),
+                        data.get("parent_seq").and_then(|v| v.as_u64()).unwrap_or(0),
+                    ));
+                }
+                continue;
+            }
+            if kind != "message.appended" {
                 continue;
             }
             let data = value.get("data").cloned().unwrap_or_default();
@@ -1074,6 +1099,7 @@ fn session_summaries_in(dir: &Path, project: &str) -> Vec<SessionSummary> {
             events,
             turns,
             first_prompt,
+            parent,
             path,
         });
     }
@@ -1302,13 +1328,13 @@ fn list_sessions(rest: &[String]) -> Result<(), String> {
     );
     if all {
         println!(
-            "  {:<3} {:<9} {:<11} {:>5} {:>7}  {:<20} {}",
-            "", "id", "when", "turns", "events", "project", "first prompt"
+            "  {:<3} {:<9} {:<11} {:>5} {:>7}  {:<14} {:<20} {}",
+            "", "id", "when", "turns", "events", "from", "project", "first prompt"
         );
     } else {
         println!(
-            "  {:<3} {:<9} {:<11} {:>5} {:>7}  {}",
-            "", "id", "when", "turns", "events", "first prompt"
+            "  {:<3} {:<9} {:<11} {:>5} {:>7}  {:<14} {}",
+            "", "id", "when", "turns", "events", "from", "first prompt"
         );
     }
     for session in sessions.iter().take(limit) {
@@ -1322,23 +1348,30 @@ fn list_sessions(rest: &[String]) -> Result<(), String> {
             .as_deref()
             .map(|text| clip(text, 46))
             .unwrap_or_else(|| "—".to_string());
+        let from = session
+            .parent
+            .as_ref()
+            .map(|(parent, at)| format!("{parent}@{at}"))
+            .unwrap_or_else(|| "—".to_string());
         if all {
             println!(
-                "  {mark:<3} {:<9} {:<11} {:>5} {:>7}  {:<20} {}",
+                "  {mark:<3} {:<9} {:<11} {:>5} {:>7}  {:<14} {:<20} {}",
                 session.id,
                 age_text(session.modified),
                 session.turns,
                 session.events,
+                clip(&from, 14),
                 clip(&session.project, 20),
                 prompt
             );
         } else {
             println!(
-                "  {mark:<3} {:<9} {:<11} {:>5} {:>7}  {}",
+                "  {mark:<3} {:<9} {:<11} {:>5} {:>7}  {:<14} {}",
                 session.id,
                 age_text(session.modified),
                 session.turns,
                 session.events,
+                clip(&from, 14),
                 prompt
             );
         }
@@ -1350,6 +1383,92 @@ fn list_sessions(rest: &[String]) -> Result<(), String> {
     println!(
         "  * = what `loongagent tui` picks up here; `loongagent resume <id>` opens any of them"
     );
+    Ok(())
+}
+
+/// `loongagent fork [ID] [--at SEQ] [--cwd DIR]`
+///
+/// A child session (ADR-0015, level 2): a new log that **references** its parent's
+/// prefix rather than copying it. The reference is the parent's id plus the sequence it
+/// continues from, recorded as the child's first event; the child then lives beside its
+/// parent, so resolving that id back to a file is a name, not a path that can go stale.
+fn fork(rest: &[String]) -> Result<(), String> {
+    let mut cwd = std::env::current_dir().map_err(|e| format!("current directory: {e}"))?;
+    let mut spec: Option<String> = None;
+    let mut at: Option<u64> = None;
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "--at" => {
+                i += 1;
+                at = Some(
+                    rest.get(i)
+                        .and_then(|value| value.parse().ok())
+                        .ok_or("--at needs an event number (seq)")?,
+                );
+            }
+            "--cwd" => {
+                i += 1;
+                cwd = PathBuf::from(rest.get(i).ok_or("--cwd needs a path")?);
+            }
+            other if !other.starts_with('-') && spec.is_none() => {
+                spec = Some(other.to_string());
+            }
+            other => return Err(format!("unexpected {other:?}\n\n{USAGE}")),
+        }
+        i += 1;
+    }
+
+    let parent_path = match &spec {
+        Some(spec) => resolve_session(spec, &cwd)?,
+        None => newest_session(&cwd).ok_or_else(|| {
+            format!(
+                "no session to fork here — `loongagent tui --new` starts one, or name one with \
+                 `loongagent fork <id>`"
+            )
+        })?,
+    };
+    let parent_id = session_id_of(&parent_path);
+    let last = loong_eventlog::replay_lenient(&parent_path)
+        .map_err(|e| format!("{}: {e}", parent_path.display()))?
+        .events
+        .last()
+        .map(|event| event.seq)
+        .unwrap_or(0);
+    let at = at.unwrap_or(last);
+    if at == 0 {
+        return Err(format!(
+            "session {parent_id} has no events yet, so there is nothing to continue from"
+        ));
+    }
+    if at > last {
+        return Err(format!(
+            "session {parent_id} has {last} events; --at {at} is past its end"
+        ));
+    }
+
+    let dir = parent_path
+        .parent()
+        .ok_or_else(|| format!("{} has no directory", parent_path.display()))?
+        .to_path_buf();
+    let id = new_session_id_in_dir(&dir);
+    let child = dir.join(format!("{id}.jsonl"));
+    let mut log = loong_eventlog::SessionLog::create(&child)
+        .map_err(|e| format!("{}: {e}", child.display()))?;
+    let forked = gen::SessionForked {
+        origin: "fork".to_string(),
+        parent_session: parent_id.clone(),
+        parent_seq: at,
+    };
+    log.append(
+        gen::event::SESSION_FORKED,
+        serde_json::to_value(&forked).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("{}: {e}", child.display()))?;
+
+    println!("forked {parent_id} at {at} -> {id}");
+    println!("  the child holds only its own events; it references the parent's prefix");
+    println!("  reopen:  loongagent resume {id}");
     Ok(())
 }
 
@@ -1447,6 +1566,7 @@ fn run() -> Result<(), String> {
         "use" => use_profile(Args::parse(rest)?, rest),
         "tui" => full_screen(Args::parse(rest)?),
         "resume" => resume(rest),
+        "fork" => fork(rest),
         "sessions" => list_sessions(rest),
         "repl" => repl(Args::parse(rest)?),
         "web" => web(Args::parse(rest)?),
@@ -3074,6 +3194,37 @@ mod session_tests {
                 .unwrap(),
             "session.jsonl"
         );
+    }
+
+    #[test]
+    fn a_child_session_says_where_it_came_from() {
+        let root = temp_root("forked-listing");
+        let cwd = Path::new("/tmp/project");
+        let dir = session_dir_in(&root, cwd);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Exactly what `loongagent fork` writes: one lineage event, nothing copied.
+        let mut child = loong_eventlog::SessionLog::create(dir.join("child123.jsonl")).unwrap();
+        child
+            .append(
+                gen::event::SESSION_FORKED,
+                serde_json::json!({
+                    "origin": "fork",
+                    "parent_session": "parent99",
+                    "parent_seq": 7,
+                }),
+            )
+            .unwrap();
+        write_session(&dir.join("parent99.jsonl"), &["the parent's prompt"]);
+
+        let sessions = session_summaries_in(&dir, "project");
+        let listed = sessions.iter().find(|s| s.id == "child123").unwrap();
+        assert_eq!(listed.parent, Some(("parent99".to_string(), 7)));
+        assert_eq!(
+            listed.events, 1,
+            "the listing counts the child's own events only"
+        );
+        let parent = sessions.iter().find(|s| s.id == "parent99").unwrap();
+        assert_eq!(parent.parent, None, "a root session came from nowhere");
     }
 
     #[test]

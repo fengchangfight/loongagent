@@ -146,6 +146,13 @@ fn roundtrip_context_category() {
 }
 
 #[test]
+fn roundtrip_session_forked() {
+    roundtrip::<g::SessionForked>(
+        r#"{"origin": "<string>","parent_session": "<string>","parent_seq": 1}"#,
+    );
+}
+
+#[test]
 fn roundtrip_skills_loaded() {
     roundtrip::<g::SkillsLoaded>(
         r#"{"count": 1,"tokens": 1,"names": "<string>","disabled": "<string>"}"#,
@@ -187,6 +194,7 @@ fn roundtrip_profile_selected() {
 
 #[test]
 fn declared_events_match_the_envelope_table() {
+    assert_eq!(g::is_ignorable_event("session.forked"), Some(false));
     assert_eq!(g::is_ignorable_event("message.appended"), Some(false));
     assert_eq!(g::is_ignorable_event("tool.call"), Some(false));
     assert_eq!(g::is_ignorable_event("tool.result"), Some(false));
@@ -206,6 +214,9 @@ fn declared_events_match_the_envelope_table() {
 
 #[test]
 fn every_event_payload_roundtrips() {
+    roundtrip::<g::SessionForked>(
+        r#"{"origin": "<string>","parent_session": "<string>","parent_seq": 1}"#,
+    );
     roundtrip::<g::MessageAppended>(r#"{"role": "user","text": "<string>"}"#);
     roundtrip::<g::ToolCall>(
         r#"{"call_id": "<string>","tool": "<string>","args": {},"action_class": "investigate"}"#,

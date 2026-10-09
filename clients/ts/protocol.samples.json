@@ -138,6 +138,11 @@
       "category": "<string>",
       "tokens": 1
     },
+    "SessionForked": {
+      "origin": "<string>",
+      "parent_session": "<string>",
+      "parent_seq": 1
+    },
     "SkillsLoaded": {
       "count": 1,
       "tokens": 1,
@@ -203,6 +208,11 @@
     }
   ],
   "events": [
+    {
+      "name": "session.forked",
+      "payload": "SessionForked",
+      "ignorable": false
+    },
     {
       "name": "message.appended",
       "payload": "MessageAppended",

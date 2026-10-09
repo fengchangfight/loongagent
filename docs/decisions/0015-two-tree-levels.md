@@ -89,6 +89,40 @@ structured summary (ADR-0006/ADR-0011).
 
 "Tree" without a qualifier is no longer used in these docs.
 
+### Implemented, 2026-10-09 — what the code does with this
+
+**Level 2 (lineage) exists now**, in the smallest useful shape:
+
+- the child's **first event** is `session.forked { origin, parent_session, parent_seq }`,
+  with `origin: fork` (the other two origins are named in the type and unused);
+- `parent_seq` is **inclusive** — the child continues *from* that event;
+- **a child lives beside its parent**, in the same project directory. That is what keeps
+  the reference a *file name* rather than a path that can go stale, and it is why
+  resolving a parent is `dir/<id>.jsonl` (with the legacy `session.jsonl` answering to
+  `default`);
+- `loongagent fork [ID] [--at SEQ]` mints the child; the default fork point is the
+  parent's head, and `--at` picks an earlier point in its event tree;
+- **a missing ancestor refuses the session**, naming the chain and pointing at ADR-0014:
+  inoperable, not merely unexplained. A cycle is refused for the same reason.
+
+**Level 1 (the event tree) now has its first real use**: `parent_id` was carried in every
+envelope and set by nothing. It is still set by nothing structural — `--at` selects a
+*sequence*, not a path — so paths and heads remain vocabulary without an implementation.
+Saying so is the point: the two levels were kept distinct so this could land in pieces.
+
+### The same replay fixed resuming, which was broken
+
+Stitching a child's prefix means replaying a log into a session's state, so the kernel
+now does that on open — and **that was missing entirely**: `messages` started empty, so a
+resumed session carried on a conversation the model could not see. Asked to recall a
+number it had been told, it answered, correctly, *"this is the first message in our
+conversation"*. The fix is one replay, used twice: ancestors' events (labelled
+`… from <ancestor>` in the ledger, so the context panel says where history came from),
+then the session's own.
+
+The compaction event replays from its recorded counts (`cleared_tool_outputs`,
+`dropped_messages`) rather than re-deciding, so a policy change cannot rewrite history.
+
 ## Consequences
 
 - **ADR-0009's one-writer rule is per session.** The write token belongs to the

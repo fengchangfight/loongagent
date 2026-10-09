@@ -90,6 +90,7 @@ log entry — a client that misses one has missed nothing.
 | `loongagent run "…"` | headless: prints the turn and exits (exit 3 when a human is needed) |
 | `loongagent sessions` | list this project's sessions (`--all` for every project) |
 | `loongagent resume [ID]` | reopen one — by id, by an unambiguous prefix, or `latest` |
+| `loongagent fork [ID]` | a child session: references its parent's prefix, copies nothing |
 
 In the TUI, **F2** opens a context panel: what the next request will actually carry
 (by category and by entry, with what has been cleared and what is pinned against what it

@@ -138,7 +138,10 @@ look, and `--session` takes the id, an unambiguous prefix, `latest`, or a path.
 ```
 
 - `loongagent tui` picks up the **newest** session in the project, and `--new` starts a
-  fresh one instead;
+  fresh one instead. Because that default is invisible otherwise, the first line of the
+  interface says which it was — `continuing session 36bxg8rd (17 events) — \`loongagent tui
+  --new\` starts a fresh one`, `new session aatt5pww`, or `reopened session …` — and the
+  usage text says the same thing where people look first;
 - `loongagent sessions [--all] [--limit N]` lists ids with when, turns, events and the
   first prompt, marking the one a bare `tui` would pick up;
 - `loongagent resume <id>` (or `resume latest`) reopens one;

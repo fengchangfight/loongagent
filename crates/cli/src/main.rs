@@ -34,6 +34,7 @@ USAGE:
   loongagent server --stdio [--session PATH] [--cwd DIR] [--model NAME]
   loongagent setup          [--profile PATH]                                write a profile
   loongagent tui            [--session ID|PATH] [--cwd DIR] [--new]        full-screen
+      with no --session it continues this project's newest session; --new starts another
   loongagent resume [ID]    [--cwd DIR]                                    reopen one (default: latest)
   loongagent sessions       [--all] [--limit N] [--cwd DIR]                list them
   loongagent fork [ID]      [--at SEQ] [--cwd DIR]                         a child session
@@ -77,6 +78,9 @@ struct Args {
     session_spec: Option<String>,
     /// `--new`: start a session rather than picking one up.
     new_session: bool,
+    /// How this run's session was chosen, so the interface can say so instead of leaving
+    /// someone to wonder whether they are continuing yesterday's conversation.
+    session_source: SessionSource,
     cwd: PathBuf,
     /// `None` means "not given": the layered configuration decides (ADR-0008).
     /// Flags are the **session layer**, the most local one.
@@ -110,6 +114,7 @@ impl Args {
             session: None,
             session_spec: None,
             new_session: false,
+            session_source: SessionSource::Created,
             cwd: cwd.clone(),
             model: None,
             profile: None,
@@ -223,12 +228,20 @@ impl Args {
         }
         self.session = if self.new_session {
             let id = new_session_id(&self.cwd);
+            self.session_source = SessionSource::Created;
             Some(session_path_for(&id, &self.cwd))
         } else if let Some(spec) = self.session_spec.clone() {
+            self.session_source = SessionSource::Named;
             Some(resolve_session(&spec, &self.cwd).map_err(|e| format!("--session {spec}: {e}"))?)
+        } else if let Some(newest) = crate::newest_session(&self.cwd) {
+            // The default, and it is worth saying out loud: this continues the project's
+            // most recent session rather than starting one.
+            self.session_source = SessionSource::Continued;
+            Some(newest)
         } else {
-            crate::newest_session(&self.cwd)
-                .or_else(|| Some(session_path_for(&new_session_id(&self.cwd), &self.cwd)))
+            let id = new_session_id(&self.cwd);
+            self.session_source = SessionSource::Created;
+            Some(session_path_for(&id, &self.cwd))
         };
         Ok(())
     }
@@ -937,6 +950,31 @@ fn config_dir() -> PathBuf {
 /// Sessions are state, not configuration, so they live under the state dir and are
 /// keyed by the project they belong to: resuming yesterday's work in a directory is
 /// the default, and `--session` is only for choosing differently.
+/// Which of the three ways this run got its session. The interface says which, because
+/// "did I just continue yesterday's conversation or start a new one?" is not a question
+/// anyone should have to infer from a file listing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionSource {
+    /// A fresh id (`--new`, or nothing to continue).
+    Created,
+    /// Someone named it (`--session`, `resume`).
+    Named,
+    /// The default: the newest session in this project.
+    Continued,
+}
+
+/// The first line of the interface, and the whole of what someone needs to know about
+/// which session they are in.
+fn session_intro(source: SessionSource, id: &str, events: u64) -> String {
+    match source {
+        SessionSource::Created => format!("new session {id}"),
+        SessionSource::Named => format!("reopened session {id} ({events} events)"),
+        SessionSource::Continued => format!(
+            "continuing session {id} ({events} events) — `loongagent tui --new` starts a fresh one"
+        ),
+    }
+}
+
 /// Where one project's sessions live. A project is a directory; its slug names the
 /// folder, so two checkouts of the same tree do not share a conversation by accident.
 fn session_dir(cwd: &Path) -> PathBuf {
@@ -2436,7 +2474,11 @@ fn full_screen(args: Args) -> Result<(), String> {
     }
     let session_id = args.session_id();
     let resume_hint = format!("loongagent resume {session_id}");
-    let mut intro = vec![format!("session {session_id} — reopen with: {resume_hint}")];
+    let mut intro = vec![session_intro(
+        args.session_source,
+        &session_id,
+        attached.existing_events,
+    )];
     if attached.existing_events > 0 {
         intro.push(format!(
             "resuming {} events from that session",
@@ -3204,6 +3246,27 @@ mod session_tests {
             seq += 1;
         }
         std::fs::write(path, text).unwrap();
+    }
+
+    #[test]
+    fn the_first_line_says_which_session_this_is_and_how_to_start_another() {
+        // The confusion this exists for: `tui` continues the newest session, which is
+        // worth saying rather than leaving to be inferred.
+        let continued = session_intro(SessionSource::Continued, "36bxg8rd", 17);
+        assert!(
+            continued.starts_with("continuing session 36bxg8rd (17 events)"),
+            "{continued}"
+        );
+        assert!(
+            continued.contains("--new"),
+            "and how to start a fresh one: {continued}"
+        );
+
+        let created = session_intro(SessionSource::Created, "aatt5pww", 0);
+        assert_eq!(created, "new session aatt5pww");
+
+        let named = session_intro(SessionSource::Named, "36bxg8rd", 17);
+        assert!(named.starts_with("reopened session 36bxg8rd"), "{named}");
     }
 
     #[test]

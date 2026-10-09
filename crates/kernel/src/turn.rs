@@ -848,7 +848,16 @@ impl Kernel {
                     .unwrap_or_else(|| "ancestor".to_string())
             });
             let replay = loong_eventlog::replay_lenient(&path)?;
-            let mut pending: Option<(Option<String>, Vec<loong_providers::ToolCallRequest>)> = None;
+            // A turn with several tool calls writes **one** assistant message and then
+            // each call's events in order (call, verdict, result, call, verdict, result…),
+            // so calls and results both accumulate here and are flushed together when the
+            // tool phase ends. Flushing at the first result would strand the second call.
+            type Pending = (
+                Option<String>,
+                Vec<loong_providers::ToolCallRequest>,
+                Vec<(String, String)>,
+            );
+            let mut pending: Option<Pending> = None;
             for event in replay.events {
                 if event.seq > upto {
                     break;
@@ -891,6 +900,7 @@ impl Kernel {
                                 pending = Some((
                                     (!appended.text.is_empty()).then(|| appended.text.clone()),
                                     Vec::new(),
+                                    Vec::new(),
                                 ));
                             }
                             // The log records only what the conversation holds: a user
@@ -913,16 +923,12 @@ impl Kernel {
                                     event.seq
                                 ))
                             })?;
-                        // Attach it to the assistant turn it belongs to; a call with no
-                        // assistant message in front of it is a broken log, and saying
-                        // so beats inventing one.
-                        let Some((_, calls)) = pending.as_mut() else {
-                            return Err(KernelError::Session(format!(
-                                "tool.call {} at seq {} has no assistant message before it",
-                                call.call_id, event.seq
-                            )));
-                        };
-                        calls.push(loong_providers::ToolCallRequest {
+                        // Attach it to the assistant turn it belongs to. A call with no
+                        // assistant message in front of it still happened — an older
+                        // writer, or a hand-edited log — so it gets the turn it needs
+                        // rather than making the session unopenable.
+                        let slot = pending.get_or_insert_with(|| (None, Vec::new(), Vec::new()));
+                        slot.1.push(loong_providers::ToolCallRequest {
                             call_id: call.call_id.clone(),
                             tool: call.tool.clone(),
                             args: call.args.clone(),
@@ -936,11 +942,17 @@ impl Kernel {
                                     event.kind, event.seq
                                 ))
                             })?;
-                        let (text, calls) = pending.take().unwrap_or((None, Vec::new()));
-                        self.push_assistant(from.as_deref(), text.clone(), &calls);
-                        self.push_tool_result(from.as_deref(), &result.call_id, &result.output);
+                        // Held back until the tool phase ends: the assistant message
+                        // comes first in the conversation, and it must carry every call
+                        // this turn made — not just the first.
+                        if let Some(slot) = pending.as_mut() {
+                            slot.2.push((result.call_id.clone(), result.output.clone()));
+                        }
                     }
                     gen::event::COMPACTION_APPLIED => {
+                        // Compaction clears tool output, so the state it acts on has to be
+                        // complete before it is replayed.
+                        self.flush_pending(&mut pending)?;
                         let applied: gen::CompactionApplied =
                             serde_json::from_value(event.data.clone()).map_err(|e| {
                                 KernelError::Session(format!(
@@ -963,10 +975,17 @@ impl Kernel {
     /// Push the assistant turn that was being held, now that its calls are known.
     fn flush_pending(
         &mut self,
-        pending: &mut Option<(Option<String>, Vec<loong_providers::ToolCallRequest>)>,
+        pending: &mut Option<(
+            Option<String>,
+            Vec<loong_providers::ToolCallRequest>,
+            Vec<(String, String)>,
+        )>,
     ) -> Result<(), KernelError> {
-        if let Some((text, calls)) = pending.take() {
+        if let Some((text, calls, results)) = pending.take() {
             self.push_assistant(None, text, &calls);
+            for (call_id, output) in results {
+                self.push_tool_result(None, &call_id, &output);
+            }
         }
         Ok(())
     }
@@ -3121,6 +3140,93 @@ Step one: breathe.
             .entries
             .iter()
             .any(|entry| entry.source == "user"));
+    }
+
+    #[test]
+    fn a_turn_with_several_tool_calls_replays_every_one_of_them() {
+        // The shape a real session has, taken from one: **one** assistant message, then
+        // each call's events in order. An earlier replay flushed the assistant at the
+        // first result, so the second call looked orphaned and the session refused to
+        // open — a log that is perfectly valid must never be unopenable.
+        let t = Temp::new();
+        let mut log = loong_eventlog::SessionLog::create(&t.log).unwrap();
+        let append = |log: &mut loong_eventlog::SessionLog, kind: &str, data: serde_json::Value| {
+            log.append(kind, data).unwrap();
+        };
+        append(
+            &mut log,
+            gen::event::MESSAGE_APPENDED,
+            serde_json::json!({"role": "user", "text": "explore"}),
+        );
+        append(
+            &mut log,
+            gen::event::MESSAGE_APPENDED,
+            serde_json::json!({"role": "assistant", "text": "looking"}),
+        );
+        for (id, tool) in [("c1", "shell"), ("c2", "glob")] {
+            append(
+                &mut log,
+                gen::event::TOOL_CALL,
+                serde_json::json!({"call_id": id, "tool": tool, "args": {"command": "ls"}, "action_class": "investigate"}),
+            );
+            append(
+                &mut log,
+                gen::event::POLICY_DECIDED,
+                serde_json::json!({"verdict": "allow", "rule": "builtin"}),
+            );
+            append(
+                &mut log,
+                gen::event::TOOL_RESULT,
+                serde_json::json!({"call_id": id, "ok": true, "output": "here"}),
+            );
+        }
+        append(
+            &mut log,
+            gen::event::COST_RECORDED,
+            serde_json::json!({"tokens_in": 1, "tokens_out": 1, "profile": "default"}),
+        );
+        append(
+            &mut log,
+            gen::event::MESSAGE_APPENDED,
+            serde_json::json!({"role": "assistant", "text": "done"}),
+        );
+        drop(log);
+
+        let (model, _seen) = RecordingModel::new(vec![response(vec![], Some("ok"))]);
+        let k = Kernel::open(&t.log, KernelConfig::new(&t.dir), Box::new(model))
+            .expect("a valid log opens, whatever shape its turns have");
+        let calls: Vec<String> = k
+            .messages()
+            .iter()
+            .filter_map(|message| match message {
+                ChatMessage::Assistant { tool_calls, .. } => Some(
+                    tool_calls
+                        .iter()
+                        .map(|c| c.call_id.clone())
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(calls, vec!["c1", "c2"], "both calls, on one assistant turn");
+
+        // And the order a provider needs: the assistant turn, then its results.
+        let roles: Vec<&str> = k
+            .messages()
+            .iter()
+            .map(|message| match message {
+                ChatMessage::User { .. } => "user",
+                ChatMessage::Assistant { .. } => "assistant",
+                ChatMessage::Tool { .. } => "tool",
+                ChatMessage::System { .. } => "system",
+            })
+            .collect();
+        assert_eq!(
+            roles,
+            vec!["system", "user", "assistant", "tool", "tool", "assistant"],
+            "{roles:?}"
+        );
     }
 
     #[test]

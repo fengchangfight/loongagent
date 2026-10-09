@@ -120,18 +120,14 @@ fn a_repository_may_not_put_a_secret_in_config_at_all() {
 #[test]
 fn a_local_layer_may_not_put_a_literal_secret_in_config() {
     let dir = workspace();
-    // The user layer lives under XDG_CONFIG_HOME, which the test owns.
-    let xdg = dir.join("xdg");
-    std::fs::create_dir_all(xdg.join("loongagent")).unwrap();
-    std::fs::write(
-        xdg.join("loongagent/profile.toml"),
-        "api_key = \"sk-live-abc\"\n",
-    )
-    .unwrap();
+    // The user layer lives directly in the client's one root, which the test owns.
+    let home = dir.join("loongagent-home");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join("profile.toml"), "api_key = \"sk-live-abc\"\n").unwrap();
     let (ok, _, stderr) = run_env(
         &dir,
         &["run", "hi", "--model", "echo"],
-        &[("XDG_CONFIG_HOME", xdg.to_str().unwrap())],
+        &[("LOONGAGENT_HOME", home.to_str().unwrap())],
     );
     assert!(!ok);
     assert!(

@@ -907,20 +907,34 @@ fn expand_home(path: &str) -> PathBuf {
 /// **signed pack**; that is not implemented, so this path is a placeholder for it
 /// and nothing here should be called tamper-resistant.
 pub fn layer_paths(workspace: &Path, session: Option<&Path>) -> Vec<(Layer, PathBuf)> {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let xdg = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| home.as_ref().map(|h| h.join(".config")));
     let mut layers = Vec::new();
     layers.push((Layer::Org, PathBuf::from("/etc/loongagent/profile.toml")));
     layers.push((Layer::Project, workspace.join(".loongagent/profile.toml")));
-    if let Some(xdg) = xdg {
-        layers.push((Layer::User, xdg.join("loongagent/profile.toml")));
-    }
+    // One root for everything the local client keeps, so "where does loongagent put
+    // things?" has a one-word answer. `LOONGAGENT_HOME` moves it for CI and scripts.
+    layers.push((Layer::User, loongagent_home().join("profile.toml")));
     if let Some(session) = session {
         layers.push((Layer::Session, session.to_path_buf()));
     }
     layers
+}
+
+/// Where the local client keeps its files: `$LOONGAGENT_HOME`, else `~/.loongagent`.
+///
+/// Files directly in it are **configuration** (`profile.toml`, `control.toml`, the
+/// `env` file holding secrets, a copy of the client token); its subdirectories are
+/// **state** (`projects/`, `control/`). The control *plane*, being a service, keeps
+/// its own files where a service's belong: `/etc/loongagent-control` for what an
+/// administrator authors, `/var/lib/loongagent-control` for what it writes.
+pub fn loongagent_home() -> PathBuf {
+    non_empty("LOONGAGENT_HOME")
+        .map(PathBuf::from)
+        .or_else(|| non_empty("HOME").map(|home| PathBuf::from(home).join(".loongagent")))
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+fn non_empty(name: &str) -> Option<std::ffi::OsString> {
+    std::env::var_os(name).filter(|value| !value.is_empty())
 }
 
 /// Merge the layers that exist, lowest precedence first.
@@ -1959,6 +1973,20 @@ description = \"Air-gapped: nothing leaves the machine.\"\n\
 
     #[test]
     fn layer_paths_are_where_they_claim_to_be() {
+        // The user layer lives under one root, and `LOONGAGENT_HOME` moves it.
+        std::env::set_var("LOONGAGENT_HOME", "/tmp/loong-home-test");
+        let layers = layer_paths(Path::new("/work/repo"), None);
+        let user = layers
+            .iter()
+            .find(|(layer, _)| *layer == Layer::User)
+            .map(|(_, path)| path.clone())
+            .unwrap();
+        assert_eq!(user, PathBuf::from("/tmp/loong-home-test/profile.toml"));
+        std::env::remove_var("LOONGAGENT_HOME");
+    }
+
+    #[test]
+    fn layer_paths_used_to_be_where_they_claim_to_be() {
         let ws = workspace();
         let paths = layer_paths(&ws, Some(Path::new("/tmp/session.toml")));
         let layers: Vec<Layer> = paths.iter().map(|(l, _)| *l).collect();

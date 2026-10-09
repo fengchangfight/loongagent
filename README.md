@@ -41,7 +41,7 @@ Standing the control plane up is a runbook:
 `scripts/control-plane-init.sh` does the layout, key and tokens).
 
 A pack carries a **placeholder** (`api_key = "env:DEEPSEEK_API_KEY"`), never a key:
-the value lives in `~/.config/loongagent/env` (mode 0600) on each machine, and a
+the value lives in `~/.loongagent/env` (mode 0600) on each machine, and a
 literal in a pack is refused at publish time and again at load time.
 
 You see profile names and what they are for (`default` — balanced, `supersmart` —

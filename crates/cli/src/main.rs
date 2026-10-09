@@ -259,10 +259,6 @@ impl Args {
     }
 }
 
-fn non_empty_env(name: &str) -> Option<std::ffi::OsString> {
-    std::env::var_os(name).filter(|value| !value.is_empty())
-}
-
 fn ask(prompt: &str, default: Option<&str>, lines: &mut dyn Iterator<Item = String>) -> String {
     print!("{prompt}");
     match default {
@@ -375,12 +371,9 @@ fn save_control(file: &ControlFile, system: bool) -> Result<PathBuf, String> {
 
 /// Where the verified pack is cached. State, not configuration.
 fn pack_cache(config: &loong_control::ControlConfig) -> loong_control::Cache {
-    let state = non_empty_env("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| non_empty_env("HOME").map(|home| PathBuf::from(home).join(".local/state")))
-        .unwrap_or_else(std::env::temp_dir)
-        .join("loongagent");
-    loong_control::Cache::new(state, &config.origin())
+    // Subdirectories of the same root: the file that the client *writes* goes under
+    // one, so a backup or a `rm -rf` has a single target.
+    loong_control::Cache::new(config_dir(), &config.origin())
 }
 
 /// The control-plane client configuration, with the token reference resolved.
@@ -890,27 +883,19 @@ fn use_profile(args: Args, rest: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// The client's one root: `$LOONGAGENT_HOME`, else `~/.loongagent` (defined in the
+/// config crate, because the user-layer path comes from the same rule).
 fn config_dir() -> PathBuf {
-    non_empty_env("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| non_empty_env("HOME").map(|home| PathBuf::from(home).join(".config")))
-        .unwrap_or_else(std::env::temp_dir)
-        .join("loongagent")
+    loong_config::loongagent_home()
 }
 
-/// `$XDG_STATE_HOME/loongagent/projects/<project>/session.jsonl`.
+/// `~/.loongagent/projects/<project>/session.jsonl` (or under `$LOONGAGENT_HOME`).
 ///
 /// Sessions are state, not configuration, so they live under the state dir and are
 /// keyed by the project they belong to: resuming yesterday's work in a directory is
 /// the default, and `--session` is only for choosing differently.
 fn default_session_path(cwd: &Path) -> PathBuf {
-    // An XDG variable that is set but empty means "use the default" (the spec says
-    // so, and a relative path here would scatter sessions around the project).
-    let base = non_empty_env("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| non_empty_env("HOME").map(|home| PathBuf::from(home).join(".local/state")))
-        .unwrap_or_else(std::env::temp_dir);
-    base.join("loongagent")
+    config_dir()
         .join("projects")
         .join(project_slug(cwd))
         .join("session.jsonl")
@@ -2153,7 +2138,7 @@ mod tests {
         let mine = ControlFile {
             url: "https://control.evil.invalid".to_string(),
             public_key: "cd".repeat(32),
-            token: Some("file:/home/me/.config/loongagent/client.token".to_string()),
+            token: Some("file:/home/me/.loongagent/client.token".to_string()),
         };
         let merged = merge_control(Some(machine.clone()), Some(mine.clone())).unwrap();
         assert_eq!(

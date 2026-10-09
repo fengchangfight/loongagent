@@ -11,8 +11,7 @@ binaries"). Each keeps its files where its kind of file belongs:
 | Root | Program | Contents |
 |---|---|---|
 | `/etc/loongagent/` | **agent** (client) | `profile.toml` (the org layer), `control.toml` (address + pinned key, machine-wide) |
-| `~/.config/loongagent/` | **agent** | `profile.toml` (user layer), `control.toml` (per-user override), `client.token` |
-| `~/.local/state/loongagent/` | **agent** | `projects/<project>/session.jsonl`, `control/<origin>/profiles.json` (pack cache) |
+| `~/.loongagent/` | **agent** | one root: files directly in it are configuration (`profile.toml`, `control.toml`, `env`, `client.token`), its subdirectories are state (`projects/<project>/session.jsonl`, `control/<origin>/profiles.json`). `$LOONGAGENT_HOME` moves the whole thing |
 | `<repository>/.loongagent/` | **agent** | project layer: `profile.toml`, `hooks.toml`, `mcp.toml`, `*.trusted`, `skills/` |
 | `/etc/loongagent-control/` | **control plane** | `control-key.pkcs8` (signing key), `client.token`, `admin.token` — all `0600` |
 | `/var/lib/loongagent-control/` | **control plane** | `profiles.json` — the signed pack it serves |
@@ -135,7 +134,7 @@ The client reads environment files before resolving any reference, in this order
 | Order | File | Notes |
 |---|---|---|
 | 1 | whatever the shell already exported | always wins; a `.env` never overrides it |
-| 2 | `~/.config/loongagent/env` | the recommended home for a secret; mode `0600` |
+| 2 | `~/.loongagent/env` | the recommended home for a secret; mode `0600` |
 | 3 | `<workspace>/.env` | convenient when you work inside the repository that has one |
 
 Both accept `NAME=value`, `NAME: value`, `export NAME=value` and quoted values. A
@@ -263,10 +262,10 @@ sudo loongagent setup --system --url http://127.0.0.1:8738 \
   --token file:/etc/loongagent-control/client.token
 
 # per user: each install keeps its own copy of the read token (mode 0600)
-install -m 0600 /etc/loongagent-control/client.token ~/.config/loongagent/client.token
+install -m 0600 /etc/loongagent-control/client.token ~/.loongagent/client.token
 loongagent setup --url http://127.0.0.1:8738 \
   --public-key <public key from step 1> \
-  --token file:~/.config/loongagent/client.token
+  --token file:~/.loongagent/client.token
 ```
 
 When both files exist, **the machine file decides the address and the key, and the
@@ -277,10 +276,10 @@ file. `loongagent control status` shows which files are in play.
 The result is the **entire** configuration an engineer owns:
 
 ```toml
-# ~/.config/loongagent/control.toml — no models, no endpoints, no secrets
+# ~/.loongagent/control.toml — no models, no endpoints, no secrets
 url = "http://127.0.0.1:8738"
 public_key = "4c02c0415cb2715abf891d6f5981aa4f2d250924a030391ec89f4590ef032ade"
-token = "file:/home/me/.config/loongagent/client.token"
+token = "file:/home/me/.loongagent/client.token"
 ```
 
 Then:

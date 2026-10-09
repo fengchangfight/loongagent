@@ -18,8 +18,7 @@ fn isolated_command() -> Command {
     let base = std::env::temp_dir().join(format!("loongagent-testenv-{}", std::process::id()));
     let mut command = Command::new(env!("CARGO_BIN_EXE_loongagent"));
     command
-        .env("XDG_CONFIG_HOME", base.join("cfg"))
-        .env("XDG_STATE_HOME", base.join("state"))
+        .env("LOONGAGENT_HOME", base.join("loongagent"))
         .env("HOME", base.join("home"));
     command
 }

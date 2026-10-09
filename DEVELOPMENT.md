@@ -123,6 +123,21 @@ audit/statistics uplink. The client only ever *reads*. Also not built: key rotat
 and revocation policy, per-team scopes, and polling/push cadence — the envelope has
 `key_id` and `version` for them, the policy does not exist yet.
 
+### One root for the client
+
+Everything the local client keeps is under **`~/.loongagent/`** (`$LOONGAGENT_HOME`
+moves it for CI and scripts), and the naming rule is short enough to remember:
+
+- **files directly in it are configuration** — `profile.toml` (user layer),
+  `control.toml` (control-plane address + pinned key), `env` (secrets, `0600`),
+  `client.token` (a per-user copy of the read token);
+- **its subdirectories are state** — `projects/<project>/session.jsonl`,
+  `control/<origin>/profiles.json` (the verified pack cache).
+
+The control *plane* is a service, so its files stay where a service's belong:
+`/etc/loongagent-control` for what an administrator authors and the service must read
+at boot, `/var/lib/loongagent-control` for what it writes.
+
 ### The draft is committed; the secret never is
 
 A profile pack is configuration — reviewed, versioned, diffed — so it carries a
@@ -143,7 +158,7 @@ The client reads environment files before resolving any reference:
 | Order | File | Rule |
 |---|---|---|
 | 1 | whatever the shell exported | always wins; an env file never overrides it |
-| 2 | `~/.config/loongagent/env` | the recommended home for the secret, mode `0600` |
+| 2 | `~/.loongagent/env` | the recommended home for the secret, mode `0600` |
 | 3 | `<workspace>/.env` | convenient when the repository you work in has one |
 
 The user's file wins over the workspace's, so a checked-out repository cannot replace
@@ -224,7 +239,7 @@ reference into the profile.
 
 ### Sessions live in the state directory
 
-`$XDG_STATE_HOME/loongagent/projects/<project>/session.jsonl`, keyed by the project
+`~/.loongagent/projects/<project>/session.jsonl`, keyed by the project
 path (readable slug plus a hash, so two paths cannot quietly share a session). Nobody
 has to pass `--session`; doing so overrides it.
 
@@ -373,7 +388,7 @@ binary the TUI spawns as its server (used by the end-to-end test).
   project layer's `skill_dirs` must stay inside the workspace. Layer files:
   `/etc/loongagent/profile.toml` (an administrator's file — the placeholder for
   ADR-0008's signed org pack), `<workspace>/.loongagent/profile.toml`,
-  `$XDG_CONFIG_HOME/loongagent/profile.toml`, and `--profile FILE` as the session
+  `~/.loongagent/profile.toml`, and `--profile FILE` as the session
   layer.
 - **Skills and commands** (`loong-skills`, T-18): one concept with two
   spellings, `.loongagent/skills/<name>/SKILL.md` and

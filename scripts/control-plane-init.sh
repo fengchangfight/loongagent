@@ -170,6 +170,6 @@ echo "     sudo loongagent setup --system --url http://127.0.0.1:$port \\"
 echo "       --public-key $public_key --token file:$dir/client.token"
 echo "   or per user (each install keeps its own copy of the read token):"
 echo "     loongagent setup --url http://127.0.0.1:$port --public-key $public_key \\"
-echo "       --token file:\$HOME/.config/loongagent/client.token"
+echo "       --token file:\$HOME/.loongagent/client.token"
 echo
 echo "Keep $dir off any backup that leaves the machine: it holds the signing key."

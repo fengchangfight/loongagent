@@ -167,7 +167,9 @@ Notes that save a round trip:
 - `api_key` must be a **reference** — `env:NAME`, `file:PATH`, `file:PATH#KEY`,
   `keychain:`, `gateway:`. A literal is refused at the administrator's own
   `publish --pack`, again at the control plane, and again when a client loads the
-  pack (ADR-0008 §5). The reference is resolved **on the client**, so the secret
+  pack (ADR-0008 §5). The **name** is checked as well: `env:` must be followed by a
+  variable name (`UPPER_SNAKE`), so pasting the secret after the prefix — which would
+  otherwise travel inside the signed pack — is refused with the mistake spelled out. The reference is resolved **on the client**, so the secret
   never reaches the control plane and never enters a signed pack.
 
 ### The draft is committed; the secret is not

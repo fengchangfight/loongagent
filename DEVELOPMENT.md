@@ -149,7 +149,14 @@ api_key = "env:DEEPSEEK_API_KEY"        # what is committed
 
 A **literal** is refused in three places, so it cannot arrive by accident: at the
 administrator's own `publish --pack` (before any network call), at the control plane
-when it validates the draft, and when a client loads a pack. The reference travels
+when it validates the draft, and when a client loads a pack.
+
+The part after the prefix is checked too, because a prefix is not a reference:
+`env:sk-4f06…` starts with `env:` and still puts the key in the pack, in every client's
+cache, and in git as soon as the draft is committed. `env:NAME` must be a variable
+*name* — `UPPER_SNAKE`, letters/digits/underscores, no long unbroken run of characters
+that a secret would have — and `file:PATH#NAME` is checked the same way. A lower-case
+variable name is therefore refused: use the convention. The reference travels
 inside the signed envelope — `profiles.json` holds `env:DEEPSEEK_API_KEY`, never a
 value — and the control plane never resolves it: the secret stays on the client.
 
@@ -158,7 +165,7 @@ The client reads environment files before resolving any reference:
 | Order | File | Rule |
 |---|---|---|
 | 1 | whatever the shell exported | always wins; an env file never overrides it |
-| 2 | `~/.loongagent/env` | the recommended home for the secret, mode `0600` |
+| 2 | `~/.loongagent/env` | the recommended home for the secret, mode `0600` (`NAME=value`, `NAME: value`, or a TOML `[keys]` table) |
 | 3 | `<workspace>/.env` | convenient when the repository you work in has one |
 
 The user's file wins over the workspace's, so a checked-out repository cannot replace

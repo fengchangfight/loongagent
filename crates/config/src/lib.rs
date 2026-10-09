@@ -848,14 +848,79 @@ impl LayerValues {
 const ADAPTER_KINDS: &[&str] = &["openai-compat"];
 
 fn check_secret_reference(source: &str, key: &str, value: &str) -> Result<(), ConfigError> {
-    let known = ["env:", "file:", "keychain:", "gateway:"];
-    if known.iter().any(|prefix| value.starts_with(prefix)) {
-        return Ok(());
+    let reference = || {
+        format!(
+            "{source}: `{key}` must be a reference — `env:NAME`, `file:PATH#KEY`, `keychain:…`, \
+             `gateway:…` — because secrets never live in configuration (ADR-0008 §5)"
+        )
+    };
+    // A prefix is not enough. Writing the secret *after* the prefix
+    // (`env:sk-4f06…`) satisfies "starts with env:" and puts the key in the pack, the
+    // client cache, and — since a draft is meant to be committed — in git. So the name
+    // itself is checked: an environment variable name, conventionally upper case.
+    if let Some(name) = value.strip_prefix("env:") {
+        return if is_secret_name(name) {
+            Ok(())
+        } else {
+            Err(ConfigError::Invalid(format!(
+                "{} — the part after `env:` must be the *name* of a variable (e.g. \
+                 `env:DEEPSEEK_API_KEY`), not the secret itself: {name:?} is not a variable name",
+                reference()
+            )))
+        };
     }
-    Err(ConfigError::Invalid(format!(
-        "{source}: `{key}` must be a reference (env:NAME, file:PATH#KEY, keychain:…, gateway:…) — \
-         secrets never live in config (ADR-0008 §5)"
-    )))
+    if let Some(rest) = value.strip_prefix("file:") {
+        // `file:PATH` (the file is the secret) or `file:PATH#NAME`.
+        return match rest.split_once('#') {
+            Some((path, name)) if !path.is_empty() && is_secret_name(name) => Ok(()),
+            Some((_, name)) => Err(ConfigError::Invalid(format!(
+                "{} — the part after `#` names a key inside the file (e.g. \
+                 `file:credentials.toml#DEEPSEEK_API_KEY`), not the secret: {name:?}",
+                reference()
+            ))),
+            None if !rest.is_empty() => Ok(()),
+            None => Err(ConfigError::Invalid(reference())),
+        };
+    }
+    for prefix in ["keychain:", "gateway:"] {
+        if let Some(rest) = value.strip_prefix(prefix) {
+            return if !rest.is_empty()
+                && rest
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "_./:-".contains(c))
+            {
+                Ok(())
+            } else {
+                Err(ConfigError::Invalid(reference()))
+            };
+        }
+    }
+    Err(ConfigError::Invalid(reference()))
+}
+
+/// An environment variable name, and nothing that looks like a value: letters, digits
+/// and underscores, starting with a letter, conventionally upper case.
+///
+/// Deliberately strict. `sk-4f06…` fails on the hyphen and the case; a pasted
+/// alphanumeric secret fails because a long unbroken run of characters with no
+/// underscore is not how anybody names a variable.
+fn is_secret_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > 64 {
+        return false;
+    }
+    let mut chars = name.chars();
+    let first = chars.next().unwrap();
+    if !first.is_ascii_uppercase() && first != '_' {
+        return false;
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+    {
+        return false;
+    }
+    // `DEEPSEEK_API_KEY` has words separated by underscores; a secret does not.
+    !name.split('_').any(|word| word.len() >= 20)
 }
 
 fn check_endpoint_reference(source: &str, key: &str, value: &str) -> Result<(), ConfigError> {
@@ -1834,6 +1899,61 @@ description = \"Air-gapped: nothing leaves the machine.\"\n\
             "default",
             "the pack's default"
         );
+    }
+
+    #[test]
+    fn a_secret_pasted_after_the_prefix_is_refused() {
+        // The mistake this exists for: `env:` followed by the key itself passes a
+        // prefix check, and then the key is inside the signed pack — and inside a
+        // committed draft.
+        for (value, why) in [
+            (
+                "env:sk-4f06f4b88d7149ca8eeaa939d0fb08bd",
+                "a pasted key after env:",
+            ),
+            (
+                "env:sk4f06f4b88d7149ca8eeaa939d0fb08bd",
+                "alphanumeric but lowercase",
+            ),
+            ("env:deepseekApiKey", "not the upper-case convention"),
+            ("env:", "empty"),
+            (
+                "file:credentials.toml#sk-live-abc",
+                "a pasted key as the table name",
+            ),
+            ("keychain:", "empty"),
+        ] {
+            let payload = format!(
+                "[[profiles]]\nname = \"x\"\n  [[profiles.models]]\n  name = \"m\"\n  \
+                 base_url = \"https://a.invalid\"\n  model = \"i\"\n  api_key = \"{value}\"\n"
+            );
+            let error = profiles_from_payload(&payload).unwrap_err().to_string();
+            assert!(
+                error.contains("reference")
+                    || error.contains("variable name")
+                    || error.contains("secret"),
+                "{why}: {error}"
+            );
+        }
+
+        // And the shapes that are references still work.
+        for value in [
+            "env:DEEPSEEK_API_KEY",
+            "env:LOONGAGENT_CONTROL_TOKEN",
+            "file:/etc/loongagent/client.token",
+            "file:credentials.toml#DEEPSEEK_API_KEY",
+            "keychain:loongagent/deepseek",
+            "gateway:acme/profiles",
+        ] {
+            let payload = format!(
+                "[[profiles]]\nname = \"x\"\n  [[profiles.models]]\n  name = \"m\"\n  \
+                 base_url = \"https://a.invalid\"\n  model = \"i\"\n  api_key = \"{value}\"\n"
+            );
+            assert!(
+                profiles_from_payload(&payload).is_ok(),
+                "{value} must be accepted"
+            );
+        }
     }
 
     #[test]

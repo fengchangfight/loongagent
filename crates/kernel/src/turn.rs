@@ -803,6 +803,59 @@ impl Kernel {
             .collect())
     }
 
+    /// What the next request will actually carry, and why — the debug view behind a
+    /// "context" panel. It changes nothing: no event, no ledger movement.
+    pub fn context_explain(&self) -> gen::ContextExplain {
+        let by_category = self.ledger.tokens_by_category();
+        let mut categories: Vec<gen::ContextCategory> = by_category
+            .into_iter()
+            .map(|(category, tokens)| gen::ContextCategory {
+                category: category.to_string(),
+                tokens,
+            })
+            .collect();
+        // Largest first: the panel's job is to show where the budget went.
+        categories.sort_by(|a, b| b.tokens.cmp(&a.tokens).then(a.category.cmp(&b.category)));
+        gen::ContextExplain {
+            context_tokens: self.ledger.total_tokens(),
+            budget_tokens: self.ledger.budget().unwrap_or(0),
+            messages: self.messages.len() as u64,
+            tools: self.tool_specs().len() as u64,
+            // Read from the derived index rather than a counter, so a resumed session
+            // reports its whole history.
+            compactions: self
+                .index
+                .kinds()
+                .map(|kinds| {
+                    kinds
+                        .iter()
+                        .filter(|k| k.kind == gen::event::COMPACTION_APPLIED)
+                        .map(|k| k.count)
+                        .sum()
+                })
+                .unwrap_or(0),
+            entries: self
+                .ledger
+                .entries()
+                .iter()
+                .map(|entry| gen::ContextEntry {
+                    id: entry.id,
+                    category: entry.category.as_str().to_string(),
+                    source: entry.source.clone(),
+                    tokens: entry.tokens,
+                    lifetime: match entry.lifetime {
+                        Lifetime::Turn => "turn".to_string(),
+                        Lifetime::Session => "session".to_string(),
+                        Lifetime::Persistent => "persistent".to_string(),
+                    },
+                    pinned: entry.pinned,
+                    cleared: entry.cleared,
+                })
+                .collect(),
+            categories,
+        }
+    }
+
     pub fn messages(&self) -> &[ChatMessage] {
         &self.messages
     }
@@ -2602,6 +2655,59 @@ Step one: breathe.
             .filter(|e| e.source == "assistant")
             .count();
         assert_eq!(history, 1, "one assistant entry, not one per delta");
+    }
+
+    #[test]
+    fn the_context_view_says_what_the_next_request_will_carry() {
+        let t = Temp::new();
+        let (model, _seen) = RecordingModel::new(vec![response(vec![], Some("hello there"))]);
+        let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        let before = loong_eventlog::replay(&t.log).unwrap().events.len();
+        k.submit("hi").unwrap();
+
+        let explained = k.context_explain();
+        assert!(
+            explained.context_tokens > 0,
+            "the ledger accounts for something"
+        );
+        assert!(
+            explained.messages >= 2,
+            "the user turn and the answer: {}",
+            explained.messages
+        );
+        assert!(explained.tools > 0, "the tools are described to the model");
+        assert_eq!(explained.compactions, 0, "nothing has been compacted yet");
+
+        let categories: Vec<&str> = explained
+            .categories
+            .iter()
+            .map(|c| c.category.as_str())
+            .collect();
+        assert!(categories.contains(&"system_prompt"), "{categories:?}");
+        assert!(categories.contains(&"history"), "{categories:?}");
+        assert!(
+            explained
+                .categories
+                .windows(2)
+                .all(|w| w[0].tokens >= w[1].tokens),
+            "largest first: {:?}",
+            explained.categories
+        );
+        assert!(!explained.entries.is_empty());
+        assert!(explained
+            .entries
+            .iter()
+            .all(|e| !e.lifetime.is_empty() && !e.category.is_empty()));
+
+        // Asking changes nothing: it is a question about the session, not a fact in it.
+        let after_turn = loong_eventlog::replay(&t.log).unwrap().events.len();
+        assert!(after_turn > before, "the turn itself recorded something");
+        let _ = k.context_explain();
+        assert_eq!(
+            loong_eventlog::replay(&t.log).unwrap().events.len(),
+            after_turn,
+            "and reading the context added nothing"
+        );
     }
 
     #[test]

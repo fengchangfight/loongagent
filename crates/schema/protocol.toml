@@ -244,6 +244,57 @@ fields = [
 
 # ------------------------------------------------------------------- methods
 
+[[types]]
+name = "SessionOnlyParams"
+kind = "struct"
+doc = "A request about one session."
+fields = [
+  { name = "session_id", type = "string" },
+]
+
+[[types]]
+name = "ContextEntry"
+kind = "struct"
+doc = "One thing in the model's context, and what it cost (ADR-0006)."
+fields = [
+  { name = "id", type = "u64" },
+  { name = "category", type = "string", doc = "system_prompt | tools | rules | memory | mcp_tools | retrieval | history" },
+  { name = "source", type = "string" },
+  { name = "tokens", type = "u64" },
+  { name = "lifetime", type = "string", doc = "turn | session | persistent" },
+  { name = "pinned", type = "bool", doc = "never evicted" },
+  { name = "cleared", type = "bool", doc = "its body was replaced by a marker to free context (ADR-0006 §4)" },
+]
+
+[[types]]
+name = "ContextExplain"
+kind = "struct"
+doc = "What the model is actually being sent, and why. A debug view: the request for it changes nothing."
+fields = [
+  { name = "context_tokens", type = "u64" },
+  { name = "budget_tokens", type = "u64", doc = "0 when there is no limit" },
+  { name = "messages", type = "u64", doc = "how many messages the next request will carry" },
+  { name = "tools", type = "u64", doc = "how many tool definitions it will carry" },
+  { name = "compactions", type = "u64", doc = "how many compactions this session has recorded" },
+  { name = "entries", type = "ContextEntry", list = true },
+  { name = "categories", type = "ContextCategory", list = true, doc = "totals per category, largest first" },
+]
+
+[[types]]
+name = "ContextCategory"
+kind = "struct"
+doc = "Token total for one category of context."
+fields = [
+  { name = "category", type = "string" },
+  { name = "tokens", type = "u64" },
+]
+
+[[methods]]
+name = "context.explain"
+doc = "Explain the context the next request will carry: every entry, its category, its tokens, and what has been cleared."
+params = "SessionOnlyParams"
+result = "ContextExplain"
+
 [[methods]]
 name = "session.attach"
 doc = "Attach a thin client to the local agent server (ADR-0009)."

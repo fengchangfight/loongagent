@@ -93,6 +93,46 @@
       "message": "<string>",
       "data": {}
     },
+    "SessionOnlyParams": {
+      "session_id": "<string>"
+    },
+    "ContextEntry": {
+      "id": 1,
+      "category": "<string>",
+      "source": "<string>",
+      "tokens": 1,
+      "lifetime": "<string>",
+      "pinned": true,
+      "cleared": true
+    },
+    "ContextExplain": {
+      "context_tokens": 1,
+      "budget_tokens": 1,
+      "messages": 1,
+      "tools": 1,
+      "compactions": 1,
+      "entries": [
+        {
+          "id": 1,
+          "category": "<string>",
+          "source": "<string>",
+          "tokens": 1,
+          "lifetime": "<string>",
+          "pinned": true,
+          "cleared": true
+        }
+      ],
+      "categories": [
+        {
+          "category": "<string>",
+          "tokens": 1
+        }
+      ]
+    },
+    "ContextCategory": {
+      "category": "<string>",
+      "tokens": 1
+    },
     "SkillsLoaded": {
       "count": 1,
       "tokens": 1,
@@ -131,6 +171,11 @@
     }
   },
   "methods": [
+    {
+      "name": "context.explain",
+      "params": "SessionOnlyParams",
+      "result": "ContextExplain"
+    },
     {
       "name": "session.attach",
       "params": "SessionAttachParams",

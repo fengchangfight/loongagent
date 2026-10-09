@@ -25,11 +25,16 @@ use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToWorker {
     Submit(String),
-    Respond { request_id: String, granted: bool },
+    Respond {
+        request_id: String,
+        granted: bool,
+    },
+    /// Ask for the context view (the debug panel opening, or a refresh).
+    RefreshContext,
 }
 
 /// What the worker reports back.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum FromWorker {
     /// A fragment of the answer, as the model writes it (a preview, not the record).
     Delta(String),
@@ -38,6 +43,8 @@ pub enum FromWorker {
     State {
         pending: Option<String>,
     },
+    /// What the next request will carry: the debug panel's data.
+    Context(Box<loong_schema::generated::ContextExplain>),
     Failed(String),
 }
 
@@ -59,6 +66,9 @@ pub struct App {
     pub pending: Option<String>,
     /// Diagnostics from the server process (its stderr): startup notes, warnings.
     pub notes: Vec<String>,
+    /// Whether the context panel is open (F2), and what it last showed.
+    pub debug: bool,
+    pub context: Option<Box<loong_schema::generated::ContextExplain>>,
     pub session: String,
     pub schema: String,
     pub busy: bool,
@@ -82,10 +92,114 @@ impl App {
             schema: schema.into(),
             busy: false,
             error: None,
+            debug: false,
+            context: None,
             streaming: String::new(),
             scroll: 0,
             quit: false,
         }
+    }
+
+    /// The debug panel: what the next request will carry, where the tokens went, and
+    /// what has been cleared. Read-only by construction — asking for it records
+    /// nothing, so looking cannot change what you are looking at.
+    fn draw_context(&self, frame: &mut Frame, area: ratatui::layout::Rect) {
+        let mut lines: Vec<Line> = Vec::new();
+        match &self.context {
+            None => lines.push(Line::from(Span::styled(
+                "asking the server…",
+                Style::default().fg(Color::DarkGray),
+            ))),
+            Some(explained) => {
+                let budget = explained.budget_tokens;
+                let used = explained.context_tokens;
+                let percent = if budget > 0 {
+                    format!("{:.0}%", (used as f64 / budget as f64) * 100.0)
+                } else {
+                    "no limit".to_string()
+                };
+                lines.push(Line::from(vec![
+                    Span::styled("tokens ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        format!("{used}"),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(if budget > 0 {
+                        format!(" / {budget}")
+                    } else {
+                        String::new()
+                    }),
+                    Span::raw("  "),
+                    Span::styled(percent, Style::default().fg(Color::Cyan)),
+                ]));
+                lines.push(
+                    Line::from(format!(
+                        "{} messages · {} tools · {} compactions",
+                        explained.messages, explained.tools, explained.compactions
+                    ))
+                    .style(Style::default().fg(Color::DarkGray)),
+                );
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "category            tokens",
+                    Style::default().fg(Color::DarkGray),
+                )));
+                let widest = explained
+                    .categories
+                    .iter()
+                    .map(|c| c.tokens)
+                    .max()
+                    .unwrap_or(1)
+                    .max(1);
+                for category in &explained.categories {
+                    let bar = "█"
+                        .repeat(((category.tokens as f64 / widest as f64) * 10.0).ceil() as usize);
+                    lines.push(Line::from(format!(
+                        "{:<16} {:>7}  {}",
+                        category.category, category.tokens, bar
+                    )));
+                }
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "entries (newest last)   p=pinned c=cleared",
+                    Style::default().fg(Color::DarkGray),
+                )));
+                // The tail is what the next request is mostly made of.
+                let room = area.height.saturating_sub(lines.len() as u16 + 2) as usize;
+                let entries = &explained.entries;
+                let start = entries.len().saturating_sub(room);
+                for entry in &entries[start..] {
+                    let marker = match (entry.pinned, entry.cleared) {
+                        (true, true) => "pc",
+                        (true, false) => "p ",
+                        (false, true) => " c",
+                        (false, false) => "  ",
+                    };
+                    let style = if entry.cleared {
+                        Style::default().fg(Color::DarkGray)
+                    } else {
+                        Style::default()
+                    };
+                    lines.push(
+                        Line::from(format!(
+                            "{marker} #{:<4} {:<13} {:>6}  {}",
+                            entry.id, entry.category, entry.tokens, entry.source
+                        ))
+                        .style(style),
+                    );
+                }
+            }
+        }
+        frame.render_widget(
+            Paragraph::new(lines)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" context (f2) "),
+                )
+                .wrap(Wrap { trim: false }),
+            area,
+        );
     }
 
     fn byte_at(&self, char_index: usize) -> usize {
@@ -165,6 +279,7 @@ impl App {
         loop {
             match worker.try_recv() {
                 Ok(FromWorker::Delta(piece)) => self.streaming.push_str(&piece),
+                Ok(FromWorker::Context(explained)) => self.context = Some(explained),
                 Ok(FromWorker::Lines(lines)) => {
                     // The finished message supersedes the fragments on screen, and it
                     // is the only one of the two that exists in the log.
@@ -255,7 +370,16 @@ impl App {
                 self.delete_at_cursor();
                 Action::None
             }
-            KeyCode::PageUp | KeyCode::Char('b') if key.code == KeyCode::PageUp || ctrl => {
+            // F2: the context panel. Opening it asks for the view rather than waiting
+            // for the next turn, so a debug look is never empty.
+            KeyCode::F(2) => {
+                self.debug = !self.debug;
+                if self.debug {
+                    return Action::Send(ToWorker::RefreshContext);
+                }
+                Action::None
+            }
+            KeyCode::PageUp => {
                 self.scroll = (self.scroll + 5).min(self.lines.len());
                 Action::None
             }
@@ -363,6 +487,17 @@ impl App {
     }
 
     pub fn draw(&mut self, frame: &mut Frame) {
+        // The context panel takes the right third; the conversation keeps the rest, so
+        // turning it on never hides what you were reading.
+        let (conversation, panel) = if self.debug {
+            let split = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
+                .split(frame.area());
+            (split[0], Some(split[1]))
+        } else {
+            (frame.area(), None)
+        };
         let areas = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -371,7 +506,7 @@ impl App {
                 Constraint::Length(3),
                 Constraint::Length(1),
             ])
-            .split(frame.area());
+            .split(conversation);
 
         if !self.notes.is_empty() {
             let latest = self.notes.last().cloned().unwrap_or_default();
@@ -415,11 +550,17 @@ impl App {
             frame.set_cursor_position((areas[2].x + 1 + caret, areas[2].y + 1));
         }
 
+        if let Some(panel) = panel {
+            self.draw_context(frame, panel);
+        }
+
         let mut hints = vec![
             Span::styled("enter", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" send  "),
             Span::styled("pgup/pgdn", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" scroll  "),
+            Span::styled("f2", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" context  "),
             Span::styled(
                 "ctrl-pgup/pgdn",
                 Style::default().add_modifier(Modifier::BOLD),
@@ -453,6 +594,7 @@ pub fn spawn_worker<T: Transport + Send + 'static>(
     let (events, from_worker) = channel::<FromWorker>();
     std::thread::spawn(move || {
         while let Ok(command) = commands.recv() {
+            let mut refreshed = false;
             let result = match command {
                 ToWorker::Submit(text) => {
                     // Deltas go out as they arrive; the finished lines follow.
@@ -475,13 +617,34 @@ pub fn spawn_worker<T: Transport + Send + 'static>(
                     loong_schema::generated::ApprovalScope::Once,
                     None,
                 ),
+                ToWorker::RefreshContext => {
+                    match client.context() {
+                        Ok(explained) => {
+                            let _ = events.send(FromWorker::Context(Box::new(explained)));
+                        }
+                        Err(e) => {
+                            let _ = events.send(FromWorker::Failed(e));
+                        }
+                    }
+                    refreshed = true;
+                    Ok(Vec::new())
+                }
             };
             match result {
                 Ok(lines) => {
+                    // An empty list is "nothing to add", not "clear the screen": the
+                    // submit path uses it to drop the streaming preview.
                     let _ = events.send(FromWorker::Lines(lines));
                 }
                 Err(e) => {
                     let _ = events.send(FromWorker::Failed(e));
+                }
+            }
+            // Keep the context view current after every command, so opening the panel
+            // mid-session shows the turn that just happened rather than an empty box.
+            if !refreshed {
+                if let Ok(explained) = client.context() {
+                    let _ = events.send(FromWorker::Context(Box::new(explained)));
                 }
             }
             let _ = events.send(FromWorker::State {
@@ -1051,6 +1214,94 @@ mod tests {
         assert_eq!(form.field, 1);
         form.handle_key(key(KeyCode::Char('x')));
         assert!(form.public_key.ends_with('x'));
+    }
+
+    fn explained() -> Box<loong_schema::generated::ContextExplain> {
+        use loong_schema::generated::{ContextCategory, ContextEntry, ContextExplain};
+        Box::new(ContextExplain {
+            context_tokens: 1700,
+            budget_tokens: 128000,
+            messages: 12,
+            tools: 9,
+            compactions: 1,
+            entries: vec![
+                ContextEntry {
+                    id: 1,
+                    category: "system_prompt".to_string(),
+                    source: "loongagent".to_string(),
+                    tokens: 400,
+                    lifetime: "session".to_string(),
+                    pinned: true,
+                    cleared: false,
+                },
+                ContextEntry {
+                    id: 7,
+                    category: "history".to_string(),
+                    source: "tool result (shell)".to_string(),
+                    tokens: 900,
+                    lifetime: "turn".to_string(),
+                    pinned: false,
+                    cleared: true,
+                },
+            ],
+            categories: vec![
+                ContextCategory {
+                    category: "history".to_string(),
+                    tokens: 900,
+                },
+                ContextCategory {
+                    category: "system_prompt".to_string(),
+                    tokens: 400,
+                },
+            ],
+        })
+    }
+
+    #[test]
+    fn f2_opens_the_context_panel_and_asks_for_its_data() {
+        let mut app = App::new("s", "v");
+        assert_eq!(
+            app.handle_key(key(KeyCode::F(2))),
+            Action::Send(ToWorker::RefreshContext),
+            "opening it asks, so the panel is never an empty box"
+        );
+        assert!(app.debug);
+        assert_eq!(
+            app.handle_key(key(KeyCode::F(2))),
+            Action::None,
+            "closing asks for nothing"
+        );
+        assert!(!app.debug);
+    }
+
+    #[test]
+    fn the_context_panel_shows_where_the_tokens_went() {
+        let (to_app, from_worker) = channel::<FromWorker>();
+        let mut app = App::new("s", "v");
+        app.handle_key(key(KeyCode::F(2)));
+        to_app.send(FromWorker::Context(explained())).unwrap();
+        app.drain(&from_worker);
+        let screen = draw(&mut app, 130, 24);
+        assert!(screen.contains("context (f2)"), "{screen}");
+        assert!(screen.contains("1700 / 128000"), "the totals: {screen}");
+        assert!(screen.contains("12 messages"), "{screen}");
+        assert!(screen.contains("compactions"), "{screen}");
+        assert!(
+            screen.contains("history") && screen.contains("system_prompt"),
+            "{screen}"
+        );
+        assert!(screen.contains("#1"), "the entries: {screen}");
+        assert!(screen.contains("pinned"), "and the legend: {screen}");
+        // The conversation did not disappear.
+        assert!(screen.contains("loongagent — session"), "{screen}");
+    }
+
+    #[test]
+    fn the_panel_stays_closed_until_it_is_asked_for() {
+        let mut app = App::new("s", "v");
+        let screen = draw(&mut app, 110, 20);
+        assert!(!screen.contains("context (f2)"), "{screen}");
+        assert!(screen.contains("f2"), "the hint advertises it: {screen}");
     }
 
     #[test]

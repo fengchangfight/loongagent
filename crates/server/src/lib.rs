@@ -98,6 +98,23 @@ impl Server {
                 };
                 self.respond(id, result, "session.attach")
             }
+            gen::method::CONTEXT_EXPLAIN => {
+                let params: gen::SessionOnlyParams = match request.params_as() {
+                    Ok(p) => p,
+                    Err(e) => return vec![e.to_line()],
+                };
+                if let Some(bad) = self.wrong_session(&params.session_id) {
+                    return vec![bad];
+                }
+                // A read of the kernel's own state: nothing is recorded, because
+                // asking "what is in the context?" is not a fact about the session.
+                let explained = self.kernel.context_explain();
+                self.respond(
+                    id,
+                    serde_json::to_value(explained).unwrap_or(Value::Null),
+                    "context.explain",
+                )
+            }
             gen::method::PROMPT_SUBMIT => {
                 let params: gen::PromptSubmitParams = match request.params_as() {
                     Ok(p) => p,
@@ -487,6 +504,75 @@ mod tests {
                 },
             })
         }
+    }
+
+    #[test]
+    fn a_client_can_ask_what_is_in_the_context_without_changing_it() {
+        let t = Temp::new();
+        let model = scripted(vec![], Some("noted"));
+        let kernel = Kernel::create(
+            t.0.join("c.jsonl"),
+            KernelConfig::new(&t.0),
+            Box::new(model),
+        )
+        .unwrap();
+        let mut server = Server::new(kernel, "s-context");
+        let attached = lines_of(&mut server, &attach_line());
+        assert_eq!(attached[0]["method"], "event");
+
+        let submitted = lines_of(
+            &mut server,
+            &Request::new(
+                2,
+                gen::method::PROMPT_SUBMIT,
+                json!({"session_id": "s-context", "text": "remember this"}),
+            )
+            .to_line(),
+        );
+        let events_after_turn = submitted
+            .iter()
+            .filter(|line| line["method"] == "event")
+            .count();
+        assert!(events_after_turn > 0);
+
+        let explained = lines_of(
+            &mut server,
+            &Request::new(
+                3,
+                gen::method::CONTEXT_EXPLAIN,
+                json!({"session_id": "s-context"}),
+            )
+            .to_line(),
+        );
+        let result = &explained[0]["result"];
+        assert!(result["context_tokens"].as_u64().unwrap() > 0, "{result}");
+        assert!(result["messages"].as_u64().unwrap() >= 2, "{result}");
+        assert!(result["tools"].as_u64().unwrap() > 0, "{result}");
+        assert!(
+            !result["entries"].as_array().unwrap().is_empty(),
+            "{result}"
+        );
+        assert!(
+            !result["categories"].as_array().unwrap().is_empty(),
+            "{result}"
+        );
+        assert_eq!(result["compactions"], 0);
+        assert!(
+            explained.iter().all(|line| line["method"] != "event"),
+            "asking is not an event: {explained:?}"
+        );
+
+        // And a session that is not this one is refused rather than answered.
+        let wrong = lines_of(
+            &mut server,
+            &Request::new(
+                4,
+                gen::method::CONTEXT_EXPLAIN,
+                json!({"session_id": "someone-else"}),
+            )
+            .to_line(),
+        );
+        assert!(wrong[0]["error"].is_object(), "{wrong:?}");
     }
 
     #[test]

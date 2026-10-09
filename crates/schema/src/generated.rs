@@ -201,6 +201,52 @@ pub struct RpcError {
     pub data: Option<Json>,
 }
 
+/// A request about one session.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionOnlyParams {
+    pub session_id: String,
+}
+
+/// One thing in the model's context, and what it cost (ADR-0006).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContextEntry {
+    pub id: u64,
+    /// system_prompt | tools | rules | memory | mcp_tools | retrieval | history
+    pub category: String,
+    pub source: String,
+    pub tokens: u64,
+    /// turn | session | persistent
+    pub lifetime: String,
+    /// never evicted
+    pub pinned: bool,
+    /// its body was replaced by a marker to free context (ADR-0006 §4)
+    pub cleared: bool,
+}
+
+/// What the model is actually being sent, and why. A debug view: the request for it changes nothing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContextExplain {
+    pub context_tokens: u64,
+    /// 0 when there is no limit
+    pub budget_tokens: u64,
+    /// how many messages the next request will carry
+    pub messages: u64,
+    /// how many tool definitions it will carry
+    pub tools: u64,
+    /// how many compactions this session has recorded
+    pub compactions: u64,
+    pub entries: Vec<ContextEntry>,
+    /// totals per category, largest first
+    pub categories: Vec<ContextCategory>,
+}
+
+/// Token total for one category of context.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContextCategory {
+    pub category: String,
+    pub tokens: u64,
+}
+
 /// What the workspace offered as skills/commands (T-18). Names and descriptions enter context; bodies do not.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillsLoaded {
@@ -268,6 +314,8 @@ pub struct ProfileSelected {
 
 /// JSON-RPC method names (ADR-0002).
 pub mod method {
+    /// Explain the context the next request will carry: every entry, its category, its tokens, and what has been cleared.
+    pub const CONTEXT_EXPLAIN: &str = "context.explain";
     /// Attach a thin client to the local agent server (ADR-0009).
     pub const SESSION_ATTACH: &str = "session.attach";
     /// Submit a user turn.

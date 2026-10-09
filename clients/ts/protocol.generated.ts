@@ -148,6 +148,48 @@ export interface RpcError {
   data?: Json;
 }
 
+/** A request about one session. */
+export interface SessionOnlyParams {
+  session_id: string;
+}
+
+/** One thing in the model's context, and what it cost (ADR-0006). */
+export interface ContextEntry {
+  id: number;
+  /** system_prompt | tools | rules | memory | mcp_tools | retrieval | history */
+  category: string;
+  source: string;
+  tokens: number;
+  /** turn | session | persistent */
+  lifetime: string;
+  /** never evicted */
+  pinned: boolean;
+  /** its body was replaced by a marker to free context (ADR-0006 §4) */
+  cleared: boolean;
+}
+
+/** What the model is actually being sent, and why. A debug view: the request for it changes nothing. */
+export interface ContextExplain {
+  context_tokens: number;
+  /** 0 when there is no limit */
+  budget_tokens: number;
+  /** how many messages the next request will carry */
+  messages: number;
+  /** how many tool definitions it will carry */
+  tools: number;
+  /** how many compactions this session has recorded */
+  compactions: number;
+  entries: ContextEntry[];
+  /** totals per category, largest first */
+  categories: ContextCategory[];
+}
+
+/** Token total for one category of context. */
+export interface ContextCategory {
+  category: string;
+  tokens: number;
+}
+
 /** What the workspace offered as skills/commands (T-18). Names and descriptions enter context; bodies do not. */
 export interface SkillsLoaded {
   count: number;
@@ -208,6 +250,7 @@ export interface ProfileSelected {
 }
 
 export const METHODS = {
+  contextExplain: "context.explain",
   sessionAttach: "session.attach",
   promptSubmit: "prompt.submit",
   approvalRespond: "approval.respond",

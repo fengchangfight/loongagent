@@ -70,6 +70,19 @@ impl<T: Transport> Client<T> {
         Ok(attached)
     }
 
+    /// What the model is about to be sent, and why. Read-only: the kernel records
+    /// nothing for it, so a debug panel cannot alter the thing it is showing.
+    pub fn context(&mut self) -> Result<gen::ContextExplain, String> {
+        let params = gen::SessionOnlyParams {
+            session_id: self.session_id.clone(),
+        };
+        let (_, result) = self.call(
+            gen::method::CONTEXT_EXPLAIN,
+            serde_json::to_value(params).unwrap(),
+        )?;
+        serde_json::from_value(result).map_err(|e| format!("context.explain: {e}"))
+    }
+
     /// Submit a turn; returns the lines to display (events, then the answer).
     pub fn submit(&mut self, text: &str) -> Result<Vec<String>, String> {
         self.submit_with(text, &mut |_, _| {})

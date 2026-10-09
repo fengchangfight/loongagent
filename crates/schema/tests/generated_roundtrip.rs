@@ -117,6 +117,30 @@ fn roundtrip_rpc_error() {
 }
 
 #[test]
+fn roundtrip_session_only_params() {
+    roundtrip::<g::SessionOnlyParams>(r#"{"session_id": "<string>"}"#);
+}
+
+#[test]
+fn roundtrip_context_entry() {
+    roundtrip::<g::ContextEntry>(
+        r#"{"id": 1,"category": "<string>","source": "<string>","tokens": 1,"lifetime": "<string>","pinned": true,"cleared": true}"#,
+    );
+}
+
+#[test]
+fn roundtrip_context_explain() {
+    roundtrip::<g::ContextExplain>(
+        r#"{"context_tokens": 1,"budget_tokens": 1,"messages": 1,"tools": 1,"compactions": 1,"entries": [{"id": 1,"category": "<string>","source": "<string>","tokens": 1,"lifetime": "<string>","pinned": true,"cleared": true}],"categories": [{"category": "<string>","tokens": 1}]}"#,
+    );
+}
+
+#[test]
+fn roundtrip_context_category() {
+    roundtrip::<g::ContextCategory>(r#"{"category": "<string>","tokens": 1}"#);
+}
+
+#[test]
 fn roundtrip_skills_loaded() {
     roundtrip::<g::SkillsLoaded>(
         r#"{"count": 1,"tokens": 1,"names": "<string>","disabled": "<string>"}"#,

@@ -123,6 +123,25 @@ audit/statistics uplink. The client only ever *reads*. Also not built: key rotat
 and revocation policy, per-team scopes, and polling/push cadence — the envelope has
 `key_id` and `version` for them, the policy does not exist yet.
 
+### The debug panel (F2)
+
+`F2` in the TUI opens a context panel on the right: the tokens the next request will
+carry against the budget, `messages`/`tools`/`compactions`, a per-category breakdown
+largest-first, and every ledger entry with its source and cost. `p` marks a pinned entry
+(the system prompt, the tool descriptions, a decision), `c` one whose body was replaced
+to free space (ADR-0006 §4).
+
+Two properties worth keeping:
+
+- **Reading it changes nothing.** `context.explain` is a question about the session, not
+  a fact in it: no event is recorded, so looking cannot alter what you are looking at
+  (asserted in the kernel and server tests).
+- **It works offline.** The panel reads the kernel, not the control plane, so
+  `loongagent tui --offline` gives the same view with no network at all.
+
+Opening the panel asks for the view immediately, and every finished turn refreshes it,
+so it is never an empty box and never stale.
+
 ### One root for the client
 
 Everything the local client keeps is under **`~/.loongagent/`** (`$LOONGAGENT_HOME`

@@ -204,6 +204,12 @@ export interface SessionForked {
   parent_seq: number;
 }
 
+/** The person stopped the turn. Recorded rather than merely reported: why a session has no answer is part of the session. */
+export interface TurnInterrupted {
+  /** interrupted | budget | steps (the limits that end a turn early) */
+  reason: string;
+}
+
 /** What the workspace offered as skills/commands (T-18). Names and descriptions enter context; bodies do not. */
 export interface SkillsLoaded {
   count: number;
@@ -272,6 +278,7 @@ export const METHODS = {
 } as const;
 
 export const EVENTS = {
+  turnInterrupted: "turn.interrupted",
   sessionForked: "session.forked",
   messageAppended: "message.appended",
   toolCall: "tool.call",

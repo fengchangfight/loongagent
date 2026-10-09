@@ -263,6 +263,13 @@ pub struct SessionForked {
     pub parent_seq: u64,
 }
 
+/// The person stopped the turn. Recorded rather than merely reported: why a session has no answer is part of the session.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TurnInterrupted {
+    /// interrupted | budget | steps (the limits that end a turn early)
+    pub reason: String,
+}
+
 /// What the workspace offered as skills/commands (T-18). Names and descriptions enter context; bodies do not.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillsLoaded {
@@ -344,6 +351,7 @@ pub mod method {
 
 /// Event kind names (ADR-0003).
 pub mod event {
+    pub const TURN_INTERRUPTED: &str = "turn.interrupted";
     pub const SESSION_FORKED: &str = "session.forked";
     pub const MESSAGE_APPENDED: &str = "message.appended";
     pub const TOOL_CALL: &str = "tool.call";
@@ -373,6 +381,7 @@ pub mod notification {
 
 /// Event kinds. The bool is the `ignorable` envelope marker (ADR-0003).
 pub const EVENT_KINDS: &[(&str, bool)] = &[
+    ("turn.interrupted", false),
     ("session.forked", false),
     ("message.appended", false),
     ("tool.call", false),

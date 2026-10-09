@@ -111,6 +111,8 @@ pub struct TurnOutcome {
     pub refused: Option<String>,
     /// Sequences appended by this turn, in order.
     pub events: Vec<u64>,
+    /// The person stopped it (`turn.interrupted` says so in the log).
+    pub interrupted: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -381,6 +383,10 @@ pub struct Kernel {
     messages: Vec<ChatMessage>,
     /// Called for every event the moment it is written (the server's liveness hook).
     event_sink: Option<Box<dyn FnMut(&gen::EventEnvelope)>>,
+    /// Set from outside — a signal handler, in practice — to stop the running turn at the
+    /// next step boundary. Cooperative on purpose: a tool that has begun finishes, and the
+    /// turn stops between steps rather than in the middle of one.
+    interrupted: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Ledger entry per message, in lockstep with `messages` (ADR-0006: the
     /// ledger decides, the wire view follows).
     entry_of: Vec<Option<u64>>,
@@ -595,6 +601,7 @@ impl Kernel {
             config,
             messages: Vec::new(),
             event_sink: None,
+            interrupted: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             entry_of: Vec::new(),
             pending: None,
             approvals: 0,
@@ -1180,6 +1187,12 @@ impl Kernel {
         text: &str,
         on_delta: &mut dyn FnMut(&str),
     ) -> Result<TurnOutcome, KernelError> {
+        // A stop belongs to the turn it was asked for: a person who interrupts once and
+        // then asks something new has not asked for that to stop too. Cleared here rather
+        // than in the loop, because the loop also resumes a turn after an approval — which
+        // is the same turn, and its stop still stands.
+        self.interrupted
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         if let Some(p) = &self.pending {
             return Err(KernelError::OutOfOrder(format!(
                 "approval {} is still pending",
@@ -1231,6 +1244,7 @@ impl Kernel {
                                     expansion.name
                                 )),
                                 events: vec![event],
+                                interrupted: false,
                             });
                         }
                     }
@@ -1258,6 +1272,7 @@ impl Kernel {
                             "unknown command /{name} — /help lists the skills and commands available here"
                         )),
                         events: vec![event],
+                        interrupted: false,
                     });
                 }
             },
@@ -1284,6 +1299,7 @@ impl Kernel {
                 pending_approval: None,
                 refused: Some(format!("refused by hook: {why}")),
                 events,
+                interrupted: false,
             });
         }
         self.run(events, on_delta)
@@ -1358,6 +1374,24 @@ impl Kernel {
         on_delta: &mut dyn FnMut(&str),
     ) -> Result<TurnOutcome, KernelError> {
         for step in 1..=self.config.max_steps {
+            // A stop asked for between steps stops here: after the last tool finished,
+            // before the next model call. Nothing half-done is left behind.
+            if self.interrupted() {
+                events.push(self.append(
+                    gen::event::TURN_INTERRUPTED,
+                    &gen::TurnInterrupted {
+                        reason: "interrupted".to_string(),
+                    },
+                )?);
+                return Ok(TurnOutcome {
+                    steps: step - 1,
+                    final_text: None,
+                    pending_approval: None,
+                    refused: None,
+                    events,
+                    interrupted: true,
+                });
+            }
             self.compact_if_needed(&mut events)?;
             let request = CompletionRequest {
                 messages: self.messages.clone(),
@@ -1398,6 +1432,7 @@ impl Kernel {
                     pending_approval: None,
                     refused: None,
                     events,
+                    interrupted: false,
                 });
             }
 
@@ -1413,6 +1448,7 @@ impl Kernel {
                             pending_approval: Some(pending),
                             refused: None,
                             events,
+                            interrupted: false,
                         });
                     }
                 }
@@ -1429,6 +1465,7 @@ impl Kernel {
             pending_approval: None,
             refused: None,
             events,
+            interrupted: false,
         })
     }
 
@@ -1685,6 +1722,24 @@ impl Kernel {
             sink(&envelope);
         }
         Ok(envelope.seq)
+    }
+
+    /// The flag a signal handler sets to stop the running turn. Handing it out is how the
+    /// server lets a person interrupt without a protocol message: the process is ours, and
+    /// Ctrl-C already means "stop what you are doing".
+    pub fn interruptor(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        std::sync::Arc::clone(&self.interrupted)
+    }
+
+    /// Use a flag someone else made. The server needs this: a signal handler can only
+    /// reach a value that lives for the process, so the process owns it and the kernel
+    /// borrows it.
+    pub fn use_interruptor(&mut self, flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        self.interrupted = flag;
+    }
+
+    fn interrupted(&self) -> bool {
+        self.interrupted.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Watch events as they are recorded. Scoped by the caller (the server installs one
@@ -2975,6 +3030,46 @@ Step one: breathe.
         assert_eq!(history, 1, "one assistant entry, not one per delta");
     }
 
+    /// A model that asks for the turn to stop while it runs — which is what a signal
+    /// arriving mid-turn looks like from inside the kernel.
+    struct StoppingModel {
+        flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        called: usize,
+    }
+
+    impl Model for StoppingModel {
+        fn complete(
+            &mut self,
+            _request: &CompletionRequest,
+        ) -> Result<CompletionResponse, ModelError> {
+            self.called += 1;
+            if self.called > 1 {
+                // The next turn is an ordinary one: the stop belonged to the first.
+                return Ok(CompletionResponse {
+                    text: Some("done".to_string()),
+                    tool_calls: Vec::new(),
+                    usage: Usage {
+                        tokens_in: 1,
+                        tokens_out: 1,
+                    },
+                });
+            }
+            self.flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(CompletionResponse {
+                text: None,
+                tool_calls: vec![ToolCallRequest {
+                    call_id: "c1".to_string(),
+                    tool: "read_file".to_string(),
+                    args: serde_json::json!({"path": "a.txt"}),
+                }],
+                usage: Usage {
+                    tokens_in: 1,
+                    tokens_out: 1,
+                },
+            })
+        }
+    }
+
     /// Write the child the way `loongagent fork` does: one lineage event, nothing copied.
     fn fork_log(child: &Path, parent_id: &str, at: u64) {
         let mut log = loong_eventlog::SessionLog::create(child).unwrap();
@@ -3171,6 +3266,43 @@ Step one: breathe.
             Ok(_) => panic!("a cyclic lineage must refuse to open"),
         };
         assert!(error.contains("cyclic"), "{error}");
+    }
+
+    #[test]
+    fn a_turn_stops_at_the_next_boundary_and_the_log_says_who_stopped_it() {
+        let t = Temp::new();
+        std::fs::write(t.dir.join("a.txt"), "hello").unwrap();
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut k = Kernel::create(
+            &t.log,
+            KernelConfig::new(&t.dir),
+            Box::new(StoppingModel {
+                flag: std::sync::Arc::clone(&flag),
+                called: 0,
+            }),
+        )
+        .unwrap();
+        k.use_interruptor(std::sync::Arc::clone(&flag));
+
+        let outcome = k.submit("do something long").unwrap();
+        // The stop landed after the step that asked for it: one step ran (the model was
+        // called and answered with a tool call), and the turn did not go on to a second.
+        assert!(outcome.interrupted, "{outcome:?}");
+        assert_eq!(outcome.steps, 1, "{outcome:?}");
+        assert_eq!(outcome.final_text, None);
+        assert!(
+            kinds(&t.log).contains(&gen::event::TURN_INTERRUPTED.to_string()),
+            "the record says why there is no answer: {:?}",
+            kinds(&t.log)
+        );
+
+        // The stop belonged to that turn: the next one runs normally.
+        let second = k.submit("now do it").unwrap();
+        assert!(
+            !second.interrupted,
+            "a stale stop must not kill the next turn"
+        );
+        assert_eq!(second.final_text.as_deref(), Some("done"));
     }
 
     #[test]

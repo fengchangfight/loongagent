@@ -143,6 +143,9 @@
       "parent_session": "<string>",
       "parent_seq": 1
     },
+    "TurnInterrupted": {
+      "reason": "<string>"
+    },
     "SkillsLoaded": {
       "count": 1,
       "tokens": 1,
@@ -208,6 +211,11 @@
     }
   ],
   "events": [
+    {
+      "name": "turn.interrupted",
+      "payload": "TurnInterrupted",
+      "ignorable": false
+    },
     {
       "name": "session.forked",
       "payload": "SessionForked",

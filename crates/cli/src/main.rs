@@ -2265,6 +2265,12 @@ struct ChildTransport {
 }
 
 impl ChildTransport {
+    /// The server process, so the interface can ask it to stop a turn (SIGINT) without the
+    /// client's blocked read standing in the way.
+    fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     /// `capture_notes` pipes the server's stderr instead of inheriting it: a
     /// full-screen UI owns the terminal, so diagnostics must be drawn, not dumped.
     fn spawn(args: &Args, capture_notes: bool) -> Result<(Self, Option<Receiver<String>>), String> {
@@ -2363,6 +2369,9 @@ impl Drop for ChildTransport {
 fn full_screen(args: Args) -> Result<(), String> {
     args.ensure_parent()?;
     let (transport, notes) = ChildTransport::spawn(&args, true)?;
+    // Taken before the transport moves into the client: the interface needs the pid to
+    // stop a turn, and the client is blocked on the transport while one runs.
+    let server_pid = transport.pid();
     let mut client = Client::new(transport, args.session_id());
     let attached = match client.attach(&args.cwd.to_string_lossy(), "tui") {
         Ok(attached) => attached,
@@ -2450,6 +2459,7 @@ fn full_screen(args: Args) -> Result<(), String> {
         attached.schema_version,
         notes,
         intro,
+        Some(Box::new(move || loong_tui::interrupt(server_pid))),
     );
     // Leaving the interface — by `/exit`, ctrl-c, or an error — says where the session
     // went, so the way out is not a dead end.

@@ -76,6 +76,14 @@ fn render_event_with(envelope: &Value, full: bool) -> Option<String> {
                 collapse_result(ok, output)
             })
         }
+        gen::event::TURN_INTERRUPTED => Some(format!(
+            "⏹ interrupted — stopped by {}",
+            if data.get("reason").and_then(|r| r.as_str()) == Some("interrupted") {
+                "you"
+            } else {
+                "a limit"
+            }
+        )),
         gen::event::POLICY_DECIDED => Some(format!(
             "· policy: {} by {}",
             data.get("verdict").and_then(|v| v.as_str()).unwrap_or("?"),
@@ -265,6 +273,17 @@ fn human_ms(ms: u64) -> String {
         format!("{ms}ms")
     } else {
         format!("{:.1}s", ms as f64 / 1000.0)
+    }
+}
+
+/// Ask the server process to stop the turn it is running. The process is our own child,
+/// so this is a signal rather than a protocol message: the client is blocked reading the
+/// turn's own stream, and a signal does not need the transport to be free.
+pub fn interrupt(pid: u32) {
+    // Safety: `kill` with a signal number on a pid we spawned; the failure mode is a
+    // process that has already exited, which the return value reports and nothing needs.
+    unsafe {
+        libc::kill(pid as libc::pid_t, libc::SIGINT);
     }
 }
 

@@ -90,6 +90,8 @@ pub enum LineKind {
     Note,
     /// Something went wrong, or a hook refused.
     Problem,
+    /// A turn the person stopped — their doing, so it is neither an error nor noise.
+    Stopped,
 }
 
 /// The palette. Muted on purpose: a transcript where everything shouts is harder to read
@@ -109,6 +111,9 @@ pub fn style_for(kind: LineKind) -> Style {
         LineKind::Policy => Style::default().fg(Color::Rgb(138, 138, 214)),
         LineKind::Note => Style::default().fg(Color::DarkGray),
         LineKind::Problem => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        LineKind::Stopped => Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
     }
 }
 
@@ -127,6 +132,9 @@ pub fn classify(line: &str) -> LineKind {
         } else {
             LineKind::ToolFailed
         };
+    }
+    if line.starts_with("⏹ ") {
+        return LineKind::Stopped;
     }
     if line.starts_with("! approval required") {
         return LineKind::Approval;
@@ -180,6 +188,9 @@ pub struct App {
     pub notes: Vec<String>,
     /// Whether the mark is drawn at the top (`/logo` turns it off).
     pub logo: bool,
+    /// How to ask the server to stop the running turn. `None` when the surface has no
+    /// process to signal: the interface then says so instead of pretending.
+    pub interrupt: Option<Box<dyn Fn()>>,
     /// What the running turn is doing, and since when — the interface's answer to "is
     /// it stuck, or working?".
     pub activity: Option<String>,
@@ -211,6 +222,7 @@ impl App {
             busy: false,
             error: None,
             logo: true,
+            interrupt: None,
             activity: None,
             busy_since: None,
             debug: false,
@@ -406,6 +418,21 @@ impl App {
         }
     }
 
+    /// Ask for the turn to stop. The server stops at the next step boundary — after the
+    /// tool that is already running finishes — so the line says "interrupting", not
+    /// "stopped".
+    fn stop_turn(&mut self) {
+        match &self.interrupt {
+            Some(interrupt) => {
+                interrupt();
+                self.push_lines(vec!["⏹ interrupting…".to_string()]);
+            }
+            None => self.push_lines(vec![
+                "⏹ cannot interrupt: this surface has no server process to signal".to_string(),
+            ]),
+        }
+    }
+
     fn byte_at(&self, char_index: usize) -> usize {
         self.input
             .char_indices()
@@ -561,6 +588,12 @@ impl App {
     pub fn handle_key(&mut self, key: KeyEvent) -> Action {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
+            // Ctrl-C means "stop this", and only leaves when there is nothing to stop —
+            // the habit people bring from every other tool.
+            KeyCode::Char('c') if ctrl && self.busy => {
+                self.stop_turn();
+                Action::None
+            }
             KeyCode::Char('c') if ctrl => {
                 self.quit = true;
                 Action::Quit
@@ -568,6 +601,12 @@ impl App {
             KeyCode::Char('d') if ctrl => {
                 self.quit = true;
                 Action::Quit
+            }
+            // Esc is the same idea, and free unless an approval is waiting (then it
+            // denies, above).
+            KeyCode::Esc if self.busy && self.pending.is_none() => {
+                self.stop_turn();
+                Action::None
             }
             KeyCode::Esc if self.pending.is_none() => {
                 self.quit = true;
@@ -892,7 +931,7 @@ impl App {
             ),
             Span::raw(" transcript  "),
             Span::styled("ctrl-c", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" quit"),
+            Span::raw(if self.busy { " interrupt" } else { " quit" }),
         ];
         if self.scroll > 0 {
             hints.push(Span::raw(format!(
@@ -1241,6 +1280,7 @@ pub fn run<T: Transport + Send + 'static>(
     schema: String,
     notes: Option<Receiver<String>>,
     intro: Vec<String>,
+    interrupt: Option<Box<dyn Fn()>>,
 ) -> Result<(), String> {
     use ratatui::backend::CrosstermBackend;
     use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture};
@@ -1257,6 +1297,7 @@ pub fn run<T: Transport + Send + 'static>(
     let history = client.replay().unwrap_or_else(|_| Vec::new());
     let (to_worker, from_worker) = spawn_worker(client);
     let mut app = App::new(session, schema);
+    app.interrupt = interrupt;
     app.push_lines(history);
     // Intro lines belong in the conversation view, not the one-line diagnostics
     // strip: the session path and "no model configured" both need to be readable.
@@ -2055,6 +2096,85 @@ mod tests {
             color_of(&mut app, 80, 20, "all done"),
             Some(ratatui::style::Color::Reset),
             "the answer is left alone"
+        );
+    }
+
+    #[test]
+    fn control_c_stops_a_running_turn_and_otherwise_leaves() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let asked = Arc::clone(&calls);
+
+        let mut app = App::new("s", "v");
+        app.interrupt = Some(Box::new(move || {
+            asked.fetch_add(1, Ordering::SeqCst);
+        }));
+        // Idle: Ctrl-C leaves, exactly as it always did.
+        let mut idle = App::new("s", "v");
+        assert_eq!(
+            idle.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Action::Quit
+        );
+        // Running: it asks the server to stop, and says so without pretending the work
+        // has already stopped.
+        app.busy = true;
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Action::None
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(
+            app.lines
+                .iter()
+                .any(|line| line.starts_with("⏹ interrupting")),
+            "{:?}",
+            app.lines
+        );
+        // Esc is the same request.
+        assert_eq!(app.handle_key(key(KeyCode::Esc)), Action::None);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        // A surface with nothing to signal says so instead of lying.
+        let mut app = App::new("s", "v");
+        app.busy = true;
+        assert_eq!(app.handle_key(key(KeyCode::Esc)), Action::None);
+        assert!(
+            app.lines
+                .iter()
+                .any(|line| line.contains("cannot interrupt")),
+            "{:?}",
+            app.lines
+        );
+    }
+
+    #[test]
+    fn the_interrupted_event_renders_as_a_stop_the_person_caused() {
+        use loong_schema::generated::event;
+        let line = loong_tui::render_event(&serde_json::json!({
+            "kind": event::TURN_INTERRUPTED,
+            "data": {"reason": "interrupted"},
+        }))
+        .expect("an interrupted turn is shown");
+        assert!(line.contains("stopped by you"), "{line}");
+        assert_eq!(classify(&line), LineKind::Stopped);
+    }
+
+    #[test]
+    fn a_stopped_turn_is_its_own_colour() {
+        assert_eq!(
+            classify("⏹ interrupted — stopped by you"),
+            LineKind::Stopped
+        );
+        assert_eq!(
+            style_for(LineKind::Stopped).fg,
+            Some(ratatui::style::Color::Yellow)
+        );
+        let mut app = App::new("s", "v");
+        app.push_lines(vec!["⏹ interrupted — stopped by you".to_string()]);
+        assert_eq!(
+            color_of(&mut app, 80, 20, "stopped by you"),
+            Some(ratatui::style::Color::Yellow)
         );
     }
 

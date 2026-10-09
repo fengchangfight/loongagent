@@ -339,6 +339,19 @@ fields = [
   { name = "parent_seq", type = "u64", doc = "the parent's event the child continues from, inclusive" },
 ]
 
+[[types]]
+name = "TurnInterrupted"
+kind = "struct"
+doc = "The person stopped the turn. Recorded rather than merely reported: why a session has no answer is part of the session."
+fields = [
+  { name = "reason", type = "string", doc = "interrupted | budget | steps (the limits that end a turn early)" },
+]
+
+[[events]]
+name = "turn.interrupted"
+payload = "TurnInterrupted"
+ignorable = false
+
 [[events]]
 name = "session.forked"
 payload = "SessionForked"

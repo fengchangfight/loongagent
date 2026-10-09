@@ -907,6 +907,7 @@ dependencies = [
 name = "loong-server"
 version = "0.0.1"
 dependencies = [
+ "libc",
  "loong-eventlog",
  "loong-hooks",
  "loong-kernel",
@@ -943,6 +944,7 @@ dependencies = [
 name = "loong-tui"
 version = "0.0.1"
 dependencies = [
+ "libc",
  "loong-protocol",
  "loong-schema",
  "serde_json",

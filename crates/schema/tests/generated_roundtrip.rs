@@ -153,6 +153,11 @@ fn roundtrip_session_forked() {
 }
 
 #[test]
+fn roundtrip_turn_interrupted() {
+    roundtrip::<g::TurnInterrupted>(r#"{"reason": "<string>"}"#);
+}
+
+#[test]
 fn roundtrip_skills_loaded() {
     roundtrip::<g::SkillsLoaded>(
         r#"{"count": 1,"tokens": 1,"names": "<string>","disabled": "<string>"}"#,
@@ -194,6 +199,7 @@ fn roundtrip_profile_selected() {
 
 #[test]
 fn declared_events_match_the_envelope_table() {
+    assert_eq!(g::is_ignorable_event("turn.interrupted"), Some(false));
     assert_eq!(g::is_ignorable_event("session.forked"), Some(false));
     assert_eq!(g::is_ignorable_event("message.appended"), Some(false));
     assert_eq!(g::is_ignorable_event("tool.call"), Some(false));
@@ -214,6 +220,7 @@ fn declared_events_match_the_envelope_table() {
 
 #[test]
 fn every_event_payload_roundtrips() {
+    roundtrip::<g::TurnInterrupted>(r#"{"reason": "<string>"}"#);
     roundtrip::<g::SessionForked>(
         r#"{"origin": "<string>","parent_session": "<string>","parent_seq": 1}"#,
     );

@@ -208,6 +208,29 @@ session and asserts the earlier prompt is on screen.
   of state that needs (the last call's time). When a turn ends, the transcript says how
   long the whole turn took as a `· turn took 42.1s` note.
 
+### Stopping a turn
+
+`Ctrl-C` (or `Esc`) while a turn is running **stops the turn**; with nothing running it
+leaves, which is the habit people bring from every other tool, and the hint line says
+which one it will be. Interrupting is cooperative and lands **at the next step boundary**
+— after the tool that is already running finishes, before the next model call. A model
+request already in flight is waited for; nothing is left half-done and nothing is
+silently abandoned.
+
+How it travels: the TUI owns the server process, so it sends **SIGINT** rather than a
+protocol message. The client is blocked reading the turn's own stream, so a message could
+not be sent from the same thread, and a process it spawned already has a way to say
+"stop". The server installs one handler (`Server::catch_interrupts`) that sets an
+`AtomicBool` the kernel reads — `Kernel::interruptor`/`use_interruptor` — and the turn
+records **`turn.interrupted`** before returning, so the log says why a session has no
+answer. The stop belongs to the turn it was asked for: the flag is cleared when the next
+turn starts, and the process stays alive for it.
+
+Verified end to end with a model that runs `sleep 4` as a tool: the log ends
+`… tool.result, turn.interrupted`, the model is never asked a second time, and the
+transcript shows `⏹ interrupted — stopped by you` in yellow — a stop the person asked for,
+so neither an error nor noise.
+
 ### Colour
 
 The transcript is painted by classification rather than by the sender: `classify` reads

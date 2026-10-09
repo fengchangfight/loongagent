@@ -6,6 +6,7 @@ license.workspace = true
 description = "Terminal client: renders the event stream, sends intents — zero agent logic (ADR-0009)"
 
 [dependencies]
+libc = "0.2"
 loong-schema.workspace = true
 loong-protocol.workspace = true
 serde_json.workspace = true

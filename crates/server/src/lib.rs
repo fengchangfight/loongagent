@@ -64,12 +64,26 @@ impl Out {
 #[derive(Debug)]
 pub enum ServerError {
     Io(std::io::Error),
+    /// A signal handler that cannot be installed, or was installed twice.
+    Signal(String),
+}
+
+/// The turn to stop when SIGINT arrives. A signal handler cannot hold a `Kernel`, so it
+/// holds the one flag the kernel reads.
+static INTERRUPT: std::sync::OnceLock<std::sync::Arc<std::sync::atomic::AtomicBool>> =
+    std::sync::OnceLock::new();
+
+extern "C" fn handle_sigint(_signal: libc::c_int) {
+    if let Some(flag) = INTERRUPT.get() {
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 impl std::fmt::Display for ServerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ServerError::Io(e) => write!(f, "io: {e}"),
+            ServerError::Signal(m) => write!(f, "signal: {m}"),
         }
     }
 }
@@ -348,8 +362,31 @@ impl Server {
         out
     }
 
+    /// Let this process's SIGINT stop the running turn instead of killing the server.
+    ///
+    /// The TUI spawns this process and signals it when someone presses Ctrl-C, which is
+    /// why the flag is handed out rather than the message being sent over the protocol:
+    /// the client is blocked reading the turn's own stream, and a process it owns already
+    /// has a way to say "stop".
+    pub fn catch_interrupts(&self) -> Result<(), ServerError> {
+        let flag = self.kernel.interruptor();
+        INTERRUPT.set(flag).map_err(|_| {
+            ServerError::Signal("a SIGINT handler is already installed".to_string())
+        })?;
+        // Safety: the handler only stores into an atomic that lives for the process.
+        unsafe {
+            libc::signal(
+                libc::SIGINT,
+                handle_sigint as extern "C" fn(libc::c_int) as libc::sighandler_t,
+            );
+        }
+        Ok(())
+    }
+
     /// Serve stdio until EOF (the transport the TUI spawns).
     pub fn run_stdio(mut self) -> Result<(), ServerError> {
+        // Ctrl-C stops the turn; the process stays for the next one.
+        self.catch_interrupts()?;
         let stdin = std::io::stdin();
         let mut stdout = std::io::stdout();
         // One handle for the whole connection: progress is written and flushed the moment

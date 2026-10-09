@@ -29,8 +29,18 @@ pub struct Client<T: Transport> {
 /// Presentation only: turn one event into a line for a human.
 ///
 /// Free rather than a method so a caller can render **inside** the notification
-/// callback — which is how a surface shows work while it is still happening.
+/// callback — which is how a surface shows work while it is still happening. Long tool
+/// output is summarised here; [`render_event_full`] is what `/expand` asks for.
 pub fn render_event(envelope: &Value) -> Option<String> {
+    render_event_with(envelope, false)
+}
+
+/// The same event, with nothing summarised.
+pub fn render_event_full(envelope: &Value) -> Option<String> {
+    render_event_with(envelope, true)
+}
+
+fn render_event_with(envelope: &Value, full: bool) -> Option<String> {
     let kind = envelope.get("kind")?.as_str()?;
     let data = envelope.get("data").cloned().unwrap_or(Value::Null);
     match kind {
@@ -60,11 +70,11 @@ pub fn render_event(envelope: &Value) -> Option<String> {
         gen::event::TOOL_RESULT => {
             let ok = data.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
             let output = data.get("output").and_then(|o| o.as_str()).unwrap_or("");
-            Some(format!(
-                "← {} {}",
-                if ok { "ok" } else { "failed" },
-                truncate(output, 120)
-            ))
+            Some(if full {
+                format!("← {} {output}", if ok { "ok" } else { "failed" })
+            } else {
+                collapse_result(ok, output)
+            })
         }
         gen::event::POLICY_DECIDED => Some(format!(
             "· policy: {} by {}",
@@ -165,6 +175,99 @@ pub fn render_event(envelope: &Value) -> Option<String> {
     }
 }
 
+/// A tool result, bounded. A chatty command must not turn the transcript into a wall of
+/// text, so a long one is summarised with the count and the way to see the rest.
+fn collapse_result(ok: bool, output: &str) -> String {
+    const MAX_ROWS: usize = 3;
+    const MAX_COLUMNS: usize = 100;
+    let verdict = if ok { "ok" } else { "failed" };
+    let lines: Vec<&str> = output.lines().collect();
+    let shown: Vec<String> = lines
+        .iter()
+        .take(MAX_ROWS)
+        .map(|line| truncate(line, MAX_COLUMNS))
+        .collect();
+    let cut = lines.len() > MAX_ROWS
+        || lines
+            .iter()
+            .take(MAX_ROWS)
+            .zip(shown.iter())
+            .any(|(raw, clipped)| raw.chars().count() > clipped.chars().count());
+    let mut text = format!("← {verdict} {}", shown.first().cloned().unwrap_or_default());
+    for line in shown.iter().skip(1) {
+        text.push('\n');
+        text.push_str("  ");
+        text.push_str(line);
+    }
+    if cut {
+        let hidden = lines.len().saturating_sub(MAX_ROWS);
+        text.push('\n');
+        text.push_str(&format!(
+            "  … {hidden} more line(s), {} · /expand",
+            human_bytes(output.len())
+        ));
+    }
+    text
+}
+
+fn human_bytes(bytes: usize) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    }
+}
+
+/// Turns a stream of events into lines, remembering the one timing a person cares about:
+/// how long a tool took. The envelopes carry `time_ms`, so the answer comes from the
+/// record rather than from a stopwatch in the interface.
+#[derive(Default)]
+pub struct Renderer {
+    last_tool_call_ms: Option<u64>,
+}
+
+impl Renderer {
+    pub fn render(&mut self, envelope: &Value) -> Option<String> {
+        let kind = envelope.get("kind").and_then(|k| k.as_str())?;
+        let at = envelope.get("time_ms").and_then(|v| v.as_u64());
+        if kind == gen::event::TOOL_CALL {
+            self.last_tool_call_ms = at;
+            return render_event(envelope);
+        }
+        if kind != gen::event::TOOL_RESULT {
+            return render_event(envelope);
+        }
+        let base = render_event(envelope)?;
+        let took = match (self.last_tool_call_ms.take(), at) {
+            (Some(start), Some(end)) if end >= start => Some(end - start),
+            _ => None,
+        };
+        match took {
+            // On the first line: the summary line below already ends with a pointer to
+            // `/expand`, and a duration after that reads like part of the pointer.
+            Some(ms) => {
+                let mut lines = base.split('\n');
+                let first = lines.next().unwrap_or_default();
+                let rest: Vec<&str> = lines.collect();
+                Some(if rest.is_empty() {
+                    format!("{first}  ({})", human_ms(ms))
+                } else {
+                    format!("{first}  ({})\n{}", human_ms(ms), rest.join("\n"))
+                })
+            }
+            None => Some(base),
+        }
+    }
+}
+
+fn human_ms(ms: u64) -> String {
+    if ms < 1000 {
+        format!("{ms}ms")
+    } else {
+        format!("{:.1}s", ms as f64 / 1000.0)
+    }
+}
+
 impl<T: Transport> Client<T> {
     pub fn new(transport: T, session_id: impl Into<String>) -> Self {
         Self {
@@ -207,6 +310,28 @@ impl<T: Transport> Client<T> {
             serde_json::from_value(result).map_err(|e| format!("attach result: {e}"))?;
         self.session_id = attached.session_id.clone();
         Ok(attached)
+    }
+
+    /// The most recent tool result, in full — what `/expand` shows. It comes from the
+    /// session's log through `session.replay`, so the summary in the transcript is never
+    /// the only copy of anything.
+    pub fn expand_last_tool_result(&mut self) -> Result<Vec<String>, String> {
+        let params = gen::SessionOnlyParams {
+            session_id: self.session_id.clone(),
+        };
+        let (_, result) = self.call(
+            gen::method::SESSION_REPLAY,
+            serde_json::to_value(params).unwrap(),
+        )?;
+        let replay: gen::SessionReplayResult =
+            serde_json::from_value(result).map_err(|e| format!("session.replay: {e}"))?;
+        let last = replay.events.iter().rev().find(|event| {
+            event.get("kind").and_then(|k| k.as_str()) == Some(gen::event::TOOL_RESULT)
+        });
+        Ok(match last.and_then(render_event_full) {
+            Some(text) => text.split('\n').map(|line| line.to_string()).collect(),
+            None => Vec::new(),
+        })
     }
 
     /// The session so far, rendered exactly the way live events are. Attaching to a
@@ -429,6 +554,85 @@ mod tests {
         let sent: Value = serde_json::from_str(&client.transport.outbound[0]).unwrap();
         assert_eq!(sent["method"], "session.attach");
         assert_eq!(sent["params"]["cwd"], "/work");
+    }
+
+    #[test]
+    fn long_tool_output_is_summarised_and_expandable() {
+        let noisy = (1..=200)
+            .map(|n| format!("line {n} of output"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let event = json!({
+            "kind": gen::event::TOOL_RESULT,
+            "time_ms": 1000,
+            "data": {"ok": true, "output": noisy},
+        });
+        let collapsed = render_event(&event).unwrap();
+        let rows: Vec<&str> = collapsed.lines().collect();
+        assert_eq!(
+            rows.len(),
+            4,
+            "bounded, whatever the command printed: {rows:?}"
+        );
+        assert!(rows[0].starts_with("← ok line 1 of output"), "{rows:?}");
+        assert!(rows[3].contains("197 more line(s)"), "{rows:?}");
+        assert!(
+            rows[3].contains("/expand"),
+            "and says how to see them: {rows:?}"
+        );
+        assert!(rows[3].contains("KiB"), "{rows:?}");
+
+        // `/expand` is the other half: the log has everything, so nothing is lost.
+        let expanded = render_event_full(&event).unwrap();
+        assert!(
+            expanded.contains("line 200 of output"),
+            "{}",
+            &expanded[..80]
+        );
+        assert!(expanded.lines().count() > 100);
+
+        // A single long line is cut, and says so.
+        let one = json!({
+            "kind": gen::event::TOOL_RESULT,
+            "data": {"ok": true, "output": "x".repeat(500)},
+        });
+        let collapsed = render_event(&one).unwrap();
+        assert!(collapsed.lines().count() <= 4, "{collapsed}");
+        assert!(collapsed.contains("/expand"), "{collapsed}");
+
+        // Short output is left exactly as it was.
+        let short = json!({
+            "kind": gen::event::TOOL_RESULT,
+            "data": {"ok": true, "output": "hello"},
+        });
+        assert_eq!(render_event(&short).unwrap(), "← ok hello");
+    }
+
+    #[test]
+    fn a_tool_result_says_how_long_the_tool_took() {
+        let mut renderer = Renderer::default();
+        let called = json!({
+            "kind": gen::event::TOOL_CALL,
+            "time_ms": 10_000,
+            "data": {"tool": "shell", "args": {"command": "cargo test"}},
+        });
+        let finished = json!({
+            "kind": gen::event::TOOL_RESULT,
+            "time_ms": 12_400,
+            "data": {"ok": true, "output": "all good"},
+        });
+        assert_eq!(renderer.render(&called).unwrap(), "→ shell cargo test");
+        assert_eq!(renderer.render(&finished).unwrap(), "← ok all good  (2.4s)");
+
+        // Sub-second work reads in milliseconds, and a result with no call before it is
+        // left alone rather than given an invented duration.
+        let quick = json!({
+            "kind": gen::event::TOOL_RESULT,
+            "time_ms": 10_250,
+            "data": {"ok": true, "output": "hi"},
+        });
+        let mut renderer = Renderer::default();
+        assert_eq!(renderer.render(&quick).unwrap(), "← ok hi");
     }
 
     #[test]

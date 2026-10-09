@@ -31,6 +31,8 @@ pub enum ToWorker {
     },
     /// Ask for the context view (the debug panel opening, or a refresh).
     RefreshContext,
+    /// Show the most recent tool result in full — the counterpart of collapsing it.
+    Expand,
 }
 
 /// What the worker reports back.
@@ -386,6 +388,13 @@ impl App {
                 self.cursor = 0;
                 Some(Action::Quit)
             }
+            // The transcript shows a summary of long tool output; this asks the log for
+            // the rest.
+            "/expand" => {
+                self.input.clear();
+                self.cursor = 0;
+                Some(Action::Send(ToWorker::Expand))
+            }
             // The mark is decoration: worth having, and worth being able to put away.
             "/logo" => {
                 self.input.clear();
@@ -520,9 +529,19 @@ impl App {
                 Ok(FromWorker::State { pending }) => {
                     self.pending = pending;
                     self.busy = false;
-                    self.busy_since = None;
                     self.activity = None;
                     self.streaming.clear();
+                    // How long the turn took, once, as bookkeeping: the per-step timings
+                    // are on the tool results, and this is the total they add up to.
+                    if let Some(since) = self.busy_since.take() {
+                        let secs = since.elapsed().as_secs_f64();
+                        let took = if secs < 60.0 {
+                            format!("{secs:.1}s")
+                        } else {
+                            format!("{}m{:02}s", (secs / 60.0) as u64, (secs % 60.0) as u64)
+                        };
+                        self.push_lines(vec![format!("· turn took {took}")]);
+                    }
                 }
                 Ok(FromWorker::Failed(message)) => {
                     self.busy = false;
@@ -823,9 +842,9 @@ impl App {
                         "enter leaves loongagent (ctrl-c does too)".to_string()
                     }
                     "/logo" => "enter shows or hides the mark".to_string(),
-                    _ => {
-                        "command — /help lists the skills, /exit leaves, /logo the mark".to_string()
-                    }
+                    "/expand" => "enter shows the last tool result in full".to_string(),
+                    _ => "command — /help skills · /exit leaves · /logo mark · /expand result"
+                        .to_string(),
                 },
                 Style::default().fg(Color::Green),
             ),
@@ -905,6 +924,7 @@ pub fn spawn_worker<T: Transport + Send + 'static>(
                 ToWorker::Submit(text) => {
                     // Deltas go out as they arrive; the finished lines follow.
                     let _ = events.send(FromWorker::Lines(Vec::new()));
+                    let mut renderer = loong_tui::Renderer::default();
                     let outcome = client.submit_with(&text, &mut |method, params| {
                         if method == loong_schema::generated::notification::MODEL_DELTA {
                             if let Some(piece) = params.get("text").and_then(|t| t.as_str()) {
@@ -914,7 +934,7 @@ pub fn spawn_worker<T: Transport + Send + 'static>(
                         }
                         // The work itself, the moment it is recorded — this is the
                         // difference between watching an agent and waiting for one.
-                        if let Some(line) = loong_tui::render_event(params) {
+                        if let Some(line) = renderer.render(params) {
                             if params.get("kind").and_then(|k| k.as_str())
                                 == Some(loong_schema::generated::event::TOOL_CALL)
                             {
@@ -936,6 +956,26 @@ pub fn spawn_worker<T: Transport + Send + 'static>(
                     loong_schema::generated::ApprovalScope::Once,
                     None,
                 ),
+                ToWorker::Expand => {
+                    // The session's own log holds the untouched output; the transcript
+                    // holds only the summary. Asking the log is what makes `/expand`
+                    // honest rather than a cache of what was already printed.
+                    match client.expand_last_tool_result() {
+                        Ok(lines) if lines.is_empty() => {
+                            let _ = events.send(FromWorker::Lines(vec![
+                                "· no tool result to expand yet".to_string(),
+                            ]));
+                        }
+                        Ok(lines) => {
+                            let _ = events.send(FromWorker::Lines(lines));
+                        }
+                        Err(e) => {
+                            let _ = events.send(FromWorker::Failed(e));
+                        }
+                    }
+                    refreshed = true;
+                    Ok(Vec::new())
+                }
                 ToWorker::RefreshContext => {
                     match client.context() {
                         Ok(explained) => {
@@ -1398,13 +1438,10 @@ mod tests {
         let mut app = App::new("s", "v");
         type_text(&mut app, "/rev");
         let screen = draw(&mut app, 70, 16);
-        assert!(
-            screen.contains("command — /help lists the skills"),
-            "{screen}"
-        );
+        assert!(screen.contains("command — /help skills"), "{screen}");
         assert!(screen.contains("/exit leaves"), "and the way out: {screen}");
         assert!(
-            screen.contains("/logo the mark"),
+            screen.contains("/logo mark"),
             "and what else is here: {screen}"
         );
         // And it is only a hint: the text is still a normal prompt buffer.
@@ -1630,7 +1667,11 @@ mod tests {
         let mut app = App::new("s", "v");
         type_text(&mut app, "/he");
         let screen = draw(&mut app, 100, 16);
-        assert!(screen.contains("/help lists the skills"), "{screen}");
+        assert!(screen.contains("/help skills"), "{screen}");
+        assert!(
+            screen.contains("/expand result"),
+            "and the rest of them: {screen}"
+        );
         assert!(screen.contains("/exit leaves"), "{screen}");
     }
 

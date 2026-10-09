@@ -195,6 +195,19 @@ renders live events. Reopening a session used to give an empty screen that was q
 appending to yesterday's conversation; the test that caught it is the one that reopens a
 session and asserts the earlier prompt is on screen.
 
+### Long output, timing, and getting things back
+
+- A tool result is **bounded**: at most three lines and 100 columns each, then
+  `… N more line(s), 8.2 KiB · /expand`. A chatty command must not turn the transcript
+  into a wall of text. **`/expand`** asks the session's own log (through
+  `session.replay`) for the most recent tool result in full, so the summary in the
+  transcript is never the only copy of anything.
+- Each tool result carries **how long the tool took** — `← ok all good  (2.4s)` — taken
+  from the `time_ms` on the events rather than from a stopwatch in the interface, so it
+  measures the work rather than the rendering. `loong_tui::Renderer` keeps the one piece
+  of state that needs (the last call's time). When a turn ends, the transcript says how
+  long the whole turn took as a `· turn took 42.1s` note.
+
 ### Colour
 
 The transcript is painted by classification rather than by the sender: `classify` reads

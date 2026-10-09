@@ -91,6 +91,7 @@ log entry — a client that misses one has missed nothing.
 | `loongagent sessions` | list this project's sessions (`--all` for every project) |
 | `loongagent resume [ID]` | reopen one — by id, by an unambiguous prefix, or `latest` |
 | `loongagent fork [ID]` | a child session: references its parent's prefix, copies nothing |
+| `loongagent delete ID` | remove a session **and its whole branch** (`--force` to confirm) |
 
 In the TUI, **F2** opens a context panel: what the next request will actually carry
 (by category and by entry, with what has been cleared and what is pinned against what it

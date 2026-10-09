@@ -37,6 +37,7 @@ USAGE:
   loongagent resume [ID]    [--cwd DIR]                                    reopen one (default: latest)
   loongagent sessions       [--all] [--limit N] [--cwd DIR]                list them
   loongagent fork [ID]      [--at SEQ] [--cwd DIR]                         a child session
+  loongagent delete ID      [--force] [--cwd DIR]                          its whole branch
   loongagent repl           [--session PATH] [--cwd DIR] [--model NAME]   line mode (any pipe)
   loongagent web            [--session PATH] [--cwd DIR] [--model NAME] [--port N] [--bind IP]
   loongagent run \"PROMPT\"   [--session PATH] [--cwd DIR] [--model NAME] [--budget N] [--keep-newest N]
@@ -1472,6 +1473,199 @@ fn fork(rest: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// ADR-0015's *branch*: the session someone named, plus every session that descends
+/// from it. Pure arithmetic over what the logs say, so the cascade can be reasoned about
+/// (and tested) without touching a file.
+fn branch_of(sessions: &[SessionSummary], target: &str) -> Vec<usize> {
+    let mut include: Vec<usize> = sessions
+        .iter()
+        .enumerate()
+        .filter(|(_, session)| session.id == target)
+        .map(|(index, _)| index)
+        .collect();
+    loop {
+        let before = include.len();
+        for (index, session) in sessions.iter().enumerate() {
+            if include.contains(&index) {
+                continue;
+            }
+            if let Some((parent, _)) = &session.parent {
+                if include.iter().any(|kept| &sessions[*kept].id == parent) {
+                    include.push(index);
+                }
+            }
+        }
+        if include.len() == before {
+            // Children of children arrive one level per pass; when a pass adds nothing,
+            // the branch is closed.
+            break;
+        }
+    }
+    include.sort_unstable();
+    include
+}
+
+/// Processes that hold this session open, by looking for `--session <path>` in their
+/// command line. Deleting a file another process is appending to does not stop that
+/// process: it keeps writing to a name nobody can see any more, and the conversation is
+/// lost without a word. On Linux — the only platform this runs on — this is cheap to
+/// check, so it is checked.
+fn writers_of(path: &Path) -> Vec<u32> {
+    let mut writers = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return writers;
+    };
+    for entry in entries.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        if pid == std::process::id() {
+            continue;
+        }
+        let Ok(raw) = std::fs::read(entry.path().join("cmdline")) else {
+            continue;
+        };
+        let args: Vec<String> = raw
+            .split(|byte| *byte == 0)
+            .filter(|arg| !arg.is_empty())
+            .map(|arg| String::from_utf8_lossy(arg).to_string())
+            .collect();
+        let holds = args.iter().enumerate().any(|(index, arg)| {
+            (arg == "--session"
+                && args
+                    .get(index + 1)
+                    .map(|next| Path::new(next) == path)
+                    .unwrap_or(false))
+                // `loongagent server --stdio --session PATH` is the long-running one.
+                || Path::new(arg) == path
+        });
+        if holds {
+            writers.push(pid);
+        }
+    }
+    writers
+}
+
+/// `loongagent delete ID [--force] [--cwd DIR]`
+///
+/// The unit is ADR-0015's **branch**: a session and its descendants go together, because
+/// a child without its ancestors cannot run — deleting a parent alone would leave
+/// sessions that refuse to open.
+fn delete(rest: &[String]) -> Result<(), String> {
+    let mut cwd = std::env::current_dir().map_err(|e| format!("current directory: {e}"))?;
+    let mut spec: Option<String> = None;
+    let mut force = false;
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "--force" | "--yes" | "-f" => force = true,
+            "--cwd" => {
+                i += 1;
+                cwd = PathBuf::from(rest.get(i).ok_or("--cwd needs a path")?);
+            }
+            other if !other.starts_with('-') && spec.is_none() => spec = Some(other.to_string()),
+            other => return Err(format!("unexpected {other:?}\n\n{USAGE}")),
+        }
+        i += 1;
+    }
+    let spec = spec.ok_or_else(|| format!("delete needs a session id\n\n{USAGE}"))?;
+
+    let target = resolve_session(&spec, &cwd)?;
+    // The branch lives beside the session that was named, wherever that is.
+    let dir = target
+        .parent()
+        .ok_or_else(|| format!("{} has no directory", target.display()))?
+        .to_path_buf();
+    let sessions = session_summaries_in(&dir, &project_slug(&cwd));
+    let target_id = session_id_of(&target);
+    let branch = branch_of(&sessions, &target_id);
+    if branch.is_empty() {
+        return Err(format!(
+            "{} is not one of the sessions in {}",
+            target_id,
+            dir.display()
+        ));
+    }
+
+    // What it would remove, said before it removes anything.
+    let doomed: Vec<&SessionSummary> = branch.iter().map(|index| &sessions[*index]).collect();
+    println!(
+        "{} session{} in this branch:",
+        doomed.len(),
+        if doomed.len() == 1 { "" } else { "s" }
+    );
+    for session in &doomed {
+        let from = session
+            .parent
+            .as_ref()
+            .map(|(parent, at)| format!("  from {parent}@{at}"))
+            .unwrap_or_default();
+        println!(
+            "  {}  {}  {} turn(s){from}",
+            session.id,
+            age_text(session.modified),
+            session.turns
+        );
+    }
+
+    if doomed.len() > 1 && !force {
+        return Err(format!(
+            "deleting {target_id} also deletes {} descendant session(s), because a child \
+             without its parent cannot run (ADR-0015). Pass --force to do that.",
+            doomed.len() - 1
+        ));
+    }
+
+    let mut open: Vec<(String, u32)> = Vec::new();
+    for session in &doomed {
+        for pid in writers_of(&session.path) {
+            open.push((session.id.clone(), pid));
+        }
+    }
+    if !open.is_empty() && !force {
+        let listed: Vec<String> = open
+            .iter()
+            .map(|(id, pid)| format!("{id} (pid {pid})"))
+            .collect();
+        return Err(format!(
+            "still open: {} — that process would keep writing to a deleted file. Close it, or \
+             pass --force if you know it does not matter.",
+            listed.join(", ")
+        ));
+    }
+    for (id, pid) in &open {
+        eprintln!("warning: {id} is open in pid {pid}; it will keep writing to a deleted file");
+    }
+
+    let mut removed = 0usize;
+    let mut freed = 0u64;
+    for session in &doomed {
+        for path in [session.path.clone(), session.path.with_extension("sqlite")] {
+            if let Ok(meta) = std::fs::metadata(&path) {
+                freed += meta.len();
+            }
+            match std::fs::remove_file(&path) {
+                Ok(()) => {
+                    if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+                        removed += 1;
+                        println!(
+                            "  removed {}",
+                            path.file_name().unwrap_or_default().to_string_lossy()
+                        );
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(format!("{}: {e}", path.display())),
+            }
+        }
+    }
+    println!(
+        "deleted {removed} session(s), {:.1} KiB",
+        freed as f64 / 1024.0
+    );
+    Ok(())
+}
+
 /// `loongagent resume [ID]` — the friendly spelling of `tui --session …`.
 fn resume(rest: &[String]) -> Result<(), String> {
     let mut args = rest.to_vec();
@@ -1567,6 +1761,7 @@ fn run() -> Result<(), String> {
         "tui" => full_screen(Args::parse(rest)?),
         "resume" => resume(rest),
         "fork" => fork(rest),
+        "delete" => delete(rest),
         "sessions" => list_sessions(rest),
         "repl" => repl(Args::parse(rest)?),
         "web" => web(Args::parse(rest)?),
@@ -3194,6 +3389,52 @@ mod session_tests {
                 .unwrap(),
             "session.jsonl"
         );
+    }
+
+    fn summary(id: &str, parent: Option<(&str, u64)>) -> SessionSummary {
+        SessionSummary {
+            id: id.to_string(),
+            path: PathBuf::from(format!("/tmp/{id}.jsonl")),
+            project: "project".to_string(),
+            modified: SystemTime::now(),
+            events: 1,
+            turns: 0,
+            first_prompt: None,
+            parent: parent.map(|(id, at)| (id.to_string(), at)),
+        }
+    }
+
+    #[test]
+    fn deleting_a_session_takes_its_whole_branch() {
+        let sessions = vec![
+            summary("a", None),
+            summary("b", Some(("a", 3))),
+            summary("b2", Some(("a", 3))),
+            summary("c", Some(("b", 9))),
+            summary("d", None),
+        ];
+        let ids = |target: &str| -> Vec<String> {
+            branch_of(&sessions, target)
+                .iter()
+                .map(|index| sessions[*index].id.clone())
+                .collect()
+        };
+        assert_eq!(
+            ids("a"),
+            vec!["a", "b", "b2", "c"],
+            "the parent and every descendant"
+        );
+        assert_eq!(ids("b"), vec!["b", "c"], "a child takes its own subtree");
+        assert_eq!(ids("c"), vec!["c"], "a leaf takes only itself");
+        assert_eq!(ids("d"), vec!["d"], "an unrelated root is not touched");
+    }
+
+    #[test]
+    fn a_cycle_in_the_lineage_does_not_spin_forever() {
+        // Not reachable through `fork`, but the cascade must not be the thing that hangs
+        // when a log has been hand-edited.
+        let sessions = vec![summary("x", Some(("y", 1))), summary("y", Some(("x", 1)))];
+        assert_eq!(branch_of(&sessions, "x").len(), 2);
     }
 
     #[test]

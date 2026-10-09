@@ -105,6 +105,13 @@ structured summary (ADR-0006/ADR-0011).
 - **a missing ancestor refuses the session**, naming the chain and pointing at ADR-0014:
   inoperable, not merely unexplained. A cycle is refused for the same reason.
 
+**Deletion follows the same unit.** `loongagent delete ID` removes the session and every
+descendant — the branch, not the node — because a child that has lost its ancestors is
+inoperable by this ADR's own argument. It prints what it is about to remove first, so the
+refusal for a multi-session branch is also the preview, and it refuses when another
+process holds the session open: unlinking a file a writer is appending to loses the
+conversation silently, which is exactly the failure this design exists to prevent.
+
 **Level 1 (the event tree) now has its first real use**: `parent_id` was carried in every
 envelope and set by nothing. It is still set by nothing structural — `--at` selects a
 *sequence*, not a path — so paths and heads remain vocabulary without an implementation.

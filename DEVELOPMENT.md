@@ -162,6 +162,25 @@ the reference a file name instead of a path that can rot; a missing ancestor ref
 session and names the whole chain (ADR-0014: inoperable, not merely unexplained). The
 listing's `from` column shows `parent@seq`.
 
+**Deleting takes the branch** (ADR-0015: a child session and its descendants):
+
+```bash
+loongagent delete <id>            # refuses if that removes descendants
+loongagent delete <id> --force    # the whole branch: the session, its children, theirs
+```
+
+The unit is the branch because a child without its ancestors cannot run: deleting a parent
+alone would leave sessions that refuse to open. The command prints the branch first, so
+the refusal is also the preview. Two guard rails, both from having been surprised before:
+
+- a session **held open by another process** is refused and the pid is named. Deleting a
+  file another process is appending to does not stop that process — it keeps writing to a
+  name nobody can see, and the conversation is gone without a word. (Found by scanning
+  `/proc/*/cmdline` for `--session <path>`; Linux-only, like the rest of this.)
+- `--force` overrides both, and then the warning is printed rather than swallowed.
+
+The derived `.sqlite` index goes with the log; it is disposable either way.
+
 **Opening a session replays it.** The log is the record, so `Kernel::build` rebuilds the
 conversation from it — ancestors first, then the session's own events — before any turn
 runs. This was missing until 2026-10-09 and the symptom was quiet: a resumed session

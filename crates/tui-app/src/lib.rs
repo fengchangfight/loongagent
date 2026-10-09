@@ -920,8 +920,14 @@ pub fn run<T: Transport + Send + 'static>(
     };
     use ratatui::Terminal;
 
+    // A session that already has a past: show it before taking over the terminal, so a
+    // reattached conversation looks reattached rather than new. Reading it records
+    // nothing (ADR-0009: the log is the record, and this is a read of it).
+    let mut client = client;
+    let history = client.replay().unwrap_or_else(|_| Vec::new());
     let (to_worker, from_worker) = spawn_worker(client);
     let mut app = App::new(session, schema);
+    app.push_lines(history);
     // Intro lines belong in the conversation view, not the one-line diagnostics
     // strip: the session path and "no model configured" both need to be readable.
     app.push_lines(

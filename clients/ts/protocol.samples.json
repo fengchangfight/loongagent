@@ -73,6 +73,11 @@
       "schema_version": "<string>",
       "existing_events": 1
     },
+    "SessionReplayResult": {
+      "events": [
+        {}
+      ]
+    },
     "PromptSubmitParams": {
       "session_id": "<string>",
       "text": "<string>"
@@ -180,6 +185,11 @@
       "name": "session.attach",
       "params": "SessionAttachParams",
       "result": "SessionAttachResult"
+    },
+    {
+      "name": "session.replay",
+      "params": "SessionOnlyParams",
+      "result": "SessionReplayResult"
     },
     {
       "name": "prompt.submit",

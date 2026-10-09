@@ -70,6 +70,26 @@ impl<T: Transport> Client<T> {
         Ok(attached)
     }
 
+    /// The session so far, rendered exactly the way live events are. Attaching to a
+    /// session that already has a past should show that past; an empty screen that is
+    /// quietly appending to yesterday's conversation is worse than useless.
+    pub fn replay(&mut self) -> Result<Vec<String>, String> {
+        let params = gen::SessionOnlyParams {
+            session_id: self.session_id.clone(),
+        };
+        let (_, result) = self.call(
+            gen::method::SESSION_REPLAY,
+            serde_json::to_value(params).unwrap(),
+        )?;
+        let replay: gen::SessionReplayResult =
+            serde_json::from_value(result).map_err(|e| format!("session.replay: {e}"))?;
+        Ok(replay
+            .events
+            .iter()
+            .filter_map(|event| self.render_event(event))
+            .collect())
+    }
+
     /// What the model is about to be sent, and why. Read-only: the kernel records
     /// nothing for it, so a debug panel cannot alter the thing it is showing.
     pub fn context(&mut self) -> Result<gen::ContextExplain, String> {

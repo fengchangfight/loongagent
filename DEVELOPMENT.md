@@ -125,6 +125,34 @@ audit/statistics uplink. The client only ever *reads*. Also not built: key rotat
 and revocation policy, per-team scopes, and polling/push cadence — the envelope has
 `key_id` and `version` for them, the policy does not exist yet.
 
+### Sessions
+
+A session **is** its log file, and the file's name is its id: eight characters from a
+clock and a process, in an alphabet with the pairs people misread removed
+(`23456789abcdefghjkmnpqrstuvwxyz`). No index to keep in step, `ls` is a valid way to
+look, and `--session` takes the id, an unambiguous prefix, `latest`, or a path.
+
+```
+~/.loongagent/projects/<slug>/<id>.jsonl     the session
+~/.loongagent/projects/<slug>/<id>.sqlite    its derived index (disposable)
+```
+
+- `loongagent tui` picks up the **newest** session in the project, and `--new` starts a
+  fresh one instead;
+- `loongagent sessions [--all] [--limit N]` lists ids with when, turns, events and the
+  first prompt, marking the one a bare `tui` would pick up;
+- `loongagent resume <id>` (or `resume latest`) reopens one;
+- the first session ever written kept the file name `session.jsonl` and answers to the id
+  `default`, so nothing had to be renamed to introduce ids;
+- a session from another project can be reopened by id; the workspace stays where the
+  command was run, which is worth knowing before editing.
+
+**Attaching replays the past.** `session.attach` reports how many events exist, and the
+client then asks for them (`session.replay`) and renders them with the same code that
+renders live events. Reopening a session used to give an empty screen that was quietly
+appending to yesterday's conversation; the test that caught it is the one that reopens a
+session and asserts the earlier prompt is on screen.
+
 ### What the TUI answers to
 
 | Key / command | What it does |

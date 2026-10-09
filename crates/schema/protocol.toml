@@ -206,6 +206,14 @@ fields = [
 ]
 
 [[types]]
+name = "SessionReplayResult"
+kind = "struct"
+doc = "A session's recorded events, oldest first: what a client needs in order to show \"what happened before I arrived\"."
+fields = [
+  { name = "events", type = "json", list = true },
+]
+
+[[types]]
 name = "PromptSubmitParams"
 kind = "struct"
 fields = [
@@ -300,6 +308,12 @@ name = "session.attach"
 doc = "Attach a thin client to the local agent server (ADR-0009)."
 params = "SessionAttachParams"
 result = "SessionAttachResult"
+
+[[methods]]
+name = "session.replay"
+doc = "Replay the session's own log, so an attaching client is not blind to its past. A read: it records nothing."
+params = "SessionOnlyParams"
+result = "SessionReplayResult"
 
 [[methods]]
 name = "prompt.submit"

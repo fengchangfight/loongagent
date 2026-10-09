@@ -123,6 +123,11 @@ export interface SessionAttachResult {
   existing_events: number;
 }
 
+/** A session's recorded events, oldest first: what a client needs in order to show "what happened before I arrived". */
+export interface SessionReplayResult {
+  events: Json[];
+}
+
 export interface PromptSubmitParams {
   session_id: string;
   text: string;
@@ -252,6 +257,7 @@ export interface ProfileSelected {
 export const METHODS = {
   contextExplain: "context.explain",
   sessionAttach: "session.attach",
+  sessionReplay: "session.replay",
   promptSubmit: "prompt.submit",
   approvalRespond: "approval.respond",
 } as const;

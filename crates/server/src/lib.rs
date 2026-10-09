@@ -115,6 +115,28 @@ impl Server {
                     "context.explain",
                 )
             }
+            gen::method::SESSION_REPLAY => {
+                let params: gen::SessionOnlyParams = match request.params_as() {
+                    Ok(p) => p,
+                    Err(e) => return vec![e.to_line()],
+                };
+                if let Some(bad) = self.wrong_session(&params.session_id) {
+                    return vec![bad];
+                }
+                // The log is the record, so replaying it is a read: nothing is written,
+                // and a client that attaches to an old session can show its past instead
+                // of an empty screen.
+                let events = loong_eventlog::replay_lenient(self.kernel.log_path())
+                    .map(|replay| {
+                        replay
+                            .events
+                            .iter()
+                            .filter_map(|event| serde_json::to_value(event).ok())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                self.respond(id, gen::SessionReplayResult { events }, "session.replay")
+            }
             gen::method::PROMPT_SUBMIT => {
                 let params: gen::PromptSubmitParams = match request.params_as() {
                     Ok(p) => p,
@@ -504,6 +526,64 @@ mod tests {
                 },
             })
         }
+    }
+
+    #[test]
+    fn a_client_that_attaches_can_replay_what_happened_before_it_arrived() {
+        let t = Temp::new();
+        let model = scripted(vec![], Some("noted"));
+        let kernel = Kernel::create(
+            t.0.join("c.jsonl"),
+            KernelConfig::new(&t.0),
+            Box::new(model),
+        )
+        .unwrap();
+        let mut server = Server::new(kernel, "s-replay");
+        let _ = lines_of(&mut server, &attach_line());
+        let _ = lines_of(
+            &mut server,
+            &Request::new(
+                2,
+                gen::method::PROMPT_SUBMIT,
+                json!({"session_id": "s-replay", "text": "remember this"}),
+            )
+            .to_line(),
+        );
+        let before = loong_eventlog::replay(t.0.join("c.jsonl"))
+            .unwrap()
+            .events
+            .len() as u64;
+
+        let replayed = lines_of(
+            &mut server,
+            &Request::new(
+                3,
+                gen::method::SESSION_REPLAY,
+                json!({"session_id": "s-replay"}),
+            )
+            .to_line(),
+        );
+        let events = replayed[0]["result"]["events"].as_array().unwrap();
+        assert_eq!(events.len() as u64, before, "everything the log holds");
+        assert!(
+            events
+                .iter()
+                .any(|e| e["kind"] == "message.appended" && e["data"]["text"] == "remember this"),
+            "{events:?}"
+        );
+        assert_eq!(events[0]["seq"], 1, "oldest first");
+        assert!(
+            replayed.iter().all(|line| line["method"] != "event"),
+            "replaying is a read, not four new events: {replayed:?}"
+        );
+        assert_eq!(
+            loong_eventlog::replay(t.0.join("c.jsonl"))
+                .unwrap()
+                .events
+                .len() as u64,
+            before,
+            "and the log did not move"
+        );
     }
 
     #[test]

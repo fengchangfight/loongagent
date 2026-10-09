@@ -95,6 +95,11 @@ fn roundtrip_session_attach_result() {
 }
 
 #[test]
+fn roundtrip_session_replay_result() {
+    roundtrip::<g::SessionReplayResult>(r#"{"events": [{}]}"#);
+}
+
+#[test]
 fn roundtrip_prompt_submit_params() {
     roundtrip::<g::PromptSubmitParams>(r#"{"session_id": "<string>","text": "<string>"}"#);
 }

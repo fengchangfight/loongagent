@@ -172,6 +172,12 @@ pub struct SessionAttachResult {
     pub existing_events: u64,
 }
 
+/// A session's recorded events, oldest first: what a client needs in order to show "what happened before I arrived".
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionReplayResult {
+    pub events: Vec<serde_json::Value>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PromptSubmitParams {
     pub session_id: String,
@@ -318,6 +324,8 @@ pub mod method {
     pub const CONTEXT_EXPLAIN: &str = "context.explain";
     /// Attach a thin client to the local agent server (ADR-0009).
     pub const SESSION_ATTACH: &str = "session.attach";
+    /// Replay the session's own log, so an attaching client is not blind to its past. A read: it records nothing.
+    pub const SESSION_REPLAY: &str = "session.replay";
     /// Submit a user turn.
     pub const PROMPT_SUBMIT: &str = "prompt.submit";
     /// Answer a pending approval request; recorded as an event either way (ADR-0007 §6).

@@ -24,6 +24,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::mpsc::Receiver;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const USAGE: &str = "\
 loongagent — a firm-internal coding agent
@@ -31,7 +32,9 @@ loongagent — a firm-internal coding agent
 USAGE:
   loongagent server --stdio [--session PATH] [--cwd DIR] [--model NAME]
   loongagent setup          [--profile PATH]                                write a profile
-  loongagent tui            [--session PATH] [--cwd DIR] [--model NAME]   full-screen
+  loongagent tui            [--session ID|PATH] [--cwd DIR] [--new]        full-screen
+  loongagent resume [ID]    [--cwd DIR]                                    reopen one (default: latest)
+  loongagent sessions       [--all] [--limit N] [--cwd DIR]                list them
   loongagent repl           [--session PATH] [--cwd DIR] [--model NAME]   line mode (any pipe)
   loongagent web            [--session PATH] [--cwd DIR] [--model NAME] [--port N] [--bind IP]
   loongagent run \"PROMPT\"   [--session PATH] [--cwd DIR] [--model NAME] [--budget N] [--keep-newest N]
@@ -63,9 +66,14 @@ fn main() {
 
 #[derive(Debug, Clone)]
 struct Args {
-    /// Where the session lives. `None` means "the usual place for this project",
-    /// so nobody has to pass `--session` to start working.
+    /// Where the session lives, once it has been worked out. `None` means "the newest
+    /// one in this project", so nobody has to pass `--session` to start working.
     session: Option<PathBuf>,
+    /// What `--session` was given: a path, an id, or `latest`. Resolved once the whole
+    /// command line is known (it needs `--cwd`).
+    session_spec: Option<String>,
+    /// `--new`: start a session rather than picking one up.
+    new_session: bool,
     cwd: PathBuf,
     /// `None` means "not given": the layered configuration decides (ADR-0008).
     /// Flags are the **session layer**, the most local one.
@@ -97,6 +105,8 @@ impl Args {
         let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
         let mut args = Args {
             session: None,
+            session_spec: None,
+            new_session: false,
             cwd: cwd.clone(),
             model: None,
             profile: None,
@@ -120,9 +130,13 @@ impl Args {
             match rest[i].as_str() {
                 "--session" => {
                     i += 1;
-                    args.session =
-                        Some(PathBuf::from(rest.get(i).ok_or("--session needs a path")?));
+                    args.session_spec = Some(
+                        rest.get(i)
+                            .ok_or("--session needs an id or a path")?
+                            .clone(),
+                    );
                 }
+                "--new" => args.new_session = true,
                 "--cwd" => {
                     i += 1;
                     args.cwd = PathBuf::from(rest.get(i).ok_or("--cwd needs a path")?);
@@ -189,7 +203,31 @@ impl Args {
             }
             i += 1;
         }
+        args.finish_session()?;
         Ok(args)
+    }
+
+    /// Work out which session this run is about — once, here, so every command and the
+    /// interface agree. Three ways to say it: a path (`./x.jsonl`), an id (the file's
+    /// own name, or an unambiguous prefix of it), or `latest`. Nothing said means the
+    /// newest session in this project, and if there is none, a fresh id is minted now so
+    /// that the answer is stable for the rest of the run.
+    fn finish_session(&mut self) -> Result<(), String> {
+        if self.new_session && self.session_spec.is_some() {
+            return Err(
+                "--new starts a session and --session picks one; pass only one of them".to_string(),
+            );
+        }
+        self.session = if self.new_session {
+            let id = new_session_id(&self.cwd);
+            Some(session_path_for(&id, &self.cwd))
+        } else if let Some(spec) = self.session_spec.clone() {
+            Some(resolve_session(&spec, &self.cwd).map_err(|e| format!("--session {spec}: {e}"))?)
+        } else {
+            crate::newest_session(&self.cwd)
+                .or_else(|| Some(session_path_for(&new_session_id(&self.cwd), &self.cwd)))
+        };
+        Ok(())
     }
 
     /// The layered configuration for this run (ADR-0008): built-in defaults, then
@@ -241,10 +279,7 @@ impl Args {
     }
 
     fn session_id(&self) -> String {
-        self.session_path()
-            .file_stem()
-            .map(|s| format!("s-{}", s.to_string_lossy()))
-            .unwrap_or_else(|| "s-local".to_string())
+        session_id_of(&self.session_path())
     }
 
     fn ensure_parent(&self) -> Result<(), String> {
@@ -899,6 +934,410 @@ fn config_dir() -> PathBuf {
 /// Sessions are state, not configuration, so they live under the state dir and are
 /// keyed by the project they belong to: resuming yesterday's work in a directory is
 /// the default, and `--session` is only for choosing differently.
+/// Where one project's sessions live. A project is a directory; its slug names the
+/// folder, so two checkouts of the same tree do not share a conversation by accident.
+fn session_dir(cwd: &Path) -> PathBuf {
+    session_dir_in(&config_dir(), cwd)
+}
+
+/// The directory a project's sessions live in, under a given root. The root is a
+/// parameter so the tests can use one of their own instead of mutating the environment
+/// of every other test in the binary.
+fn session_dir_in(root: &Path, cwd: &Path) -> PathBuf {
+    root.join("projects").join(project_slug(cwd))
+}
+
+/// A session **is** its file, and the file's name is its id: no index to keep in step,
+/// and `ls` is a valid way to look. The first session ever written kept the name
+/// `session.jsonl`; it answers to `default` rather than looking like an accident.
+fn session_id_of(path: &Path) -> String {
+    match path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().to_string())
+    {
+        Some(stem) if stem != "session" && !stem.is_empty() => stem,
+        _ => "default".to_string(),
+    }
+}
+
+fn session_path_for(id: &str, cwd: &Path) -> PathBuf {
+    session_path_in(&config_dir(), id, cwd)
+}
+
+fn session_path_in(root: &Path, id: &str, cwd: &Path) -> PathBuf {
+    if id == "default" {
+        session_dir_in(root, cwd).join("session.jsonl")
+    } else {
+        session_dir_in(root, cwd).join(format!("{id}.jsonl"))
+    }
+}
+
+/// A new id: eight characters, from a clock and this process, in an alphabet with the
+/// pairs people misread removed (`0`/`O`, `1`/`l`/`I`). Short enough to type back,
+/// random enough that a prefix is not a guess.
+fn new_session_id(cwd: &Path) -> String {
+    new_session_id_in(&config_dir(), cwd)
+}
+
+fn new_session_id_in(root: &Path, cwd: &Path) -> String {
+    const ALPHABET: &[u8] = b"23456789abcdefghjkmnpqrstuvwxyz";
+    let dir = session_dir_in(root, cwd);
+    for attempt in 0..256u64 {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        let mut hash = 0xcbf2_9ce4_8422_2325u64 ^ u64::from(std::process::id()) ^ attempt;
+        for byte in nanos
+            .to_le_bytes()
+            .iter()
+            .chain(std::process::id().to_le_bytes().iter())
+        {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        let id: String = (0..8)
+            .map(|i| ALPHABET[((hash >> (i * 5)) % ALPHABET.len() as u64) as usize] as char)
+            .collect();
+        if !dir.join(format!("{id}.jsonl")).exists() {
+            return id;
+        }
+    }
+    // Asking the clock harder is not a plan; this cannot collide with a base32 id.
+    format!("p{}", std::process::id())
+}
+
+/// What a session looks like from outside, read from the log itself — the log is the
+/// record, so a list must not need an index that could disagree with it.
+#[derive(Debug, Clone)]
+struct SessionSummary {
+    id: String,
+    path: PathBuf,
+    project: String,
+    modified: SystemTime,
+    events: u64,
+    turns: u64,
+    first_prompt: Option<String>,
+}
+
+fn session_summaries_in(dir: &Path, project: &str) -> Vec<SessionSummary> {
+    let mut sessions = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return sessions;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let modified = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(UNIX_EPOCH);
+        let mut events = 0u64;
+        let mut turns = 0u64;
+        let mut first_prompt = None;
+        for line in text.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            events += 1;
+            if value.get("kind").and_then(|k| k.as_str()) != Some("message.appended") {
+                continue;
+            }
+            let data = value.get("data").cloned().unwrap_or_default();
+            if data.get("role").and_then(|r| r.as_str()) != Some("user") {
+                continue;
+            }
+            turns += 1;
+            if first_prompt.is_none() {
+                let text = data
+                    .get("text")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or_default();
+                let flattened = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                if !flattened.is_empty() {
+                    first_prompt = Some(flattened);
+                }
+            }
+        }
+        sessions.push(SessionSummary {
+            id: session_id_of(&path),
+            project: project.to_string(),
+            modified,
+            events,
+            turns,
+            first_prompt,
+            path,
+        });
+    }
+    sessions.sort_by(|a, b| b.modified.cmp(&a.modified).then(a.id.cmp(&b.id)));
+    sessions
+}
+
+/// This project's sessions, newest first.
+fn session_summaries(cwd: &Path) -> Vec<SessionSummary> {
+    session_summaries_in(&session_dir(cwd), &project_slug(cwd))
+}
+
+/// Every project's sessions, newest first. `--all` for the list, and how `resume` finds
+/// a session that is not in the current directory.
+fn all_session_summaries() -> Vec<SessionSummary> {
+    all_session_summaries_in(&config_dir())
+}
+
+fn all_session_summaries_in(root: &Path) -> Vec<SessionSummary> {
+    let mut sessions = Vec::new();
+    let root = root.join("projects");
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return sessions;
+    };
+    for entry in entries.flatten() {
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let slug = entry.file_name().to_string_lossy().to_string();
+        sessions.extend(session_summaries_in(&entry.path(), &slug));
+    }
+    sessions.sort_by(|a, b| b.modified.cmp(&a.modified).then(a.id.cmp(&b.id)));
+    sessions
+}
+
+fn newest_session(cwd: &Path) -> Option<PathBuf> {
+    newest_session_in(&config_dir(), cwd)
+}
+
+fn newest_session_in(root: &Path, cwd: &Path) -> Option<PathBuf> {
+    session_summaries_in(&session_dir_in(root, cwd), &project_slug(cwd))
+        .first()
+        .map(|s| s.path.clone())
+}
+
+/// Turn what someone typed into a session file. A path stays a path; anything else is an
+/// id — exact, an unambiguous prefix of one, or `latest`. The error names the candidates
+/// rather than saying "not found" when the answer is "several".
+fn resolve_session(spec: &str, cwd: &Path) -> Result<PathBuf, String> {
+    resolve_session_in(&config_dir(), spec, cwd)
+}
+
+fn resolve_session_in(root: &Path, spec: &str, cwd: &Path) -> Result<PathBuf, String> {
+    if spec.contains('/') || spec.ends_with(".jsonl") {
+        return Ok(PathBuf::from(spec));
+    }
+    let dir = session_dir_in(root, cwd);
+    let wanted = spec.to_ascii_lowercase();
+    if wanted == "latest" || wanted == "last" {
+        return newest_session_in(root, cwd).ok_or_else(|| {
+            format!(
+                "no sessions in {} yet — start one with `loongagent tui`",
+                dir.display()
+            )
+        });
+    }
+    let sessions = session_summaries_in(&dir, &project_slug(cwd));
+    if let Some(path) = match_session(&sessions, &wanted)? {
+        return Ok(path);
+    }
+    // Not here: it may be a session from another project, which `sessions --all` shows.
+    // Resuming it is allowed; the workspace stays wherever this command was run.
+    let elsewhere = all_session_summaries_in(root);
+    match match_session(&elsewhere, &wanted)? {
+        Some(path) => Ok(path),
+        None => Err(format!(
+            "no session {spec:?} — `loongagent sessions` lists what exists{}; `loongagent tui` \
+             starts a new one",
+            match sessions.len() {
+                0 => String::new(),
+                _ => format!(
+                    " (here: {})",
+                    sessions
+                        .iter()
+                        .map(|s| s.id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            }
+        )),
+    }
+}
+
+/// Exact id, then an unambiguous prefix. `Ok(None)` means "not here"; the error is only
+/// for the case where the answer is "several".
+fn match_session(sessions: &[SessionSummary], wanted: &str) -> Result<Option<PathBuf>, String> {
+    if let Some(found) = sessions.iter().find(|s| s.id == wanted) {
+        return Ok(Some(found.path.clone()));
+    }
+    let matching: Vec<&SessionSummary> = sessions
+        .iter()
+        .filter(|s| s.id.starts_with(wanted))
+        .collect();
+    match matching.as_slice() {
+        [] => Ok(None),
+        [one] => Ok(Some(one.path.clone())),
+        many => Err(format!(
+            "{wanted:?} matches {} sessions ({}); give more characters",
+            many.len(),
+            many.iter()
+                .map(|s| s.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+/// How long ago, in the only units a person reads in a list.
+fn age_text(then: SystemTime) -> String {
+    let secs = SystemTime::now()
+        .duration_since(then)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    match secs {
+        0..=59 => "just now".to_string(),
+        60..=3599 => format!("{} min ago", secs / 60),
+        3600..=86399 => format!("{} h ago", secs / 3600),
+        _ => format!("{} d ago", secs / 86400),
+    }
+}
+
+fn clip(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(width.saturating_sub(1)).collect();
+    format!("{head}…")
+}
+
+/// `loongagent sessions [--all] [--limit N] [--cwd DIR]`
+fn list_sessions(rest: &[String]) -> Result<(), String> {
+    let mut cwd = std::env::current_dir().map_err(|e| format!("current directory: {e}"))?;
+    let mut all = false;
+    let mut limit = 20usize;
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "--all" => all = true,
+            "--limit" => {
+                i += 1;
+                limit = rest
+                    .get(i)
+                    .and_then(|value| value.parse().ok())
+                    .ok_or("--limit needs a number")?;
+            }
+            "--cwd" => {
+                i += 1;
+                cwd = PathBuf::from(rest.get(i).ok_or("--cwd needs a path")?);
+            }
+            other => return Err(format!("unexpected {other:?}\n\n{USAGE}")),
+        }
+        i += 1;
+    }
+    let sessions = if all {
+        all_session_summaries()
+    } else {
+        session_summaries(&cwd)
+    };
+    if sessions.is_empty() {
+        println!(
+            "no sessions {} yet — `loongagent tui` starts one",
+            if all {
+                "on this machine".to_string()
+            } else {
+                format!("in {}", project_slug(&cwd))
+            }
+        );
+        return Ok(());
+    }
+    // The one a bare `loongagent tui` would pick up.
+    let current = newest_session(&cwd).map(|path| session_id_of(&path));
+    println!(
+        "{} session{} (newest first){}",
+        sessions.len(),
+        if sessions.len() == 1 { "" } else { "s" },
+        if all {
+            ""
+        } else {
+            " — --all shows every project"
+        }
+    );
+    if all {
+        println!(
+            "  {:<3} {:<9} {:<11} {:>5} {:>7}  {:<20} {}",
+            "", "id", "when", "turns", "events", "project", "first prompt"
+        );
+    } else {
+        println!(
+            "  {:<3} {:<9} {:<11} {:>5} {:>7}  {}",
+            "", "id", "when", "turns", "events", "first prompt"
+        );
+    }
+    for session in sessions.iter().take(limit) {
+        let mark = if Some(&session.id) == current.as_ref() {
+            "*"
+        } else {
+            " "
+        };
+        let prompt = session
+            .first_prompt
+            .as_deref()
+            .map(|text| clip(text, 46))
+            .unwrap_or_else(|| "—".to_string());
+        if all {
+            println!(
+                "  {mark:<3} {:<9} {:<11} {:>5} {:>7}  {:<20} {}",
+                session.id,
+                age_text(session.modified),
+                session.turns,
+                session.events,
+                clip(&session.project, 20),
+                prompt
+            );
+        } else {
+            println!(
+                "  {mark:<3} {:<9} {:<11} {:>5} {:>7}  {}",
+                session.id,
+                age_text(session.modified),
+                session.turns,
+                session.events,
+                prompt
+            );
+        }
+    }
+    if sessions.len() > limit {
+        println!("  … {} more (--limit N)", sessions.len() - limit);
+    }
+    println!();
+    println!(
+        "  * = what `loongagent tui` picks up here; `loongagent resume <id>` opens any of them"
+    );
+    Ok(())
+}
+
+/// `loongagent resume [ID]` — the friendly spelling of `tui --session …`.
+fn resume(rest: &[String]) -> Result<(), String> {
+    let mut args = rest.to_vec();
+    let positional = args
+        .first()
+        .filter(|first| !first.starts_with('-'))
+        .cloned();
+    if positional.is_some() {
+        args.remove(0);
+    }
+    args.splice(
+        0..0,
+        [
+            "--session".to_string(),
+            positional.unwrap_or_else(|| "latest".to_string()),
+        ],
+    );
+    full_screen(Args::parse(&args)?)
+}
+
 fn default_session_path(cwd: &Path) -> PathBuf {
     config_dir()
         .join("projects")
@@ -972,6 +1411,8 @@ fn run() -> Result<(), String> {
         "profiles" => profiles(Args::parse(rest)?),
         "use" => use_profile(Args::parse(rest)?, rest),
         "tui" => full_screen(Args::parse(rest)?),
+        "resume" => resume(rest),
+        "sessions" => list_sessions(rest),
         "repl" => repl(Args::parse(rest)?),
         "web" => web(Args::parse(rest)?),
         "run" => {
@@ -1634,7 +2075,9 @@ fn full_screen(args: Args) -> Result<(), String> {
             state.summary()
         );
     }
-    let mut intro = vec![format!("session: {}", args.session_path().display())];
+    let session_id = args.session_id();
+    let resume_hint = format!("loongagent resume {session_id}");
+    let mut intro = vec![format!("session {session_id} — reopen with: {resume_hint}")];
     if attached.existing_events > 0 {
         intro.push(format!(
             "resuming {} events from that session",
@@ -1660,7 +2103,8 @@ fn full_screen(args: Args) -> Result<(), String> {
     );
     // Leaving the interface — by `/exit`, ctrl-c, or an error — says where the session
     // went, so the way out is not a dead end.
-    println!("session: {}", args.session_path().display());
+    println!("session {session_id}");
+    println!("reopen:  {resume_hint}");
     outcome
 }
 
@@ -1797,6 +2241,11 @@ fn repl(args: Args) -> Result<(), String> {
         "loongagent — session {} (schema {}, {} events). Ctrl-D to quit.",
         attached.session_id, attached.schema_version, attached.existing_events
     );
+    // Show what the session already contains, for the same reason the TUI does: a
+    // reopened conversation should look reopened.
+    for line in client.replay().unwrap_or_default() {
+        println!("{line}");
+    }
 
     let stdin = std::io::stdin();
     loop {
@@ -2360,5 +2809,231 @@ mod tests {
         assert_eq!(read_credential(&path, "ABSENT"), None);
         assert_eq!(read_credential(&dir.join("absent"), "ANY"), None);
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+
+    /// A root of our own: `config_dir()` would read the developer's environment.
+    fn temp_root(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("loong-sessions-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A session log with `turns` user turns, enough for the listing to read.
+    fn write_session(path: &Path, prompts: &[&str]) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut text = String::from(
+            "{\"kind\":\"skills.loaded\",\"data\":{\"count\":1},\"seq\":1,\"time_ms\":1,\"id\":\"e1\"}\n",
+        );
+        let mut seq = 2;
+        for prompt in prompts {
+            text.push_str(&format!(
+                "{{\"kind\":\"message.appended\",\"data\":{{\"role\":\"user\",\"text\":{}}},\"seq\":{seq},\"time_ms\":1,\"id\":\"e{seq}\"}}\n",
+                serde_json::to_string(prompt).unwrap()
+            ));
+            seq += 1;
+            text.push_str(&format!(
+                "{{\"kind\":\"message.appended\",\"data\":{{\"role\":\"assistant\",\"text\":\"ok\"}},\"seq\":{seq},\"time_ms\":1,\"id\":\"e{seq}\"}}\n"
+            ));
+            seq += 1;
+        }
+        std::fs::write(path, text).unwrap();
+    }
+
+    #[test]
+    fn a_new_id_is_short_and_says_itself_out_loud() {
+        let root = temp_root("id");
+        let cwd = Path::new("/tmp/project");
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..200 {
+            let id = new_session_id_in(&root, cwd);
+            assert_eq!(id.chars().count(), 8, "{id}");
+            assert!(
+                id.chars()
+                    .all(|c| "23456789abcdefghjkmnpqrstuvwxyz".contains(c)),
+                "{id} must avoid the characters people misread"
+            );
+            assert!(seen.insert(id), "the generator repeated itself");
+        }
+        // And it will not hand out a name that is already taken.
+        let taken = session_path_in(&root, "abcdefgh", cwd);
+        std::fs::create_dir_all(taken.parent().unwrap()).unwrap();
+        std::fs::write(&taken, "").unwrap();
+        for _ in 0..50 {
+            assert_ne!(new_session_id_in(&root, cwd), "abcdefgh");
+        }
+    }
+
+    #[test]
+    fn the_first_session_ever_kept_its_name_and_answers_to_default() {
+        assert_eq!(session_id_of(Path::new("/x/session.jsonl")), "default");
+        assert_eq!(session_id_of(Path::new("/x/k7m2xq3f.jsonl")), "k7m2xq3f");
+        assert_eq!(
+            session_path_for("default", Path::new("/tmp/p"))
+                .file_name()
+                .unwrap(),
+            "session.jsonl"
+        );
+        assert_eq!(
+            session_path_for("k7m2xq3f", Path::new("/tmp/p"))
+                .file_name()
+                .unwrap(),
+            "k7m2xq3f.jsonl"
+        );
+    }
+
+    #[test]
+    fn a_session_is_summarised_from_its_own_log() {
+        let root = temp_root("summary");
+        let cwd = Path::new("/tmp/project");
+        let dir = session_dir_in(&root, cwd);
+        write_session(&dir.join("aaaa1111.jsonl"), &["first question", "second"]);
+        // The derived index and anything else in the directory are not sessions.
+        std::fs::write(dir.join("aaaa1111.sqlite"), "not a log").unwrap();
+        std::fs::write(dir.join("notes.txt"), "not a log").unwrap();
+
+        let sessions = session_summaries_in(&dir, "project");
+        assert_eq!(sessions.len(), 1);
+        let one = &sessions[0];
+        assert_eq!(one.id, "aaaa1111");
+        assert_eq!(one.turns, 2);
+        assert_eq!(one.events, 5, "one skills.loaded plus two exchanges");
+        assert_eq!(one.first_prompt.as_deref(), Some("first question"));
+    }
+
+    #[test]
+    fn resolve_takes_an_exact_id_a_prefix_and_latest() {
+        let root = temp_root("resolve");
+        let cwd = Path::new("/tmp/project");
+        let dir = session_dir_in(&root, cwd);
+        write_session(&dir.join("aaaa1111.jsonl"), &["older"]);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write_session(&dir.join("bbbb2222.jsonl"), &["newer"]);
+
+        assert_eq!(
+            resolve_session_in(&root, "aaaa1111", cwd)
+                .unwrap()
+                .file_name()
+                .unwrap(),
+            "aaaa1111.jsonl"
+        );
+        assert_eq!(
+            resolve_session_in(&root, "bbbb", cwd)
+                .unwrap()
+                .file_name()
+                .unwrap(),
+            "bbbb2222.jsonl",
+            "an unambiguous prefix is enough"
+        );
+        assert_eq!(
+            resolve_session_in(&root, "latest", cwd)
+                .unwrap()
+                .file_name()
+                .unwrap(),
+            "bbbb2222.jsonl",
+            "the newest by modification time"
+        );
+        assert_eq!(
+            resolve_session_in(&root, "./elsewhere.jsonl", cwd).unwrap(),
+            PathBuf::from("./elsewhere.jsonl"),
+            "a path is a path, even when it does not exist yet"
+        );
+        assert_eq!(
+            resolve_session_in(&root, "AAAA", cwd)
+                .unwrap()
+                .file_name()
+                .unwrap(),
+            "aaaa1111.jsonl",
+            "ids are matched case-insensitively"
+        );
+    }
+
+    #[test]
+    fn a_prefix_that_fits_two_sessions_says_which() {
+        let root = temp_root("ambiguous");
+        let cwd = Path::new("/tmp/project");
+        let dir = session_dir_in(&root, cwd);
+        write_session(&dir.join("k7m2xq3f.jsonl"), &["one"]);
+        write_session(&dir.join("k7m2yyyy.jsonl"), &["two"]);
+        let error = resolve_session_in(&root, "k7m2", cwd).unwrap_err();
+        assert!(error.contains("matches 2"), "{error}");
+        assert!(
+            error.contains("k7m2xq3f") && error.contains("k7m2yyyy"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_id_names_the_way_to_find_one() {
+        let root = temp_root("unknown");
+        let cwd = Path::new("/tmp/project");
+        write_session(
+            &session_dir_in(&root, cwd).join("aaaa1111.jsonl"),
+            &["only"],
+        );
+        let error = resolve_session_in(&root, "zzzz", cwd).unwrap_err();
+        assert!(error.contains("loongagent sessions"), "{error}");
+
+        // Nothing at all, not even in another project.
+        let empty = temp_root("unknown-empty");
+        let error = resolve_session_in(&empty, "zzzz", cwd).unwrap_err();
+        assert!(error.contains("loongagent sessions"), "{error}");
+    }
+
+    #[test]
+    fn a_session_from_another_project_can_still_be_reopened() {
+        let root = temp_root("elsewhere");
+        let here = Path::new("/tmp/here");
+        let there = Path::new("/tmp/there");
+        write_session(
+            &session_dir_in(&root, there).join("cccc3333.jsonl"),
+            &["from there"],
+        );
+        assert_eq!(
+            session_summaries_in(&session_dir_in(&root, here), "here").len(),
+            0
+        );
+        assert_eq!(
+            resolve_session_in(&root, "cccc3333", here)
+                .unwrap()
+                .file_name()
+                .unwrap(),
+            "cccc3333.jsonl",
+            "`sessions --all` shows it, so `resume` must be able to open it"
+        );
+        assert_eq!(all_session_summaries_in(&root).len(), 1);
+    }
+
+    #[test]
+    fn a_long_prompt_is_clipped_without_breaking_a_character() {
+        assert_eq!(clip("short", 10), "short");
+        assert_eq!(clip("abcdefghij", 5), "abcd…");
+        let clipped = clip("中文中文中文", 4);
+        assert_eq!(clipped.chars().count(), 4);
+        assert!(clipped.ends_with('…'));
+    }
+
+    #[test]
+    fn ages_are_said_the_way_a_person_says_them() {
+        let now = SystemTime::now();
+        assert_eq!(age_text(now), "just now");
+        assert_eq!(
+            age_text(now - std::time::Duration::from_secs(120)),
+            "2 min ago"
+        );
+        assert_eq!(
+            age_text(now - std::time::Duration::from_secs(7200)),
+            "2 h ago"
+        );
+        assert_eq!(
+            age_text(now - std::time::Duration::from_secs(172800)),
+            "2 d ago"
+        );
     }
 }

@@ -66,6 +66,102 @@ const SEAL_ROWS: u16 = 3;
 const SEAL_RED: Color = Color::Rgb(150, 24, 24);
 const SEAL_GOLD: Color = Color::Rgb(255, 206, 84);
 
+/// What a line is, for colour. Classified from the line's own vocabulary — the renderer
+/// that produces those strings lives in `loong-tui`, next door, and a test renders real
+/// events through it to keep the two in step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineKind {
+    /// What the person said.
+    User,
+    /// The model's own words.
+    Answer,
+    /// Something the agent is doing.
+    ToolCall,
+    /// What it got back.
+    ToolOk,
+    ToolFailed,
+    /// A decision the person has to make.
+    Approval,
+    /// A policy ruling, or where a value came from.
+    Policy,
+    /// Bookkeeping: skills, tokens, compaction, hooks that allowed something.
+    Note,
+    /// Something went wrong, or a hook refused.
+    Problem,
+}
+
+/// The palette. Muted on purpose: a transcript where everything shouts is harder to read
+/// than one where only the things that matter are loud.
+pub fn style_for(kind: LineKind) -> Style {
+    match kind {
+        LineKind::User => Style::default().fg(Color::Cyan),
+        LineKind::Answer => Style::default(),
+        LineKind::ToolCall => Style::default().fg(Color::Rgb(86, 182, 194)),
+        LineKind::ToolOk => Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::DIM),
+        LineKind::ToolFailed => Style::default().fg(Color::Red),
+        LineKind::Approval => Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+        LineKind::Policy => Style::default().fg(Color::Rgb(138, 138, 214)),
+        LineKind::Note => Style::default().fg(Color::DarkGray),
+        LineKind::Problem => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+    }
+}
+
+/// Which kind a rendered line is. The prefixes are the client renderer's, so this is a
+/// classifier over a vocabulary this repository owns end to end.
+pub fn classify(line: &str) -> LineKind {
+    if line.starts_with("you: ") {
+        return LineKind::User;
+    }
+    if line.starts_with("→ ") {
+        return LineKind::ToolCall;
+    }
+    if let Some(rest) = line.strip_prefix("← ") {
+        return if rest.starts_with("ok ") || rest == "ok" {
+            LineKind::ToolOk
+        } else {
+            LineKind::ToolFailed
+        };
+    }
+    if line.starts_with("! approval required") {
+        return LineKind::Approval;
+    }
+    if line.starts_with("! ") {
+        return LineKind::Problem;
+    }
+    if line.starts_with("· policy:") {
+        return LineKind::Policy;
+    }
+    if line.starts_with("· ") || line == "·" {
+        return LineKind::Note;
+    }
+    LineKind::Answer
+}
+
+/// One line, painted. The user's own words keep a bright label so the eye can find where
+/// a prompt began when scrolling back.
+fn styled(line: &str) -> Line<'static> {
+    let kind = classify(line);
+    if kind == LineKind::User {
+        if let Some((label, text)) = line.split_once(' ') {
+            return Line::from(vec![
+                Span::styled(
+                    label.to_string(),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+                Span::raw(text.to_string()),
+            ]);
+        }
+    }
+    Line::from(Span::styled(line.to_string(), style_for(kind)))
+}
+
 /// How tall the input box may grow. Beyond this it scrolls, so a pasted file cannot
 /// take the whole screen away from the conversation.
 const MAX_INPUT_ROWS: u16 = 8;
@@ -618,16 +714,18 @@ impl App {
         let total = self.lines.len();
         let end = total.saturating_sub(self.scroll);
         let start = end.saturating_sub(height.max(1));
-        let mut shown: Vec<Line<'static>> = self.lines[start..end]
-            .iter()
-            .map(|l| Line::from(l.clone()))
-            .collect();
+        let mut shown: Vec<Line<'static>> =
+            self.lines[start..end].iter().map(|l| styled(l)).collect();
         // What is being written right now goes below the finished output.
         if !self.streaming.is_empty() {
             shown.extend(self.streaming.split('\n').map(|piece| {
+                // Still being written: dimmer than the settled answer and italic, so the
+                // two are never confused while the text grows.
                 Line::from(Span::styled(
                     piece.to_string(),
-                    Style::default().fg(Color::Gray),
+                    Style::default()
+                        .fg(Color::Gray)
+                        .add_modifier(Modifier::ITALIC),
                 ))
             }));
         }
@@ -670,8 +768,17 @@ impl App {
 
         if !self.notes.is_empty() {
             let latest = self.notes.last().cloned().unwrap_or_default();
+            // A warning is worth noticing; an ordinary startup note is not.
+            let lower = latest.to_ascii_lowercase();
+            let severity = if lower.contains("error") || lower.contains("refused") {
+                Color::Red
+            } else if lower.contains("warning") || lower.contains("failed") {
+                Color::Yellow
+            } else {
+                Color::DarkGray
+            };
             let widget = Paragraph::new(latest)
-                .style(Style::default().fg(Color::DarkGray))
+                .style(Style::default().fg(severity))
                 .wrap(Wrap { trim: true });
             frame.render_widget(widget, areas[1]);
         }
@@ -1766,6 +1873,148 @@ mod tests {
         assert_eq!(app.scroll, 0);
         app.handle_mouse(ratatui::crossterm::event::MouseEventKind::ScrollDown);
         assert_eq!(app.scroll, 0, "and it stops at the bottom");
+    }
+
+    /// The foreground a line is drawn in, read from the cell buffer (the text helper
+    /// throws styles away, which is the point of having this one).
+    fn color_of(
+        app: &mut App,
+        width: u16,
+        height: u16,
+        needle: &str,
+    ) -> Option<ratatui::style::Color> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let area = buffer.area();
+        for y in 0..area.height {
+            let row: String = (0..area.width)
+                .map(|x| buffer[(x, y)].symbol().to_string())
+                .collect();
+            if let Some(column) = row.find(needle) {
+                let x = column as u16;
+                if x < area.width {
+                    return Some(
+                        buffer[(x, y)]
+                            .style()
+                            .fg
+                            .unwrap_or(ratatui::style::Color::Reset),
+                    );
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn every_kind_of_line_has_its_own_colour() {
+        for (line, expected) in [
+            ("you: fix the bug", LineKind::User),
+            ("→ read_file a.txt", LineKind::ToolCall),
+            ("← ok hello", LineKind::ToolOk),
+            ("← failed no such file", LineKind::ToolFailed),
+            (
+                "! approval required (out_of_bounds): write [cwd]",
+                LineKind::Approval,
+            ),
+            ("! /deploy: missing argument", LineKind::Problem),
+            ("! the turn failed", LineKind::Problem),
+            (
+                "· policy: allow by builtin:write_workspace",
+                LineKind::Policy,
+            ),
+            ("· tokens 1053 in / 5 out (default)", LineKind::Note),
+            ("· compacted: 100 -> 40 tokens", LineKind::Note),
+            ("here is the answer", LineKind::Answer),
+        ] {
+            assert_eq!(classify(line), expected, "{line:?}");
+        }
+        // And the palette actually differs between the kinds that matter.
+        assert_ne!(
+            style_for(LineKind::Problem).fg,
+            style_for(LineKind::Answer).fg
+        );
+        assert_ne!(
+            style_for(LineKind::ToolCall).fg,
+            style_for(LineKind::ToolOk).fg
+        );
+    }
+
+    #[test]
+    fn the_renderer_and_the_classifier_agree() {
+        // The classifier reads the vocabulary `loong_tui::render_event` writes. Rendered
+        // through the real renderer, every marked line must be classified — only the
+        // model's own prose is allowed to fall through to `Answer`.
+        use loong_schema::generated::{event, Role};
+        let cases = vec![
+            serde_json::json!({"kind": event::MESSAGE_APPENDED, "data": {"role": Role::User, "text": "hi"}}),
+            serde_json::json!({"kind": event::MESSAGE_APPENDED, "data": {"role": Role::Assistant, "text": "hello"}}),
+            serde_json::json!({"kind": event::TOOL_CALL, "data": {"tool": "read_file", "args": {"path": "a.txt"}}}),
+            serde_json::json!({"kind": event::TOOL_RESULT, "data": {"ok": true, "output": "hi"}}),
+            serde_json::json!({"kind": event::TOOL_RESULT, "data": {"ok": false, "output": "nope"}}),
+            serde_json::json!({"kind": event::POLICY_DECIDED, "data": {"verdict": "allow", "rule": "builtin"}}),
+            serde_json::json!({"kind": event::APPROVAL_REQUESTED, "data": {"request_id": "r1", "action_class": "out_of_bounds"}}),
+            serde_json::json!({"kind": event::COST_RECORDED, "data": {"tokens_in": 1, "tokens_out": 2, "profile": "p"}}),
+            serde_json::json!({"kind": event::SKILLS_LOADED, "data": {"count": 1, "names": ["help"], "disabled": [], "tokens": 3}}),
+            serde_json::json!({"kind": event::COMPACTION_APPLIED, "data": {"tokens_before": 9, "tokens_after": 4, "kept_tokens": 2, "cleared_tool_outputs": 1, "dropped_messages": 1, "summary": "s"}}),
+        ];
+        for case in cases {
+            let line =
+                loong_tui::render_event(&case).unwrap_or_else(|| panic!("no line for {case}"));
+            if line.starts_with(&["you: ", "→ ", "← ", "! ", "· "][0])
+                || ["→ ", "← ", "! ", "· "].iter().any(|p| line.starts_with(p))
+            {
+                assert_ne!(
+                    classify(&line),
+                    LineKind::Answer,
+                    "{line:?} is marked, so it must be classified"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn errors_are_red_and_work_is_blue_in_the_drawn_screen() {
+        let mut app = App::new("s", "v");
+        app.push_lines(vec![
+            "you: do it".to_string(),
+            "→ write_file game.html".to_string(),
+            "← ok wrote it".to_string(),
+            "! the turn failed".to_string(),
+            "· policy: allow by builtin".to_string(),
+            "all done".to_string(),
+        ]);
+        assert_eq!(
+            color_of(&mut app, 80, 20, "the turn failed"),
+            Some(ratatui::style::Color::Red)
+        );
+        assert_eq!(
+            color_of(&mut app, 80, 20, "write_file"),
+            Some(ratatui::style::Color::Rgb(86, 182, 194))
+        );
+        assert_eq!(
+            color_of(&mut app, 80, 20, "wrote it"),
+            Some(ratatui::style::Color::Green)
+        );
+        assert_eq!(
+            color_of(&mut app, 80, 20, "by builtin"),
+            Some(ratatui::style::Color::Rgb(138, 138, 214))
+        );
+        assert_eq!(
+            color_of(&mut app, 80, 20, "you:"),
+            Some(ratatui::style::Color::Cyan),
+            "the label marks where a prompt began"
+        );
+        assert_eq!(
+            color_of(&mut app, 80, 20, "do it"),
+            Some(ratatui::style::Color::Reset),
+            "and the person's own words stay plain, so they are readable"
+        );
+        assert_eq!(
+            color_of(&mut app, 80, 20, "all done"),
+            Some(ratatui::style::Color::Reset),
+            "the answer is left alone"
+        );
     }
 
     #[test]

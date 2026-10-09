@@ -195,6 +195,33 @@ renders live events. Reopening a session used to give an empty screen that was q
 appending to yesterday's conversation; the test that caught it is the one that reopens a
 session and asserts the earlier prompt is on screen.
 
+### Colour
+
+The transcript is painted by classification rather than by the sender: `classify` reads
+the line's own vocabulary (the prefixes `loong-tui`'s renderer writes) and `style_for`
+turns that into a style, so there is one palette for the whole surface.
+
+| Line | Colour | Why |
+|---|---|---|
+| `you: …` | the label in cyan, the words plain | the label marks where a prompt began when scrolling back; the person's own words stay readable |
+| `→ tool …` | teal | the agent is doing something |
+| `← ok …` | green, dim | a result is evidence, not news |
+| `← failed …` | red | it did not work |
+| `! approval required …` | yellow, bold | the person has to answer |
+| `! …` | red, bold | something went wrong |
+| `· policy: …` | violet | a decision about permission, which is worth finding later |
+| `· …` | dark grey | bookkeeping: skills, tokens, compaction |
+| anything else | default | the model's own answer, left alone |
+
+The notes strip follows the same idea by severity — a line containing `warning` is yellow,
+`error` or `refused` is red, everything else dark grey — and the streaming preview is grey
+italic, so text still being written is never mistaken for the settled answer.
+
+A test renders real events through `loong_tui::render_event` and asserts that every
+**marked** line is classified: only the model's prose is allowed to fall through to
+`Answer`. Another reads the cell buffer and asserts the colours actually land (the text
+helper throws styles away on purpose, so there is a second helper that does not).
+
 ### The mark
 
 Three rows at the top when the terminal is at least 44 columns and 18 rows: a red seal

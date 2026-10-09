@@ -198,10 +198,19 @@ loongagent-control health --url http://127.0.0.1:8738
 On each machine — this is the **entire** configuration an engineer owns:
 
 ```bash
+# The control plane's directory is 0700 and root-owned, so the *client* user cannot
+# read client.token out of it. Give each user their own copy (the admin token stays
+# on the server):
+sudo install -o "$USER" -g "$USER" -m 0600 \
+  /etc/loongagent/control/client.token ~/.config/loongagent/client.token
+
 loongagent setup --url http://127.0.0.1:8738 \
   --public-key <public key from step 1> \
-  --token file:/etc/loongagent/control/client.token
+  --token file:~/.config/loongagent/client.token
 ```
+
+On a fleet, the client token arrives by the same channel as the binary (image, MDM,
+configuration management) — it is a shared secret, not per-install identity.
 
 ```
 wrote ~/.config/loongagent/control.toml
@@ -258,6 +267,13 @@ off-site copy of that file is an off-site ability to mint packs. The served
 **What leaves the machine**: nothing. The client reads `/v1/pack/profiles` and the
 uplink (audit/statistics) is not built.
 
+**Where an `api_key` reference points**: `api_key` in a pack is a *reference* the
+client resolves, so a pack may say `file:/home/alice/project/.env#DEEPSEEK_API_KEY`
+and the file exists per machine. The reader accepts `NAME: value`, `NAME=value`, and
+a TOML `[keys]` table. Keep that file mode `0600` — it is a secret, and a `.env`
+committed to a repository is ignored by `.gitignore` but still world-readable on
+disk by default (`-rw-rw-r--` is what `umask 002` gives you).
+
 ## 7. Troubleshooting
 
 | Message | Meaning |
@@ -271,6 +287,7 @@ uplink (audit/statistics) is not built.
 | `this control plane has no signing key — start it with --key` | started without `--key`; it can serve, not author |
 | `--public-key pins X but … is key Y — refusing to serve` | two different keys were configured; the served pack would be unverifiable |
 | `the control plane is unreachable: …` then the run continues | the last verified pack was used — check `from_cache` in the log and the `[control]` line |
+| `cannot read …: Permission denied` | the `token` reference points into a root-only directory; copy the client token out as shown in step 5 |
 | TUI shows `not connected to a control plane` | no `control.toml` on this machine — run `loongagent setup` |
 | `no model is configured yet` | a pack is configured but nothing selected, or no pack at all — `loongagent profiles`, then `use` |
 

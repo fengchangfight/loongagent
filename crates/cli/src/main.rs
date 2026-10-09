@@ -1160,20 +1160,56 @@ fn credential_path(path: &str, base: &Path) -> Option<PathBuf> {
     Some(base.join(path))
 }
 
-/// Read one secret out of a credentials file: `[keys]` NAME = "…".
+/// Read one named secret out of a file.
 ///
-/// `toml::from_str`, not `str::parse`: the `FromStr` implementation parses a *single
-/// value*, so a document with a `[keys]` table fails with "unexpected content".
+/// Line-based and forgiving about the separator, because the file is something an
+/// operator already has rather than something we dictate:
+///
+/// ```text
+/// NAME=value          NAME: value          export NAME=value
+/// [keys]              # a comment          NAME = "quoted value"
+/// ```
+///
+/// A missing key names the keys that *are* there and never their values — an error
+/// message is not the place to print a secret.
 fn read_credential(path: &Path, key: &str) -> Option<String> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let parsed: toml::Value = toml::from_str(&text)
-        .map_err(|e| eprintln!("[config] {} is not valid TOML: {e}", path.display()))
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| eprintln!("[config] cannot read {}: {e}", path.display()))
         .ok()?;
-    parsed
-        .get("keys")
-        .and_then(|keys| keys.get(key))
-        .and_then(|value| value.as_str())
-        .map(|secret| secret.to_string())
+    let mut names = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with('[') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line).trim_start();
+        // The first `=` or `:` only, so a value may contain either character.
+        let split = line.char_indices().find(|(_, c)| *c == '=' || *c == ':');
+        let Some((index, _)) = split else { continue };
+        let name = line[..index].trim();
+        let value = line[index + 1..]
+            .trim()
+            .trim_matches('"')
+            .trim_matches('\'');
+        names.push(name.to_string());
+        if name == key {
+            if value.is_empty() {
+                eprintln!("[config] {} has {key} but it is empty", path.display());
+                return None;
+            }
+            return Some(value.to_string());
+        }
+    }
+    eprintln!(
+        "[config] {} has no {key}; it defines: {}",
+        path.display(),
+        if names.is_empty() {
+            "(nothing)".to_string()
+        } else {
+            names.join(", ")
+        }
+    );
+    None
 }
 
 fn resolve_reference(value: Option<&str>, base: &Path) -> Option<String> {
@@ -1981,32 +2017,48 @@ mod tests {
     }
 
     #[test]
-    fn a_credentials_file_is_read_by_the_reference_it_is_named_for() {
+    fn a_secret_file_is_read_in_the_shapes_operators_actually_write() {
         let dir = std::env::temp_dir().join(format!("loong-creds-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("credentials.toml");
+        let path = dir.join("secrets");
+
+        // `KEY: value` — a `.env` written by hand.
+        std::fs::write(&path, "# comment\nDEEPSEEK_API_KEY: sk-colon\nOTHER: x\n").unwrap();
+        assert_eq!(
+            read_credential(&path, "DEEPSEEK_API_KEY").as_deref(),
+            Some("sk-colon")
+        );
+
+        // `KEY=value`, quoted, with `export`, and a value containing `=`.
         std::fs::write(
             &path,
-            "# a comment, then a table\n[keys]\nDEEPSEEK_API_KEY = \"sk-secret\"\n\
-             MOONSHOT_API_KEY = \"ms-secret\"\n",
+            "export DEEPSEEK_API_KEY=\"sk-equals=\"\nEMPTY=\n#NAME=ignored\n",
         )
         .unwrap();
         assert_eq!(
             read_credential(&path, "DEEPSEEK_API_KEY").as_deref(),
-            Some("sk-secret")
+            Some("sk-equals=")
         );
         assert_eq!(
-            read_credential(&path, "MOONSHOT_API_KEY").as_deref(),
-            Some("ms-secret")
-        );
-        assert_eq!(
-            read_credential(&path, "NOT_THERE"),
+            read_credential(&path, "EMPTY"),
             None,
-            "a missing key is not a panic"
+            "an empty value is not a secret"
         );
-        std::fs::write(&path, "this is not toml at all").unwrap();
-        assert_eq!(read_credential(&path, "ANY"), None, "nor is nonsense");
-        assert_eq!(read_credential(&dir.join("absent.toml"), "ANY"), None);
+        assert_eq!(
+            read_credential(&path, "NAME"),
+            None,
+            "a comment is not a definition"
+        );
+
+        // A TOML credentials file still works, table header and quotes included.
+        std::fs::write(&path, "[keys]\nDEEPSEEK_API_KEY = \"sk-toml\"\n").unwrap();
+        assert_eq!(
+            read_credential(&path, "DEEPSEEK_API_KEY").as_deref(),
+            Some("sk-toml")
+        );
+
+        assert_eq!(read_credential(&path, "ABSENT"), None);
+        assert_eq!(read_credential(&dir.join("absent"), "ANY"), None);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

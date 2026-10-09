@@ -1669,13 +1669,17 @@ fn full_screen(args: Args) -> Result<(), String> {
         Ok(None) => {}
         Err(e) => intro.push(format!("control plane: {e}")),
     }
-    loong_tui_app::run(
+    let outcome = loong_tui_app::run(
         client,
         attached.session_id,
         attached.schema_version,
         notes,
         intro,
-    )
+    );
+    // Leaving the interface — by `/exit`, ctrl-c, or an error — says where the session
+    // went, so the way out is not a dead end.
+    println!("session: {}", args.session_path().display());
+    outcome
 }
 
 /// The browser surface: the same JSON-RPC lines, carried over a WebSocket.

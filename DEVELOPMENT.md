@@ -123,6 +123,25 @@ audit/statistics uplink. The client only ever *reads*. Also not built: key rotat
 and revocation policy, per-team scopes, and polling/push cadence — the envelope has
 `key_id` and `version` for them, the policy does not exist yet.
 
+### What the TUI answers to
+
+| Key / command | What it does |
+|---|---|
+| `enter` | send the line |
+| `/exit`, `/quit`, `/q` | leave — handled by the **interface**, never sent to the agent |
+| `ctrl-c`, `ctrl-d` | leave |
+| `f2` | the context panel |
+| `pgup`/`pgdn`, mouse wheel | scroll the conversation; `ctrl-pgup`/`ctrl-pgdn` jump to the ends |
+| `a`/`y`, `d`/`n`, `esc` | approve / deny a pending action |
+| `←`/`→`/`home`/`end`/`del`, `ctrl-a/e/u/k/w` | edit the line, by character so CJK works |
+
+`/exit` is in that table rather than in the skills because quitting is the surface's
+business: a command that means "stop this program" has no meaning to a model. Everything
+else beginning with `/` — `/help`, workspace skills, MCP prompts — goes to the server,
+where it is resolved, audited and recorded. The boundary is tested from both sides.
+
+On the way out the session path is printed, so leaving is not a dead end.
+
 ### The debug panel (F2)
 
 `F2` in the TUI opens a context panel on the right: the tokens the next request will

@@ -202,6 +202,21 @@ impl App {
         );
     }
 
+    /// The one place that decides which slash commands never reach the agent. Kept
+    /// deliberately short: a command belongs here only if the *interface* is what has
+    /// to act — quitting, and nothing else so far. `/help` and the rest are skills the
+    /// workspace provides, and they stay on the server where they can be audited.
+    fn surface_command(&mut self, text: &str) -> Option<Action> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "/exit" | "/quit" | "/q" => {
+                self.input.clear();
+                self.cursor = 0;
+                Some(Action::Quit)
+            }
+            _ => None,
+        }
+    }
+
     fn byte_at(&self, char_index: usize) -> usize {
         self.input
             .char_indices()
@@ -423,6 +438,13 @@ impl App {
                 if text.is_empty() {
                     return Action::None;
                 }
+                // Commands that belong to the *surface*, not to the agent: `/exit`
+                // asks this program to stop, so sending it to a model would be wrong
+                // (and used to fail with "no such command"). Everything else goes to
+                // the server, where skills and MCP prompts live.
+                if let Some(action) = self.surface_command(&text) {
+                    return action;
+                }
                 self.input.clear();
                 self.cursor = 0;
                 self.push_lines(vec![format!("you: {text}")]);
@@ -533,7 +555,14 @@ impl App {
             None if self.busy => ("working…".to_string(), Style::default().fg(Color::Cyan)),
             // A leading `/` is a command: say where the list of them is.
             None if self.input.starts_with('/') => (
-                "command — /help lists the skills available here".to_string(),
+                match self.input.trim() {
+                    // Once it is unambiguous, say what will happen rather than where to
+                    // read about it.
+                    "/exit" | "/quit" | "/q" | "/exi" | "/qui" => {
+                        "enter leaves loongagent (ctrl-c does too)".to_string()
+                    }
+                    _ => "command — /help lists the skills, /exit leaves".to_string(),
+                },
                 Style::default().fg(Color::Green),
             ),
             None => ("prompt".to_string(), Style::default()),
@@ -1074,9 +1103,10 @@ mod tests {
         type_text(&mut app, "/rev");
         let screen = draw(&mut app, 70, 16);
         assert!(
-            screen.contains("command — /help lists the skills available here"),
+            screen.contains("command — /help lists the skills"),
             "{screen}"
         );
+        assert!(screen.contains("/exit leaves"), "and the way out: {screen}");
         // And it is only a hint: the text is still a normal prompt buffer.
         assert_eq!(app.input, "/rev");
     }
@@ -1255,6 +1285,53 @@ mod tests {
                 },
             ],
         })
+    }
+
+    #[test]
+    fn exit_and_quit_leave_the_interface_without_asking_the_agent() {
+        for command in ["/exit", "/quit", "/q", " /exit ", "/EXIT"] {
+            let mut app = App::new("s", "v");
+            type_text(&mut app, command);
+            assert_eq!(
+                app.handle_key(key(KeyCode::Enter)),
+                Action::Quit,
+                "{command:?} must quit, not be sent to a model"
+            );
+            assert!(app.input.is_empty(), "{command:?} clears the line");
+            assert!(
+                !app.lines.iter().any(|line| line.starts_with("you:")),
+                "{command:?} is not part of the conversation"
+            );
+        }
+    }
+
+    #[test]
+    fn only_an_exact_command_is_taken_locally() {
+        // The boundary matters: anything else is a skill invocation or a prompt, and
+        // belongs to the server where it can be audited.
+        for text in ["/exit now", "/exiting", "/exitx", "exit", "/help"] {
+            let mut app = App::new("s", "v");
+            type_text(&mut app, text);
+            match app.handle_key(key(KeyCode::Enter)) {
+                Action::Send(ToWorker::Submit(sent)) => assert_eq!(sent, text),
+                other => panic!("{text:?} should go to the server, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn the_hint_says_what_exit_will_do() {
+        let mut app = App::new("s", "v");
+        type_text(&mut app, "/exit");
+        let screen = draw(&mut app, 100, 16);
+        assert!(screen.contains("enter leaves loongagent"), "{screen}");
+
+        // And while it is still ambiguous, it names both the skills and the way out.
+        let mut app = App::new("s", "v");
+        type_text(&mut app, "/he");
+        let screen = draw(&mut app, 100, 16);
+        assert!(screen.contains("/help lists the skills"), "{screen}");
+        assert!(screen.contains("/exit leaves"), "{screen}");
     }
 
     #[test]

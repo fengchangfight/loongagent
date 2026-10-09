@@ -456,17 +456,27 @@ impl ControlPlane {
                     (401, json_error("the admin token is required to publish"))
                 } else {
                     match self.accept(&body) {
-                        Ok((envelope, profiles)) => (
-                            200,
-                            serde_json::json!({
-                                "published": true,
-                                "version": envelope.version,
-                                "issuer": envelope.issuer,
-                                "key_id": envelope.key_id,
-                                "profiles": profiles,
-                            })
-                            .to_string(),
-                        ),
+                        Ok((envelope, profiles)) => {
+                            // Say it where the administrator will see it, every time.
+                            let warnings = loong_config::profiles_from_payload(&envelope.payload)
+                                .map(|pack| pack.warnings)
+                                .unwrap_or_default();
+                            for warning in &warnings {
+                                eprintln!("published a pack with a warning: {warning}");
+                            }
+                            (
+                                200,
+                                serde_json::json!({
+                                    "published": true,
+                                    "version": envelope.version,
+                                    "issuer": envelope.issuer,
+                                    "key_id": envelope.key_id,
+                                    "profiles": profiles,
+                                    "warnings": warnings,
+                                })
+                                .to_string(),
+                            )
+                        }
                         Err(e) => (400, json_error(&e.to_string())),
                     }
                 }
@@ -542,6 +552,11 @@ impl ControlPlane {
             if let Ok(envelope) = Envelope::from_json(&text) {
                 health["version"] = serde_json::json!(envelope.version);
                 health["artifact"] = serde_json::json!(envelope.artifact);
+                // Observable, not buried: how many credentials this plane is shipping
+                // in the clear.
+                if let Ok(pack) = loong_config::profiles_from_payload(&envelope.payload) {
+                    health["plaintext_secrets"] = serde_json::json!(pack.warnings.len());
+                }
             }
         }
         health.to_string()

@@ -172,6 +172,31 @@ Notes that save a round trip:
   otherwise travel inside the signed pack — is refused with the mistake spelled out. The reference is resolved **on the client**, so the secret
   never reaches the control plane and never enters a signed pack.
 
+### Shipping the credential in the pack (temporary, and visible)
+
+Before identity and the model gateway exist, a firm may choose to send the credential
+with the pack so that an install needs no local secret at all. Put the value in the
+draft:
+
+```toml
+api_key = "sk-…"                       # inside the signed pack, in the clear
+# api_key = "env:DEEPSEEK_API_KEY"     # what this becomes once identity arrives
+```
+
+Everything says so out loud:
+
+- `publish` prints a warning and the response carries it (`"warnings": […]`);
+- `GET /v1/health` reports `"plaintext_secrets": 1`, so a monitor can see it;
+- every client prints `[control] warning: … carries the secret itself` on load;
+- `check --strict` exits 1, which is what a pre-commit hook in a configuration
+  repository wants.
+
+It lands in exactly three places — the draft, the control plane's `profiles.json`, and
+each install's `~/.loongagent/control/<origin>/profiles.json` — and **not** in the
+session log, the index, or `control.toml`. All three are plaintext files, so treat
+backups of them as secrets. Local configuration files (project, user, session) still
+refuse a literal; only the pack may carry one.
+
 ### Validate before you commit, not before you publish
 
 `publish` refuses a draft that carries a value, but by then a `git commit` may already

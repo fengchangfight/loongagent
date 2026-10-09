@@ -197,10 +197,12 @@ USAGE
       Send an envelope that was signed elsewhere. For an air-gapped administrator;
       the envelope is the same, so installs cannot tell the difference.
 
-  loongagent-control check --pack profiles.toml
+  loongagent-control check --pack profiles.toml [--strict]
       Validate a draft without publishing it: the same check the control plane makes,
       offline, so it can run before a commit rather than after one. Exit 1 if the pack
-      could not be published, with the reason.
+      could not be published, with the reason. A pack that carries a credential in the
+      clear is *reported*; `--strict` makes that a failure too, which is what a
+      pre-commit hook in a repository wants.
 
   loongagent-control public-key --key control-key.pkcs8
       Print the public key (and its id) for a signing key: the value installs pin.
@@ -420,6 +422,16 @@ fn check(args: &[String]) -> Result<(), String> {
                 model.name, model.model, model.base_url
             );
         }
+    }
+    let strict = args.iter().any(|a| a == "--strict");
+    for warning in &parsed.warnings {
+        println!("  warning: {warning}");
+    }
+    if strict && !parsed.warnings.is_empty() {
+        return Err(format!(
+            "{pack}: {} warning(s), and --strict was asked for",
+            parsed.warnings.len()
+        ));
     }
     println!("  (nothing was sent anywhere, and nothing was signed)");
     Ok(())

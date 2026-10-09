@@ -488,6 +488,7 @@ fn sync_pack(args: &Args, offline: bool) -> Result<Option<PackState>, String> {
 
     let pack = loong_config::profiles_from_payload(&synced.envelope.payload)
         .map_err(|e| format!("the control plane's pack is not usable: {e}"))?;
+    note_pack_warnings(&pack);
     let layers = loong_config::layer_paths(&args.cwd, args.profile.as_deref());
     let without_pack = loong_config::resolve(&layers, &args.cwd).map_err(|e| e.to_string())?;
     let chosen = without_pack.control_profile.clone();
@@ -524,6 +525,7 @@ fn cached_pack_state(args: &Args) -> Result<Option<PackState>, String> {
         .verify(&config.public_key, &[loong_pack::PROFILES_SCHEMA])
         .map_err(|e| format!("the cached pack no longer verifies: {e}"))?;
     let pack = loong_config::profiles_from_payload(&envelope.payload).map_err(|e| e.to_string())?;
+    note_pack_warnings(&pack);
     let layers = loong_config::layer_paths(&args.cwd, args.profile.as_deref());
     let without_pack = loong_config::resolve(&layers, &args.cwd).map_err(|e| e.to_string())?;
     let profile = pack
@@ -650,6 +652,14 @@ fn setup(args: Args) -> Result<(), String> {
     Ok(())
 }
 
+/// Say what the pack is carrying, once, where a person will see it. The TUI shows the
+/// server's notes, so this reaches the interface as well as the terminal.
+fn note_pack_warnings(pack: &loong_config::ProfilePack) {
+    for warning in &pack.warnings {
+        eprintln!("[control] warning: {warning}");
+    }
+}
+
 /// Prove a control-plane configuration before saving it: validate the address, fetch
 /// and verify a pack, and only then write the file. Shared by `loongagent setup` and
 /// the TUI's first-run form, so the two cannot drift apart.
@@ -669,6 +679,7 @@ fn connect(
     .map_err(|e| e.to_string())?;
     let pack = loong_config::profiles_from_payload(&synced.envelope.payload)
         .map_err(|e| format!("the pack is not usable: {e}"))?;
+    note_pack_warnings(&pack);
     let path = save_control(file, system)?;
     Ok((path, synced, pack))
 }
@@ -743,6 +754,7 @@ fn control(args: Args, rest: &[String]) -> Result<(), String> {
                     );
                     println!("  cached pack verifies: yes");
                     if let Ok(pack) = loong_config::profiles_from_payload(&envelope.payload) {
+                        note_pack_warnings(&pack);
                         print_profiles(&pack, None);
                     }
                 }
@@ -785,6 +797,7 @@ fn control(args: Args, rest: &[String]) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
             let pack = loong_config::profiles_from_payload(&synced.envelope.payload)
                 .map_err(|e| format!("the pack is not usable: {e}"))?;
+            note_pack_warnings(&pack);
             println!(
                 "{} {} (key {}), {}{}",
                 synced.envelope.issuer,
@@ -821,6 +834,7 @@ fn profiles(args: Args) -> Result<(), String> {
         .load()
         .ok_or_else(|| "no cached pack".to_string())?;
     let pack = loong_config::profiles_from_payload(&envelope.payload).map_err(|e| e.to_string())?;
+    note_pack_warnings(&pack);
     println!(
         "from {} {} (key {}), signed and verified",
         envelope.issuer, envelope.version, envelope.key_id
@@ -850,6 +864,7 @@ fn use_profile(args: Args, rest: &[String]) -> Result<(), String> {
     let (config, _) = control_config(&file)?;
     let envelope = pack_cache(&config).load().ok_or("no cached pack")?;
     let pack = loong_config::profiles_from_payload(&envelope.payload).map_err(|e| e.to_string())?;
+    note_pack_warnings(&pack);
     let chosen = pack.pick(Some(&name)).map_err(|e| e.to_string())?.clone();
     let _ = state;
 

@@ -303,6 +303,7 @@ pub fn profiles_from_payload(payload: &str) -> Result<ProfilePack, ConfigError> 
         ));
     }
     let mut profiles = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
     for entry in raw.profiles {
         let mut models = Vec::new();
         for model in entry.models {
@@ -319,10 +320,10 @@ pub fn profiles_from_payload(payload: &str) -> Result<ProfilePack, ConfigError> 
                 )));
             }
             if let Some(key) = &model.api_key {
-                check_secret_reference(
-                    &entry.name,
+                check_pack_secret(
                     &format!("models.{}.api_key", model.name),
                     key,
+                    &mut warnings,
                 )?;
             }
             models.push(ModelSpec {
@@ -379,6 +380,7 @@ pub fn profiles_from_payload(payload: &str) -> Result<ProfilePack, ConfigError> 
     Ok(ProfilePack {
         default_profile: raw.default_profile,
         profiles,
+        warnings,
     })
 }
 
@@ -387,6 +389,10 @@ pub fn profiles_from_payload(payload: &str) -> Result<ProfilePack, ConfigError> 
 pub struct ProfilePack {
     pub default_profile: Option<String>,
     pub profiles: Vec<NamedProfile>,
+    /// What an operator should know before serving this pack. Today that is one thing:
+    /// the pack carries a credential in the clear, which is a deliberate and temporary
+    /// relaxation of ADR-0008 §5 (see its amendment).
+    pub warnings: Vec<String>,
 }
 
 impl ProfilePack {
@@ -921,6 +927,32 @@ fn is_secret_name(name: &str) -> bool {
     }
     // `DEEPSEEK_API_KEY` has words separated by underscores; a secret does not.
     !name.split('_').any(|word| word.len() >= 20)
+}
+
+/// A secret in a **pack**: a reference must be well formed, and a bare literal is
+/// accepted — visibly. The pack is the distribution channel, and until identity and the
+/// model gateway exist (ADR-0012 §4/§5) a firm may choose to ship the credential with
+/// it. The warning is the price of that choice, repeated at publish, at load, and in
+/// `GET /v1/health`.
+///
+/// A *malformed* reference is still refused: `env:sk-4f06…` is not a name, and
+/// accepting it would silently look up a variable called `sk-4f06…`.
+fn check_pack_secret(
+    key: &str,
+    value: &str,
+    warnings: &mut Vec<String>,
+) -> Result<(), ConfigError> {
+    let known = ["env:", "file:", "keychain:", "gateway:"];
+    if known.iter().any(|prefix| value.starts_with(prefix)) {
+        return check_secret_reference("the pack", key, value);
+    }
+    warnings.push(format!(
+        "`{key}` carries the secret itself: it travels inside the signed pack, sits in \
+         plaintext in every install's cache, and is copied by any backup of either. \
+         References (`env:NAME`, `file:PATH#KEY`) are what ADR-0008 §5 asks for; this is \
+         the recorded, temporary exception."
+    ));
+    Ok(())
 }
 
 fn check_endpoint_reference(source: &str, key: &str, value: &str) -> Result<(), ConfigError> {
@@ -1902,6 +1934,23 @@ description = \"Air-gapped: nothing leaves the machine.\"\n\
     }
 
     #[test]
+    fn a_literal_in_a_config_file_is_still_refused() {
+        // The pack may carry a secret for now; a file a repository or a dotfiles
+        // directory can commit may not. That is the line the amendment keeps.
+        let ws = workspace();
+        let user = write(
+            &ws,
+            "u.toml",
+            "[[models]]\nname = \"m\"\nbase_url = \"https://a.invalid\"\nmodel = \"i\"\napi_key = \"sk-live-abc\"\n",
+        );
+        let err = resolve(&[(Layer::User, user)], &ws)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("must be a reference"), "{err}");
+        assert!(err.contains("ADR-0008"), "{err}");
+    }
+
+    #[test]
     fn a_secret_pasted_after_the_prefix_is_refused() {
         // The mistake this exists for: `env:` followed by the key itself passes a
         // prefix check, and then the key is inside the signed pack — and inside a
@@ -1972,13 +2021,29 @@ description = \"Air-gapped: nothing leaves the machine.\"\n\
         .unwrap_err()
         .to_string();
         assert!(err.contains("ghost"), "{err}");
-        // A model with a literal secret never gets through the pack path either.
-        let err = profiles_from_payload(
+        // A literal in a pack is accepted *and warned about*: the distribution channel
+        // may carry it until identity and the gateway exist (ADR-0008 §5 amendment).
+        let pack = profiles_from_payload(
             "[[profiles]]\nname = \"x\"\n  [[profiles.models]]\n  name = \"m\"\n  base_url = \"https://a.invalid\"\n  model = \"i\"\n  api_key = \"sk-literal\"\n",
         )
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("reference"), "{err}");
+        .unwrap();
+        assert_eq!(pack.warnings.len(), 1, "{:?}", pack.warnings);
+        assert!(
+            pack.warnings[0].contains("carries the secret itself"),
+            "{:?}",
+            pack.warnings[0]
+        );
+        assert!(
+            pack.warnings[0].contains("ADR-0008"),
+            "and names the rule it bends"
+        );
+
+        // A well-formed reference warns about nothing.
+        let clean = profiles_from_payload(
+            "[[profiles]]\nname = \"x\"\n  [[profiles.models]]\n  name = \"m\"\n  base_url = \"https://a.invalid\"\n  model = \"i\"\n  api_key = \"env:DEEPSEEK_API_KEY\"\n",
+        )
+        .unwrap();
+        assert!(clean.warnings.is_empty(), "{:?}", clean.warnings);
     }
 
     #[test]

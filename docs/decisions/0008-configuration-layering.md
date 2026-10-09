@@ -93,6 +93,21 @@ store or the control plane's model gateway (T-08/T-05), and config carries only
 a **reference** (`keychain://…`, `env:…`, `gateway:…`). This also means a
 profile can be PR-reviewed in the open without redaction.
 
+**Amendment, 2026-10-09 — the pack path may carry a literal, visibly, for now.** A firm
+deploying before identity and the model gateway exist (ADR-0012 §4/§5) may put the
+credential in the pack itself, so that an install needs no local secret at all. It is
+allowed, not silent: `publish` warns, `check` reports it (`--strict` makes that a
+failure, which is what a pre-commit hook wants), the control plane repeats it in the
+publish response and reports `plaintext_secrets` in `GET /v1/health`, and every client
+prints it on load. **Local configuration files still refuse a literal** — the project,
+user and session layers — so a repository or a dotfile directory cannot carry a key.
+
+The cost, stated rather than implied: the value travels inside the signed pack and sits
+in plaintext in the control plane's `profiles.json` and in every install's cache
+(`~/.loongagent/control/<origin>/profiles.json`), and therefore in any backup of either.
+It does **not** reach the session log or the derived index. Replacing this with
+`env:`, `file:` or `gateway:` references is what ADR-0012 §4/§5 exist to enable.
+
 ### 6. Packs: one signed envelope for every distributed artifact
 
 Profiles (T-07), policy packs (ADR-0005), and role/context packs

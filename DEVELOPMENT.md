@@ -147,9 +147,17 @@ A profile pack is configuration — reviewed, versioned, diffed — so it carrie
 api_key = "env:DEEPSEEK_API_KEY"        # what is committed
 ```
 
-A **literal** is refused in three places, so it cannot arrive by accident: at the
-administrator's own `publish --pack` (before any network call), at the control plane
-when it validates the draft, and when a client loads a pack.
+In a **pack** a literal is accepted, visibly (ADR-0008 §5 amendment, 2026-10-09): the
+deployment can ship the credential until identity and the model gateway exist. It warns
+at publish, in the publish response, in `GET /v1/health` (`plaintext_secrets`), and on
+every client; `check --strict` fails on it. It lands in the draft, the control plane's
+`profiles.json`, and each install's pack cache — never in the session log, the index, or
+`control.toml`.
+
+In a **local configuration file** (project, user, session, org) a literal is still
+refused in three places, so a repository or a dotfile cannot carry a key: at the
+administrator's own `publish --pack`, at the control plane when it validates a draft,
+and when a client loads a pack.
 
 `loongagent-control check --pack FILE` runs that validation offline — no network, no
 signature — so it can sit in a pre-commit hook. A secret pasted into a draft that is

@@ -11,6 +11,19 @@ use std::time::{Duration, Instant};
 use tungstenite::client::IntoClientRequest;
 use tungstenite::Message;
 
+/// A command that cannot see the developer's configuration. Without this a control
+/// plane configured on this machine supplies the endpoints under test — and spends
+/// real tokens while doing it.
+fn isolated_command() -> Command {
+    let base = std::env::temp_dir().join(format!("loongagent-testenv-{}", std::process::id()));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_loongagent"));
+    command
+        .env("XDG_CONFIG_HOME", base.join("cfg"))
+        .env("XDG_STATE_HOME", base.join("state"))
+        .env("HOME", base.join("home"));
+    command
+}
+
 static N: AtomicU64 = AtomicU64::new(0);
 
 fn workspace() -> std::path::PathBuf {
@@ -89,7 +102,7 @@ struct Web {
 
 impl Web {
     fn start(dir: &std::path::Path, base_url: &str) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_loongagent"))
+        let mut child = isolated_command()
             .arg("web")
             .arg("--session")
             .arg(dir.join("s.jsonl"))

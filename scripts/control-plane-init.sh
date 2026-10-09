@@ -102,6 +102,10 @@ head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$dir/admin.token"
 printf '\n' >> "$dir/client.token"
 printf '\n' >> "$dir/admin.token"
 chmod 600 "$dir/client.token" "$dir/admin.token"
+# The public key is not a secret and is what every install pins: keep it where an
+# administrator can find it after the terminal has scrolled.
+printf '%s\n' "$public_key" > "$dir/control-key.pub"
+chmod 644 "$dir/control-key.pub"
 rm -f "$dir/keygen.log"
 
 if [ -n "$starter" ]; then

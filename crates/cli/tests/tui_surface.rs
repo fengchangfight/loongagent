@@ -3,6 +3,19 @@
 
 use std::process::{Command, Stdio};
 
+/// A command that cannot see the developer's configuration. Without this a control
+/// plane configured on this machine supplies the endpoints under test — and spends
+/// real tokens while doing it.
+fn isolated_command() -> Command {
+    let base = std::env::temp_dir().join(format!("loongagent-testenv-{}", std::process::id()));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_loongagent"));
+    command
+        .env("XDG_CONFIG_HOME", base.join("cfg"))
+        .env("XDG_STATE_HOME", base.join("state"))
+        .env("HOME", base.join("home"));
+    command
+}
+
 #[test]
 fn the_full_screen_surface_refuses_a_pipe_and_points_at_the_line_mode() {
     // The test harness has no TTY on stdout, which is exactly the case a user hits
@@ -12,7 +25,7 @@ fn the_full_screen_surface_refuses_a_pipe_and_points_at_the_line_mode() {
     // another test's mystery.
     let dir = std::env::temp_dir().join(format!("loongagent-tui-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_loongagent"))
+    let out = isolated_command()
         .arg("tui")
         .arg("--session")
         .arg(dir.join("s.jsonl"))
@@ -40,7 +53,7 @@ fn the_full_screen_surface_refuses_a_pipe_and_points_at_the_line_mode() {
 fn the_line_mode_surface_works_under_a_pipe() {
     let dir = std::env::temp_dir().join(format!("loongagent-repl-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_loongagent"))
+    let mut child = isolated_command()
         .arg("repl")
         .arg("--session")
         .arg(dir.join("s.jsonl"))

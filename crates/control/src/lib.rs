@@ -160,17 +160,40 @@ impl Cache {
 
     /// Written to a temporary file and renamed, so a crash mid-write cannot leave a
     /// half pack where the next run would read it.
+    ///
+    /// Two writers are normal, not exotic: a surface and the server it spawns both
+    /// sync, and so do two terminals. The temporary name is therefore unique per
+    /// *write* — with a fixed name they overwrite each other's half-written file and
+    /// the next reader fails verification, which kills that session before it prints
+    /// anything. A pack that is already there is not rewritten at all, which removes
+    /// most of the window.
     pub fn store(&self, envelope: &Envelope) -> Result<(), ControlError> {
+        let json = envelope.to_json().map_err(ControlError::Rejected)?;
+        // Compare what the file *means*, not how it is spelled.
+        if let Ok(on_disk) = std::fs::read_to_string(&self.path) {
+            if Envelope::from_json(&on_disk).as_ref().ok() == Some(envelope) {
+                return Ok(());
+            }
+        }
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| ControlError::Io(e.to_string()))?;
         }
-        let temporary = self.path.with_extension("json.tmp");
-        std::fs::write(
-            &temporary,
-            envelope.to_json().map_err(ControlError::Rejected)?,
-        )
-        .map_err(|e| ControlError::Io(e.to_string()))?;
-        std::fs::rename(&temporary, &self.path).map_err(|e| ControlError::Io(e.to_string()))
+        static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let stamp = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let temporary = self
+            .path
+            .with_extension(format!("json.{}.{stamp}.tmp", std::process::id()));
+        std::fs::write(&temporary, &json).map_err(|e| ControlError::Io(e.to_string()))?;
+        match std::fs::rename(&temporary, &self.path) {
+            Ok(()) => Ok(()),
+            // Another writer got there first with a complete file: the outcome we
+            // wanted anyway.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => {
+                let _ = std::fs::remove_file(&temporary);
+                Err(ControlError::Io(e.to_string()))
+            }
+        }
     }
 }
 
@@ -951,6 +974,56 @@ mod tests {
         }
         .check_transport()
         .is_ok());
+    }
+
+    #[test]
+    fn several_writers_do_not_corrupt_the_cache() {
+        // A surface and the server it spawns both sync; so do two terminals.
+        let (private, public) = generate_keypair().unwrap();
+        let state = temp("cache-race");
+        let cache = std::sync::Arc::new(Cache::new(&state, "control.acme.internal"));
+        let mut writers = Vec::new();
+        for round in 0..8 {
+            let cache = std::sync::Arc::clone(&cache);
+            let envelope = pack(&private, &format!("v{round}"), "default_profile = \"d\"\n");
+            writers.push(std::thread::spawn(move || {
+                for _ in 0..25 {
+                    cache.store(&envelope).unwrap();
+                }
+            }));
+        }
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        // Whatever won, the file is a whole, verifiable pack — never a half write.
+        let stored = cache.load().expect("a readable pack");
+        stored.verify(&public, &[PROFILES_SCHEMA]).unwrap();
+        // And no scratch files are left behind.
+        let leftovers: Vec<_> = std::fs::read_dir(cache.path().parent().unwrap())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "left behind: {leftovers:?}");
+    }
+
+    #[test]
+    fn an_unchanged_pack_is_not_written_again() {
+        let (private, public) = generate_keypair().unwrap();
+        let state = temp("cache-idempotent");
+        let cache = Cache::new(&state, "control.acme.internal");
+        let envelope = pack(&private, "v1", "default_profile = \"d\"\n");
+        cache.store(&envelope).unwrap();
+        let first = std::fs::metadata(cache.path()).unwrap().modified().unwrap();
+        cache.store(&envelope).unwrap();
+        let second = std::fs::metadata(cache.path()).unwrap().modified().unwrap();
+        assert_eq!(first, second, "the same pack must not be rewritten");
+        cache
+            .load()
+            .unwrap()
+            .verify(&public, &[PROFILES_SCHEMA])
+            .unwrap();
     }
 
     #[test]

@@ -197,6 +197,10 @@ USAGE
       Send an envelope that was signed elsewhere. For an air-gapped administrator;
       the envelope is the same, so installs cannot tell the difference.
 
+  loongagent-control public-key --key control-key.pkcs8
+      Print the public key (and its id) for a signing key: the value installs pin.
+      The keygen output is easy to lose; this is how you get it back.
+
   loongagent-control show --file profile-pack.json [--public-key HEX]
   loongagent-control show --url URL --token-env NAME [--public-key HEX]
       Decode an envelope — from a file, or from what a control plane is serving —
@@ -233,6 +237,7 @@ fn run() -> Result<(), String> {
         "keygen" => keygen(rest),
         "sign" => sign(rest),
         "show" => show(rest),
+        "public-key" => public_key(rest),
         "serve" => serve(rest),
         "publish" => publish(rest),
         "health" => health(rest),
@@ -381,6 +386,17 @@ fn sign(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// The pinning value for an existing signing key. Not a secret, and the one thing an
+/// administrator needs after the keygen output has scrolled away.
+fn public_key(args: &[String]) -> Result<(), String> {
+    let key_path = flag(args, "--key")?;
+    let key = std::fs::read(&key_path).map_err(|e| format!("reading {key_path}: {e}"))?;
+    let public = public_of(&key).map_err(|e| e.to_string())?;
+    println!("{}", loong_pack::hex(&public));
+    eprintln!("key id: {}", key_id(&public));
+    Ok(())
+}
+
 fn show(args: &[String]) -> Result<(), String> {
     let text = match (optional(args, "--file"), optional(args, "--url")) {
         (Some(path), _) => {
@@ -493,6 +509,7 @@ fn serve(args: &[String]) -> Result<(), String> {
     println!("  directory: {}", dir);
     println!("  issuer:    {issuer}");
     println!("  key id:    {}", key_id(&public));
+    println!("  public key: {}", loong_pack::hex(&public));
     println!(
         "  pack:      {}",
         if plane.has_pack() {
@@ -528,13 +545,17 @@ fn publish(args: &[String]) -> Result<(), String> {
                     .map(|d| d.as_secs().to_string())
                     .unwrap_or_else(|_| "1".to_string())
             });
-            serde_json::json!({
+            // No `--issuer` means "the identity this control plane was started with",
+            // which is the honest answer: that is who is signing.
+            let mut request = serde_json::json!({
                 "payload": payload,
                 "version": version,
-                "issuer": optional(args, "--issuer").unwrap_or_else(|| "org".to_string()),
                 "scope": optional(args, "--scope").unwrap_or_else(|| "org".to_string()),
-            })
-            .to_string()
+            });
+            if let Some(issuer) = optional(args, "--issuer") {
+                request["issuer"] = serde_json::json!(issuer);
+            }
+            request.to_string()
         }
         (None, Some(file)) => {
             std::fs::read_to_string(&file).map_err(|e| format!("reading {file}: {e}"))?

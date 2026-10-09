@@ -1147,7 +1147,7 @@ fn resolve_session_in(root: &Path, spec: &str, cwd: &Path) -> Result<PathBuf, St
     // Not here: it may be a session from another project, which `sessions --all` shows.
     // Resuming it is allowed; the workspace stays wherever this command was run.
     let elsewhere = all_session_summaries_in(root);
-    match match_session(&elsewhere, &wanted)? {
+    match match_session_across_projects(&elsewhere, &wanted)? {
         Some(path) => Ok(path),
         None => Err(format!(
             "no session {spec:?} — `loongagent sessions` lists what exists{}; `loongagent tui` \
@@ -1163,6 +1163,40 @@ fn resolve_session_in(root: &Path, spec: &str, cwd: &Path) -> Result<PathBuf, St
                         .join(", ")
                 ),
             }
+        )),
+    }
+}
+
+/// The same, but for sessions in *other* projects: here an exact id is not enough to
+/// disambiguate, because every legacy session in every project is called `default`.
+/// Choosing one silently would be worse than saying which ones exist.
+fn match_session_across_projects(
+    sessions: &[SessionSummary],
+    wanted: &str,
+) -> Result<Option<PathBuf>, String> {
+    let exact: Vec<&SessionSummary> = sessions.iter().filter(|s| s.id == wanted).collect();
+    if let [one] = exact.as_slice() {
+        return Ok(Some(one.path.clone()));
+    }
+    let candidates: Vec<&SessionSummary> = if exact.is_empty() {
+        sessions
+            .iter()
+            .filter(|s| s.id.starts_with(wanted))
+            .collect()
+    } else {
+        exact
+    };
+    match candidates.as_slice() {
+        [] => Ok(None),
+        [one] => Ok(Some(one.path.clone())),
+        many => Err(format!(
+            "{wanted:?} matches {} sessions in other projects ({}); run it where it lives, or \
+             pass the full path",
+            many.len(),
+            many.iter()
+                .map(|s| format!("{} in {}", s.id, s.project))
+                .collect::<Vec<_>>()
+                .join(", ")
         )),
     }
 }
@@ -1253,8 +1287,9 @@ fn list_sessions(rest: &[String]) -> Result<(), String> {
         );
         return Ok(());
     }
-    // The one a bare `loongagent tui` would pick up.
-    let current = newest_session(&cwd).map(|path| session_id_of(&path));
+    // The one a bare `loongagent tui` would pick up. Compared by path, not by id:
+    // every legacy session is called `default`, and marking five rows is not a mark.
+    let current = newest_session(&cwd);
     println!(
         "{} session{} (newest first){}",
         sessions.len(),
@@ -1277,7 +1312,7 @@ fn list_sessions(rest: &[String]) -> Result<(), String> {
         );
     }
     for session in sessions.iter().take(limit) {
-        let mark = if Some(&session.id) == current.as_ref() {
+        let mark = if Some(&session.path) == current.as_ref() {
             "*"
         } else {
             " "
@@ -3008,6 +3043,37 @@ mod session_tests {
             "`sessions --all` shows it, so `resume` must be able to open it"
         );
         assert_eq!(all_session_summaries_in(&root).len(), 1);
+    }
+
+    #[test]
+    fn an_id_that_exists_in_two_other_projects_is_not_guessed() {
+        // Every legacy session is called `default`, so this is the common case, not a
+        // corner: silently opening one of them would open the wrong conversation.
+        let root = temp_root("ambiguous-elsewhere");
+        let here = Path::new("/tmp/here");
+        for (there, prompt) in [("/tmp/one", "first"), ("/tmp/two", "second")] {
+            write_session(
+                &session_dir_in(&root, Path::new(there)).join("session.jsonl"),
+                &[prompt],
+            );
+        }
+        let error = resolve_session_in(&root, "default", here).unwrap_err();
+        assert!(error.contains("other projects"), "{error}");
+        assert!(
+            error.contains("full path"),
+            "and says what to do instead: {error}"
+        );
+
+        // With only one of them, it resolves — the useful half of the same rule.
+        std::fs::remove_file(session_dir_in(&root, Path::new("/tmp/two")).join("session.jsonl"))
+            .unwrap();
+        assert_eq!(
+            resolve_session_in(&root, "default", here)
+                .unwrap()
+                .file_name()
+                .unwrap(),
+            "session.jsonl"
+        );
     }
 
     #[test]

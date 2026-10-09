@@ -197,6 +197,11 @@ USAGE
       Send an envelope that was signed elsewhere. For an air-gapped administrator;
       the envelope is the same, so installs cannot tell the difference.
 
+  loongagent-control check --pack profiles.toml
+      Validate a draft without publishing it: the same check the control plane makes,
+      offline, so it can run before a commit rather than after one. Exit 1 if the pack
+      could not be published, with the reason.
+
   loongagent-control public-key --key control-key.pkcs8
       Print the public key (and its id) for a signing key: the value installs pin.
       The keygen output is easy to lose; this is how you get it back.
@@ -238,6 +243,7 @@ fn run() -> Result<(), String> {
         "sign" => sign(rest),
         "show" => show(rest),
         "public-key" => public_key(rest),
+        "check" => check(rest),
         "serve" => serve(rest),
         "publish" => publish(rest),
         "health" => health(rest),
@@ -391,6 +397,31 @@ fn sign(args: &[String]) -> Result<(), String> {
     println!();
     println!("publish it with:");
     println!("  loongagent-control publish --url https://<control-plane> --file {out} --token-env ADMIN_TOKEN");
+    Ok(())
+}
+
+/// Validate a draft the way the control plane would, without a network or a key. This
+/// is the check to put in a pre-commit hook: a secret pasted into a committed draft is
+/// already in the history by the time `publish` refuses it.
+fn check(args: &[String]) -> Result<(), String> {
+    let pack = flag(args, "--pack")?;
+    let payload = std::fs::read_to_string(&pack).map_err(|e| format!("reading {pack}: {e}"))?;
+    let parsed =
+        loong_config::profiles_from_payload(&payload).map_err(|e| format!("{pack}: {e}"))?;
+    println!("{pack}: valid ({} bytes)", payload.len());
+    if let Some(default) = &parsed.default_profile {
+        println!("  default profile: {default}");
+    }
+    for profile in &parsed.profiles {
+        println!("  {} — {}", profile.name, first_line(&profile.description));
+        for model in &profile.models {
+            println!(
+                "      model {} → {} ({})",
+                model.name, model.model, model.base_url
+            );
+        }
+    }
+    println!("  (nothing was sent anywhere, and nothing was signed)");
     Ok(())
 }
 

@@ -151,6 +151,10 @@ A **literal** is refused in three places, so it cannot arrive by accident: at th
 administrator's own `publish --pack` (before any network call), at the control plane
 when it validates the draft, and when a client loads a pack.
 
+`loongagent-control check --pack FILE` runs that validation offline — no network, no
+signature — so it can sit in a pre-commit hook. A secret pasted into a draft that is
+under version control is already in the history by the time `publish` says no.
+
 The part after the prefix is checked too, because a prefix is not a reference:
 `env:sk-4f06…` starts with `env:` and still puts the key in the pack, in every client's
 cache, and in git as soon as the draft is committed. `env:NAME` must be a variable

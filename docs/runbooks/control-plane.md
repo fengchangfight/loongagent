@@ -172,10 +172,30 @@ Notes that save a round trip:
   otherwise travel inside the signed pack — is refused with the mistake spelled out. The reference is resolved **on the client**, so the secret
   never reaches the control plane and never enters a signed pack.
 
+### Validate before you commit, not before you publish
+
+`publish` refuses a draft that carries a value, but by then a `git commit` may already
+have recorded it. So the same check is available offline, and it is worth wiring into
+the repository that holds the draft:
+
+```bash
+loongagent-control check --pack profiles.toml     # exits 1 with the reason
+```
+
+```sh
+# .git/hooks/pre-commit  (or your hook manager's equivalent)
+loongagent-control check --pack profiles.toml || exit 1
+```
+
+`check` never contacts a control plane and never signs anything: it runs the same
+validation the server would, on your machine, before the value has a chance to enter
+the history.
+
 ### The draft is committed; the secret is not
 
-This file is configuration: it goes in a repository, it gets reviewed, and a pack is
-what reviewers approve. So it carries a **placeholder**, and the value lives in an
+This file is configuration: the intention is that it goes in a repository, gets
+reviewed, and that a pack is what reviewers approve. Whether or not it is in a
+repository *today*, it carries a **placeholder**, and the value lives in an
 environment file on each machine:
 
 ```toml

@@ -1596,6 +1596,9 @@ fn full_screen(args: Args) -> Result<(), String> {
     // discover a command. Doing it before the session starts is also why nothing has
     // to be reconfigured mid-session.
     if load_control()?.is_none() && args.model.is_none() && !args.offline {
+        // In a pipe the form cannot be drawn: refuse first, in the same words the TUI
+        // would use, rather than asking for three fields that cannot be seen.
+        loong_tui_app::full_screen_needs_a_terminal()?;
         if let Some((url, public_key, token)) = loong_tui_app::setup_form()? {
             let file = ControlFile {
                 url,

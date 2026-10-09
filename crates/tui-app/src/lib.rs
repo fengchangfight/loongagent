@@ -594,6 +594,20 @@ impl SetupForm {
     }
 }
 
+/// A full-screen surface needs a terminal, and must say so before asking for anything:
+/// discovering the problem after typing three fields would be rude, and in a pipe the
+/// form cannot be drawn at all.
+pub fn full_screen_needs_a_terminal() -> Result<(), String> {
+    use std::io::IsTerminal;
+    if std::io::stdout().is_terminal() {
+        return Ok(());
+    }
+    Err(
+        "no terminal on stdout: use `loongagent repl` for a line-mode session, or run in a TTY"
+            .to_string(),
+    )
+}
+
 /// Draw the first-run form. Separate from the event loop so the layout can be
 /// asserted on (three labelled fields and a hint line) without a terminal.
 fn draw_setup_form(frame: &mut ratatui::Frame, form: &SetupForm) {
@@ -661,6 +675,7 @@ fn draw_setup_form(frame: &mut ratatui::Frame, form: &SetupForm) {
 /// full-screen form. `Ok(None)` means the user declined — a session without a control
 /// plane is a legitimate state (a local profile, or a provider double).
 pub fn setup_form() -> Result<Option<(String, String, String)>, String> {
+    full_screen_needs_a_terminal()?;
     use ratatui::backend::CrosstermBackend;
     use ratatui::crossterm::event::{self, Event};
     use ratatui::crossterm::execute;
@@ -712,14 +727,6 @@ pub fn run<T: Transport + Send + 'static>(
         disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
     };
     use ratatui::Terminal;
-    use std::io::IsTerminal;
-
-    if !std::io::stdout().is_terminal() {
-        return Err(
-            "no terminal on stdout: use `loongagent repl` for a line-mode session, or run in a TTY"
-                .to_string(),
-        );
-    }
 
     let (to_worker, from_worker) = spawn_worker(client);
     let mut app = App::new(session, schema);

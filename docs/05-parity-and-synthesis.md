@@ -116,6 +116,7 @@ rows below are what "not losing" means concretely.
 | CC feature | Our status | Where | Next |
 |---|---|---|---|
 | Streamed responses (text as it is written) | ✅ | Adapter-level SSE (2026-10-08): `model.delta` is a **transient notification**, deliberately not an event — the finished message is the record, so the log never fills with partial states. Tool-call argument fragments are reassembled; a server that ignores `stream` is still understood | tool-call deltas are not rendered live |
+| Several models + routing policy | ✅ | `[[models]]` + `[router]` with an explicit condition language (`context_tokens`, `step`), first-match-wins; the rule that fired is logged as `model.selected` (2026-10-09). A project layer may not define models, only route among existing ones; a model's budget only narrows across layers | no live switch by hand inside a session; no cost- or latency-based rules (the facts are not measured yet) |
 | Mid-session model switch, effort levels | ⚠️ | ADR-0005/0008: switching allowed **within the profile's allowed set**. The profile now *chooses* the model (`model` + `base_url`, resolved from the layers) and `--model` remains the session override | mid-session switching itself is not implemented |
 | Subagent-specific model | ✅ | T-17 + ADR-0005 | — |
 | SDK (Python + TypeScript) over the same loop | ✅ | ADR-0002 (JSON-RPC + schema) | generate bindings |

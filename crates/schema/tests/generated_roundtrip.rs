@@ -136,6 +136,13 @@ fn roundtrip_model_delta() {
 }
 
 #[test]
+fn roundtrip_model_selected() {
+    roundtrip::<g::ModelSelected>(
+        r#"{"model": "<string>","previous": "<string>","rule": "<string>","context_tokens": 1}"#,
+    );
+}
+
+#[test]
 fn declared_events_match_the_envelope_table() {
     assert_eq!(g::is_ignorable_event("message.appended"), Some(false));
     assert_eq!(g::is_ignorable_event("tool.call"), Some(false));
@@ -146,6 +153,7 @@ fn declared_events_match_the_envelope_table() {
     assert_eq!(g::is_ignorable_event("cost.recorded"), Some(false));
     assert_eq!(g::is_ignorable_event("compaction.applied"), Some(false));
     assert_eq!(g::is_ignorable_event("hook.fired"), Some(false));
+    assert_eq!(g::is_ignorable_event("model.selected"), Some(false));
     assert_eq!(g::is_ignorable_event("skills.loaded"), Some(false));
     assert_eq!(g::is_ignorable_event("skill.invoked"), Some(false));
     assert_eq!(g::is_ignorable_event("not.a.real.event"), None);
@@ -175,6 +183,9 @@ fn every_event_payload_roundtrips() {
     );
     roundtrip::<g::HookFired>(
         r#"{"event": "<string>","hook_id": "<string>","kind": "<string>","verdict": "allow","reason": "<string>","duration_ms": 1,"failed": true}"#,
+    );
+    roundtrip::<g::ModelSelected>(
+        r#"{"model": "<string>","previous": "<string>","rule": "<string>","context_tokens": 1}"#,
     );
     roundtrip::<g::SkillsLoaded>(
         r#"{"count": 1,"tokens": 1,"names": "<string>","disabled": "<string>"}"#,

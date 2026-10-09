@@ -175,6 +175,17 @@ export interface ModelDelta {
   text: string;
 }
 
+/** A model choice, and what chose it. Recorded when the choice changes, so the log answers 'why this model?' without a debugger. */
+export interface ModelSelected {
+  model: string;
+  /** the model used before; empty on a session's first call */
+  previous: string;
+  /** the routing rule that fired; empty when the default applied */
+  rule: string;
+  /** the estimate the decision was made from */
+  context_tokens: number;
+}
+
 export const METHODS = {
   sessionAttach: "session.attach",
   promptSubmit: "prompt.submit",
@@ -191,6 +202,7 @@ export const EVENTS = {
   costRecorded: "cost.recorded",
   compactionApplied: "compaction.applied",
   hookFired: "hook.fired",
+  modelSelected: "model.selected",
   skillsLoaded: "skills.loaded",
   skillInvoked: "skill.invoked",
 } as const;

@@ -81,7 +81,9 @@ impl Kind {
 /// a typo in a policy file must not look like it worked.
 pub fn kind_of(key: &str) -> Option<Kind> {
     Some(match key {
-        "model" | "base_url" | "profile" => Kind::FreeOverride,
+        "model" | "base_url" | "profile" | "models" | "router.default" | "router.rules" => {
+            Kind::FreeOverride
+        }
         "budget_tokens" | "keep_newest_tokens" | "max_steps" | "compact_at_percent"
         | "permissions" => Kind::NarrowOnly,
         "skill_dirs" | "disable_skills" => Kind::AddOnly,
@@ -97,6 +99,8 @@ pub enum Value {
     Number(u64),
     Verdict(Verdict),
     List(Vec<String>),
+    Model(ModelSpec),
+    Rules(Vec<RouterRule>),
 }
 
 impl Value {
@@ -106,6 +110,12 @@ impl Value {
             Value::Number(n) => n.to_string(),
             Value::Verdict(v) => format!("{v:?}").to_lowercase(),
             Value::List(items) => items.join(", "),
+            Value::Model(spec) => format!("{} → {} ({})", spec.name, spec.model, spec.base_url),
+            Value::Rules(rules) => rules
+                .iter()
+                .map(|rule| format!("{} → {}", rule.condition.render(), rule.model))
+                .collect::<Vec<_>>()
+                .join("; "),
         }
     }
 }
@@ -142,9 +152,116 @@ impl std::fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
+/// A model a profile offers. Engineers pick one of these by name (ADR-0005/0007: a
+/// profile names models, not endpoints), and the router chooses between them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelSpec {
+    pub name: String,
+    /// The adapter to build it with; only `openai-compat` exists today.
+    pub kind: String,
+    pub base_url: String,
+    pub model: String,
+    /// A *reference* (`env:NAME`, `file:PATH#KEY`, `keychain:…`), never a secret.
+    pub api_key: Option<String>,
+    pub budget_tokens: Option<u64>,
+}
+
+/// The facts a routing rule may read. Deliberately small and inspectable: a model
+/// choice that cannot be explained from the session is a model choice nobody can
+/// debug.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Facts {
+    pub context_tokens: u64,
+    pub step: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fact {
+    ContextTokens,
+    Step,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Op {
+    Gt,
+    Ge,
+    Lt,
+    Le,
+    Eq,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Condition {
+    pub fact: Fact,
+    pub op: Op,
+    pub value: u64,
+}
+
+impl Condition {
+    pub fn matches(&self, facts: &Facts) -> bool {
+        let actual = match self.fact {
+            Fact::ContextTokens => facts.context_tokens,
+            Fact::Step => facts.step,
+        };
+        match self.op {
+            Op::Gt => actual > self.value,
+            Op::Ge => actual >= self.value,
+            Op::Lt => actual < self.value,
+            Op::Le => actual <= self.value,
+            Op::Eq => actual == self.value,
+        }
+    }
+
+    pub fn render(&self) -> String {
+        let fact = match self.fact {
+            Fact::ContextTokens => "context_tokens",
+            Fact::Step => "step",
+        };
+        let op = match self.op {
+            Op::Gt => ">",
+            Op::Ge => ">=",
+            Op::Lt => "<",
+            Op::Le => "<=",
+            Op::Eq => "==",
+        };
+        format!("{fact} {op} {}", self.value)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouterRule {
+    pub condition: Condition,
+    pub model: String,
+}
+
+/// Ordered, first-match-wins. The rule that fired is recorded with the choice, so
+/// "why this model?" has an answer (ADR-0008 §4 applied to routing).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Router {
+    pub default: Option<String>,
+    pub rules: Vec<RouterRule>,
+}
+
+impl Router {
+    /// `(model, Some(rule))` when a rule fired, `(default, None)` otherwise.
+    pub fn select(&self, facts: &Facts) -> (Option<&str>, Option<&RouterRule>) {
+        for rule in &self.rules {
+            if rule.condition.matches(facts) {
+                return (Some(rule.model.as_str()), Some(rule));
+            }
+        }
+        (self.default.as_deref(), None)
+    }
+}
+
 /// The effective configuration, after merging every layer.
 #[derive(Debug, Clone, Default)]
 pub struct Profile {
+    /// Every model the profile offers, in declaration order.
+    pub models: Vec<ModelSpec>,
+    pub router: Router,
+    /// Convenience mirrors of the model a turn starts with, so a caller that only
+    /// needs "the" model does not have to consult the router.
     pub model: Option<String>,
     pub base_url: Option<String>,
     pub api_key: Option<String>,
@@ -162,6 +279,14 @@ pub struct Profile {
 }
 
 impl Profile {
+    /// The model a turn starts with: the router's default, else the first declared.
+    pub fn default_model(&self) -> Option<&ModelSpec> {
+        match self.router.default.as_deref() {
+            Some(name) => self.models.iter().find(|m| m.name == name),
+            None => self.models.first(),
+        }
+    }
+
     pub fn permission(&self, class: ActionClass) -> Option<Verdict> {
         self.permissions
             .iter()
@@ -220,6 +345,73 @@ struct RawProfile {
     disable_skills: Vec<String>,
     #[serde(default)]
     permissions: BTreeMap<String, String>,
+    #[serde(default)]
+    models: Vec<RawModel>,
+    router: Option<RawRouter>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawModel {
+    name: String,
+    kind: Option<String>,
+    base_url: String,
+    model: String,
+    api_key: Option<String>,
+    budget_tokens: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRouter {
+    default: Option<String>,
+    #[serde(default)]
+    rules: Vec<RawRule>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRule {
+    when: String,
+    #[serde(rename = "use")]
+    model: String,
+}
+
+/// `context_tokens > 150000` → a condition. Unknown facts are errors that list the
+/// ones that exist, because a rule that never fires is worse than no rule.
+pub fn parse_condition(text: &str) -> Result<Condition, String> {
+    // Explicit, because `split_once` on a set of characters hides which operator it
+    // found — and `>=` must not be read as `>`.
+    let operators: [(&str, Op); 5] = [
+        (">=", Op::Ge),
+        ("<=", Op::Le),
+        ("==", Op::Eq),
+        (">", Op::Gt),
+        ("<", Op::Lt),
+    ];
+    for (symbol, op) in operators {
+        if let Some((fact, value)) = text.split_once(symbol) {
+            let fact = match fact.trim() {
+                "context_tokens" => Fact::ContextTokens,
+                "step" => Fact::Step,
+                other => {
+                    return Err(format!(
+                        "unknown fact {other:?} — the facts a rule may read are context_tokens and step"
+                    ))
+                }
+            };
+            let value = value.trim().parse::<u64>().map_err(|_| {
+                format!(
+                    "{text:?} needs a whole number to compare against, got {:?}",
+                    value.trim()
+                )
+            })?;
+            return Ok(Condition { fact, op, value });
+        }
+    }
+    Err(format!(
+        "{text:?} needs a comparison, e.g. `context_tokens > 150000`"
+    ))
 }
 
 /// One layer's raw settings, already validated against the key table.
@@ -263,16 +455,68 @@ impl LayerValues {
 
         // reference: a secret is never a literal.
         if let Some(api_key) = raw.api_key.filter(|_| layer != Layer::Project) {
-            if !api_key.starts_with("env:")
-                && !api_key.starts_with("keychain:")
-                && !api_key.starts_with("gateway:")
-            {
+            check_secret_reference(&source, "api_key", &api_key)?;
+            values.push(("api_key".to_string(), Value::Text(api_key)));
+        }
+
+        // A profile may offer several models; the router picks between them.
+        let mut named: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for model in &raw.models {
+            if layer == Layer::Project {
                 return Err(ConfigError::Invalid(format!(
-                    "{source}: `api_key` must be a reference (env:NAME, keychain:…, gateway:…) — \
-                     secrets never live in config (ADR-0008 §5)"
+                    "{source}: the project layer may not define models — a repository must not \
+                     choose where prompts go (ADR-0008)"
                 )));
             }
-            values.push(("api_key".to_string(), Value::Text(api_key)));
+            if !named.insert(model.name.clone()) {
+                return Err(ConfigError::Invalid(format!(
+                    "{source}: model {:?} is defined twice in this file",
+                    model.name
+                )));
+            }
+            let kind = model
+                .kind
+                .clone()
+                .unwrap_or_else(|| "openai-compat".to_string());
+            if !ADAPTER_KINDS.contains(&kind.as_str()) {
+                return Err(ConfigError::Invalid(format!(
+                    "{source}: model {:?} asks for kind {kind:?}; the adapters that exist are {}",
+                    model.name,
+                    ADAPTER_KINDS.join(", ")
+                )));
+            }
+            check_endpoint_reference(&source, "base_url", &model.base_url)?;
+            if let Some(key) = &model.api_key {
+                check_secret_reference(&source, &format!("models.{}.api_key", model.name), key)?;
+            }
+            values.push((
+                format!("models.{}", model.name),
+                Value::Model(ModelSpec {
+                    name: model.name.clone(),
+                    kind,
+                    base_url: model.base_url.clone(),
+                    model: model.model.clone(),
+                    api_key: model.api_key.clone(),
+                    budget_tokens: model.budget_tokens,
+                }),
+            ));
+        }
+        if let Some(router) = &raw.router {
+            if let Some(default) = &router.default {
+                values.push(("router.default".to_string(), Value::Text(default.clone())));
+            }
+            if !router.rules.is_empty() {
+                let mut rules = Vec::new();
+                for rule in &router.rules {
+                    let condition = parse_condition(&rule.when)
+                        .map_err(|e| ConfigError::Invalid(format!("{source}: rule: {e}")))?;
+                    rules.push(RouterRule {
+                        condition,
+                        model: rule.model.clone(),
+                    });
+                }
+                values.push(("router.rules".to_string(), Value::Rules(rules)));
+            }
         }
 
         // narrow-only numbers
@@ -337,7 +581,11 @@ impl LayerValues {
 
         for (key, _) in &values {
             let base = key.split('.').next().unwrap_or(key);
-            if kind_of(base).is_none() {
+            // `permissions.*` and `models.*` take their kind from their table; the
+            // router's keys are declared in full (`router.default`, `router.rules`).
+            let known = kind_of(key).is_some()
+                || (matches!(base, "permissions" | "models") && kind_of(base).is_some());
+            if !known {
                 return Err(ConfigError::Invalid(format!(
                     "{source}: unknown key {base:?}"
                 )));
@@ -374,6 +622,19 @@ impl LayerValues {
             ],
         }
     }
+}
+
+const ADAPTER_KINDS: &[&str] = &["openai-compat"];
+
+fn check_secret_reference(source: &str, key: &str, value: &str) -> Result<(), ConfigError> {
+    let known = ["env:", "file:", "keychain:", "gateway:"];
+    if known.iter().any(|prefix| value.starts_with(prefix)) {
+        return Ok(());
+    }
+    Err(ConfigError::Invalid(format!(
+        "{source}: `{key}` must be a reference (env:NAME, file:PATH#KEY, keychain:…, gateway:…) — \
+         secrets never live in config (ADR-0008 §5)"
+    )))
 }
 
 fn check_endpoint_reference(source: &str, key: &str, value: &str) -> Result<(), ConfigError> {
@@ -454,7 +715,62 @@ pub fn resolve(layers: &[(Layer, PathBuf)], workspace: &Path) -> Result<Profile,
         present.push(values);
     }
     present.sort_by_key(|l| l.layer);
-    Ok(merge(&present))
+    let mut profile = merge(&present);
+    finish(&mut profile)?;
+    Ok(profile)
+}
+
+/// Rules that only make sense once every layer has been merged: the shorthand form,
+/// and a router that may only name models that exist.
+fn finish(profile: &mut Profile) -> Result<(), ConfigError> {
+    // `model`/`base_url`/`api_key` on their own are the one-model shorthand, which
+    // is what every profile written before `[[models]]` existed looks like.
+    if profile.models.is_empty() {
+        if let (Some(base_url), Some(model)) = (profile.base_url.clone(), profile.model.clone()) {
+            profile.models.push(ModelSpec {
+                name: "default".to_string(),
+                kind: "openai-compat".to_string(),
+                base_url,
+                model,
+                api_key: profile.api_key.clone(),
+                budget_tokens: profile.budget_tokens,
+            });
+        }
+    }
+    if profile.router.default.is_none() {
+        profile.router.default = profile.models.first().map(|m| m.name.clone());
+    }
+
+    let known: Vec<String> = profile.models.iter().map(|m| m.name.clone()).collect();
+    let mut referenced: Vec<&str> = profile
+        .router
+        .rules
+        .iter()
+        .map(|r| r.model.as_str())
+        .collect();
+    if let Some(default) = profile.router.default.as_deref() {
+        referenced.push(default);
+    }
+    for name in referenced {
+        if !known.iter().any(|k| k == name) {
+            return Err(ConfigError::Invalid(format!(
+                "the router names a model {name:?} that no layer defines (defined: {})",
+                if known.is_empty() {
+                    "none".to_string()
+                } else {
+                    known.join(", ")
+                }
+            )));
+        }
+    }
+
+    // Keep the convenience mirrors pointed at the model a turn starts with.
+    if let Some(first) = profile.default_model().cloned() {
+        profile.model = Some(first.model.clone());
+        profile.base_url = Some(first.base_url.clone());
+        profile.api_key = first.api_key.clone();
+    }
+    Ok(())
 }
 
 fn merge(layers: &[LayerValues]) -> Profile {
@@ -465,7 +781,11 @@ fn merge(layers: &[LayerValues]) -> Profile {
     for layer in layers {
         for (key, value) in &layer.values {
             let base = key.split('.').next().unwrap_or(key).to_string();
-            let kind = kind_of(&base).expect("checked when loading");
+            // The full key first: `router.default` is a key of its own, while
+            // `permissions.*` and `models.*` take their kind from the table.
+            let kind = kind_of(key)
+                .or_else(|| kind_of(&base))
+                .expect("checked when loading");
             match kind {
                 Kind::NarrowOnly => {
                     // Strictest wins: numbers by minimum, verdicts by rank.
@@ -495,6 +815,44 @@ fn merge(layers: &[LayerValues]) -> Profile {
                                 current.overridden.push((layer.layer, value.clone()));
                             }
                         }
+                    }
+                }
+                Kind::FreeOverride if key.starts_with("models.") => {
+                    // A model definition is free-override (the most local layer decides
+                    // which endpoint *this user* talks to), but its budget is not: an
+                    // organisation's ceiling survives a local redefinition.
+                    match (winners.get_mut(key), value) {
+                        (Some(current), Value::Model(new)) => {
+                            if let Value::Model(old) = &current.value {
+                                let mut merged = new.clone();
+                                merged.budget_tokens = match (old.budget_tokens, new.budget_tokens)
+                                {
+                                    (Some(a), Some(b)) => Some(a.min(b)),
+                                    (Some(a), None) => Some(a),
+                                    (None, b) => b,
+                                };
+                                let old_value = current.value.clone();
+                                let old_layer = current.layer;
+                                current.value = Value::Model(merged);
+                                current.layer = layer.layer;
+                                current.source = layer.source.clone();
+                                current.overridden.push((old_layer, old_value));
+                            }
+                        }
+                        (None, _) => {
+                            winners.insert(
+                                key.clone(),
+                                Provenance {
+                                    key: key.clone(),
+                                    kind,
+                                    value: value.clone(),
+                                    layer: layer.layer,
+                                    source: layer.source.clone(),
+                                    overridden: Vec::new(),
+                                },
+                            );
+                        }
+                        _ => {}
                     }
                 }
                 Kind::FreeOverride | Kind::Reference => {
@@ -561,6 +919,11 @@ fn merge(layers: &[LayerValues]) -> Profile {
             ("keep_newest_tokens", Value::Number(n)) => profile.keep_newest_tokens = Some(*n),
             ("max_steps", Value::Number(n)) => profile.max_steps = Some(*n as usize),
             ("compact_at_percent", Value::Number(n)) => profile.compact_at_percent = Some(*n),
+            (key, Value::Model(spec)) if key.starts_with("models.") => {
+                profile.models.push(spec.clone())
+            }
+            ("router.default", Value::Text(name)) => profile.router.default = Some(name.clone()),
+            ("router.rules", Value::Rules(rules)) => profile.router.rules = rules.clone(),
             ("skill_dirs", Value::List(items)) => {
                 profile.skill_dirs = items.iter().map(PathBuf::from).collect()
             }
@@ -573,6 +936,7 @@ fn merge(layers: &[LayerValues]) -> Profile {
             _ => {}
         }
     }
+    profile.models.sort_by(|a, b| a.name.cmp(&b.name));
     profile.provenance = winners;
     profile
 }
@@ -900,6 +1264,248 @@ mod tests {
             Some(Verdict::Ask),
             "the built-in default, not an invented one"
         );
+    }
+
+    #[test]
+    fn several_models_and_a_router_can_be_declared() {
+        let ws = workspace();
+        let user = write(
+            &ws,
+            "u.toml",
+            "[[models]]\n\
+             name = \"fast\"\n\
+             base_url = \"https://api.deepseek.com\"\n\
+             model = \"deepseek-chat\"\n\
+             api_key = \"env:DEEPSEEK_API_KEY\"\n\
+             budget_tokens = 128000\n\n\
+             [[models]]\n\
+             name = \"long\"\n\
+             base_url = \"https://api.moonshot.cn/v1\"\n\
+             model = \"kimi-k2\"\n\
+             budget_tokens = 512000\n\n\
+             [router]\n\
+             default = \"fast\"\n\
+             [[router.rules]]\n\
+             when = \"context_tokens > 150000\"\n\
+             use = \"long\"\n",
+        );
+        let profile = resolve(&[(Layer::User, user)], &ws).unwrap();
+        assert_eq!(profile.models.len(), 2);
+        assert_eq!(profile.default_model().unwrap().name, "fast");
+        assert_eq!(
+            profile.models[0].kind, "openai-compat",
+            "the default adapter"
+        );
+        assert_eq!(profile.models[1].budget_tokens, Some(512_000));
+
+        let (chosen, rule) = profile.router.select(&Facts {
+            context_tokens: 10,
+            step: 1,
+        });
+        assert_eq!(chosen, Some("fast"));
+        assert!(rule.is_none(), "the default, not a rule");
+        let (chosen, rule) = profile.router.select(&Facts {
+            context_tokens: 200_000,
+            step: 4,
+        });
+        assert_eq!(chosen, Some("long"));
+        assert_eq!(rule.unwrap().condition.render(), "context_tokens > 150000");
+
+        // Every model answers "why is this the value?"
+        assert_eq!(profile.explain("models.fast").unwrap().layer, Layer::User);
+        assert!(profile.explain("router.rules").is_some());
+    }
+
+    #[test]
+    fn the_shorthand_still_means_one_model() {
+        let ws = workspace();
+        let user = write(
+            &ws,
+            "u.toml",
+            "base_url = \"https://api.deepseek.com\"\nmodel = \"deepseek-chat\"\n",
+        );
+        let profile = resolve(&[(Layer::User, user)], &ws).unwrap();
+        assert_eq!(profile.models.len(), 1, "one model, synthesized");
+        assert_eq!(profile.models[0].name, "default");
+        assert_eq!(profile.router.default.as_deref(), Some("default"));
+        assert_eq!(
+            profile.base_url.as_deref(),
+            Some("https://api.deepseek.com")
+        );
+    }
+
+    #[test]
+    fn a_repository_may_not_define_a_model() {
+        let ws = workspace();
+        let project = write(
+            &ws,
+            "p.toml",
+            "[[models]]\nname = \"sneaky\"\nbase_url = \"http://elsewhere.invalid\"\nmodel = \"m\"\n",
+        );
+        let err = resolve(&[(Layer::Project, project)], &ws)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("may not define models"), "{err}");
+    }
+
+    #[test]
+    fn a_project_may_route_among_models_it_did_not_define() {
+        let ws = workspace();
+        let user = write(
+            &ws,
+            "u.toml",
+            "[[models]]\nname = \"fast\"\nbase_url = \"https://a.invalid\"\nmodel = \"m\"\n\n\
+             [[models]]\nname = \"cheap\"\nbase_url = \"https://b.invalid\"\nmodel = \"m\"\n",
+        );
+        let project = write(
+            &ws,
+            "p.toml",
+            "[router]\ndefault = \"cheap\"\n[[router.rules]]\nwhen = \"step > 3\"\nuse = \"cheap\"\n",
+        );
+        let profile = resolve(&[(Layer::User, user), (Layer::Project, project)], &ws).unwrap();
+        assert_eq!(
+            profile.router.default.as_deref(),
+            Some("cheap"),
+            "the project may shape routing within what exists"
+        );
+    }
+
+    #[test]
+    fn a_model_budget_only_narrows_across_layers() {
+        let ws = workspace();
+        let org = write(
+            &ws,
+            "org.toml",
+            "[[models]]\nname = \"m\"\nbase_url = \"https://a.invalid\"\nmodel = \"x\"\nbudget_tokens = 100000\n",
+        );
+        // The user redefines the same model with a larger budget, and a different endpoint.
+        let user = write(
+            &ws,
+            "u.toml",
+            "[[models]]\nname = \"m\"\nbase_url = \"https://b.invalid\"\nmodel = \"y\"\nbudget_tokens = 500000\n",
+        );
+        let profile = resolve(&[(Layer::Org, org), (Layer::User, user)], &ws).unwrap();
+        let model = &profile.models[0];
+        assert_eq!(
+            model.base_url, "https://b.invalid",
+            "the local endpoint wins"
+        );
+        assert_eq!(model.model, "y");
+        assert_eq!(
+            model.budget_tokens,
+            Some(100_000),
+            "but the org's ceiling does not"
+        );
+    }
+
+    #[test]
+    fn a_router_that_names_a_missing_model_is_an_error() {
+        let ws = workspace();
+        let user = write(
+            &ws,
+            "u.toml",
+            "[[models]]\nname = \"fast\"\nbase_url = \"https://a.invalid\"\nmodel = \"m\"\n\n\
+             [router]\ndefault = \"fast\"\n[[router.rules]]\nwhen = \"step > 1\"\nuse = \"ghost\"\n",
+        );
+        let err = resolve(&[(Layer::User, user)], &ws)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("ghost") && err.contains("fast"), "{err}");
+    }
+
+    #[test]
+    fn conditions_are_checked_where_they_are_written() {
+        let ws = workspace();
+        for (when, expected) in [
+            ("token_count > 10", "unknown fact"),
+            ("context_tokens 10", "needs a comparison"),
+            ("context_tokens > many", "whole number"),
+        ] {
+            let user = write(
+                &ws,
+                "u.toml",
+                &format!(
+                    "base_url = \"https://a.invalid\"\nmodel = \"m\"\n[router]\n[[router.rules]]\nwhen = \"{when}\"\nuse = \"default\"\n"
+                ),
+            );
+            let err = resolve(&[(Layer::User, user)], &ws)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(expected), "{when}: {err}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_adapter_kind_is_refused_with_the_list() {
+        let ws = workspace();
+        let user = write(
+            &ws,
+            "u.toml",
+            "[[models]]\nname = \"m\"\nkind = \"telepathy\"\nbase_url = \"https://a.invalid\"\nmodel = \"x\"\n",
+        );
+        let err = resolve(&[(Layer::User, user)], &ws)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("telepathy") && err.contains("openai-compat"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn conditions_evaluate_the_facts_they_name() {
+        let condition = parse_condition("context_tokens >= 1000").unwrap();
+        assert!(!condition.matches(&Facts {
+            context_tokens: 999,
+            step: 0
+        }));
+        assert!(condition.matches(&Facts {
+            context_tokens: 1000,
+            step: 0
+        }));
+        let step = parse_condition("step == 3").unwrap();
+        assert!(step.matches(&Facts {
+            context_tokens: 0,
+            step: 3
+        }));
+        assert!(!step.matches(&Facts {
+            context_tokens: 0,
+            step: 4
+        }));
+        let less = parse_condition("step < 2").unwrap();
+        assert!(less.matches(&Facts {
+            context_tokens: 0,
+            step: 1
+        }));
+    }
+
+    #[test]
+    fn the_router_takes_the_first_matching_rule() {
+        let router = Router {
+            default: Some("fallback".to_string()),
+            rules: vec![
+                RouterRule {
+                    condition: parse_condition("context_tokens > 10").unwrap(),
+                    model: "big".to_string(),
+                },
+                RouterRule {
+                    condition: parse_condition("context_tokens > 10").unwrap(),
+                    model: "never".to_string(),
+                },
+            ],
+        };
+        let (model, rule) = router.select(&Facts {
+            context_tokens: 11,
+            step: 0,
+        });
+        assert_eq!(model, Some("big"));
+        assert_eq!(rule.unwrap().model, "big");
+        let (model, rule) = router.select(&Facts {
+            context_tokens: 1,
+            step: 0,
+        });
+        assert_eq!(model, Some("fallback"));
+        assert!(rule.is_none());
     }
 
     #[test]

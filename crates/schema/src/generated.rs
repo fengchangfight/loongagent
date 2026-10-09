@@ -231,6 +231,18 @@ pub struct ModelDelta {
     pub text: String,
 }
 
+/// A model choice, and what chose it. Recorded when the choice changes, so the log answers 'why this model?' without a debugger.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelSelected {
+    pub model: String,
+    /// the model used before; empty on a session's first call
+    pub previous: String,
+    /// the routing rule that fired; empty when the default applied
+    pub rule: String,
+    /// the estimate the decision was made from
+    pub context_tokens: u64,
+}
+
 /// JSON-RPC method names (ADR-0002).
 pub mod method {
     /// Attach a thin client to the local agent server (ADR-0009).
@@ -252,6 +264,7 @@ pub mod event {
     pub const COST_RECORDED: &str = "cost.recorded";
     pub const COMPACTION_APPLIED: &str = "compaction.applied";
     pub const HOOK_FIRED: &str = "hook.fired";
+    pub const MODEL_SELECTED: &str = "model.selected";
     pub const SKILLS_LOADED: &str = "skills.loaded";
     pub const SKILL_INVOKED: &str = "skill.invoked";
 }
@@ -277,6 +290,7 @@ pub const EVENT_KINDS: &[(&str, bool)] = &[
     ("cost.recorded", false),
     ("compaction.applied", false),
     ("hook.fired", false),
+    ("model.selected", false),
     ("skills.loaded", false),
     ("skill.invoked", false),
 ];

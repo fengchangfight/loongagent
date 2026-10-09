@@ -363,7 +363,13 @@ pub struct Kernel {
     ledger: Ledger,
     tools: Registry,
     pdp: Pdp,
-    model: Box<dyn Model>,
+    /// Every model this session may use, by the name the profile gave it.
+    models: std::collections::BTreeMap<String, Box<dyn Model>>,
+    /// The routing policy from the merged configuration (ADR-0008). Which model to
+    /// use is decided per call from facts about the session — and recorded.
+    router: loong_config::Router,
+    /// The model in use, so a switch is visible in the log.
+    selected_model: String,
     config: KernelConfig,
     /// The typed conversation the model sees. Kept in step with the ledger by
     /// construction: every mutation goes through `record_*`.
@@ -408,7 +414,11 @@ impl Kernel {
         config: KernelConfig,
         model: Box<dyn Model>,
     ) -> Result<Self, KernelError> {
-        Self::build(SessionLog::create(log_path)?, config, model)
+        Self::build(
+            SessionLog::create(log_path)?,
+            config,
+            vec![("default".to_string(), model)],
+        )
     }
 
     pub fn open(
@@ -416,14 +426,50 @@ impl Kernel {
         config: KernelConfig,
         model: Box<dyn Model>,
     ) -> Result<Self, KernelError> {
-        Self::build(SessionLog::open(log_path)?, config, model)
+        Self::build(
+            SessionLog::open(log_path)?,
+            config,
+            vec![("default".to_string(), model)],
+        )
+    }
+
+    /// A session with several models and the router that chooses between them.
+    pub fn create_with_models(
+        log_path: impl AsRef<Path>,
+        config: KernelConfig,
+        models: Vec<(String, Box<dyn Model>)>,
+    ) -> Result<Self, KernelError> {
+        Self::build(SessionLog::create(log_path)?, config, models)
+    }
+
+    pub fn open_with_models(
+        log_path: impl AsRef<Path>,
+        config: KernelConfig,
+        models: Vec<(String, Box<dyn Model>)>,
+    ) -> Result<Self, KernelError> {
+        Self::build(SessionLog::open(log_path)?, config, models)
     }
 
     fn build(
         log: SessionLog,
         mut config: KernelConfig,
-        model: Box<dyn Model>,
+        models: Vec<(String, Box<dyn Model>)>,
     ) -> Result<Self, KernelError> {
+        let router = config.settings.router.clone();
+        let mut by_name = std::collections::BTreeMap::new();
+        for (name, model) in models {
+            by_name.insert(name, model);
+        }
+        // The router's default, else whatever exists. A rule that names a model this
+        // session does not have falls back here instead of failing the turn.
+        let selected_model = router
+            .default
+            .clone()
+            .filter(|name| by_name.contains_key(name))
+            .or_else(|| by_name.keys().next().cloned())
+            .ok_or_else(|| {
+                KernelError::Model(ModelError::Transport("no model configured".to_string()))
+            })?;
         // Narrow-only keys (ADR-0008 §2): the strictest of what the caller asked for
         // and what the layered configuration says. One place does this arithmetic,
         // so a session flag can never widen a cap that config set.
@@ -536,7 +582,9 @@ impl Kernel {
             ledger,
             tools,
             pdp,
-            model,
+            models: by_name,
+            router,
+            selected_model,
             config,
             messages: Vec::new(),
             entry_of: Vec::new(),
@@ -958,8 +1006,28 @@ impl Kernel {
                 messages: self.messages.clone(),
                 tools: self.tool_specs(),
             };
+            // Routing happens here, per call, from facts the session can explain —
+            // and a change of model is an event, not a hidden optimisation.
+            let facts = loong_config::Facts {
+                context_tokens: self.ledger.total_tokens(),
+                step: step as u64,
+            };
+            let (chosen, rule) = self.router.select(&facts);
+            let chosen = chosen
+                .filter(|name| self.models.contains_key(*name))
+                .unwrap_or(self.selected_model.as_str())
+                .to_string();
+            if chosen != self.selected_model {
+                events.push(self.record_model_selected(
+                    &chosen,
+                    rule.map(|r| r.condition.render()),
+                    &facts,
+                )?);
+            }
             let response = self
-                .model
+                .models
+                .get_mut(&chosen)
+                .expect("the chosen model exists")
                 .complete_streaming(&request, on_delta)
                 .map_err(KernelError::Model)?;
             events.push(self.record_cost(&response.usage)?);
@@ -1339,6 +1407,27 @@ impl Kernel {
             output: output.to_string(),
         });
         Ok(seq)
+    }
+
+    fn record_model_selected(
+        &mut self,
+        model: &str,
+        rule: Option<String>,
+        facts: &loong_config::Facts,
+    ) -> Result<u64, KernelError> {
+        let previous = std::mem::replace(&mut self.selected_model, model.to_string());
+        Ok(self
+            .log
+            .append(
+                gen::event::MODEL_SELECTED,
+                json!({
+                    "model": model,
+                    "previous": previous,
+                    "rule": rule.unwrap_or_else(|| "the router's default".to_string()),
+                    "context_tokens": facts.context_tokens,
+                }),
+            )?
+            .seq)
     }
 
     fn record_cost(&mut self, usage: &Usage) -> Result<u64, KernelError> {
@@ -2464,6 +2553,67 @@ Step one: breathe.
             .filter(|e| e.source == "assistant")
             .count();
         assert_eq!(history, 1, "one assistant entry, not one per delta");
+    }
+
+    #[test]
+    fn the_router_can_switch_models_and_the_log_says_why() {
+        let t = Temp::new();
+        // The first model answers with a tool call, so the turn needs a second model
+        // call — and the rule fires on the step number.
+        let (first, seen_first) = RecordingModel::new(vec![
+            response(
+                vec![call("c1", "read_file", json!({"path": "note.txt"}))],
+                None,
+            ),
+            response(vec![], Some("the first model finished it")),
+        ]);
+        let (second, seen_second) = RecordingModel::new(vec![response(vec![], Some("second"))]);
+        std::fs::write(t.dir.join("note.txt"), "hi\n").unwrap();
+
+        let mut config = KernelConfig::new(&t.dir);
+        config.settings.router = loong_config::Router {
+            default: Some("first".to_string()),
+            rules: vec![loong_config::RouterRule {
+                condition: loong_config::parse_condition("step > 1").unwrap(),
+                model: "second".to_string(),
+            }],
+        };
+        let mut k = Kernel::create_with_models(
+            &t.log,
+            config,
+            vec![
+                ("first".to_string(), Box::new(first)),
+                ("second".to_string(), Box::new(second)),
+            ],
+        )
+        .unwrap();
+
+        let outcome = k.submit("read the note").unwrap();
+        assert_eq!(
+            outcome.final_text.as_deref(),
+            Some("second"),
+            "the second call went to the routed model"
+        );
+        assert_eq!(
+            seen_first.lock().unwrap().len(),
+            1,
+            "the first model was used once"
+        );
+        assert_eq!(seen_second.lock().unwrap().len(), 1);
+
+        // The switch is a fact in the log, with the rule that caused it.
+        let events = loong_eventlog::replay(&t.log).unwrap().events;
+        let switch = events
+            .iter()
+            .find(|e| e.kind == ev::MODEL_SELECTED)
+            .expect("a model switch is recorded");
+        assert_eq!(switch.data["model"], "second");
+        assert_eq!(switch.data["previous"], "first");
+        assert_eq!(switch.data["rule"], "step > 1");
+        assert!(
+            switch.data["context_tokens"].as_u64().is_some(),
+            "with the fact it used"
+        );
     }
 
     #[test]

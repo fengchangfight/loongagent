@@ -47,6 +47,50 @@ same gates run wherever the repository is hosted. Both install rustfmt (the
 toolchain uses the `minimal` profile) and use the TUNA mirror, because this project
 is built from behind one.
 
+### Profiles: several models, and a router you can explain
+
+`loongagent setup` writes one interactively (it pre-fills the base URL, asks for the
+model id from your provider's docs, and keeps the key out of the profile). The format:
+
+```toml
+[[models]]
+name = "fast"                 # what you and the router call it
+kind = "openai-compat"        # the only adapter today
+base_url = "https://api.deepseek.com"
+model = "<the id from your provider's docs>"
+api_key = "file:credentials.toml#DEEPSEEK_API_KEY"   # or env:NAME; never a literal
+budget_tokens = 128000
+
+[router]
+default = "fast"
+[[router.rules]]              # first match wins, per model call
+when = "context_tokens > 150000"
+use  = "long"
+```
+
+What a rule may read is deliberately small — `context_tokens` and `step` — because a
+model choice nobody can explain is a model choice nobody can debug. The rule that
+fired is written to the session log as `model.selected`, together with the estimate
+it used, so "why this model?" has an answer afterwards.
+
+Merge rules, in the spirit of ADR-0008 §2: a **project layer may not define models**
+(a repository must not choose where prompts go), though it may route among models
+that exist; redefining a model in a more local layer takes the endpoint but **not a
+larger budget** (ceilings only narrow); `router.default` and `router.rules` are
+free-override, with the project layer's choices checked against the models that exist.
+
+Secrets are references: `env:NAME`, `file:PATH#KEY` (relative paths resolve beside the
+profile in use), and `keychain:`/`gateway:` — which are recognised and refused with a
+reason, because no credential store is wired yet (ADR-0008 §5). `loongagent setup`
+stores a pasted key in `credentials.toml` with mode 0600 and writes only the
+reference into the profile.
+
+### Sessions live in the state directory
+
+`$XDG_STATE_HOME/loongagent/projects/<project>/session.jsonl`, keyed by the project
+path (readable slug plus a hash, so two paths cannot quietly share a session). Nobody
+has to pass `--session`; doing so overrides it.
+
 ### The toolchain, and what is pinned where
 
 `rust-toolchain.toml` pins the **channel** (`stable`) so a developer's machine needs
@@ -317,15 +361,19 @@ binary the TUI spawns as its server (used by the end-to-end test).
 8. **Post-tool hook verdicts are recorded but cannot undo anything**, and hooks
    deliberately cannot rewrite a tool call — the moment they could, the loop would
    stop being small enough to audit.
-9. **`cargo clippy` is not a gate yet**: the code has never had a lint sweep, and
+9. **The TUI has no debug pane yet**: the context/ledger view (what the model is
+   actually being sent, entry by entry, with its token categories) is requested and
+   not built. `loongagent config show` and `cat .loongagent/session.jsonl` are the
+   current substitutes.
+10. **`cargo clippy` is not a gate yet**: the code has never had a lint sweep, and
    adding a gate that fails on the first run is worse than not having it. It is the
    next hygiene step after the formatter sweep.
-10. **Configuration is layered but not yet distributed**: ADR-0008's signed pack
+11. **Configuration is layered but not yet distributed**: ADR-0008's signed pack
    envelope is not implemented, so the org layer is a plain file an administrator
    owns and nothing is tamper-resistant; `keychain:` and `gateway:` credential
    references are recognised and refused (no credential store is wired), and there
    is no `--set key=value` for ad-hoc session overrides.
-11. **Not started**: session
+12. **Not started**: session
    export/import, WASM extensions, the web client, compaction, the control plane.
 
 ## Cutting a release

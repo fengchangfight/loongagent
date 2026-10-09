@@ -341,6 +341,22 @@ fields = [
   { name = "text", type = "string", doc = "the fragment just written, not the whole answer so far" },
 ]
 
+[[types]]
+name = "ModelSelected"
+kind = "struct"
+doc = "A model choice, and what chose it. Recorded when the choice changes, so the log answers 'why this model?' without a debugger."
+fields = [
+  { name = "model", type = "string" },
+  { name = "previous", type = "string", doc = "the model used before; empty on a session's first call" },
+  { name = "rule", type = "string", doc = "the routing rule that fired; empty when the default applied" },
+  { name = "context_tokens", type = "u64", doc = "the estimate the decision was made from" },
+]
+
+[[events]]
+name = "model.selected"
+payload = "ModelSelected"
+ignorable = false
+
 [[events]]
 name = "skills.loaded"
 payload = "SkillsLoaded"

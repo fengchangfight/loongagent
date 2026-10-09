@@ -412,10 +412,7 @@ impl App {
         // Show where typing goes. Without this the prompt is a guess, and the
         // terminal's own cursor stays hidden.
         if self.pending.is_none() {
-            frame.set_cursor_position((
-                areas[2].x + 1 + caret,
-                areas[2].y + 1,
-            ));
+            frame.set_cursor_position((areas[2].x + 1 + caret, areas[2].y + 1));
         }
 
         let mut hints = vec![
@@ -423,7 +420,10 @@ impl App {
             Span::raw(" send  "),
             Span::styled("pgup/pgdn", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" scroll  "),
-            Span::styled("ctrl-pgup/pgdn", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "ctrl-pgup/pgdn",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" transcript  "),
             Span::styled("ctrl-c", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" quit"),
@@ -505,7 +505,7 @@ pub fn run<T: Transport + Send + 'static>(
     intro: Vec<String>,
 ) -> Result<(), String> {
     use ratatui::backend::CrosstermBackend;
-    use ratatui::crossterm::event::{self, EnableMouseCapture, DisableMouseCapture};
+    use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture};
     use ratatui::crossterm::execute;
     use ratatui::crossterm::terminal::{
         disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -524,7 +524,12 @@ pub fn run<T: Transport + Send + 'static>(
     let mut app = App::new(session, schema);
     // Intro lines belong in the conversation view, not the one-line diagnostics
     // strip: the session path and "no model configured" both need to be readable.
-    app.push_lines(intro.into_iter().map(|line| format!("· {line}")).collect::<Vec<_>>());
+    app.push_lines(
+        intro
+            .into_iter()
+            .map(|line| format!("· {line}"))
+            .collect::<Vec<_>>(),
+    );
 
     enable_raw_mode().map_err(|e| e.to_string())?;
     let mut stdout = std::io::stdout();
@@ -566,7 +571,12 @@ pub fn run<T: Transport + Send + 'static>(
     })();
 
     disable_raw_mode().ok();
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture).ok();
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )
+    .ok();
     terminal.show_cursor().ok();
     outcome
 }
@@ -834,7 +844,10 @@ mod tests {
         type_text(&mut app, "你好世界");
         app.handle_key(key(KeyCode::Left));
         app.handle_key(key(KeyCode::Backspace));
-        assert_eq!(app.input, "你好界", "a whole character goes, not a broken byte");
+        assert_eq!(
+            app.input, "你好界",
+            "a whole character goes, not a broken byte"
+        );
         app.handle_key(key(KeyCode::Home));
         app.handle_key(key(KeyCode::Right));
         app.handle_key(key(KeyCode::Char('，')));

@@ -109,6 +109,12 @@
     "ModelDelta": {
       "turn_id": 1,
       "text": "<string>"
+    },
+    "ModelSelected": {
+      "model": "<string>",
+      "previous": "<string>",
+      "rule": "<string>",
+      "context_tokens": 1
     }
   },
   "methods": [
@@ -172,6 +178,11 @@
     {
       "name": "hook.fired",
       "payload": "HookFired",
+      "ignorable": false
+    },
+    {
+      "name": "model.selected",
+      "payload": "ModelSelected",
       "ignorable": false
     },
     {

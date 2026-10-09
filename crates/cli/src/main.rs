@@ -30,6 +30,7 @@ loongagent — a firm-internal coding agent
 
 USAGE:
   loongagent server --stdio [--session PATH] [--cwd DIR] [--model NAME]
+  loongagent setup          [--profile PATH]                                write a profile
   loongagent tui            [--session PATH] [--cwd DIR] [--model NAME]   full-screen
   loongagent repl           [--session PATH] [--cwd DIR] [--model NAME]   line mode (any pipe)
   loongagent web            [--session PATH] [--cwd DIR] [--model NAME] [--port N] [--bind IP]
@@ -171,7 +172,17 @@ impl Args {
 
     /// The session file: explicit if asked, otherwise the per-project default.
     fn session_path(&self) -> PathBuf {
-        self.session.clone().unwrap_or_else(|| default_session_path(&self.cwd))
+        self.session
+            .clone()
+            .unwrap_or_else(|| default_session_path(&self.cwd))
+    }
+
+    /// Where a relative credential path is looked up: beside the profile in use.
+    fn profile_base(&self) -> PathBuf {
+        self.profile
+            .as_ref()
+            .and_then(|path| path.parent().map(Path::to_path_buf))
+            .unwrap_or_else(config_dir)
     }
 
     fn session_id(&self) -> String {
@@ -191,6 +202,311 @@ impl Args {
 
 fn non_empty_env(name: &str) -> Option<std::ffi::OsString> {
     std::env::var_os(name).filter(|value| !value.is_empty())
+}
+
+/// What the wizard collected, as data: rendering and writing are separate, so the
+/// answers can be tested without a terminal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SetupPlan {
+    models: Vec<SetupModel>,
+    budget_tokens: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SetupModel {
+    name: String,
+    base_url: String,
+    model: String,
+    /// `Some(key)` when the key was pasted (it goes to the credentials file),
+    /// `None` when the profile should reference the environment.
+    key: Option<String>,
+    env_name: String,
+    budget_tokens: u64,
+}
+
+/// The providers the wizard knows. Only the base URL is pre-filled: model ids change
+/// every few months, and a wizard that hard-codes today's names is a wizard that goes
+/// stale silently. The user copies the id from their provider's docs.
+const PROVIDERS: &[(&str, &str, &str, &str)] = &[
+    (
+        "1",
+        "DeepSeek",
+        "https://api.deepseek.com",
+        "DEEPSEEK_API_KEY",
+    ),
+    (
+        "2",
+        "Moonshot / Kimi",
+        "https://api.moonshot.cn/v1",
+        "MOONSHOT_API_KEY",
+    ),
+    ("3", "OpenAI", "https://api.openai.com/v1", "OPENAI_API_KEY"),
+    (
+        "4",
+        "a local server (vLLM, LM Studio, Ollama)",
+        "http://127.0.0.1:8000/v1",
+        "LOONGAGENT_API_KEY",
+    ),
+    ("5", "something else", "", "LOONGAGENT_API_KEY"),
+];
+
+fn ask(prompt: &str, default: Option<&str>, lines: &mut dyn Iterator<Item = String>) -> String {
+    print!("{prompt}");
+    match default {
+        Some(default) if !default.is_empty() => print!(" [{default}]"),
+        _ => {}
+    }
+    print!(": ");
+    let _ = std::io::stdout().flush();
+    let answer = lines.next().unwrap_or_default();
+    let answer = answer.trim().to_string();
+    if answer.is_empty() {
+        default.unwrap_or("").to_string()
+    } else {
+        answer
+    }
+}
+
+/// Collect the answers. Split from input and from writing so it can be tested.
+fn plan_from(lines: &mut dyn Iterator<Item = String>) -> Result<SetupPlan, String> {
+    println!("Which provider?");
+    for (key, label, base, _) in PROVIDERS {
+        println!(
+            "  {key}) {label}{}",
+            if base.is_empty() {
+                String::new()
+            } else {
+                format!("  ({base})")
+            }
+        );
+    }
+    let choice = ask("choice", Some("1"), lines);
+    let (_, label, base_url, env_name) = PROVIDERS
+        .iter()
+        .find(|(key, ..)| *key == choice)
+        .ok_or_else(|| format!("{choice:?} is not one of the choices"))?;
+
+    let base_url = ask("base_url", Some(base_url), lines);
+    if base_url.is_empty() {
+        return Err("a base_url is required".to_string());
+    }
+    println!("The model id comes from your provider's docs (e.g. their chat-completions model).");
+    let model = ask("model id", None, lines);
+    if model.is_empty() {
+        return Err("a model id is required".to_string());
+    }
+    let name = ask("a short name for it", Some(model.as_str()), lines);
+
+    let budget = ask(
+        "context budget in tokens (0 = no limit)",
+        Some("200000"),
+        lines,
+    )
+    .parse::<u64>()
+    .map_err(|_| "the budget must be a whole number".to_string())?;
+    // Asked last, so nothing else follows the secret on screen.
+    print!("api_key (paste it, or press Enter to reference ${env_name} instead): ");
+    let _ = std::io::stdout().flush();
+    let pasted = lines.next().unwrap_or_default().trim().to_string();
+    let key = if pasted.is_empty() {
+        None
+    } else {
+        Some(pasted)
+    };
+    if key.is_some() {
+        println!(
+            "  → the key goes to the credentials file (mode 0600), and the profile references it"
+        );
+    } else {
+        println!("  → the profile will reference env:{env_name}; export it in your shell");
+    }
+
+    let first_base_url = base_url.clone();
+    let mut models = vec![SetupModel {
+        name,
+        base_url,
+        model,
+        key,
+        env_name: env_name.to_string(),
+        budget_tokens: budget,
+    }];
+
+    // A second model is what makes the router useful, so offer it rather than
+    // document it.
+    loop {
+        let more = ask("add another model for routing? (y/N)", Some("n"), lines);
+        if !more.eq_ignore_ascii_case("y") {
+            break;
+        }
+        let base_url = ask("base_url", Some(first_base_url.as_str()), lines);
+        let model = ask("model id", None, lines);
+        if model.is_empty() {
+            return Err("a model id is required".to_string());
+        }
+        let name = ask("a short name for it", Some(model.as_str()), lines);
+        print!("api_key (paste it, or Enter for env:LOONGAGENT_API_KEY): ");
+        let _ = std::io::stdout().flush();
+        let pasted = lines.next().unwrap_or_default().trim().to_string();
+        models.push(SetupModel {
+            name,
+            base_url,
+            model,
+            key: if pasted.is_empty() {
+                None
+            } else {
+                Some(pasted)
+            },
+            env_name: "LOONGAGENT_API_KEY".to_string(),
+            budget_tokens: budget,
+        });
+        println!("  (routing rules are written by hand; see the file's comments)");
+    }
+
+    println!("Configured {} from {label}.", models[0].name);
+    Ok(SetupPlan {
+        models,
+        budget_tokens: budget,
+    })
+}
+
+fn render_profile(plan: &SetupPlan) -> String {
+    let mut out = String::from(
+        "# Written by `loongagent setup`. Committed files may not contain secrets: keys are\n\
+         # references (env:NAME or file:PATH#KEY), never literals (ADR-0008 §5).\n\
+         profile = \"personal\"\n",
+    );
+    for model in &plan.models {
+        let key = match &model.key {
+            Some(_) => format!("file:credentials.toml#{}", model.env_name),
+            None => format!("env:{}", model.env_name),
+        };
+        out.push_str(&format!(
+            "\n[[models]]\nname = \"{name}\"\nkind = \"openai-compat\"\n\
+             base_url = \"{base}\"\nmodel = \"{id}\"\napi_key = \"{key}\"\n\
+             budget_tokens = {budget}\n",
+            name = model.name,
+            base = model.base_url,
+            id = model.model,
+            budget = model.budget_tokens,
+        ));
+    }
+    // A commented router: the shape is useful to see, and switching models silently
+    // is exactly what this project refuses to do.
+    out.push_str(&format!(
+        "\n[router]\ndefault = \"{}\"\n\n\
+         # Rules are first-match-wins, and the one that fired is recorded in the session:\n\
+         # [[router.rules]]\n\
+         # when = \"context_tokens > 150000\"\n\
+         # use = \"a-long-context-model\"\n",
+        plan.models[0].name
+    ));
+    out
+}
+
+fn render_credentials(plan: &SetupPlan) -> Option<String> {
+    let keys: Vec<&SetupModel> = plan.models.iter().filter(|m| m.key.is_some()).collect();
+    if keys.is_empty() {
+        return None;
+    }
+    let mut out = String::from(
+        "# Written by `loongagent setup`, mode 0600. Not configuration: this is the one\n\
+         # file that holds secrets, which is why the profile above only references it.\n\
+         [keys]\n",
+    );
+    for model in keys {
+        out.push_str(&format!(
+            "{} = {:?}\n",
+            model.env_name,
+            model.key.clone().unwrap_or_default()
+        ));
+    }
+    Some(out)
+}
+
+fn setup(args: Args) -> Result<(), String> {
+    let dir = config_dir();
+    let profile_path = args
+        .profile
+        .clone()
+        .unwrap_or_else(|| dir.join("profile.toml"));
+    let credentials_path = profile_path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join("credentials.toml");
+
+    println!("loongagent setup");
+    println!("  profile:     {}", profile_path.display());
+    println!("  credentials: {}", credentials_path.display());
+    println!();
+    let mut lines = std::io::stdin().lock().lines().map_while(Result::ok);
+    let plan = plan_from(&mut lines)?;
+
+    if let Some(parent) = profile_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("creating {}: {e}", parent.display()))?;
+    }
+    if profile_path.exists() {
+        let backup = profile_path.with_extension("toml.bak");
+        std::fs::rename(&profile_path, &backup)
+            .map_err(|e| format!("backing up {}: {e}", profile_path.display()))?;
+        println!("kept the previous profile as {}", backup.display());
+    }
+    std::fs::write(&profile_path, render_profile(&plan))
+        .map_err(|e| format!("writing {}: {e}", profile_path.display()))?;
+
+    if let Some(text) = render_credentials(&plan) {
+        std::fs::write(&credentials_path, text)
+            .map_err(|e| format!("writing {}: {e}", credentials_path.display()))?;
+        // 0600 before anything else can read it.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&credentials_path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| {
+                    format!("setting permissions on {}: {e}", credentials_path.display())
+                })?;
+        }
+    }
+
+    println!();
+    println!("wrote {}", profile_path.display());
+    if render_credentials(&plan).is_some() {
+        println!("wrote {} (mode 0600)", credentials_path.display());
+    }
+    for model in plan.models.iter().filter(|m| m.key.is_none()) {
+        println!(
+            "export {}='…'   # the profile references it",
+            model.env_name
+        );
+    }
+    println!();
+    println!("next:  loongagent tui          (in the project you want to work on)");
+    println!("       loongagent config show  (which layer set what)");
+    Ok(())
+}
+
+/// Read one secret out of a credentials file: `[keys]` NAME = "…".
+///
+/// `toml::from_str`, not `str::parse`: the `FromStr` implementation parses a *single
+/// value*, so a document with a `[keys]` table fails with "unexpected content".
+fn read_credential(path: &Path, key: &str) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let parsed: toml::Value = toml::from_str(&text)
+        .map_err(|e| eprintln!("[config] {} is not valid TOML: {e}", path.display()))
+        .ok()?;
+    parsed
+        .get("keys")
+        .and_then(|keys| keys.get(key))
+        .and_then(|value| value.as_str())
+        .map(|secret| secret.to_string())
+}
+
+fn config_dir() -> PathBuf {
+    non_empty_env("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| non_empty_env("HOME").map(|home| PathBuf::from(home).join(".config")))
+        .unwrap_or_else(std::env::temp_dir)
+        .join("loongagent")
 }
 
 /// `$XDG_STATE_HOME/loongagent/projects/<project>/session.jsonl`.
@@ -272,6 +588,7 @@ fn run() -> Result<(), String> {
             Some("trust") => mcp_trust(Args::parse(&rest[1..])?),
             _ => Err(format!("mcp list | mcp trust\n\n{USAGE}")),
         },
+        "setup" => setup(Args::parse(rest)?),
         "tui" => full_screen(Args::parse(rest)?),
         "repl" => repl(Args::parse(rest)?),
         "web" => web(Args::parse(rest)?),
@@ -345,7 +662,7 @@ fn serve(args: Args) -> Result<(), String> {
             }
         }
     }
-    let model = build_model(&args, &settings)?;
+    let models = build_models(&args, &settings)?;
     let mut config = KernelConfig::new(&args.cwd);
     // `--budget 0` means "unbounded", which is the widest: the kernel takes the
     // strictest of this and the configuration, so a ceiling still holds.
@@ -368,9 +685,9 @@ fn serve(args: Args) -> Result<(), String> {
     config.settings = settings;
     let session_path = args.session_path();
     let kernel = if session_path.exists() {
-        Kernel::open(&session_path, config, model)
+        Kernel::open_with_models(&session_path, config, models)
     } else {
-        Kernel::create(&session_path, config, model)
+        Kernel::create_with_models(&session_path, config, models)
     }
     .map_err(|e| e.to_string())?;
     Server::new(kernel, args.session_id())
@@ -381,22 +698,78 @@ fn serve(args: Args) -> Result<(), String> {
 /// Which provider to build: the session's choice if it made one, else the
 /// configuration's (T-07: engineers pick a profile, not a model), else the `echo`
 /// double so a fresh checkout runs without keys.
-fn build_model(args: &Args, settings: &loong_config::Profile) -> Result<Box<dyn Model>, String> {
-    let kind = args
-        .model
-        .clone()
-        .or_else(|| {
-            settings
-                .base_url
-                .as_ref()
-                .map(|_| "openai-compat".to_string())
-        })
-        .unwrap_or_else(|| "echo".to_string());
+/// Every model the profile offers, by name — the set the router chooses from. A
+/// `--model` on the command line overrides the whole set with one adapter, which is
+/// what a developer wants when trying the loop with a provider double.
+fn build_models(
+    args: &Args,
+    settings: &loong_config::Profile,
+) -> Result<Vec<(String, Box<dyn Model>)>, String> {
+    let base = args.profile_base();
+    if let Some(name) = args.model.clone() {
+        return Ok(vec![(
+            "default".to_string(),
+            build_model(args, settings, Some(&name))?,
+        )]);
+    }
+    if settings.models.is_empty() {
+        return Ok(vec![("default".to_string(), Box::new(UnconfiguredModel))]);
+    }
+    let mut built = Vec::new();
+    for spec in &settings.models {
+        let model = match spec.kind.as_str() {
+            "openai-compat" => {
+                let base_url = resolve_reference(Some(&spec.base_url), &base)
+                    .or_else(|| std::env::var("LOONGAGENT_BASE_URL").ok())
+                    .ok_or_else(|| {
+                        format!("model {:?}: base_url could not be resolved", spec.name)
+                    })?;
+                let key = resolve_reference(spec.api_key.as_deref(), &base)
+                    .or_else(|| std::env::var("LOONGAGENT_API_KEY").ok());
+                if key.is_none() {
+                    eprintln!(
+                        "[config] model {:?} has no usable api_key — the provider will answer 401",
+                        spec.name
+                    );
+                }
+                Box::new(OpenAiCompat::new(base_url, spec.model.clone(), key)) as Box<dyn Model>
+            }
+            other => {
+                return Err(format!(
+                    "model {:?} asks for adapter {other:?}, which this build does not have",
+                    spec.name
+                ))
+            }
+        };
+        built.push((spec.name.clone(), model));
+    }
+    Ok(built)
+}
+
+fn build_model(
+    args: &Args,
+    settings: &loong_config::Profile,
+    forced: Option<&str>,
+) -> Result<Box<dyn Model>, String> {
+    let base_dir = args.profile_base();
+    let kind = match forced {
+        Some(name) => name.to_string(),
+        None => args
+            .model
+            .clone()
+            .or_else(|| {
+                settings
+                    .base_url
+                    .as_ref()
+                    .map(|_| "openai-compat".to_string())
+            })
+            .unwrap_or_else(|| "unconfigured".to_string()),
+    };
     match kind.as_str() {
         "echo" => Ok(Box::new(EchoModel)),
         "unconfigured" => Ok(Box::new(UnconfiguredModel)),
         "openai-compat" => {
-            let base = resolve_reference(settings.base_url.as_deref())
+            let base = resolve_reference(settings.base_url.as_deref(), &base_dir)
                 .or_else(|| std::env::var("LOONGAGENT_BASE_URL").ok())
                 .ok_or_else(|| {
                     "openai-compat needs a base_url: set it in a profile (base_url = \"http://…\" \
@@ -408,7 +781,7 @@ fn build_model(args: &Args, settings: &loong_config::Profile) -> Result<Box<dyn 
                 .clone()
                 .or_else(|| std::env::var("LOONGAGENT_MODEL").ok())
                 .unwrap_or_else(|| "local".to_string());
-            let key = match resolve_reference(settings.api_key.as_deref()) {
+            let key = match resolve_reference(settings.api_key.as_deref(), &base_dir) {
                 Some(key) => Some(key),
                 None => std::env::var("LOONGAGENT_API_KEY").ok(),
             };
@@ -466,10 +839,35 @@ fn build_model(args: &Args, settings: &loong_config::Profile) -> Result<Box<dyn 
 
 /// Resolve a configuration reference (ADR-0008 §5: config carries a reference, not
 /// a secret). A bare value is passed through only for non-secret keys.
-fn resolve_reference(value: Option<&str>) -> Option<String> {
+fn resolve_reference(value: Option<&str>, base: &Path) -> Option<String> {
     let value = value?;
     if let Some(name) = value.strip_prefix("env:") {
         return std::env::var(name).ok();
+    }
+    if let Some(rest) = value.strip_prefix("file:") {
+        let (path, key) = match rest.split_once('#') {
+            Some((path, key)) => (path, key),
+            None => {
+                eprintln!("[config] {value} needs the form file:PATH#KEY");
+                return None;
+            }
+        };
+        let path = if let Some(relative) = path.strip_prefix("~/") {
+            match std::env::var("HOME") {
+                Ok(home) => PathBuf::from(home).join(relative),
+                Err(_) => return None,
+            }
+        } else if Path::new(path).is_absolute() {
+            PathBuf::from(path)
+        } else {
+            // Relative to the profile in use, so a profile and its credentials file
+            // move together — and `--profile elsewhere/profile.toml` finds its own.
+            base.join(path)
+        };
+        return read_credential(&path, key).or_else(|| {
+            eprintln!("[config] {} has no usable keys.{key}", path.display());
+            None
+        });
     }
     if value.starts_with("keychain:") || value.starts_with("gateway:") {
         // ADR-0008 §5 says credentials live in the OS store or the control plane.
@@ -658,7 +1056,10 @@ fn full_screen(args: Args) -> Result<(), String> {
     let settings = args.settings()?;
     let mut intro = vec![format!("session: {}", args.session_path().display())];
     if attached.existing_events > 0 {
-        intro.push(format!("resuming {} events from that session", attached.existing_events));
+        intro.push(format!(
+            "resuming {} events from that session",
+            attached.existing_events
+        ));
     }
     if args.model.is_none() && settings.base_url.is_none() {
         intro.push(
@@ -667,7 +1068,13 @@ fn full_screen(args: Args) -> Result<(), String> {
                 .to_string(),
         );
     }
-    loong_tui_app::run(client, attached.session_id, attached.schema_version, notes, intro)
+    loong_tui_app::run(
+        client,
+        attached.session_id,
+        attached.schema_version,
+        notes,
+        intro,
+    )
 }
 
 /// The browser surface: the same JSON-RPC lines, carried over a WebSocket.
@@ -1089,4 +1496,110 @@ fn headless(args: Args, prompt: &str) -> Result<(), String> {
         std::process::exit(3);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn answers(list: &[&str]) -> std::vec::IntoIter<String> {
+        list.iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    #[test]
+    fn the_wizard_turns_answers_into_a_profile_and_a_credentials_file() {
+        // choice, base_url, model id, name, budget, api_key, "another model?"
+        let mut lines = answers(&["1", "", "some-model", "small", "64000", "sk-secret", "n"]);
+        let plan = plan_from(&mut lines).unwrap();
+        assert_eq!(plan.models.len(), 1);
+        assert_eq!(
+            plan.models[0].base_url, "https://api.deepseek.com",
+            "the provider default"
+        );
+        assert_eq!(plan.models[0].name, "small");
+        assert_eq!(plan.models[0].budget_tokens, 64000);
+
+        let profile = render_profile(&plan);
+        assert!(profile.contains("name = \"small\""));
+        assert!(profile.contains("model = \"some-model\""));
+        assert!(profile.contains("api_key = \"file:credentials.toml#DEEPSEEK_API_KEY\""));
+        assert!(profile.contains("budget_tokens = 64000"));
+        assert!(
+            !profile.contains("sk-secret"),
+            "a secret never lands in the profile"
+        );
+        assert!(profile.contains("default = \"small\""));
+
+        let credentials = render_credentials(&plan).unwrap();
+        assert!(credentials.contains("DEEPSEEK_API_KEY = \"sk-secret\""));
+    }
+
+    #[test]
+    fn a_key_that_is_not_pasted_becomes_an_environment_reference() {
+        let mut lines = answers(&["3", "", "gpt-x", "", "1000", "", "n"]);
+        let plan = plan_from(&mut lines).unwrap();
+        assert!(plan.models[0].key.is_none());
+        assert!(render_profile(&plan).contains("api_key = \"env:OPENAI_API_KEY\""));
+        assert!(render_credentials(&plan).is_none(), "no secret, no file");
+    }
+
+    #[test]
+    fn a_second_model_becomes_a_second_entry_for_the_router() {
+        let mut lines = answers(&[
+            "4", "", "local-a", "a", "8000", "", "y", "", "local-b", "b", "", "n",
+        ]);
+        let plan = plan_from(&mut lines).unwrap();
+        assert_eq!(plan.models.len(), 2);
+        assert_eq!(plan.models[1].model, "local-b");
+        assert_eq!(
+            plan.models[1].base_url, plan.models[0].base_url,
+            "the first base_url is offered"
+        );
+        assert_eq!(render_profile(&plan).matches("[[models]]").count(), 2);
+    }
+
+    #[test]
+    fn a_credentials_file_is_read_by_the_reference_it_is_named_for() {
+        let dir = std::env::temp_dir().join(format!("loong-creds-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("credentials.toml");
+        std::fs::write(
+            &path,
+            "# a comment, then a table\n[keys]\nDEEPSEEK_API_KEY = \"sk-secret\"\n\
+             MOONSHOT_API_KEY = \"ms-secret\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_credential(&path, "DEEPSEEK_API_KEY").as_deref(),
+            Some("sk-secret")
+        );
+        assert_eq!(
+            read_credential(&path, "MOONSHOT_API_KEY").as_deref(),
+            Some("ms-secret")
+        );
+        assert_eq!(
+            read_credential(&path, "NOT_THERE"),
+            None,
+            "a missing key is not a panic"
+        );
+        std::fs::write(&path, "this is not toml at all").unwrap();
+        assert_eq!(read_credential(&path, "ANY"), None, "nor is nonsense");
+        assert_eq!(read_credential(&dir.join("absent.toml"), "ANY"), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn bad_answers_are_refused_with_a_reason() {
+        let mut lines = answers(&["1", "", "m", "n", "lots", "", "n"]);
+        assert!(plan_from(&mut lines).unwrap_err().contains("whole number"));
+        let mut lines = answers(&["9"]);
+        assert!(plan_from(&mut lines)
+            .unwrap_err()
+            .contains("not one of the choices"));
+        let mut lines = answers(&["1", "", "", "n", "1", "", "n"]);
+        assert!(plan_from(&mut lines).unwrap_err().contains("model id"));
+    }
 }

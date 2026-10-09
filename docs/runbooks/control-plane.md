@@ -36,6 +36,57 @@ sensitive: whoever holds it can make the control plane sign a pack.
 
 ---
 
+## From nothing to a synced profile
+
+The whole sequence, with the paths this runbook uses. Steps 1–4 are on the machine
+that serves profiles; step 5 is on each engineer's machine.
+
+```bash
+# 1. the control plane: key, tokens, and a starter draft where you keep configuration
+./scripts/control-plane-init.sh --issuer acme-platform \
+  --dir /etc/loongagent-control --state /var/lib/loongagent-control \
+  --starter ~/config/loongagent/profiles.toml
+#   prints the public key to pin — keep that line
+
+# 2. edit the draft: base_url, the model id from your provider's docs, a description,
+#    and `api_key = "env:NAME"` (a placeholder: the value lives on each client)
+
+# 3. start it
+sudo /usr/local/bin/loongagent-control serve \
+  --dir /var/lib/loongagent-control \
+  --key /etc/loongagent-control/control-key.pkcs8 --issuer acme-platform \
+  --client-token-file /etc/loongagent-control/client.token \
+  --admin-token-file  /etc/loongagent-control/admin.token --port 8738
+
+# 4. publish, and check what it is serving
+loongagent-control publish --url http://127.0.0.1:8738 \
+  --pack ~/config/loongagent/profiles.toml \
+  --token-file /etc/loongagent-control/admin.token --version 1
+loongagent-control show --url http://127.0.0.1:8738 \
+  --token-file /etc/loongagent-control/client.token --public-key <hex>
+```
+
+Then on an engineer's machine there are two ways, and they do the same thing:
+
+```bash
+# 5a. just start the UI: the first run asks for the address, the key and a token
+loongagent tui
+
+# 5b. or configure it non-interactively (an image, MDM, a provisioning script)
+loongagent setup --url http://127.0.0.1:8738 --public-key <hex> \
+  --token file:/etc/loongagent-control/client.token
+
+# then, either way:
+loongagent profiles          # what the control plane offers, and what is selected
+loongagent use default       # the one profile-related choice a user makes
+loongagent tui               # no flags: the pack decides the model
+```
+
+The first run of `tui` draws a three-field form (address, public key, token
+reference) in the terminal, verifies a pack before saving anything, and writes
+`~/.loongagent/control.toml`. Press Esc to skip it: a session without a control plane
+is a legitimate state.
+
 ## 0. Build
 
 ```bash
@@ -298,13 +349,24 @@ event control.synced    {"issuer":"acme-platform","version":"2026.10.09-1","key_
 event profile.selected  {"profile":"default","description":"Balanced: …","models":"main"}
 ```
 
+## 5b. When the first run already happened
+
+`loongagent control status` answers "what is this install talking to, and what has it
+verified?" — the machine file, the user file, the cached pack and whether it still
+verifies. `loongagent control sync` refreshes the cache without starting a session.
+
 ## 6. Migration
 
 Layouts before 2026-10-09 put the control plane under `/etc/loongagent/control` (and
 the served pack under `/var/lib/loongagent/control`), sharing `/etc/loongagent` with
 the agent, with the draft kept as a system file. Moving is one `mv` per root:
 
+A layout from before 2026-10-09 put the control plane under `/etc/loongagent/control`
+(sharing `/etc/loongagent` with the agent, draft included as a system file), and the
+client's own files under `~/.config/loongagent` and `~/.local/state/loongagent`.
+
 ```bash
+# --- the control plane, on the server ---
 sudo install -d -m 0700 /etc/loongagent-control /var/lib/loongagent-control
 sudo mv /etc/loongagent/control/control-key.pkcs8 \
         /etc/loongagent/control/client.token \
@@ -314,6 +376,13 @@ sudo mv /var/lib/loongagent/control/profiles.json /var/lib/loongagent-control/
 sudo install -o "$USER" -m 0644 /etc/loongagent/control/profiles.toml \
   ~/config/loongagent/profiles.toml
 sudo rmdir /etc/loongagent/control /var/lib/loongagent/control
+
+# --- the client, on each machine: one root now ---
+mkdir -p ~/.loongagent
+mv ~/.config/loongagent/{profile.toml,control.toml,env,client.token} ~/.loongagent/ 2>/dev/null
+mv ~/.local/state/loongagent/projects ~/.loongagent/ 2>/dev/null
+mv ~/.local/state/loongagent/control  ~/.loongagent/ 2>/dev/null
+rmdir ~/.config/loongagent ~/.local/state/loongagent 2>/dev/null
 
 # then start it with the new paths (step 3) — the key is unchanged, so no install
 # needs to re-pin anything.

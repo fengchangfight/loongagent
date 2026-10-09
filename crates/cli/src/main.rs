@@ -626,22 +626,7 @@ fn setup(args: Args) -> Result<(), String> {
         public_key: public_key.trim().to_string(),
         token,
     };
-    // Prove it before writing it: a configuration that cannot verify a pack is not
-    // worth saving.
-    let (config, resolved_token) = control_config(&file)?;
-    let cache = pack_cache(&config);
-    println!();
-    println!("contacting {} …", file.url);
-    let synced = loong_control::sync(
-        &config,
-        &cache,
-        resolved_token.as_deref(),
-        loong_control::DEFAULT_TIMEOUT,
-    )
-    .map_err(|e| e.to_string())?;
-    let pack = loong_config::profiles_from_payload(&synced.envelope.payload)
-        .map_err(|e| format!("the pack is not usable: {e}"))?;
-    let path = save_control(&file, args.control_system)?;
+    let (path, synced, pack) = connect(&file, args.control_system)?;
     println!("wrote {}", path.display());
     if !args.control_system && system_control_path().exists() {
         println!(
@@ -663,6 +648,29 @@ fn setup(args: Args) -> Result<(), String> {
     println!("choose one with:  loongagent use <name>");
     println!("then start:       loongagent tui");
     Ok(())
+}
+
+/// Prove a control-plane configuration before saving it: validate the address, fetch
+/// and verify a pack, and only then write the file. Shared by `loongagent setup` and
+/// the TUI's first-run form, so the two cannot drift apart.
+fn connect(
+    file: &ControlFile,
+    system: bool,
+) -> Result<(PathBuf, loong_control::Synced, loong_config::ProfilePack), String> {
+    let (config, resolved_token) = control_config(file)?;
+    let cache = pack_cache(&config);
+    eprintln!("contacting {} …", file.url);
+    let synced = loong_control::sync(
+        &config,
+        &cache,
+        resolved_token.as_deref(),
+        loong_control::DEFAULT_TIMEOUT,
+    )
+    .map_err(|e| e.to_string())?;
+    let pack = loong_config::profiles_from_payload(&synced.envelope.payload)
+        .map_err(|e| format!("the pack is not usable: {e}"))?;
+    let path = save_control(file, system)?;
+    Ok((path, synced, pack))
 }
 
 fn print_profiles(pack: &loong_config::ProfilePack, selected: Option<&str>) {
@@ -1584,6 +1592,33 @@ fn full_screen(args: Args) -> Result<(), String> {
             return Err(e);
         }
     };
+    // First run: ask here, in the terminal UI, rather than sending the user off to
+    // discover a command. Doing it before the session starts is also why nothing has
+    // to be reconfigured mid-session.
+    if load_control()?.is_none() && args.model.is_none() && !args.offline {
+        if let Some((url, public_key, token)) = loong_tui_app::setup_form()? {
+            let file = ControlFile {
+                url,
+                public_key,
+                token: if token.trim().is_empty() {
+                    None
+                } else {
+                    Some(token)
+                },
+            };
+            match connect(&file, false) {
+                Ok((path, synced, pack)) => eprintln!(
+                    "wrote {} — verified {} {} ({} profiles)",
+                    path.display(),
+                    synced.envelope.issuer,
+                    synced.envelope.version,
+                    pack.profiles.len()
+                ),
+                Err(e) => return Err(format!("not connected: {e}")),
+            }
+        }
+    }
+
     // What a first run needs to see, inside the UI rather than on a stderr that the
     // alternate screen would overwrite: where this session lives, and whether a model
     // is configured at all.

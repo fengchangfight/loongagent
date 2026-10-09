@@ -7,12 +7,15 @@
 //!
 //! The two roles are separated by token, not by goodwill:
 //!
-//! - **profile administrator**: holds the signing key, runs `keygen`/`sign`, and
-//!   publishes with the admin token;
+//! - **profile administrator**: writes a draft and publishes it with the admin token;
 //! - **every install**: reads with the client token, and verifies what it reads
 //!   against the public key pinned in its own configuration.
 //!
-//! The private key never reaches the server; only the public key does.
+//! **The control plane holds the signing key** (owner decision, 2026-10-09): it signs
+//! the drafts an administrator publishes, so the private key never has to be copied
+//! to a workstation. The trade is named in ADR-0016 §2 — a compromised control plane
+//! can mint packs. `sign` remains for an air-gapped administrator who has the key
+//! somewhere else; the envelope is identical, so installs cannot tell them apart.
 
 use loong_control::{bind, ControlPlane, DEFAULT_TIMEOUT};
 use loong_pack::{
@@ -34,25 +37,35 @@ loongagent-control — distribute signed profile packs (ADR-0008 §6, ADR-0016)
 USAGE
   loongagent-control keygen [--out DIR]
       Make an Ed25519 signing keypair. Writes control-key.pkcs8 (mode 0600) and
-      prints the public key to pin in every install. The private key never leaves
-      this machine.
+      prints the public key to pin in every install. The private key stays with the
+      control plane: install it there, and administrators publish drafts.
+
+  loongagent-control serve --dir DIR --key control-key.pkcs8 --issuer NAME
+                           --client-token-env NAME --admin-token-env NAME
+                           [--public-key HEX] [--bind IP] [--port N]
+      Serve the published pack **and hold the signing key**, so an administrator
+      publishes a draft and the control plane signs it (owner decision, 2026-10-09).
+      The private key never has to be copied to an administrator's workstation.
+      Reads need the client token; publishing needs the admin token.
+
+  loongagent-control publish --url URL --pack profiles.toml --token-env NAME
+                             [--version V] [--issuer NAME] [--scope SCOPE]
+      Send a draft to the control plane, which validates and signs it. This is the
+      normal way to publish.
+
+  loongagent-control publish --url URL --file profile-pack.json --token-env NAME
+      Send an envelope that was signed elsewhere. For an air-gapped administrator;
+      the envelope is the same, so installs cannot tell the difference.
+
+  loongagent-control show --file profile-pack.json [--public-key HEX]
+  loongagent-control show --url URL --token-env NAME [--public-key HEX]
+      Decode an envelope — from a file, or from what a control plane is serving —
+      show who signed it, and verify it if a key is given.
 
   loongagent-control sign --pack FILE --key FILE --issuer NAME [--version V]
                           [--scope SCOPE] [-o profile-pack.json]
-      Sign a profile pack (the TOML a profile administrator writes) into the
-      envelope every install verifies.
-
-  loongagent-control show --file profile-pack.json [--public-key HEX]
-      Decode an envelope, show who signed it, and verify it if a key is given.
-
-  loongagent-control serve --dir DIR --public-key HEX [--key FILE] --issuer NAME
-                           --client-token-env NAME --admin-token-env NAME
-                           [--bind IP] [--port N]
-      Serve the published pack. Reads need the client token; publishing needs the
-      admin token.
-
-  loongagent-control publish --url URL --file profile-pack.json --token-env NAME
-      Send a signed pack to a running control plane.
+      Sign a pack **without** a control plane, for an air-gapped administrator.
+      The normal path is `publish --pack`, which the control plane signs itself.
 
   loongagent-control health --url URL
       Is it up, and does it have a pack?
@@ -218,8 +231,23 @@ fn sign(args: &[String]) -> Result<(), String> {
 }
 
 fn show(args: &[String]) -> Result<(), String> {
-    let path = flag(args, "--file")?;
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("reading {path}: {e}"))?;
+    let text = match (optional(args, "--file"), optional(args, "--url")) {
+        (Some(path), _) => {
+            std::fs::read_to_string(&path).map_err(|e| format!("reading {path}: {e}"))?
+        }
+        (None, Some(url)) => {
+            let token = read_token(args, "--token-env", "--token-file")?;
+            let response = loong_http::get_json(
+                &format!("{}/v1/pack/profiles", url.trim_end_matches('/')),
+                Some(&token),
+                DEFAULT_TIMEOUT,
+            )
+            .map_err(|e| e.0)?;
+            println!("from {url}:");
+            response.body
+        }
+        _ => return Err("--file PATH (or --url URL) is required".to_string()),
+    };
     let envelope = Envelope::from_json(&text).map_err(|e| e.to_string())?;
     println!("artifact:  {}", envelope.artifact);
     println!("schema:    {}", envelope.payload_schema);
@@ -272,13 +300,25 @@ fn show(args: &[String]) -> Result<(), String> {
 fn serve(args: &[String]) -> Result<(), String> {
     let dir = flag(args, "--dir")?;
     let issuer = flag(args, "--issuer")?;
-    let public = match (optional(args, "--public-key"), optional(args, "--key")) {
-        (Some(hex), _) => loong_pack::unhex(&hex).ok_or("--public-key must be hex")?,
-        (None, Some(key_path)) => {
-            let key = std::fs::read(&key_path).map_err(|e| format!("reading {key_path}: {e}"))?;
-            public_of(&key).map_err(|e| e.to_string())?
+    let key_path = flag(args, "--key")?;
+    let private = std::fs::read(&key_path).map_err(|e| format!("reading {key_path}: {e}"))?;
+    let derived = public_of(&private).map_err(|e| e.to_string())?;
+    // `--public-key` is optional but checked when given: serving under one key and
+    // signing with another would publish packs no install accepts.
+    let public = match optional(args, "--public-key") {
+        Some(hex) => {
+            let pinned = loong_pack::unhex(&hex).ok_or("--public-key must be hex")?;
+            if pinned != derived {
+                return Err(format!(
+                    "--public-key pins {} but {key_path} is key {} — refusing to serve packs \
+                     nobody could verify",
+                    key_id(&pinned),
+                    key_id(&derived)
+                ));
+            }
+            pinned
         }
-        _ => return Err("--public-key HEX (or --key FILE) is required".to_string()),
+        None => derived,
     };
     let client_token = read_token(args, "--client-token-env", "--client-token-file")?;
     let admin_token = read_token(args, "--admin-token-env", "--admin-token-file")?;
@@ -288,7 +328,9 @@ fn serve(args: &[String]) -> Result<(), String> {
         .parse()
         .map_err(|_| "--port must be a number".to_string())?;
 
-    let plane = ControlPlane::new(&dir, client_token, admin_token, public.clone(), &issuer);
+    let plane = ControlPlane::new(&dir, client_token, admin_token, public.clone(), &issuer)
+        .with_signing_key(private)
+        .map_err(|e| e.to_string())?;
     let listener = bind(&bind_ip, port).map_err(|e| format!("binding {bind_ip}:{port}: {e}"))?;
     println!(
         "loongagent-control serving {}",
@@ -317,9 +359,40 @@ fn serve(args: &[String]) -> Result<(), String> {
 
 fn publish(args: &[String]) -> Result<(), String> {
     let url = flag(args, "--url")?;
-    let file = flag(args, "--file")?;
     let token = read_token(args, "--token-env", "--token-file")?;
-    let body = std::fs::read_to_string(&file).map_err(|e| format!("reading {file}: {e}"))?;
+    let body = match (optional(args, "--pack"), optional(args, "--file")) {
+        (Some(pack), None) => {
+            // A draft: the control plane validates and signs it. This is the normal
+            // path, and it is why the signing key never leaves the server.
+            let payload =
+                std::fs::read_to_string(&pack).map_err(|e| format!("reading {pack}: {e}"))?;
+            // Validate locally too, so the administrator hears about a broken pack
+            // before a round trip.
+            loong_config::profiles_from_payload(&payload)
+                .map_err(|e| format!("{pack} is not a usable profile pack: {e}"))?;
+            let version = optional(args, "--version").unwrap_or_else(|| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs().to_string())
+                    .unwrap_or_else(|_| "1".to_string())
+            });
+            serde_json::json!({
+                "payload": payload,
+                "version": version,
+                "issuer": optional(args, "--issuer").unwrap_or_else(|| "org".to_string()),
+                "scope": optional(args, "--scope").unwrap_or_else(|| "org".to_string()),
+            })
+            .to_string()
+        }
+        (None, Some(file)) => {
+            std::fs::read_to_string(&file).map_err(|e| format!("reading {file}: {e}"))?
+        }
+        _ => {
+            return Err(
+                "--pack FILE (a draft) or --file FILE (a signed envelope) is required".to_string(),
+            )
+        }
+    };
     let response = loong_http::post_json(
         &format!("{}/v1/admin/publish", url.trim_end_matches('/')),
         &body,
@@ -333,7 +406,17 @@ fn publish(args: &[String]) -> Result<(), String> {
             response.status, response.body
         ));
     }
-    println!("published: {}", response.body);
+    let value: serde_json::Value = serde_json::from_str(&response.body).unwrap_or_default();
+    println!(
+        "published {} {} (key {})",
+        value.get("issuer").and_then(|v| v.as_str()).unwrap_or("?"),
+        value.get("version").and_then(|v| v.as_str()).unwrap_or("?"),
+        value.get("key_id").and_then(|v| v.as_str()).unwrap_or("?")
+    );
+    if let Some(profiles) = value.get("profiles").and_then(|v| v.as_array()) {
+        let names: Vec<&str> = profiles.iter().filter_map(|p| p.as_str()).collect();
+        println!("  profiles: {}", names.join(", "));
+    }
     Ok(())
 }
 
@@ -351,6 +434,12 @@ fn health(args: &[String]) -> Result<(), String> {
         "{}",
         serde_json::to_string_pretty(&value).unwrap_or(response.body)
     );
+    if value.get("can_sign").and_then(|v| v.as_bool()) != Some(true) {
+        eprintln!(
+            "warning: this control plane has no signing key, so it cannot accept drafts — start \
+             it with --key"
+        );
+    }
     if value.get("has_pack").and_then(|v| v.as_bool()) != Some(true) {
         return Err(
             "the control plane is up but has no profiles published — publish a pack before \

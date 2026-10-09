@@ -54,17 +54,23 @@ Two binaries, one shared crate, and a deliberate division of labour:
 | Binary | Who runs it | What it does |
 |---|---|---|
 | `loongagent` | every engineer | reads a signed pack, verifies it against a **pinned** key, runs the profile |
-| `loongagent-control` | a **profile administrator** | `keygen`, `sign`, `serve`, `publish` — distributes packs, and nothing else |
+| `loongagent-control` | a **profile administrator** | `keygen`, `serve`, `publish`, `show`, `health` — distributes packs, and nothing else. `sign` exists for an air-gapped administrator |
 
 ```bash
 # once, by the profile administrator
 loongagent-control keygen --out /etc/loongagent/control      # private key, mode 0600
 #   prints the public key to pin in every install
-loongagent-control sign --pack profiles.toml --key control-key.pkcs8 \
-    --issuer acme-platform --version 2026.10.09-1 -o profile-pack.json
+
+# the control plane holds that key and signs what administrators publish
 CLIENT_TOKEN=… ADMIN_TOKEN=… loongagent-control serve \
-    --dir /var/lib/loongagent/control --public-key <hex> --issuer acme-platform \
-    --client-token-env CLIENT_TOKEN --admin-token-env ADMIN_TOKEN
+    --dir /var/lib/loongagent/control --key /etc/loongagent/control/control-key.pkcs8 \
+    --issuer acme-platform --client-token-env CLIENT_TOKEN --admin-token-env ADMIN_TOKEN
+
+# an administrator writes profiles.toml and publishes the draft; the key stays on the server
+ADMIN_TOKEN=… loongagent-control publish --url https://control.acme.internal \
+    --pack profiles.toml --token-env ADMIN_TOKEN --version 2026.10.09-1
+ADMIN_TOKEN=… loongagent-control show --url https://control.acme.internal \
+    --token-env ADMIN_TOKEN --public-key <hex>      # verify what is being served
 
 # on each machine
 loongagent setup --url https://control.acme.internal --public-key <hex> --token env:CLIENT_TOKEN
@@ -81,9 +87,12 @@ Properties that are enforced, not documented:
   another artifact or as another version.
 - **The key is pinned out of band.** The public key travels with the install (image,
   MDM), never learned from the wire; a pack signed by another key is refused with
-  both fingerprints printed. The control plane refuses to *serve* a pack that does
-  not verify under its own pinned key, so a broken signing step is caught at
-  publish time rather than on every client.
+  both fingerprints printed. **The control plane holds the signing key** (owner
+  decision, 2026-10-09) and signs the drafts administrators publish, so the private
+  key never has to live on someone's workstation; started with `--public-key`, it
+  refuses to run if the key does not derive it. A control plane without a key can
+  still distribute, and says so in `GET /v1/health` (`can_sign`). The trade is
+  explicit: a compromised control plane can mint packs.
 - **Tokens are separated.** Reading needs the client token every install has;
   publishing needs the admin token. The client token cannot change policy.
 - **The verified pack is the `control` layer**, ranked above the local org file and
@@ -92,7 +101,10 @@ Properties that are enforced, not documented:
   `control.profile` — the choice of bundle.
 - **Offline is degraded, not dead**: the last verified pack is cached under the state
   directory and used when the control plane is unreachable; a pack that *fails*
-  verification never falls back to the cache.
+  verification never falls back to the cache. **A pack does not expire** (owner
+  decision, 2026-10-09): a machine that never reconnects keeps running the pack it
+  verified, so revocation has no teeth against it — an accepted trade, recorded in
+  ADR-0016 §7.
 - **Transport**: HTTPS everywhere except loopback; the client refuses to send a
   token in the clear to another machine.
 

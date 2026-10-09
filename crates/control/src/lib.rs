@@ -242,9 +242,14 @@ pub struct ControlPlane {
     dir: PathBuf,
     client_token: String,
     admin_token: String,
-    /// The public key the served pack must verify under. Present so the control
-    /// plane refuses to serve something that no client could accept.
+    /// The public key the served pack must verify under — derived from the signing
+    /// key, or pinned alongside it.
     public_key: Vec<u8>,
+    /// The signing key. **The control plane holds it** (owner decision, 2026-10-09):
+    /// an administrator publishes a draft, and the control plane signs it, so the
+    /// private key never has to be copied to an administrator's workstation. Absent
+    /// means this control plane can distribute but not author.
+    signing_key: Option<Vec<u8>>,
     issuer: String,
 }
 
@@ -261,17 +266,77 @@ impl ControlPlane {
             client_token: client_token.into(),
             admin_token: admin_token.into(),
             public_key,
+            signing_key: None,
             issuer: issuer.into(),
         }
+    }
+
+    /// The same plane, holding a signing key: administrators publish drafts and the
+    /// control plane signs them (owner decision, 2026-10-09).
+    pub fn with_signing_key(mut self, key_pkcs8: Vec<u8>) -> Result<Self, ControlError> {
+        let derived = loong_pack::public_of(&key_pkcs8).map_err(ControlError::Rejected)?;
+        if derived != self.public_key {
+            // A control plane signing with a key nobody pinned would publish packs
+            // that every install refuses — better to refuse to start.
+            return Err(ControlError::Rejected(loong_pack::PackError::WrongKey {
+                expected: loong_pack::key_id(&self.public_key),
+                found: loong_pack::key_id(&derived),
+            }));
+        }
+        self.signing_key = Some(key_pkcs8);
+        Ok(self)
+    }
+
+    pub fn can_sign(&self) -> bool {
+        self.signing_key.is_some()
     }
 
     pub fn pack_path(&self) -> PathBuf {
         self.dir.join("profiles.json")
     }
 
-    /// Accept a pack for distribution. It must verify under the pinned key: the
-    /// control plane is the last place a broken signature can be caught before it
-    /// reaches every install.
+    /// Sign and publish a **draft** payload.
+    ///
+    /// The administrator sends the profile TOML they wrote; validation happens here
+    /// (`profiles_from_payload`) so a pack no install could resolve is refused at
+    /// publish time, and the signature is made with the key this control plane holds.
+    pub fn publish_draft(
+        &self,
+        payload: &str,
+        version: &str,
+        issuer: &str,
+        scope: &str,
+    ) -> Result<Envelope, ControlError> {
+        let key = self.signing_key.as_ref().ok_or_else(|| {
+            ControlError::Rejected(PackError::Malformed(
+                "this control plane has no signing key — start it with --key so it can sign \
+                 what you publish"
+                    .to_string(),
+            ))
+        })?;
+        // Refuse before signing anything an install would reject.
+        loong_config::profiles_from_payload(payload).map_err(|e| {
+            ControlError::Rejected(PackError::Malformed(format!(
+                "the draft is not a usable profile pack: {e}"
+            )))
+        })?;
+        let envelope = Envelope::sign(
+            key,
+            PROFILES_ARTIFACT,
+            PROFILES_SCHEMA,
+            version,
+            issuer,
+            scope,
+            now_ms(),
+            payload,
+        )
+        .map_err(ControlError::Rejected)?;
+        self.store(&envelope)?;
+        Ok(envelope)
+    }
+
+    /// Accept an already-signed envelope. Kept for an air-gapped administrator who
+    /// signs elsewhere; it must verify under the key this control plane serves.
     pub fn publish(&self, json: &str) -> Result<Envelope, ControlError> {
         let envelope = Envelope::from_json(json).map_err(ControlError::Rejected)?;
         if envelope.artifact != PROFILES_ARTIFACT {
@@ -283,12 +348,18 @@ impl ControlPlane {
         envelope
             .verify(&self.public_key, &[PROFILES_SCHEMA])
             .map_err(ControlError::Rejected)?;
+        self.store(&envelope)?;
+        Ok(envelope)
+    }
+
+    fn store(&self, envelope: &Envelope) -> Result<(), ControlError> {
+        let json = envelope.to_json().map_err(ControlError::Rejected)?;
         std::fs::create_dir_all(&self.dir).map_err(|e| ControlError::Io(e.to_string()))?;
         let temporary = self.pack_path().with_extension("json.tmp");
         std::fs::write(&temporary, json).map_err(|e| ControlError::Io(e.to_string()))?;
         std::fs::rename(&temporary, self.pack_path())
             .map_err(|e| ControlError::Io(e.to_string()))?;
-        Ok(envelope)
+        Ok(())
     }
 
     pub fn has_pack(&self) -> bool {
@@ -361,14 +432,15 @@ impl ControlPlane {
                 if !self.authorised(token.as_deref(), &self.admin_token) {
                     (401, json_error("the admin token is required to publish"))
                 } else {
-                    match self.publish(body.trim()) {
-                        Ok(envelope) => (
+                    match self.accept(&body) {
+                        Ok((envelope, profiles)) => (
                             200,
                             serde_json::json!({
                                 "published": true,
                                 "version": envelope.version,
                                 "issuer": envelope.issuer,
                                 "key_id": envelope.key_id,
+                                "profiles": profiles,
                             })
                             .to_string(),
                         ),
@@ -381,12 +453,67 @@ impl ControlPlane {
         write_response(stream, status, &payload)
     }
 
+    /// What `/v1/admin/publish` accepts: a draft this plane signs, or an envelope
+    /// signed elsewhere. Told apart by shape, and both are validated before storing.
+    fn accept(&self, body: &str) -> Result<(Envelope, Vec<String>), ControlError> {
+        let trimmed = body.trim();
+        let envelope = if trimmed.starts_with('{') {
+            let request: serde_json::Value = serde_json::from_str(trimmed)
+                .map_err(|e| ControlError::Rejected(PackError::Json(e.to_string())))?;
+            match request.get("payload").and_then(|p| p.as_str()) {
+                Some(payload) => {
+                    let version =
+                        request
+                            .get("version")
+                            .and_then(|v| v.as_str())
+                            .ok_or_else(|| {
+                                ControlError::Rejected(PackError::Malformed(
+                                    "a draft needs a version".to_string(),
+                                ))
+                            })?;
+                    let issuer = request
+                        .get("issuer")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&self.issuer)
+                        .to_string();
+                    let scope = request
+                        .get("scope")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("org");
+                    self.publish_draft(payload, version, &issuer, scope)?
+                }
+                // An envelope, signed elsewhere, is JSON too. Tell them apart by the
+                // field that only an envelope has.
+                None if request.get("signature").is_some() => self.publish(trimmed)?,
+                None => {
+                    return Err(ControlError::Rejected(PackError::Malformed(
+                        "send either a draft (\"payload\", \"version\") or a signed envelope"
+                            .to_string(),
+                    )))
+                }
+            }
+        } else if trimmed.starts_with("[[profiles]]") || trimmed.starts_with("default_profile") {
+            // A bare TOML draft, for `curl --data-binary @profiles.toml`.
+            let version = format!("{}", now_ms());
+            self.publish_draft(trimmed, &version, &self.issuer.clone(), "org")?
+        } else {
+            return Err(ControlError::Rejected(PackError::Malformed(
+                "send a draft as JSON ({\"payload\", \"version\"}) or as TOML".to_string(),
+            )));
+        };
+        let names = loong_config::profiles_from_payload(&envelope.payload)
+            .map(|pack| pack.profiles.into_iter().map(|p| p.name).collect())
+            .unwrap_or_default();
+        Ok((envelope, names))
+    }
+
     fn health(&self) -> String {
         let mut health = serde_json::json!({
             "ok": true,
             "issuer": self.issuer,
             "key_id": key_id(&self.public_key),
             "has_pack": self.has_pack(),
+            "can_sign": self.can_sign(),
         });
         if let Ok(text) = std::fs::read_to_string(self.pack_path()) {
             if let Ok(envelope) = Envelope::from_json(&text) {
@@ -403,6 +530,13 @@ impl ControlPlane {
             None => false,
         }
     }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn json_error(message: &str) -> String {
@@ -500,6 +634,7 @@ mod tests {
                 client_token: self.client_token.clone(),
                 admin_token: self.admin_token.clone(),
                 public_key: self.public_key.clone(),
+                signing_key: self.signing_key.clone(),
                 issuer: self.issuer.clone(),
             }
         }
@@ -552,6 +687,119 @@ mod tests {
             );
             assert!(!cache.path().exists(), "and nothing is cached from it");
         });
+    }
+
+    #[test]
+    fn the_control_plane_signs_a_draft_with_the_key_it_holds() {
+        let (private, public) = generate_keypair().unwrap();
+        let dir = temp("signing");
+        let plane = ControlPlane::new(&dir, "c", "a", public.clone(), "acme")
+            .with_signing_key(private.clone())
+            .unwrap();
+        assert!(plane.can_sign());
+
+        let draft = "default_profile = \"default\"\n[[profiles]]\nname = \"default\"\n\
+                     description = \"balanced\"\n  [[profiles.models]]\n  name = \"m\"\n\
+                     base_url = \"https://a.invalid\"\n  model = \"i\"\n";
+        let envelope = plane
+            .publish_draft(draft, "2026.10.09-2", "acme", "org")
+            .unwrap();
+        assert_eq!(envelope.version, "2026.10.09-2");
+        assert_eq!(envelope.key_id, key_id(&public));
+        // The pack it just signed is one every install can accept.
+        envelope.verify(&public, &[PROFILES_SCHEMA]).unwrap();
+        assert!(plane.has_pack());
+
+        // A draft the resolver would reject never becomes a pack.
+        let broken = "[[profiles]]\nname = \"x\"\n";
+        let error = plane
+            .publish_draft(broken, "v3", "acme", "org")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not a usable profile pack"), "{error}");
+        // …and the good pack is still the one being served.
+        let served =
+            Envelope::from_json(&std::fs::read_to_string(plane.pack_path()).unwrap()).unwrap();
+        assert_eq!(served.version, "2026.10.09-2");
+    }
+
+    #[test]
+    fn a_control_plane_without_a_signing_key_says_so_instead_of_guessing() {
+        let (_, public) = generate_keypair().unwrap();
+        let dir = temp("no-key");
+        let plane = ControlPlane::new(&dir, "c", "a", public, "acme");
+        assert!(!plane.can_sign());
+        let error = plane
+            .publish_draft("default_profile = \"d\"\n", "v1", "acme", "org")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no signing key"), "{error}");
+        assert!(
+            error.contains("--key"),
+            "and it says how to fix it: {error}"
+        );
+    }
+
+    #[test]
+    fn a_signing_key_that_does_not_match_the_served_public_key_refuses_to_start() {
+        let (_, public) = generate_keypair().unwrap();
+        let (other_private, _) = generate_keypair().unwrap();
+        let dir = temp("mismatch");
+        let plane = ControlPlane::new(&dir, "c", "a", public, "acme");
+        match plane.with_signing_key(other_private) {
+            Err(ControlError::Rejected(loong_pack::PackError::WrongKey { expected, found })) => {
+                assert_ne!(expected, found);
+            }
+            Ok(plane) => panic!(
+                "expected a key mismatch, but it started: can_sign={}",
+                plane.can_sign()
+            ),
+            Err(other) => panic!("expected a key mismatch, got {other}"),
+        }
+    }
+
+    #[test]
+    fn the_publish_endpoint_takes_a_draft_and_signs_it() {
+        let (private, public) = generate_keypair().unwrap();
+        let dir = temp("endpoint-sign");
+        let plane = ControlPlane::new(&dir, "client-token", "admin-token", public.clone(), "acme")
+            .with_signing_key(private)
+            .unwrap();
+        let listener = bind("127.0.0.1", 0).unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let _ = plane.serve(listener);
+        });
+        let draft = "default_profile = \"default\"\n[[profiles]]\nname = \"default\"\n\
+                     description = \"balanced\"\n  [[profiles.models]]\n  name = \"m\"\n\
+                     base_url = \"https://a.invalid\"\n  model = \"i\"\n";
+        let body = serde_json::json!({
+            "payload": draft,
+            "version": "2026.10.09-3",
+            "issuer": "acme",
+            "scope": "org",
+        })
+        .to_string();
+        let response = loong_http::post_json(
+            &format!("http://127.0.0.1:{}/v1/admin/publish", addr.port()),
+            &body,
+            Some("admin-token"),
+            DEFAULT_TIMEOUT,
+        )
+        .unwrap();
+        assert_eq!(response.status, 200, "{}", response.body);
+        assert!(response.body.contains("2026.10.09-3"), "{}", response.body);
+        assert!(response.body.contains("default"), "{}", response.body);
+
+        // And a client reads back something it can verify.
+        let fetched = loong_http::get_json(
+            &format!("http://127.0.0.1:{}/v1/pack/profiles", addr.port()),
+            Some("client-token"),
+            DEFAULT_TIMEOUT,
+        )
+        .unwrap();
+        let envelope = Envelope::from_json(fetched.body.trim()).unwrap();
+        envelope.verify(&public, &[PROFILES_SCHEMA]).unwrap();
     }
 
     #[test]

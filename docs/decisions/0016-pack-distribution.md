@@ -51,13 +51,29 @@ fixed order, with no insignificant whitespace. `signature` and `key_id` are
 excluded from what they authenticate; everything else is covered, including the
 version and the scope, so a pack cannot be replayed as another artifact.
 
-### 2. Ed25519, via `ring`
+### 2. Ed25519 (via `ring`), and the control plane holds the key
 
-Ed25519 through `ring` — already in the tree for TLS, so no new cryptography
-family arrives, and `ring` is the implementation we already trust for the
-transport. The private key is PKCS#8 (`ring`'s native input); `keygen` writes it
-0600 and never transmits it. `key_id` is a truncated SHA-256 of the public key so
-rotation is possible without breaking older clients.
+Ed25519 through `ring` — already in the tree for TLS, so no new cryptography family
+arrives, and `ring` is the implementation we already trust for the transport. The
+private key is PKCS#8 (`ring`'s native input), written 0600.
+
+**Owner decision, 2026-10-09: the control plane holds the signing key.** An
+administrator publishes a *draft* and the control plane validates and signs it, so
+the private key never has to be copied to an administrator's workstation and no
+signing step depends on one person's laptop. The alternative — an administrator
+signing offline and uploading a finished envelope — was built first and remains
+supported (`publish --file`, `sign`) for an air-gapped administrator, but it is not
+the normal path: it puts the key wherever the administrator works.
+
+The trade is named rather than hidden: **a compromised control plane can mint
+packs**, where offline signing would have kept that power on a workstation. What
+still holds: the key file is 0600 and never leaves the server; a control plane
+started with `--public-key` refuses to run if the key does not derive it; and
+clients refuse anything not signed by the key they pinned. `GET /v1/health` reports
+`can_sign`, so "can this plane author?" is observable.
+
+`key_id` is a truncated SHA-256 of the public key so rotation is possible without
+breaking older clients.
 
 ### 3. Key distribution: pinned out of band, never learned from the wire
 
@@ -118,7 +134,20 @@ The client stores one local key — `control.profile` — and the resolver expan
 the chosen bundle into the control layer. `description` is not decoration: it is
 what the user is shown instead of a model list (T-07's "declare intent").
 
-### 7. Offline is degraded, not dead
+### 7. A pack does not expire
+
+**Owner decision, 2026-10-09: no expiry, no maximum age.** A machine that never
+reaches the control plane again keeps running the last pack it verified, for as long
+as it exists. The consequence is recorded rather than mitigated: revocation has no
+teeth against a machine that stays offline, and a rotated-out pack keeps working
+there. That is acceptable for a firm-internal tool whose failure mode is "an
+engineer's old laptop keeps using last quarter's profile", and it is the direct cost
+of "offline is degraded, not dead".
+
+If that trade ever changes, the mechanism is already in the envelope (`issued_at_ms`,
+`version`) — the decision, not the plumbing, is what would have to change.
+
+### 8. Offline is degraded, not dead
 
 The last verified pack is cached under the state directory and used when the
 control plane is unreachable, so a disconnected machine still runs. Because the
@@ -139,7 +168,11 @@ verified) as its first-class provenance, which is the local half of ADR-0012's
   installs (an empty org layer is the v1 story, ADR-0012 Consequences). It is no
   longer the documented path, and `loongagent setup` no longer writes one: setup
   asks for a control-plane address.
-- **Deferred:** key rotation policy, revocation, per-team scopes, transport
+- **Scope, reaffirmed 2026-10-09:** this ADR covers **profile distribution only**.
+  Identity/SSO, the model gateway, rollups/dashboards and the uplink stay in
+  ADR-0012's deferred list, to be built later and separately; the client continues to
+  only ever *read*.
+- **Deferred:** key rotation procedure, revocation, per-team scopes, transport
   cadence (poll vs push), the uplink (audit/statistics batches), and signed
-  policy/context payloads — the envelope is built for them, the payload schemas
-  are not written.
+  policy/context payloads — the envelope is built for them, the payload schemas are
+  not written.

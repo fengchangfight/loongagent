@@ -56,6 +56,10 @@ Two binaries, one shared crate, and a deliberate division of labour:
 | `loongagent` | every engineer | reads a signed pack, verifies it against a **pinned** key, runs the profile |
 | `loongagent-control` | a **profile administrator** | `keygen`, `serve`, `publish`, `show`, `health` — distributes packs, and nothing else. `sign` exists for an air-gapped administrator |
 
+Bringing one up (layout, key, tokens, systemd, troubleshooting):
+**[docs/runbooks/control-plane.md](runbooks/control-plane.md)**, and
+`scripts/control-plane-init.sh` writes the layout and prints the next commands.
+
 ```bash
 # once, by the profile administrator
 loongagent-control keygen --out /etc/loongagent/control      # private key, mode 0600

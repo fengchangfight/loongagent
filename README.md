@@ -36,6 +36,10 @@ loongagent use default     # the one profile-related choice you make
 loongagent tui
 ```
 
+Standing the control plane up is a runbook:
+[docs/runbooks/control-plane.md](docs/runbooks/control-plane.md) (and
+`scripts/control-plane-init.sh` does the layout, key and tokens).
+
 You see profile names and what they are for (`default` — balanced, `supersmart` —
 frontier throughout). Which vendor, which endpoint and which key are behind them is
 not yours to edit: the pack is signed, this install pins the public key, and a pack

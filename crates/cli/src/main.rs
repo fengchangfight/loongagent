@@ -507,6 +507,16 @@ fn setup(args: Args) -> Result<(), String> {
     if url.trim().is_empty() {
         return Err("a control-plane address is required".to_string());
     }
+    // Check the address before asking for anything secret: refusing plain HTTP to
+    // another machine *after* accepting a token would be a strange order to be told.
+    loong_control::ControlConfig {
+        base_url: url.trim().to_string(),
+        public_key: vec![0; 32],
+        token: None,
+        profile: None,
+    }
+    .check_transport()
+    .map_err(|e| e.to_string())?;
     let public_key = match &args.control_key {
         Some(key) => key.clone(),
         None => {
@@ -1136,6 +1146,20 @@ fn build_model(
 
 /// Resolve a configuration reference (ADR-0008 §5: config carries a reference, not
 /// a secret). A bare value is passed through only for non-secret keys.
+/// Where a `file:` reference points: absolute, `~/…`, or relative to the profile in
+/// use, so a profile and its credentials file move together.
+fn credential_path(path: &str, base: &Path) -> Option<PathBuf> {
+    if let Some(relative) = path.strip_prefix("~/") {
+        return std::env::var("HOME")
+            .ok()
+            .map(|home| PathBuf::from(home).join(relative));
+    }
+    if Path::new(path).is_absolute() {
+        return Some(PathBuf::from(path));
+    }
+    Some(base.join(path))
+}
+
 /// Read one secret out of a credentials file: `[keys]` NAME = "…".
 ///
 /// `toml::from_str`, not `str::parse`: the `FromStr` implementation parses a *single
@@ -1158,29 +1182,32 @@ fn resolve_reference(value: Option<&str>, base: &Path) -> Option<String> {
         return std::env::var(name).ok();
     }
     if let Some(rest) = value.strip_prefix("file:") {
-        let (path, key) = match rest.split_once('#') {
-            Some((path, key)) => (path, key),
+        // Two shapes, because both are useful and the control plane writes one of them:
+        //   file:PATH          the file *is* the secret (what `--client-token-file` writes)
+        //   file:PATH#KEY      `[keys] KEY = "…"` inside a shared credentials file
+        return match rest.split_once('#') {
+            Some((path, key)) => {
+                let path = credential_path(path, base)?;
+                read_credential(&path, key).or_else(|| {
+                    eprintln!("[config] {} has no usable keys.{key}", path.display());
+                    None
+                })
+            }
             None => {
-                eprintln!("[config] {value} needs the form file:PATH#KEY");
-                return None;
+                let path = credential_path(rest, base)?;
+                match std::fs::read_to_string(&path) {
+                    Ok(text) if !text.trim().is_empty() => Some(text.trim().to_string()),
+                    Ok(_) => {
+                        eprintln!("[config] {} is empty", path.display());
+                        None
+                    }
+                    Err(e) => {
+                        eprintln!("[config] cannot read {}: {e}", path.display());
+                        None
+                    }
+                }
             }
         };
-        let path = if let Some(relative) = path.strip_prefix("~/") {
-            match std::env::var("HOME") {
-                Ok(home) => PathBuf::from(home).join(relative),
-                Err(_) => return None,
-            }
-        } else if Path::new(path).is_absolute() {
-            PathBuf::from(path)
-        } else {
-            // Relative to the profile in use, so a profile and its credentials file
-            // move together — and `--profile elsewhere/profile.toml` finds its own.
-            base.join(path)
-        };
-        return read_credential(&path, key).or_else(|| {
-            eprintln!("[config] {} has no usable keys.{key}", path.display());
-            None
-        });
     }
     if value.starts_with("keychain:") || value.starts_with("gateway:") {
         // ADR-0008 §5 says credentials live in the OS store or the control plane.
@@ -1914,6 +1941,43 @@ mod tests {
         };
         let error = control_config(&file).unwrap_err();
         assert!(error.contains("TLS"), "{error}");
+    }
+
+    #[test]
+    fn a_file_reference_reads_either_a_table_or_a_bare_secret() {
+        let dir = std::env::temp_dir().join(format!("loong-secret-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // What `loongagent-control --client-token-file` writes: the file is the token.
+        let bare = dir.join("client.token");
+        std::fs::write(&bare, "ct-secret\n").unwrap();
+        assert_eq!(
+            resolve_reference(Some(&format!("file:{}", bare.display())), &dir),
+            Some("ct-secret".to_string()),
+            "trailing whitespace is not part of a token"
+        );
+        // An empty file is a mistake, not an empty token.
+        let empty = dir.join("empty.token");
+        std::fs::write(&empty, "   \n").unwrap();
+        assert_eq!(
+            resolve_reference(Some(&format!("file:{}", empty.display())), &dir),
+            None
+        );
+        // And the table form still works, with the key named.
+        let table = dir.join("credentials.toml");
+        std::fs::write(&table, "[keys]\nCONTROL_TOKEN = \"from-table\"\n").unwrap();
+        assert_eq!(
+            resolve_reference(
+                Some(&format!("file:{}#CONTROL_TOKEN", table.display())),
+                &dir
+            ),
+            Some("from-table".to_string())
+        );
+        // A relative path is read beside the profile in use.
+        assert_eq!(
+            resolve_reference(Some("file:client.token"), &dir),
+            Some("ct-secret".to_string())
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

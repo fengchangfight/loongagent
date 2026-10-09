@@ -98,9 +98,38 @@ Notes that save a round trip:
 - `base_url` is the OpenAI-compatible base, `model` is the id that endpoint wants. A
   local server (vLLM, LM Studio, Ollama) is `http://127.0.0.1:8000/v1`.
 - `api_key` must be a **reference** — `env:NAME`, `file:PATH`, `file:PATH#KEY`,
-  `keychain:`, `gateway:`. A literal is refused. It is resolved **on the client**, so
-  each machine keeps its own secret; `file:PATH#KEY` accepts `NAME: value`,
-  `NAME=value`, or a TOML `[keys]` table (ADR-0008 §5).
+  `keychain:`, `gateway:`. A literal is refused at the administrator's own
+  `publish --pack`, again at the control plane, and again when a client loads the
+  pack (ADR-0008 §5). The reference is resolved **on the client**, so the secret
+  never reaches the control plane and never enters a signed pack.
+
+### The draft is committed; the secret is not
+
+This file is configuration: it goes in a repository, it gets reviewed, and a pack is
+what reviewers approve. So it carries a **placeholder**, and the value lives in an
+environment file on each machine:
+
+```toml
+api_key = "env:DEEPSEEK_API_KEY"        # committed — a name, not a secret
+```
+
+The client reads environment files before resolving any reference, in this order:
+
+| Order | File | Notes |
+|---|---|---|
+| 1 | whatever the shell already exported | always wins; a `.env` never overrides it |
+| 2 | `~/.config/loongagent/env` | the recommended home for a secret; mode `0600` |
+| 3 | `<workspace>/.env` | convenient when you work inside the repository that has one |
+
+Both accept `NAME=value`, `NAME: value`, `export NAME=value` and quoted values. A
+missing file is not an error. `file:PATH#KEY` remains available when a machine keeps
+its secret somewhere else entirely — but prefer a name over a path in anything you
+commit.
+
+`.gitignore` in this repository ignores `.env` and `.env.*`; if you keep the secret in
+a repository of your own, make sure the same is true there. **A pack never contains
+the value**: `api_key` travels as the reference string, so `profiles.json` on the
+control plane and in a client's cache holds `env:DEEPSEEK_API_KEY`, not a key.
 - `description` is the only thing an engineer reads before choosing. Write it about
   cost and behaviour.
 - Name profiles by capability (`default`, `fast`, `supersmart`), never by vendor —

@@ -40,6 +40,10 @@ Standing the control plane up is a runbook:
 [docs/runbooks/control-plane.md](docs/runbooks/control-plane.md) (and
 `scripts/control-plane-init.sh` does the layout, key and tokens).
 
+A pack carries a **placeholder** (`api_key = "env:DEEPSEEK_API_KEY"`), never a key:
+the value lives in `~/.config/loongagent/env` (mode 0600) on each machine, and a
+literal in a pack is refused at publish time and again at load time.
+
 You see profile names and what they are for (`default` — balanced, `supersmart` —
 frontier throughout). Which vendor, which endpoint and which key are behind them is
 not yours to edit: the pack is signed, this install pins the public key, and a pack

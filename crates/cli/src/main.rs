@@ -114,6 +114,10 @@ impl Args {
             keep_newest: None,
             positional: Vec::new(),
         };
+        // Before anything resolves a reference: a pack says `env:NAME`, and this is
+        // what makes that work without an export in every shell.
+        load_env_files(&config_dir(), &cwd);
+
         let mut i = 0;
         while i < rest.len() {
             match rest[i].as_str() {
@@ -390,6 +394,18 @@ fn control_config(
             "the public key must be a 32-byte Ed25519 key in hex ({} bytes given)",
             public_key.len()
         ));
+    }
+    // The same rule the pack's `api_key` gets, for the same reason: a token is a
+    // secret, and a secret in a configuration file is one `git add` from a leak
+    // (this file lives in ~/.config, which dotfiles repositories do commit).
+    if let Some(token) = &file.token {
+        let known = ["env:", "file:", "keychain:", "gateway:"];
+        if !known.iter().any(|prefix| token.starts_with(prefix)) {
+            return Err(format!(
+                "the control-plane token must be a reference (env:NAME, file:PATH), not a \
+                 literal — use file:/path/to/client.token (ADR-0008 §5)"
+            ));
+        }
     }
     let token = resolve_reference(file.token.as_deref(), &config_dir());
     let config = loong_control::ControlConfig {
@@ -1251,6 +1267,74 @@ fn credential_path(path: &str, base: &Path) -> Option<PathBuf> {
     Some(base.join(path))
 }
 
+/// Environment files the client reads, in order, so a pack can name a variable
+/// (`api_key = "env:DEEPSEEK_API_KEY"`) and still work without the operator
+/// exporting anything before every run.
+///
+/// Two rules, both deliberate:
+///
+/// - a variable that is **already set** is never overridden, so the shell — and
+///   anything a configuration-management run exported — always wins;
+/// - the user's own file wins over the workspace's, so a checked-out repository
+///   cannot replace a credential the user chose.
+fn env_file_paths(user_config_dir: &Path, workspace: &Path) -> Vec<PathBuf> {
+    vec![user_config_dir.join("env"), workspace.join(".env")]
+}
+
+/// Parse the files into `(name, value)` pairs, first definition winning.
+fn read_env_files(paths: &[PathBuf]) -> Vec<(String, String)> {
+    let mut found: Vec<(String, String)> = Vec::new();
+    for path in paths {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') || line.starts_with('[') {
+                continue;
+            }
+            let line = line.strip_prefix("export ").unwrap_or(line).trim_start();
+            let split = line.char_indices().find(|(_, c)| *c == '=' || *c == ':');
+            let Some((index, _)) = split else { continue };
+            let name = line[..index].trim().to_string();
+            let value = line[index + 1..]
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'');
+            if name.is_empty() || value.is_empty() {
+                continue;
+            }
+            if found.iter().any(|(existing, _)| *existing == name) {
+                continue;
+            }
+            found.push((name, value.to_string()));
+        }
+    }
+    found
+}
+
+/// Apply them to this process, naming the file each variable actually came from.
+/// Names are printed, never values.
+fn load_env_files(user_config_dir: &Path, workspace: &Path) {
+    let mut by_file: Vec<(String, Vec<String>)> = Vec::new();
+    for path in env_file_paths(user_config_dir, workspace) {
+        let pairs = read_env_files(std::slice::from_ref(&path));
+        let mut taken = Vec::new();
+        for (name, value) in pairs {
+            if std::env::var_os(&name).is_none() {
+                std::env::set_var(&name, value);
+                taken.push(name);
+            }
+        }
+        if !taken.is_empty() {
+            by_file.push((path.display().to_string(), taken));
+        }
+    }
+    for (file, names) in by_file {
+        eprintln!("[config] environment from {file}: {}", names.join(", "));
+    }
+}
+
 /// Read one named secret out of a file.
 ///
 /// Line-based and forgiving about the separator, because the file is something an
@@ -2087,6 +2171,76 @@ mod tests {
         // A managed one with no user file is the machine's, whole.
         assert_eq!(merge_control(Some(machine.clone()), None).unwrap(), machine);
         assert!(merge_control(None, None).is_none());
+    }
+
+    #[test]
+    fn environment_files_are_read_with_the_user_winning_and_the_shell_above_both() {
+        let dir = std::env::temp_dir().join(format!("loong-env-{}", std::process::id()));
+        let user = dir.join("cfg");
+        let workspace = dir.join("ws");
+        std::fs::create_dir_all(&user).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(
+            &user.join("env"),
+            "# the user's own file\nexport DEEPSEEK_API_KEY=\"sk-user\"\nSHARED: from-user\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &workspace.join(".env"),
+            "DEEPSEEK_API_KEY=sk-workspace\nSHARED=from-workspace\nONLY_HERE=yes\n",
+        )
+        .unwrap();
+
+        let pairs = read_env_files(&env_file_paths(&user, &workspace));
+        assert_eq!(
+            pairs
+                .iter()
+                .find(|(n, _)| n == "DEEPSEEK_API_KEY")
+                .unwrap()
+                .1,
+            "sk-user",
+            "the user's file wins over a checked-out repository"
+        );
+        assert_eq!(
+            pairs.iter().find(|(n, _)| n == "SHARED").unwrap().1,
+            "from-user"
+        );
+        assert_eq!(
+            pairs.iter().find(|(n, _)| n == "ONLY_HERE").unwrap().1,
+            "yes",
+            "and the workspace can still supply what the user did not"
+        );
+
+        // A missing file is not an error, and neither is an empty one.
+        let none = read_env_files(&[dir.join("absent"), dir.join("also-absent")]);
+        assert!(none.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_literal_control_plane_token_is_refused() {
+        let literal = ControlFile {
+            url: "https://control.acme.internal".to_string(),
+            public_key: "ab".repeat(32),
+            token: Some("ct-abcdef123456".to_string()),
+        };
+        let error = control_config(&literal).unwrap_err();
+        assert!(error.contains("reference"), "{error}");
+        assert!(error.contains("ADR-0008"), "{error}");
+        // The two shapes that are not literals still work.
+        for reference in [
+            "env:LOONGAGENT_CONTROL_TOKEN",
+            "file:/etc/loongagent/client.token",
+        ] {
+            let file = ControlFile {
+                token: Some(reference.to_string()),
+                ..literal.clone()
+            };
+            assert!(
+                control_config(&file).is_ok(),
+                "{reference} must be accepted"
+            );
+        }
     }
 
     #[test]

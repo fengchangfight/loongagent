@@ -108,7 +108,9 @@ description = "Balanced: the everyday profile. Replace this sentence."
   kind = "openai-compat"
   base_url = "http://127.0.0.1:8000/v1"      # provider, your gateway, or a local server
   model = "REPLACE-WITH-A-MODEL-ID"
-  api_key = "env:LOONGAGENT_API_KEY"         # resolved on the *client*; never a literal
+  api_key = "env:DEEPSEEK_API_KEY"           # a *placeholder*: resolved on the client,
+                                             # never a literal. This file is committed, so
+                                             # it must not contain the secret itself.
   budget_tokens = 128000
   [profiles.router]
   default = "main"

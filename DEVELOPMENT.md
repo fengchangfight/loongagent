@@ -123,6 +123,39 @@ audit/statistics uplink. The client only ever *reads*. Also not built: key rotat
 and revocation policy, per-team scopes, and polling/push cadence — the envelope has
 `key_id` and `version` for them, the policy does not exist yet.
 
+### The draft is committed; the secret never is
+
+A profile pack is configuration — reviewed, versioned, diffed — so it carries a
+**placeholder** and the value lives on each machine:
+
+```toml
+api_key = "env:DEEPSEEK_API_KEY"        # what is committed
+```
+
+A **literal** is refused in three places, so it cannot arrive by accident: at the
+administrator's own `publish --pack` (before any network call), at the control plane
+when it validates the draft, and when a client loads a pack. The reference travels
+inside the signed envelope — `profiles.json` holds `env:DEEPSEEK_API_KEY`, never a
+value — and the control plane never resolves it: the secret stays on the client.
+
+The client reads environment files before resolving any reference:
+
+| Order | File | Rule |
+|---|---|---|
+| 1 | whatever the shell exported | always wins; an env file never overrides it |
+| 2 | `~/.config/loongagent/env` | the recommended home for the secret, mode `0600` |
+| 3 | `<workspace>/.env` | convenient when the repository you work in has one |
+
+The user's file wins over the workspace's, so a checked-out repository cannot replace
+a credential the user chose. All three accept `NAME=value`, `NAME: value`,
+`export NAME=value` and quoted values, and only names are ever reported
+(`[config] environment from …: DEEPSEEK_API_KEY`).
+
+`file:PATH` / `file:PATH#KEY` remain for a machine that keeps its secret elsewhere
+(`NAME: value`, `NAME=value`, or a TOML `[keys]` table are all understood). The
+control-plane **token** must be a reference too, for the same reason: `control.toml`
+lives in `~/.config`, which dotfiles repositories do commit.
+
 ### Profiles: several models, and a router you can explain
 
 A profile is a **named bundle** an administrator publishes (T-07), and the payload

@@ -58,6 +58,28 @@ if [ ! -x "$binary" ]; then
   cargo build --release -p loong-control
 fi
 
+# The signing key must never be committed: a key in a repository is an off-site
+# ability to mint packs every install accepts.
+work_tree=""
+probe="$(cd "$dir" 2>/dev/null && pwd || echo "$dir")"
+while [ -n "$probe" ] && [ "$probe" != "/" ]; do
+  if [ -e "$probe/.git" ]; then work_tree="$probe"; break; fi
+  probe="$(dirname "$probe")"
+done
+if [ -n "$work_tree" ] && [ "${FORCE:-0}" = "1" ]; then
+  echo "warning: creating private material inside the git work tree at $work_tree" >&2
+  echo "  add these lines to .gitignore first:" >&2
+  echo "    control-key.pkcs8" >&2
+  echo "    client.token" >&2
+  echo "    admin.token" >&2
+fi
+if [ -n "$work_tree" ] && [ "${FORCE:-0}" != "1" ]; then
+  echo "refusing to create private material inside the git work tree at $work_tree" >&2
+  echo "  use --dir /etc/loongagent-control, or FORCE=1 if this repository exists to" >&2
+  echo "  hold secrets and ignores them (add: control-key.pkcs8, client.token, admin.token)." >&2
+  exit 1
+fi
+
 if [ -e "$dir/control-key.pkcs8" ]; then
   echo "refusing to touch an existing control plane: $dir/control-key.pkcs8 exists" >&2
   echo "  a new key would invalidate every install that pinned the old one." >&2

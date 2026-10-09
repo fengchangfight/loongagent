@@ -23,6 +23,146 @@ use loong_pack::{
 };
 use std::path::{Path, PathBuf};
 
+/// Walk up from `path` looking for a git work tree (a `.git` file or directory).
+///
+/// The signing key is the one file in this system that must never be committed: a
+/// key in a repository is an off-site ability to mint packs every install accepts.
+/// Administrators run `keygen` wherever they happen to be, so the tool checks.
+fn git_work_tree(path: &Path) -> Option<PathBuf> {
+    let mut dir = std::fs::canonicalize(path).ok()?;
+    loop {
+        if dir.join(".git").exists() {
+            return Some(dir);
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
+}
+
+/// `Some(stdout)` when the git command succeeded. A missing git or a repository that
+/// is not one is not an error: it means "cannot tell", and we say less rather than
+/// cry wolf.
+fn git(dir: &Path, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn is_tracked(repo: &Path, name: &str) -> bool {
+    git(repo, &["ls-files", "--error-unmatch", name]).is_some()
+}
+
+fn is_ignored(repo: &Path, name: &str) -> bool {
+    git(repo, &["check-ignore", "-q", name]).is_some()
+}
+
+/// Names that hold a secret. Deliberately about *this* system's files: an
+/// `.env.example` is documentation, not a secret.
+fn looks_like_a_secret(name: &str) -> bool {
+    if name.ends_with(".example") || name.ends_with(".template") {
+        return false;
+    }
+    matches!(
+        name,
+        "control-key.pkcs8" | "client.token" | "admin.token" | "credentials.toml" | ".env" | "env"
+    ) || name.ends_with(".pkcs8")
+        || name.ends_with(".key")
+        || name.ends_with(".pem")
+        || name.starts_with(".env.")
+}
+
+/// Refuse to *create* private material inside a work tree unless told twice.
+///
+/// `names` is what this command is about to write, so the forced path can name the
+/// `.gitignore` lines before the files exist.
+fn guard_private_material(
+    dir: &Path,
+    what: &str,
+    names: &[&str],
+    force: bool,
+) -> Result<(), String> {
+    let Some(repo) = git_work_tree(dir) else {
+        return Ok(());
+    };
+    if !force {
+        return Err(format!(
+            "refusing to write {what} inside the git work tree at {}\n\
+             \ta signing key in a repository is an off-site ability to mint packs every install \
+             accepts.\n\
+             \tuse --out /etc/loongagent-control (the layout the runbook describes), or pass \
+             --force if this repository exists to hold secrets and ignores them.",
+            repo.display()
+        ));
+    }
+    eprintln!(
+        "warning: writing {what} inside the git work tree at {} because --force was given",
+        repo.display()
+    );
+    for name in names {
+        if !is_ignored(&repo, name) {
+            eprintln!("  {name} is not ignored by git — add this line to .gitignore:  {name}");
+        }
+    }
+    Ok(())
+}
+
+/// Publishing is where a leak in the *repository holding the draft* becomes visible:
+/// the draft itself can only carry references, but the repository may also hold the
+/// machine's `.env` next to it.
+fn guard_pack_repository(pack: &Path, force: bool) -> Result<(), String> {
+    let dir = pack.parent().unwrap_or(Path::new("."));
+    let Some(repo) = git_work_tree(dir) else {
+        return Ok(());
+    };
+    let mut places = vec![repo.clone()];
+    let pack_dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    if pack_dir != repo {
+        places.push(pack_dir);
+    }
+    let mut tracked = Vec::new();
+    let mut unignored = Vec::new();
+    for place in places {
+        let Ok(entries) = std::fs::read_dir(&place) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !looks_like_a_secret(&name) {
+                continue;
+            }
+            if is_tracked(&repo, &name) {
+                tracked.push(place.join(&name).display().to_string());
+            } else if !is_ignored(&repo, &name) {
+                unignored.push(place.join(&name).display().to_string());
+            }
+        }
+    }
+    if !tracked.is_empty() && !force {
+        return Err(format!(
+            "a secret is already tracked by git:\n\t{}\n\
+             \tfix it before publishing:  git rm --cached <that file>, add it to .gitignore, and \
+             rotate the secret.\n\
+             \t(--force publishes anyway; this check is about the repository, not the pack.)",
+            tracked.join("\n\t")
+        ));
+    }
+    if !unignored.is_empty() {
+        eprintln!(
+            "warning: not ignored by git (one `git add -A` from a leak): {}",
+            unignored.join(", ")
+        );
+    }
+    Ok(())
+}
+
 fn main() {
     if let Err(message) = run() {
         eprintln!("loongagent-control: {message}");
@@ -35,7 +175,7 @@ fn usage() -> String {
 loongagent-control — distribute signed profile packs (ADR-0008 §6, ADR-0016)
 
 USAGE
-  loongagent-control keygen [--out DIR]
+  loongagent-control keygen [--out DIR] [--force]
       Make an Ed25519 signing keypair. Writes control-key.pkcs8 (mode 0600) and
       prints the public key to pin in every install. The private key stays with the
       control plane: install it there, and administrators publish drafts.
@@ -72,6 +212,11 @@ USAGE
 
 TOKENS come from the environment (--*-token-env) or a file (--*-token-file), never
 from the command line: arguments are visible to every process on the machine.
+
+GIT: keygen refuses to write a signing key inside a git work tree, and publish
+refuses to run while a secret is *tracked* in the repository holding the draft. A
+signing key in a repository is an off-site ability to mint packs; `--force` overrides
+either check and says what to add to .gitignore.
 
 A PACK is TOML with `default_profile` and one or more `[[profiles]]`, each with a
 `description`, `[[profiles.models]]` and an optional `[profiles.router]`. Engineers
@@ -132,6 +277,12 @@ fn keygen(args: &[String]) -> Result<(), String> {
     let dir = optional(args, "--out").unwrap_or_else(|| ".".to_string());
     let dir = PathBuf::from(dir);
     std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+    guard_private_material(
+        &dir,
+        "the signing key",
+        &["control-key.pkcs8"],
+        args.iter().any(|a| a == "--force"),
+    )?;
     let key_path = dir.join("control-key.pkcs8");
     if key_path.exists() {
         return Err(format!(
@@ -364,6 +515,7 @@ fn publish(args: &[String]) -> Result<(), String> {
         (Some(pack), None) => {
             // A draft: the control plane validates and signs it. This is the normal
             // path, and it is why the signing key never leaves the server.
+            guard_pack_repository(Path::new(&pack), args.iter().any(|a| a == "--force"))?;
             let payload =
                 std::fs::read_to_string(&pack).map_err(|e| format!("reading {pack}: {e}"))?;
             // Validate locally too, so the administrator hears about a broken pack

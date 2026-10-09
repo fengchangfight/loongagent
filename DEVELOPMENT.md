@@ -151,6 +151,13 @@ a credential the user chose. All three accept `NAME=value`, `NAME: value`,
 `export NAME=value` and quoted values, and only names are ever reported
 (`[config] environment from …: DEEPSEEK_API_KEY`).
 
+**The signing key must never be in a repository**, and the tools enforce it: `keygen`
+refuses to write a key inside a git work tree (`--force` writes it and prints the
+`.gitignore` lines), `scripts/control-plane-init.sh` refuses the same way (`FORCE=1`),
+and `publish --pack` refuses while a secret is *tracked* in the repository holding the
+draft — naming the `git rm --cached` fix — while an untracked, unignored secret gets a
+warning. Five integration tests in `crates/control/tests/` cover those paths.
+
 `file:PATH` / `file:PATH#KEY` remain for a machine that keeps its secret elsewhere
 (`NAME: value`, `NAME=value`, or a TOML `[keys]` table are all understood). The
 control-plane **token** must be a reference too, for the same reason: `control.toml`

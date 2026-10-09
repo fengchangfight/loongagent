@@ -62,6 +62,23 @@ The script prints the **public key** (to pin in every install) and refuses to ru
 a key already exists — overwriting one would invalidate every install that pinned it.
 It does not start anything.
 
+### The signing key must not be in a repository
+
+A key in a repository is an off-site ability to mint packs that every install accepts,
+so the tools check rather than trust:
+
+- `keygen` **refuses to write a key inside a git work tree**, and names the layout to
+  use instead. `--force` writes it and prints the `.gitignore` lines you now need.
+- `scripts/control-plane-init.sh` refuses the same way (`FORCE=1` overrides) — it also
+  writes the two tokens.
+- `publish --pack` **refuses while a secret is tracked** in the repository holding the
+  draft (`.env`, `client.token`, `*.pkcs8`, …), and prints the fix: `git rm --cached`,
+  add it to `.gitignore`, and rotate it. A secret that is merely *untracked and
+  unignored* gets a warning, because that is one `git add -A` from a leak.
+- A **pack itself can only carry references** — a literal `api_key` is refused at
+  publish time and again at load time — so the draft is safe to commit. That is the
+  point of the split: the draft is configuration, the value is machine state.
+
 ## 2. Write the pack
 
 Edit the starter (`~/config/loongagent/profiles.toml`). Engineers see only `name`

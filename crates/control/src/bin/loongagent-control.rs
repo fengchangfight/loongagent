@@ -241,6 +241,14 @@ fn run() -> Result<(), String> {
         "serve" => serve(rest),
         "publish" => publish(rest),
         "health" => health(rest),
+        "-V" | "--version" => {
+            println!(
+                "loongagent-control {} (pack schema {})",
+                env!("CARGO_PKG_VERSION"),
+                loong_pack::PROFILES_SCHEMA
+            );
+            Ok(())
+        }
         "-h" | "--help" | "help" | "" => {
             println!("{}", usage());
             Ok(())

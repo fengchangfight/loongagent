@@ -16,7 +16,15 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+/// For an administrator's deliberate action (`publish`, `show`, `health`), where waiting
+/// is better than not knowing.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// For a client *starting a session*. The control plane is a refresh channel: if it does
+/// not answer quickly, the last verified pack is the right answer, and making someone
+/// wait fifteen seconds to be told that is worse than the stale policy. A refusal
+/// (nothing listening) returns immediately; this only bounds a black-holed endpoint.
+pub const CLIENT_SYNC_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 pub enum ControlError {

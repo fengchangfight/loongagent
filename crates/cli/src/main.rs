@@ -75,8 +75,6 @@ struct Args {
     /// The web surface's bind address and port (loopback by default: a browser on
     /// this machine, not the network).
     bind: String,
-    /// Use the last verified pack instead of contacting the control plane.
-    offline: bool,
     /// `setup`: the control plane's address, its pinned public key, and a token
     /// reference. All three can be answered interactively instead.
     control_url: Option<String>,
@@ -103,7 +101,6 @@ impl Args {
             model: None,
             profile: None,
             bind: "127.0.0.1".to_string(),
-            offline: false,
             control_url: None,
             control_key: None,
             control_token: None,
@@ -155,7 +152,6 @@ impl Args {
                     args.control_token = Some(rest.get(i).ok_or("--token needs a value")?.clone());
                 }
                 "--system" => args.control_system = true,
-                "--offline" => args.offline = true,
                 "--bind" => {
                     i += 1;
                     args.bind = rest.get(i).ok_or("--bind needs an address")?.clone();
@@ -204,7 +200,7 @@ impl Args {
     /// one. The pack is the *verified* layer: nothing reaches the resolver that a user
     /// could have written by hand (ADR-0008 §6).
     fn settings_with_pack(&self) -> Result<(loong_config::Profile, Option<PackState>), String> {
-        let pack = sync_pack(self, self.offline)?;
+        let pack = sync_pack(self)?;
         let layers = loong_config::layer_paths(&self.cwd, self.profile.as_deref());
         let resolved = match &pack {
             Some(state) => loong_config::resolve_with(
@@ -449,42 +445,31 @@ fn first_line(text: &str) -> String {
 /// The layers are read twice: once to learn `control.profile`, once with the pack in
 /// place. That keeps "the pack may not set the choice, the choice selects the pack"
 /// from becoming a special case in the resolver, and both passes are cheap.
-fn sync_pack(args: &Args, offline: bool) -> Result<Option<PackState>, String> {
+fn sync_pack(args: &Args) -> Result<Option<PackState>, String> {
     let Some(file) = load_control()? else {
         return Ok(None);
     };
     let (config, token) = control_config(&file)?;
     let cache = pack_cache(&config);
 
-    let synced = if offline {
-        match cache.load() {
-            Some(envelope) => {
-                envelope
-                    .verify(&config.public_key, &[loong_pack::PROFILES_SCHEMA])
-                    .map_err(|e| e.to_string())?;
-                loong_control::Synced {
-                    envelope,
-                    from_cache: true,
-                    note: Some("using the cached pack (--offline)".to_string()),
-                }
-            }
-            None => {
-                return Err(
-                    "no pack has been synced yet, and --offline was asked for — run \
-                     `loongagent control sync` once with the control plane reachable"
-                        .to_string(),
-                )
-            }
-        }
-    } else {
-        loong_control::sync(
-            &config,
-            &cache,
-            token.as_deref(),
-            loong_control::DEFAULT_TIMEOUT,
-        )
-        .map_err(|e| e.to_string())?
-    };
+    // The program decides, once per start: reachable means refresh, unreachable means the
+    // last verified pack. There is no switch to remember.
+    let synced = loong_control::sync(
+        &config,
+        &cache,
+        token.as_deref(),
+        loong_control::CLIENT_SYNC_TIMEOUT,
+    )
+    .map_err(|e| match e {
+        // The one case where the person must act: nothing cached *and* nothing reachable.
+        loong_control::ControlError::Unreachable(detail) => format!(
+            "no profile pack has been synced on this machine yet, and the control plane at {} is \
+             unreachable ({detail}) — start it, or run `loongagent setup` once while it is \
+             reachable",
+            config.base_url
+        ),
+        other => other.to_string(),
+    })?;
 
     let pack = loong_config::profiles_from_payload(&synced.envelope.payload)
         .map_err(|e| format!("the control plane's pack is not usable: {e}"))?;
@@ -701,7 +686,7 @@ fn print_profiles(pack: &loong_config::ProfilePack, selected: Option<&str>) {
 }
 
 /// `loongagent control status|sync` — what this install trusts, and what it has.
-fn control(args: Args, rest: &[String]) -> Result<(), String> {
+fn control(rest: &[String]) -> Result<(), String> {
     let sub = rest
         .iter()
         .find(|a| !a.starts_with("--") && **a != "control")
@@ -759,9 +744,6 @@ fn control(args: Args, rest: &[String]) -> Result<(), String> {
                     }
                 }
                 None => println!("cached pack:   none yet"),
-            }
-            if args.offline {
-                return Ok(());
             }
             println!();
             println!("checking {} …", file.url);
@@ -986,7 +968,7 @@ fn run() -> Result<(), String> {
             _ => Err(format!("mcp list | mcp trust\n\n{USAGE}")),
         },
         "setup" => setup(Args::parse(rest)?),
-        "control" => control(Args::parse(rest)?, rest),
+        "control" => control(rest),
         "profiles" => profiles(Args::parse(rest)?),
         "use" => use_profile(Args::parse(rest)?, rest),
         "tui" => full_screen(Args::parse(rest)?),
@@ -1611,7 +1593,7 @@ fn full_screen(args: Args) -> Result<(), String> {
     // First run: ask here, in the terminal UI, rather than sending the user off to
     // discover a command. Doing it before the session starts is also why nothing has
     // to be reconfigured mid-session.
-    if load_control()?.is_none() && args.model.is_none() && !args.offline {
+    if load_control()?.is_none() && args.model.is_none() {
         // In a pipe the form cannot be drawn: refuse first, in the same words the TUI
         // would use, rather than asking for three fields that cannot be seen.
         loong_tui_app::full_screen_needs_a_terminal()?;

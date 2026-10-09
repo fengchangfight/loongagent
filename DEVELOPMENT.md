@@ -108,9 +108,11 @@ Properties that are enforced, not documented:
   **locked**: project, user and session layers may narrow it, never rewrite it (an
   attempt is an error naming the pack). The one profile-related key a user owns is
   `control.profile` — the choice of bundle.
-- **Offline is degraded, not dead**: the last verified pack is cached under the state
-  directory and used when the control plane is unreachable; a pack that *fails*
-  verification never falls back to the cache. **A pack does not expire** (owner
+- **Offline is degraded, not dead, and the client decides**: at startup it refreshes the
+  pack if the control plane answers within a few seconds, uses the last verified pack if
+  it does not, and — if nothing has ever been synced — says what to do about it. There is
+  no flag for this: it is a property of the client, not a mode someone has to know. A pack
+  that *fails* verification never falls back to the cache. **A pack does not expire** (owner
   decision, 2026-10-09): a machine that never reconnects keeps running the pack it
   verified, so revocation has no teeth against it — an accepted trade, recorded in
   ADR-0016 §7.
@@ -155,8 +157,8 @@ Two properties worth keeping:
 - **Reading it changes nothing.** `context.explain` is a question about the session, not
   a fact in it: no event is recorded, so looking cannot alter what you are looking at
   (asserted in the kernel and server tests).
-- **It works offline.** The panel reads the kernel, not the control plane, so
-  `loongagent tui --offline` gives the same view with no network at all.
+- **It works offline.** The panel reads the kernel, not the control plane, so it looks
+  the same with no network at all.
 
 Opening the panel asks for the view immediately, and every finished turn refreshes it,
 so it is never an empty box and never stale.

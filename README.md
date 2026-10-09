@@ -91,7 +91,9 @@ log entry — a client that misses one has missed nothing.
 
 In the TUI, **F2** opens a context panel: what the next request will actually carry
 (by category and by entry, with what has been cleared and what is pinned against what it
-cost). It reads the kernel, records nothing, and works with `--offline`.
+cost). It reads the kernel, records nothing, and works with no control plane at all —
+the client refreshes the pack when the control plane answers and uses the last one it
+verified when it does not.
 
 All four speak JSON-RPC to the same local server, which streams every event of a
 turn before it answers. The UI holds no agent logic, so a new surface cannot drift

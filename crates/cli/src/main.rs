@@ -21,7 +21,7 @@ use loong_server::Server;
 use loong_tui::{Client, Transport};
 use serde_json::json;
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::mpsc::Receiver;
 
@@ -62,7 +62,9 @@ fn main() {
 
 #[derive(Debug, Clone)]
 struct Args {
-    session: PathBuf,
+    /// Where the session lives. `None` means "the usual place for this project",
+    /// so nobody has to pass `--session` to start working.
+    session: Option<PathBuf>,
     cwd: PathBuf,
     /// `None` means "not given": the layered configuration decides (ADR-0008).
     /// Flags are the **session layer**, the most local one.
@@ -85,7 +87,7 @@ impl Args {
     fn parse(rest: &[String]) -> Result<Self, String> {
         let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
         let mut args = Args {
-            session: cwd.join(".loongagent").join("session.jsonl"),
+            session: None,
             cwd: cwd.clone(),
             model: None,
             profile: None,
@@ -101,7 +103,8 @@ impl Args {
             match rest[i].as_str() {
                 "--session" => {
                     i += 1;
-                    args.session = PathBuf::from(rest.get(i).ok_or("--session needs a path")?);
+                    args.session =
+                        Some(PathBuf::from(rest.get(i).ok_or("--session needs a path")?));
                 }
                 "--cwd" => {
                     i += 1;
@@ -166,19 +169,69 @@ impl Args {
         loong_config::resolve(&layers, &self.cwd).map_err(|e| e.to_string())
     }
 
+    /// The session file: explicit if asked, otherwise the per-project default.
+    fn session_path(&self) -> PathBuf {
+        self.session.clone().unwrap_or_else(|| default_session_path(&self.cwd))
+    }
+
     fn session_id(&self) -> String {
-        self.session
+        self.session_path()
             .file_stem()
             .map(|s| format!("s-{}", s.to_string_lossy()))
             .unwrap_or_else(|| "s-local".to_string())
     }
 
     fn ensure_parent(&self) -> Result<(), String> {
-        if let Some(dir) = self.session.parent() {
+        if let Some(dir) = self.session_path().parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         }
         Ok(())
     }
+}
+
+fn non_empty_env(name: &str) -> Option<std::ffi::OsString> {
+    std::env::var_os(name).filter(|value| !value.is_empty())
+}
+
+/// `$XDG_STATE_HOME/loongagent/projects/<project>/session.jsonl`.
+///
+/// Sessions are state, not configuration, so they live under the state dir and are
+/// keyed by the project they belong to: resuming yesterday's work in a directory is
+/// the default, and `--session` is only for choosing differently.
+fn default_session_path(cwd: &Path) -> PathBuf {
+    // An XDG variable that is set but empty means "use the default" (the spec says
+    // so, and a relative path here would scatter sessions around the project).
+    let base = non_empty_env("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| non_empty_env("HOME").map(|home| PathBuf::from(home).join(".local/state")))
+        .unwrap_or_else(std::env::temp_dir);
+    base.join("loongagent")
+        .join("projects")
+        .join(project_slug(cwd))
+        .join("session.jsonl")
+}
+
+/// A readable directory name for a project path: `/home/me/work/api` becomes
+/// `home-me-work-api-3f9a1c22`. The hash is there because two different paths can
+/// produce the same slug (`/a-b/c` and `/a/b-c`), and quietly sharing a session
+/// between two projects would be a nasty surprise.
+fn project_slug(cwd: &Path) -> String {
+    let path = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    let text = path.to_string_lossy();
+    let mut slug: String = text
+        .trim_start_matches('/')
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    while slug.contains("--") {
+        slug = slug.replace("--", "-");
+    }
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in text.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{}-{:08x}", slug.trim_matches('-'), hash as u32)
 }
 
 fn run() -> Result<(), String> {
@@ -313,10 +366,11 @@ fn serve(args: Args) -> Result<(), String> {
         .map(|row| row.value.render())
         .unwrap_or_else(|| "default".to_string());
     config.settings = settings;
-    let kernel = if args.session.exists() {
-        Kernel::open(&args.session, config, model)
+    let session_path = args.session_path();
+    let kernel = if session_path.exists() {
+        Kernel::open(&session_path, config, model)
     } else {
-        Kernel::create(&args.session, config, model)
+        Kernel::create(&session_path, config, model)
     }
     .map_err(|e| e.to_string())?;
     Server::new(kernel, args.session_id())
@@ -340,6 +394,7 @@ fn build_model(args: &Args, settings: &loong_config::Profile) -> Result<Box<dyn 
         .unwrap_or_else(|| "echo".to_string());
     match kind.as_str() {
         "echo" => Ok(Box::new(EchoModel)),
+        "unconfigured" => Ok(Box::new(UnconfiguredModel)),
         "openai-compat" => {
             let base = resolve_reference(settings.base_url.as_deref())
                 .or_else(|| std::env::var("LOONGAGENT_BASE_URL").ok())
@@ -428,6 +483,20 @@ fn resolve_reference(value: Option<&str>) -> Option<String> {
     Some(value.to_string())
 }
 
+/// The model a first run gets: it answers every call with the one thing the user
+/// needs to know. Refusing to start would be worse — the TUI shows this as an
+/// error line inside a working session, next to the command that fixes it.
+struct UnconfiguredModel;
+
+impl Model for UnconfiguredModel {
+    fn complete(&mut self, _req: &CompletionRequest) -> Result<CompletionResponse, ModelError> {
+        Err(ModelError::Transport(
+            "no model is configured yet — run `loongagent setup` to pick one, then start again              (or pass --model echo / demo-write / demo-escape to exercise the loop without a model)"
+                .to_string(),
+        ))
+    }
+}
+
 /// The plainest possible provider double: repeats the last user message. Used by
 /// `run` and by the end-to-end test; needs no keys and no network.
 struct EchoModel;
@@ -495,7 +564,7 @@ impl ChildTransport {
         let mut child = command
             .arg("--stdio")
             .arg("--session")
-            .arg(&args.session)
+            .arg(args.session_path())
             .arg("--cwd")
             .arg(&args.cwd)
             .stdin(Stdio::piped())
@@ -581,13 +650,24 @@ fn full_screen(args: Args) -> Result<(), String> {
             return Err(e);
         }
     };
+    // What a first run needs to see, inside the UI rather than on a stderr that the
+    // alternate screen would overwrite: where this session lives, and whether a model
+    // is configured at all.
+    // The client resolves the same layers the server does, so it can tell the user
+    // whether a model exists without asking the server about it.
+    let settings = args.settings()?;
+    let mut intro = vec![format!("session: {}", args.session_path().display())];
     if attached.existing_events > 0 {
-        eprintln!(
-            "resuming session {} ({} events)",
-            attached.session_id, attached.existing_events
+        intro.push(format!("resuming {} events from that session", attached.existing_events));
+    }
+    if args.model.is_none() && settings.base_url.is_none() {
+        intro.push(
+            "no model configured — run `loongagent setup`, or pass --model demo-write to try the \
+             loop without one"
+                .to_string(),
         );
     }
-    loong_tui_app::run(client, attached.session_id, attached.schema_version, notes)
+    loong_tui_app::run(client, attached.session_id, attached.schema_version, notes, intro)
 }
 
 /// The browser surface: the same JSON-RPC lines, carried over a WebSocket.

@@ -53,6 +53,8 @@ pub struct App {
     /// The rendered conversation, oldest first.
     pub lines: Vec<String>,
     pub input: String,
+    /// Where the caret is, in characters (not bytes) from the start of `input`.
+    pub cursor: usize,
     /// The request awaiting an answer, if the turn stopped for one.
     pub pending: Option<String>,
     /// Diagnostics from the server process (its stderr): startup notes, warnings.
@@ -73,6 +75,7 @@ impl App {
         Self {
             lines: Vec::new(),
             input: String::new(),
+            cursor: 0,
             pending: None,
             notes: Vec::new(),
             session: session.into(),
@@ -83,6 +86,60 @@ impl App {
             scroll: 0,
             quit: false,
         }
+    }
+
+    fn byte_at(&self, char_index: usize) -> usize {
+        self.input
+            .char_indices()
+            .nth(char_index)
+            .map(|(byte, _)| byte)
+            .unwrap_or(self.input.len())
+    }
+
+    fn insert(&mut self, text: &str) {
+        let at = self.byte_at(self.cursor);
+        self.input.insert_str(at, text);
+        self.cursor += text.chars().count();
+    }
+
+    fn delete_before_cursor(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        let from = self.byte_at(self.cursor - 1);
+        let to = self.byte_at(self.cursor);
+        self.input.replace_range(from..to, "");
+        self.cursor -= 1;
+    }
+
+    fn delete_at_cursor(&mut self) {
+        if self.cursor >= self.input.chars().count() {
+            return;
+        }
+        let from = self.byte_at(self.cursor);
+        let to = self.byte_at(self.cursor + 1);
+        self.input.replace_range(from..to, "");
+    }
+
+    /// The input line as it should be drawn at this width, plus the caret's column
+    /// inside the box. Long input scrolls horizontally so the caret stays visible —
+    /// without that, typing past the edge looks like the keys stopped working.
+    pub fn input_view(&self, inner_width: u16) -> (String, u16) {
+        use unicode_width::UnicodeWidthStr;
+        let width = inner_width.max(1) as usize;
+        let before: String = self.input.chars().take(self.cursor).collect();
+        let caret = before.width();
+        let offset = caret.saturating_sub(width.saturating_sub(1));
+        let mut visible = String::new();
+        let mut used = 0usize;
+        for (index, ch) in self.input.chars().enumerate() {
+            let ch_width = ch.to_string().width();
+            if index >= offset && used + ch_width <= width {
+                visible.push(ch);
+                used += ch_width;
+            }
+        }
+        (visible, (caret - offset) as u16)
     }
 
     pub fn push_lines(&mut self, lines: impl IntoIterator<Item = String>) {
@@ -150,7 +207,55 @@ impl App {
             KeyCode::Char('a') | KeyCode::Char('y') if self.pending.is_some() => self.answer(true),
             KeyCode::Char('d') | KeyCode::Char('n') if self.pending.is_some() => self.answer(false),
             KeyCode::Esc if self.pending.is_some() => self.answer(false),
-            KeyCode::PageUp => {
+            // Readline-ish editing, so the line behaves like every other prompt.
+            KeyCode::Left => {
+                self.cursor = self.cursor.saturating_sub(1);
+                Action::None
+            }
+            KeyCode::Right => {
+                self.cursor = (self.cursor + 1).min(self.input.chars().count());
+                Action::None
+            }
+            KeyCode::Char('a') if ctrl && self.pending.is_none() => {
+                self.cursor = 0;
+                Action::None
+            }
+            KeyCode::Char('e') if ctrl && self.pending.is_none() => {
+                self.cursor = self.input.chars().count();
+                Action::None
+            }
+            KeyCode::Char('u') if ctrl && self.pending.is_none() => {
+                let from = self.byte_at(0);
+                let to = self.byte_at(self.cursor);
+                self.input.replace_range(from..to, "");
+                self.cursor = 0;
+                Action::None
+            }
+            KeyCode::Char('k') if ctrl && self.pending.is_none() => {
+                let from = self.byte_at(self.cursor);
+                self.input.truncate(from);
+                Action::None
+            }
+            KeyCode::Char('w') if ctrl && self.pending.is_none() => {
+                let chars: Vec<char> = self.input.chars().collect();
+                let mut cut = self.cursor;
+                while cut > 0 && chars[cut - 1].is_whitespace() {
+                    cut -= 1;
+                }
+                while cut > 0 && !chars[cut - 1].is_whitespace() {
+                    cut -= 1;
+                }
+                let from = self.byte_at(cut);
+                let to = self.byte_at(self.cursor);
+                self.input.replace_range(from..to, "");
+                self.cursor = cut;
+                Action::None
+            }
+            KeyCode::Delete if self.pending.is_none() => {
+                self.delete_at_cursor();
+                Action::None
+            }
+            KeyCode::PageUp | KeyCode::Char('b') if key.code == KeyCode::PageUp || ctrl => {
                 self.scroll = (self.scroll + 5).min(self.lines.len());
                 Action::None
             }
@@ -166,6 +271,16 @@ impl App {
                 self.scroll = self.scroll.saturating_sub(1);
                 Action::None
             }
+            // Home/End belong to the line — that is what every prompt does, and the
+            // transcript has PageUp/PageDown plus ctrl-Home/ctrl-End of its own.
+            KeyCode::Home if !ctrl => {
+                self.cursor = 0;
+                Action::None
+            }
+            KeyCode::End if !ctrl => {
+                self.cursor = self.input.chars().count();
+                Action::None
+            }
             KeyCode::Home => {
                 self.scroll = self.lines.len();
                 Action::None
@@ -176,7 +291,7 @@ impl App {
             }
             // While a question is open the input line is not an input line.
             KeyCode::Backspace if self.pending.is_none() => {
-                self.input.pop();
+                self.delete_before_cursor();
                 Action::None
             }
             KeyCode::Enter if self.pending.is_none() => {
@@ -185,16 +300,28 @@ impl App {
                     return Action::None;
                 }
                 self.input.clear();
+                self.cursor = 0;
                 self.push_lines(vec![format!("you: {text}")]);
                 self.busy = true;
                 self.error = None;
                 Action::Send(ToWorker::Submit(text))
             }
             KeyCode::Char(c) if !ctrl && self.pending.is_none() => {
-                self.input.push(c);
+                self.insert(&c.to_string());
                 Action::None
             }
             _ => Action::None,
+        }
+    }
+
+    /// A mouse wheel event: scrolling the conversation is the one thing a wheel
+    /// should do here, and it is what people try first.
+    pub fn handle_mouse(&mut self, kind: ratatui::crossterm::event::MouseEventKind) {
+        use ratatui::crossterm::event::MouseEventKind;
+        match kind {
+            MouseEventKind::ScrollUp => self.scroll = (self.scroll + 3).min(self.lines.len()),
+            MouseEventKind::ScrollDown => self.scroll = self.scroll.saturating_sub(3),
+            _ => {}
         }
     }
 
@@ -276,16 +403,28 @@ impl App {
             ),
             None => ("prompt".to_string(), Style::default()),
         };
-        let input = Paragraph::new(self.input.clone())
+        let inner_width = areas[2].width.saturating_sub(2);
+        let (visible, caret) = self.input_view(inner_width);
+        let input = Paragraph::new(visible)
             .block(Block::default().borders(Borders::ALL).title(title))
             .style(style);
         frame.render_widget(input, areas[2]);
+        // Show where typing goes. Without this the prompt is a guess, and the
+        // terminal's own cursor stays hidden.
+        if self.pending.is_none() {
+            frame.set_cursor_position((
+                areas[2].x + 1 + caret,
+                areas[2].y + 1,
+            ));
+        }
 
         let mut hints = vec![
             Span::styled("enter", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" send  "),
             Span::styled("pgup/pgdn", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" scroll  "),
+            Span::styled("ctrl-pgup/pgdn", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" transcript  "),
             Span::styled("ctrl-c", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" quit"),
         ];
@@ -363,9 +502,10 @@ pub fn run<T: Transport + Send + 'static>(
     session: String,
     schema: String,
     notes: Option<Receiver<String>>,
+    intro: Vec<String>,
 ) -> Result<(), String> {
     use ratatui::backend::CrosstermBackend;
-    use ratatui::crossterm::event;
+    use ratatui::crossterm::event::{self, EnableMouseCapture, DisableMouseCapture};
     use ratatui::crossterm::execute;
     use ratatui::crossterm::terminal::{
         disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -382,10 +522,15 @@ pub fn run<T: Transport + Send + 'static>(
 
     let (to_worker, from_worker) = spawn_worker(client);
     let mut app = App::new(session, schema);
+    // Intro lines belong in the conversation view, not the one-line diagnostics
+    // strip: the session path and "no model configured" both need to be readable.
+    app.push_lines(intro.into_iter().map(|line| format!("· {line}")).collect::<Vec<_>>());
 
     enable_raw_mode().map_err(|e| e.to_string())?;
     let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen).map_err(|e| e.to_string())?;
+    // Mouse capture so the wheel scrolls the conversation. Text selection then needs
+    // the terminal's modifier (Shift or Option) — the usual trade for this.
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture).map_err(|e| e.to_string())?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).map_err(|e| e.to_string())?;
 
@@ -402,14 +547,16 @@ pub fn run<T: Transport + Send + 'static>(
                 .map_err(|e| e.to_string())?;
 
             if event::poll(std::time::Duration::from_millis(80)).map_err(|e| e.to_string())? {
-                if let event::Event::Key(key) = event::read().map_err(|e| e.to_string())? {
-                    match app.handle_key(key) {
+                match event::read().map_err(|e| e.to_string())? {
+                    event::Event::Key(key) => match app.handle_key(key) {
                         Action::Send(command) => {
                             let _ = to_worker.send(command);
                         }
                         Action::Quit => return Ok(()),
                         Action::None => {}
-                    }
+                    },
+                    event::Event::Mouse(mouse) => app.handle_mouse(mouse.kind),
+                    _ => {}
                 }
             }
             if app.quit {
@@ -419,7 +566,7 @@ pub fn run<T: Transport + Send + 'static>(
     })();
 
     disable_raw_mode().ok();
-    execute!(terminal.backend_mut(), LeaveAlternateScreen).ok();
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture).ok();
     terminal.show_cursor().ok();
     outcome
 }
@@ -579,8 +726,8 @@ mod tests {
         assert!(!scrolled.contains("line 50"), "{scrolled}");
         assert!(scrolled.contains("line"), "{scrolled}");
 
-        app.handle_key(key(KeyCode::End));
-        assert_eq!(app.scroll, 0, "End returns to the newest output");
+        app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL));
+        assert_eq!(app.scroll, 0, "ctrl-End returns to the newest output");
 
         app.handle_key(key(KeyCode::PageUp));
         app.push_lines(vec!["a new answer".to_string()]);
@@ -651,6 +798,87 @@ mod tests {
             1,
             "and it is not shown twice: {screen}"
         );
+    }
+
+    #[test]
+    fn the_caret_moves_and_edits_in_the_middle_of_the_line() {
+        let mut app = App::new("s", "v");
+        type_text(&mut app, "helo");
+        app.handle_key(key(KeyCode::Left));
+        app.handle_key(key(KeyCode::Char('l')));
+        assert_eq!(app.input, "hello");
+        assert_eq!(app.cursor, 4, "the caret follows what was typed");
+
+        app.handle_key(key(KeyCode::Home));
+        app.handle_key(key(KeyCode::Delete));
+        assert_eq!(app.input, "ello");
+        app.handle_key(key(KeyCode::End));
+        app.handle_key(key(KeyCode::Backspace));
+        assert_eq!(app.input, "ell");
+
+        // Readline habits work: ctrl-a/e move, ctrl-u/k kill, ctrl-w kills a word.
+        app.handle_key(key(KeyCode::Char('o')));
+        app.handle_key(key(KeyCode::Char(' ')));
+        type_text(&mut app, "world");
+        app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        assert_eq!(app.input, "ello ", "ctrl-w kills the word behind the caret");
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+        assert_eq!(app.input, "", "ctrl-a then ctrl-k clears the line");
+        assert_eq!(app.cursor, 0);
+    }
+
+    #[test]
+    fn utf8_is_edited_by_character_not_by_byte() {
+        let mut app = App::new("s", "v");
+        type_text(&mut app, "你好世界");
+        app.handle_key(key(KeyCode::Left));
+        app.handle_key(key(KeyCode::Backspace));
+        assert_eq!(app.input, "你好界", "a whole character goes, not a broken byte");
+        app.handle_key(key(KeyCode::Home));
+        app.handle_key(key(KeyCode::Right));
+        app.handle_key(key(KeyCode::Char('，')));
+        assert_eq!(app.input, "你，好界");
+        assert_eq!(app.cursor, 2);
+    }
+
+    #[test]
+    fn a_long_line_scrolls_so_the_caret_stays_visible() {
+        let mut app = App::new("s", "v");
+        type_text(&mut app, "0123456789");
+        let (visible, caret) = app.input_view(6);
+        assert_eq!(visible, "56789", "the tail is shown");
+        assert_eq!(caret, 5, "and the caret sits at its end");
+
+        app.handle_key(key(KeyCode::Home));
+        let (visible, caret) = app.input_view(6);
+        assert_eq!(visible, "012345", "moving home scrolls back");
+        assert_eq!(caret, 0);
+    }
+
+    #[test]
+    fn the_wheel_scrolls_the_conversation() {
+        let mut app = App::new("s", "v");
+        app.push_lines((1..=40).map(|i| format!("line {i}")));
+        app.handle_mouse(ratatui::crossterm::event::MouseEventKind::ScrollUp);
+        assert_eq!(app.scroll, 3, "a wheel notch moves three lines");
+        app.handle_mouse(ratatui::crossterm::event::MouseEventKind::ScrollDown);
+        assert_eq!(app.scroll, 0);
+        app.handle_mouse(ratatui::crossterm::event::MouseEventKind::ScrollDown);
+        assert_eq!(app.scroll, 0, "and it stops at the bottom");
+    }
+
+    #[test]
+    fn the_caret_is_drawn_where_the_next_character_goes() {
+        // The terminal cursor is not part of the rendered buffer, so this checks the
+        // arithmetic the drawing code uses.
+        let mut app = App::new("s", "v");
+        type_text(&mut app, "abc");
+        let (_, caret) = app.input_view(20);
+        assert_eq!(caret, 3);
+        app.handle_key(key(KeyCode::Home));
+        let (_, caret) = app.input_view(20);
+        assert_eq!(caret, 0);
     }
 
     #[test]

@@ -10,5 +10,6 @@ loong-tui.workspace = true
 loong-schema.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+unicode-width = "0.2"
 ratatui = "0.30.2"
 crossterm = "0.29.0"

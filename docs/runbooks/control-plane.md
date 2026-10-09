@@ -454,6 +454,24 @@ list yet — the envelope carries `key_id` and `version` for exactly this, and t
 policy is unwritten. Rotating a **token** is cheap by comparison: replace the file
 and restart the service.
 
+**After an upgrade, restart it.** A running control plane holds the code it started
+with, so new rules do not reach it until the process does. The repository ships the
+installer that keeps the two copies of each binary in step, and prints the commit each
+one was built from:
+
+```bash
+./scripts/install-local.sh          # installs both, prints both commits + repository HEAD
+sudo systemctl restart loongagent-control
+curl -s http://127.0.0.1:8738/v1/health | jq
+```
+
+If a restart seems to have no effect, check that it actually happened: a stale pid file
+points at a process that is already gone. Ask the port who is listening —
+
+```bash
+ss -ltnp | grep 8738                # the pid that really owns it
+```
+
 **Backups**: back up the pack in your repository. Think twice about
 `/etc/loongagent-control/control-key.pkcs8` — an off-site copy of that file is an
 off-site ability to mint packs. The served `profiles.json` is derived; republishing

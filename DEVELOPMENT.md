@@ -550,6 +550,15 @@ binary the TUI spawns as its server (used by the end-to-end test).
 12. **Not started**: session
    export/import, WASM extensions, the web client, compaction, the control plane.
 
+## After changing code
+
+`./scripts/install-local.sh` installs both binaries where PATH finds them and prints the
+commit each was built from, next to the repository HEAD. `--version` names that commit,
+because a stale `~/.cargo/bin` copy has quietly run old rules three times here — once
+publishing with the wrong issuer, once not knowing a subcommand, once refusing a pack
+the new code accepts — and a long-running control plane is the same trap in a process:
+**restart it after installing.**
+
 ## Cutting a release
 
 ```bash

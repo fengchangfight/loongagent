@@ -1003,9 +1003,10 @@ fn run() -> Result<(), String> {
         }
         "--version" | "version" => {
             println!(
-                "loongagent {} (schema {})",
+                "loongagent {} (schema {}, commit {})",
                 env!("CARGO_PKG_VERSION"),
-                loong_schema::SCHEMA_VERSION
+                loong_schema::SCHEMA_VERSION,
+                env!("LOONG_COMMIT")
             );
             Ok(())
         }

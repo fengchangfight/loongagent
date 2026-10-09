@@ -251,9 +251,10 @@ fn run() -> Result<(), String> {
         "health" => health(rest),
         "-V" | "--version" => {
             println!(
-                "loongagent-control {} (pack schema {})",
+                "loongagent-control {} (pack schema {}, commit {})",
                 env!("CARGO_PKG_VERSION"),
-                loong_pack::PROFILES_SCHEMA
+                loong_pack::PROFILES_SCHEMA,
+                env!("LOONG_COMMIT")
             );
             Ok(())
         }
@@ -640,6 +641,13 @@ fn publish(args: &[String]) -> Result<(), String> {
     if let Some(profiles) = value.get("profiles").and_then(|v| v.as_array()) {
         let names: Vec<&str> = profiles.iter().filter_map(|p| p.as_str()).collect();
         println!("  profiles: {}", names.join(", "));
+    }
+    // What the control plane said back about the pack, in the command the
+    // administrator actually ran.
+    if let Some(warnings) = value.get("warnings").and_then(|v| v.as_array()) {
+        for warning in warnings.iter().filter_map(|w| w.as_str()) {
+            println!("  warning: {warning}");
+        }
     }
     Ok(())
 }

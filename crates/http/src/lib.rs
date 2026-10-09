@@ -113,6 +113,49 @@ pub fn parse_http_url(url: &str) -> Result<(String, u16, String, bool), HttpErro
 
 /// POST a JSON body and read the whole response. `timeout` bounds both the
 /// connect and the read/write, so a hanging server cannot hang a tool or a hook.
+/// A GET, for reading something small and structured (the pack a control plane
+/// serves). Same framing, same TLS, no body.
+pub fn get_json(
+    url: &str,
+    bearer: Option<&str>,
+    timeout: Duration,
+) -> Result<HttpResponse, HttpError> {
+    let mut stream = open(url, timeout)?;
+    let (host, port, path, tls) = parse_http_url(url)?;
+    let authority = if (tls && port == 443) || (!tls && port == 80) {
+        host.clone()
+    } else {
+        format!("{host}:{port}")
+    };
+    let mut head = format!(
+        "GET {path} HTTP/1.1\r\nHost: {authority}\r\nAccept: application/json\r\n\
+         Connection: close\r\n"
+    );
+    if let Some(token) = bearer {
+        head.push_str(&format!("Authorization: Bearer {token}\r\n"));
+    }
+    head.push_str("\r\n");
+    stream
+        .write_all(head.as_bytes())
+        .map_err(|e| err(format!("sending the request: {e}")))?;
+    stream
+        .flush()
+        .map_err(|e| err(format!("sending the request: {e}")))?;
+
+    let (status, _content_type, mut reader) = read_head(&mut stream)?;
+    let mut body = String::new();
+    reader
+        .read_to_string(&mut body)
+        .map_err(|e| err(format!("reading the response: {e}")))?;
+    if !(200..300).contains(&status) {
+        return Err(err(format!(
+            "HTTP {status}: {}",
+            body.trim().chars().take(300).collect::<String>()
+        )));
+    }
+    Ok(HttpResponse { status, body })
+}
+
 pub fn post_json(
     url: &str,
     body: &str,
@@ -642,6 +685,32 @@ mod tests {
         assert!(err.0.contains("402"), "{err}");
         assert!(err.0.contains("no credit"), "{err}");
         assert!(seen.is_empty(), "nothing is reported as a delta");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_get_reads_a_body_and_a_bearer_token() {
+        let (url, server) = fake_server(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\
+             Connection: close\r\n\r\n{\"ok\":true}",
+        );
+        let response = get_json(&url, Some("s3cret"), Duration::from_secs(5)).unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, "{\"ok\":true}");
+        let sent = server.join().unwrap();
+        assert!(sent.starts_with("GET "), "GET, not POST: {sent}");
+        assert!(sent.contains("Authorization: Bearer s3cret"));
+    }
+
+    #[test]
+    fn a_get_that_fails_carries_what_the_server_said() {
+        let (url, server) = fake_server(
+            "HTTP/1.1 409 Conflict\r\nContent-Length: 28\r\nConnection: close\r\n\r\n\
+             {\"error\":\"nothing published\"}",
+        );
+        let error = get_json(&url, None, Duration::from_secs(5)).unwrap_err();
+        assert!(error.0.contains("409"), "{error}");
+        assert!(error.0.contains("nothing published"), "{error}");
         server.join().unwrap();
     }
 

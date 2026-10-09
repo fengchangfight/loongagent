@@ -40,6 +40,11 @@ use std::path::{Path, PathBuf};
 pub enum Layer {
     Builtin,
     Org,
+    /// A verified pack from the control plane (ADR-0008 §6, ADR-0016). Ranked just
+    /// above the local org file — a managed install's policy is the authoritative
+    /// delivery, and a stale local file must not shadow it — and *locked* against the
+    /// layers below: an engineer picks a profile, not an endpoint (T-07).
+    Control,
     Project,
     User,
     Session,
@@ -50,6 +55,7 @@ impl Layer {
         match self {
             Layer::Builtin => "builtin",
             Layer::Org => "org",
+            Layer::Control => "control plane",
             Layer::Project => "project",
             Layer::User => "user",
             Layer::Session => "session",
@@ -84,6 +90,8 @@ pub fn kind_of(key: &str) -> Option<Kind> {
         "model" | "base_url" | "profile" | "models" | "router.default" | "router.rules" => {
             Kind::FreeOverride
         }
+        // The one profile-related key a user owns: which named bundle to run.
+        "control.profile" => Kind::FreeOverride,
         "budget_tokens" | "keep_newest_tokens" | "max_steps" | "compact_at_percent"
         | "permissions" => Kind::NarrowOnly,
         "skill_dirs" | "disable_skills" => Kind::AddOnly,
@@ -254,9 +262,207 @@ impl Router {
     }
 }
 
+/// A named bundle of models plus the routing between them (T-07). This is what the
+/// control plane publishes and what an engineer picks by name; the description is
+/// what they are shown instead of a model list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedProfile {
+    pub name: String,
+    pub description: String,
+    pub models: Vec<ModelSpec>,
+    pub router: Router,
+}
+
+/// Read a profile pack payload (the TOML inside a signed envelope).
+///
+/// Kept in this crate because the payload *is* configuration: the control plane and
+/// the local agent must agree on what it means, and the merge rules apply to it.
+pub fn profiles_from_payload(payload: &str) -> Result<ProfilePack, ConfigError> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct RawPayload {
+        default_profile: Option<String>,
+        #[serde(default)]
+        profiles: Vec<RawProfileEntry>,
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct RawProfileEntry {
+        name: String,
+        description: Option<String>,
+        #[serde(default)]
+        models: Vec<RawModel>,
+        router: Option<RawRouter>,
+    }
+    let raw: RawPayload = toml::from_str(payload)
+        .map_err(|e| ConfigError::Invalid(format!("the pack payload is not valid TOML: {e}")))?;
+    if raw.profiles.is_empty() {
+        return Err(ConfigError::Invalid(
+            "the pack defines no profiles — a profile administrator must publish at least one"
+                .to_string(),
+        ));
+    }
+    let mut profiles = Vec::new();
+    for entry in raw.profiles {
+        let mut models = Vec::new();
+        for model in entry.models {
+            let kind = model
+                .kind
+                .clone()
+                .unwrap_or_else(|| "openai-compat".to_string());
+            if !ADAPTER_KINDS.contains(&kind.as_str()) {
+                return Err(ConfigError::Invalid(format!(
+                    "profile {:?}: model {:?} asks for kind {kind:?}; the adapters that exist are {}",
+                    entry.name,
+                    model.name,
+                    ADAPTER_KINDS.join(", ")
+                )));
+            }
+            if let Some(key) = &model.api_key {
+                check_secret_reference(
+                    &entry.name,
+                    &format!("models.{}.api_key", model.name),
+                    key,
+                )?;
+            }
+            models.push(ModelSpec {
+                name: model.name,
+                kind,
+                base_url: model.base_url,
+                model: model.model,
+                api_key: model.api_key,
+                budget_tokens: model.budget_tokens,
+            });
+        }
+        if models.is_empty() {
+            return Err(ConfigError::Invalid(format!(
+                "profile {:?} defines no models",
+                entry.name
+            )));
+        }
+        let mut router = Router::default();
+        if let Some(raw_router) = entry.router {
+            router.default = raw_router.default;
+            for rule in raw_router.rules {
+                let condition = parse_condition(&rule.when)
+                    .map_err(|e| ConfigError::Invalid(format!("profile {:?}: {e}", entry.name)))?;
+                router.rules.push(RouterRule {
+                    condition,
+                    model: rule.model,
+                });
+            }
+        }
+        if router.default.is_none() {
+            router.default = models.first().map(|m| m.name.clone());
+        }
+        let known: Vec<&str> = models.iter().map(|m| m.name.as_str()).collect();
+        let mut referenced: Vec<&str> = router.rules.iter().map(|r| r.model.as_str()).collect();
+        if let Some(default) = router.default.as_deref() {
+            referenced.push(default);
+        }
+        for name in referenced {
+            if !known.contains(&name) {
+                return Err(ConfigError::Invalid(format!(
+                    "profile {:?}: the router names {name:?}, which it does not define ({})",
+                    entry.name,
+                    known.join(", ")
+                )));
+            }
+        }
+        profiles.push(NamedProfile {
+            name: entry.name,
+            description: entry.description.unwrap_or_default(),
+            models,
+            router,
+        });
+    }
+    Ok(ProfilePack {
+        default_profile: raw.default_profile,
+        profiles,
+    })
+}
+
+/// A pack's contents: the bundles, and which one runs when a user has not chosen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfilePack {
+    pub default_profile: Option<String>,
+    pub profiles: Vec<NamedProfile>,
+}
+
+impl ProfilePack {
+    /// The bundle named by the user's choice, else the pack's default, else the
+    /// first — and if the user named something that is not there, say so rather than
+    /// silently running a different profile.
+    pub fn pick(&self, chosen: Option<&str>) -> Result<&NamedProfile, ConfigError> {
+        if let Some(name) = chosen {
+            return self
+                .profiles
+                .iter()
+                .find(|p| p.name == name)
+                .ok_or_else(|| {
+                    ConfigError::Invalid(format!(
+                        "profile {name:?} is not in the pack (the control plane offers: {})",
+                        self.profiles
+                            .iter()
+                            .map(|p| p.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))
+                });
+        }
+        if let Some(default) = self.default_profile.as_deref() {
+            if let Some(profile) = self.profiles.iter().find(|p| p.name == default) {
+                return Ok(profile);
+            }
+        }
+        self.profiles
+            .first()
+            .ok_or_else(|| ConfigError::Invalid("the pack defines no profiles".to_string()))
+    }
+}
+
+/// A pack, turned into the control layer's values.
+///
+/// `source` is what the provenance rows will show — the issuer and version — so
+/// `config show` answers "and who said so?" with the pack, not with a file path.
+pub fn pack_layer(profile: &NamedProfile) -> Vec<(String, Value)> {
+    let mut values = Vec::new();
+    for model in &profile.models {
+        values.push((
+            format!("models.{}", model.name),
+            Value::Model(model.clone()),
+        ));
+    }
+    if let Some(default) = &profile.router.default {
+        values.push(("router.default".to_string(), Value::Text(default.clone())));
+    }
+    if !profile.router.rules.is_empty() {
+        values.push((
+            "router.rules".to_string(),
+            Value::Rules(profile.router.rules.clone()),
+        ));
+    }
+    // Not `control.profile`: that key is the *user's* choice, and the pack must not
+    // decide it for them. The resolved name is recorded as provenance instead.
+    values
+}
+
+/// The pack a session is running on, for provenance and for the TUI header.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlProvenance {
+    pub issuer: String,
+    pub version: String,
+    pub key_id: String,
+    pub profile: String,
+}
+
 /// The effective configuration, after merging every layer.
 #[derive(Debug, Clone, Default)]
 pub struct Profile {
+    /// Which pack this configuration came from, when it came from one.
+    pub control: Option<ControlProvenance>,
+    /// The named profile this install runs (the user's one profile-related choice).
+    pub control_profile: Option<String>,
     /// Every model the profile offers, in declaration order.
     pub models: Vec<ModelSpec>,
     pub router: Router,
@@ -348,6 +554,16 @@ struct RawProfile {
     #[serde(default)]
     models: Vec<RawModel>,
     router: Option<RawRouter>,
+    control: Option<RawControl>,
+}
+
+/// The user's side of the control plane: which named profile to run. The address and
+/// the pinned key are machine configuration, not layered config — they are what
+/// `loongagent setup` writes.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawControl {
+    profile: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -500,6 +716,11 @@ impl LayerValues {
                     budget_tokens: model.budget_tokens,
                 }),
             ));
+        }
+        if let Some(control) = &raw.control {
+            if let Some(name) = &control.profile {
+                values.push(("control.profile".to_string(), Value::Text(name.clone())));
+            }
         }
         if let Some(router) = &raw.router {
             if let Some(default) = &router.default {
@@ -704,6 +925,19 @@ pub fn layer_paths(workspace: &Path, session: Option<&Path>) -> Vec<(Layer, Path
 
 /// Merge the layers that exist, lowest precedence first.
 pub fn resolve(layers: &[(Layer, PathBuf)], workspace: &Path) -> Result<Profile, ConfigError> {
+    resolve_with(layers, workspace, None)
+}
+
+/// As [`resolve`], plus an optional pack from the control plane.
+///
+/// The pack arrives as values rather than as a path because it was *verified* before
+/// it got here: nothing that reaches this function may be an unverified file a user
+/// could edit (ADR-0008 §6).
+pub fn resolve_with(
+    layers: &[(Layer, PathBuf)],
+    workspace: &Path,
+    pack: Option<(String, Vec<(String, Value)>)>,
+) -> Result<Profile, ConfigError> {
     let mut present: Vec<LayerValues> = vec![LayerValues::builtin_defaults()];
     let mut sources = std::collections::BTreeMap::new();
     for (layer, path) in layers {
@@ -714,8 +948,16 @@ pub fn resolve(layers: &[(Layer, PathBuf)], workspace: &Path) -> Result<Profile,
         sources.insert(*layer, path.display().to_string());
         present.push(values);
     }
+    if let Some((source, values)) = pack {
+        sources.insert(Layer::Control, source.clone());
+        present.push(LayerValues {
+            layer: Layer::Control,
+            source,
+            values,
+        });
+    }
     present.sort_by_key(|l| l.layer);
-    let mut profile = merge(&present);
+    let mut profile = merge(&present)?;
     finish(&mut profile)?;
     Ok(profile)
 }
@@ -773,7 +1015,7 @@ fn finish(profile: &mut Profile) -> Result<(), ConfigError> {
     Ok(())
 }
 
-fn merge(layers: &[LayerValues]) -> Profile {
+fn merge(layers: &[LayerValues]) -> Result<Profile, ConfigError> {
     let mut profile = Profile::default();
     // Key → the winning row so far, plus what lost.
     let mut winners: BTreeMap<String, Provenance> = BTreeMap::new();
@@ -781,6 +1023,23 @@ fn merge(layers: &[LayerValues]) -> Profile {
     for layer in layers {
         for (key, value) in &layer.values {
             let base = key.split('.').next().unwrap_or(key).to_string();
+            // Locked: once the control plane has set a key, a lower layer may narrow
+            // it but never rewrite it. This is what makes "engineers pick a profile,
+            // not a vendor" a property rather than advice (T-07, ADR-0016 §5).
+            if let Some(current) = winners.get(key) {
+                if current.layer == Layer::Control && layer.layer > Layer::Control {
+                    let kind = kind_of(key).or_else(|| kind_of(&base));
+                    if !matches!(kind, Some(Kind::NarrowOnly) | Some(Kind::AddOnly)) {
+                        return Err(ConfigError::Invalid(format!(
+                            "{}: `{key}` is set by the control plane ({}) and cannot be changed \
+                             by the {} layer — pick a different profile instead",
+                            layer.source,
+                            current.source,
+                            layer.layer.as_str()
+                        )));
+                    }
+                }
+            }
             // The full key first: `router.default` is a key of its own, while
             // `permissions.*` and `models.*` take their kind from the table.
             let kind = kind_of(key)
@@ -924,6 +1183,7 @@ fn merge(layers: &[LayerValues]) -> Profile {
             }
             ("router.default", Value::Text(name)) => profile.router.default = Some(name.clone()),
             ("router.rules", Value::Rules(rules)) => profile.router.rules = rules.clone(),
+            ("control.profile", Value::Text(name)) => profile.control_profile = Some(name.clone()),
             ("skill_dirs", Value::List(items)) => {
                 profile.skill_dirs = items.iter().map(PathBuf::from).collect()
             }
@@ -938,7 +1198,7 @@ fn merge(layers: &[LayerValues]) -> Profile {
     }
     profile.models.sort_by(|a, b| a.name.cmp(&b.name));
     profile.provenance = winners;
-    profile
+    Ok(profile)
 }
 
 /// Which of two narrow-only values is stricter. Returns
@@ -1506,6 +1766,167 @@ mod tests {
         });
         assert_eq!(model, Some("fallback"));
         assert!(rule.is_none());
+    }
+
+    const EXAMPLE_PACK: &str = "\
+default_profile = \"default\"\n\
+\n\
+[[profiles]]\n\
+name = \"default\"\n\
+description = \"Balanced: cheap for the loop, escalating past 150k tokens.\"\n\
+  [[profiles.models]]\n\
+  name = \"fast\"\n\
+  base_url = \"https://api.deepseek.com\"\n\
+  model = \"an-id-from-the-docs\"\n\
+  budget_tokens = 128000\n\
+  [[profiles.models]]\n\
+  name = \"frontier\"\n\
+  base_url = \"https://api.example.invalid/v1\"\n\
+  model = \"big\"\n\
+  [profiles.router]\n\
+  default = \"fast\"\n\
+  [[profiles.router.rules]]\n\
+  when = \"context_tokens > 150000\"\n\
+  use = \"frontier\"\n\
+\n\
+[[profiles]]\n\
+name = \"local-only\"\n\
+description = \"Air-gapped: nothing leaves the machine.\"\n\
+  [[profiles.models]]\n\
+  name = \"local\"\n\
+  base_url = \"http://127.0.0.1:8000/v1\"\n\
+  model = \"whatever-you-run\"\n";
+
+    #[test]
+    fn a_pack_payload_becomes_named_profiles_with_descriptions() {
+        let pack = profiles_from_payload(EXAMPLE_PACK).unwrap();
+        assert_eq!(pack.default_profile.as_deref(), Some("default"));
+        assert_eq!(pack.profiles.len(), 2);
+        assert_eq!(pack.profiles[0].name, "default");
+        assert!(pack.profiles[0].description.contains("Balanced"));
+        assert_eq!(pack.profiles[0].models.len(), 2);
+        assert_eq!(pack.profiles[1].name, "local-only");
+
+        // Choosing is by name, and a name that is not there is an error that lists
+        // what is — never a silent fallback to another profile.
+        assert_eq!(pack.pick(Some("local-only")).unwrap().name, "local-only");
+        let err = pack.pick(Some("supersmart")).unwrap_err().to_string();
+        assert!(
+            err.contains("supersmart") && err.contains("local-only"),
+            "{err}"
+        );
+        assert_eq!(
+            pack.pick(None).unwrap().name,
+            "default",
+            "the pack's default"
+        );
+    }
+
+    #[test]
+    fn a_broken_pack_says_what_is_wrong() {
+        let err = profiles_from_payload("[[profiles]]\nname = \"x\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no models"), "{err}");
+        let err = profiles_from_payload("default_profile = \"d\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no profiles"), "{err}");
+        let err = profiles_from_payload(
+            "[[profiles]]\nname = \"x\"\n  [[profiles.models]]\n  name = \"m\"\n  base_url = \"https://a.invalid\"\n  model = \"i\"\n  [profiles.router]\n  default = \"ghost\"\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("ghost"), "{err}");
+        // A model with a literal secret never gets through the pack path either.
+        let err = profiles_from_payload(
+            "[[profiles]]\nname = \"x\"\n  [[profiles.models]]\n  name = \"m\"\n  base_url = \"https://a.invalid\"\n  model = \"i\"\n  api_key = \"sk-literal\"\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("reference"), "{err}");
+    }
+
+    #[test]
+    fn the_pack_is_the_control_layer_and_it_outranks_a_local_org_file() {
+        let ws = workspace();
+        // A stale local org file naming a different endpoint for the same model.
+        let org = write(
+            &ws,
+            "org.toml",
+            "[[models]]\nname = \"fast\"\nbase_url = \"http://stale.invalid\"\nmodel = \"old\"\n",
+        );
+        let profile = resolve_with(
+            &[(Layer::Org, org)],
+            &ws,
+            Some((
+                "control plane: acme 1".to_string(),
+                pack_layer(
+                    &profiles_from_payload(EXAMPLE_PACK)
+                        .unwrap()
+                        .pick(None)
+                        .unwrap()
+                        .clone(),
+                ),
+            )),
+        )
+        .unwrap();
+        let model = &profile.models[0];
+        assert_eq!(
+            model.base_url, "https://api.deepseek.com",
+            "the verified pack wins"
+        );
+        let provenance = profile.explain("models.fast").unwrap();
+        assert_eq!(provenance.layer, Layer::Control);
+        assert!(
+            provenance.source.contains("acme"),
+            "and the row names the pack"
+        );
+    }
+
+    #[test]
+    fn a_user_or_project_may_not_rewrite_what_the_control_plane_set() {
+        let ws = workspace();
+        let pack = || {
+            Some((
+                "control plane: acme 1".to_string(),
+                pack_layer(
+                    &profiles_from_payload(EXAMPLE_PACK)
+                        .unwrap()
+                        .pick(None)
+                        .unwrap()
+                        .clone(),
+                ),
+            ))
+        };
+
+        // The endpoint of a control-plane model: refused, and the message says why.
+        let user = write(
+            &ws,
+            "u.toml",
+            "[[models]]\nname = \"fast\"\nbase_url = \"http://mine.invalid\"\nmodel = \"mine\"\n",
+        );
+        let err = resolve_with(&[(Layer::User, user)], &ws, pack())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("control plane"), "{err}");
+        assert!(err.contains("cannot be changed"), "{err}");
+        assert!(err.contains("pick a different profile"), "{err}");
+
+        // The routing table too: the profile carries it.
+        let project = write(&ws, "p.toml", "[router]\ndefault = \"frontier\"\n");
+        assert!(resolve_with(&[(Layer::Project, project)], &ws, pack()).is_err());
+
+        // But narrowing is still allowed — an org ceiling stays a ceiling, and a
+        // local layer may only make things stricter.
+        let narrowing = write(&ws, "n.toml", "budget_tokens = 32000\n");
+        let narrowed = resolve_with(&[(Layer::User, narrowing)], &ws, pack()).unwrap();
+        assert_eq!(narrowed.budget_tokens, Some(32_000));
+
+        // And the user's own choice of profile is theirs.
+        let choice = write(&ws, "c.toml", "control.profile = \"local-only\"\n");
+        let chosen = resolve_with(&[(Layer::User, choice)], &ws, pack()).unwrap();
+        assert_eq!(chosen.control_profile.as_deref(), Some("local-only"));
     }
 
     #[test]

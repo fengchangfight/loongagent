@@ -12,6 +12,11 @@ import sys
 ALLOWED = {
     # the protocol's single source of truth depends on nothing of ours
     "loong-schema": set(),
+    # the signed envelope, shared by the local agent and the control plane
+    # (ADR-0012 §1: the two deploy independently, so this code cannot be copied)
+    "loong-pack": set(),
+    # pack distribution: reads the envelope, speaks HTTP to the control plane
+    "loong-control": {"loong-pack", "loong-http", "loong-config"},
     # edges (pluggable, language-neutral, no kernel knowledge)
     "loong-protocol": {"loong-schema"},
     "loong-eventlog": {"loong-schema"},
@@ -37,7 +42,7 @@ ALLOWED = {
     # the one binary that ties faces together
     "loongagent": {
         "loong-schema", "loong-protocol", "loong-eventlog", "loong-http", "loong-proc", "loong-manifest", "loong-providers",
-        "loong-sandbox", "loong-tools", "loong-hooks", "loong-mcp", "loong-skills", "loong-config", "loong-index", "loong-kernel", "loong-server", "loong-tui", "loong-tui-app", "loong-web",
+        "loong-sandbox", "loong-tools", "loong-hooks", "loong-mcp", "loong-skills", "loong-config", "loong-index", "loong-kernel", "loong-server", "loong-tui", "loong-tui-app", "loong-web", "loong-control", "loong-pack",
     },
 }
 

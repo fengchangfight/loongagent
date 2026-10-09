@@ -75,6 +75,13 @@ struct Args {
     /// The web surface's bind address and port (loopback by default: a browser on
     /// this machine, not the network).
     bind: String,
+    /// Use the last verified pack instead of contacting the control plane.
+    offline: bool,
+    /// `setup`: the control plane's address, its pinned public key, and a token
+    /// reference. All three can be answered interactively instead.
+    control_url: Option<String>,
+    control_key: Option<String>,
+    control_token: Option<String>,
     port: u16,
     stdio: bool,
     /// Context budget in tokens; 0 means unbounded.
@@ -93,6 +100,10 @@ impl Args {
             model: None,
             profile: None,
             bind: "127.0.0.1".to_string(),
+            offline: false,
+            control_url: None,
+            control_key: None,
+            control_token: None,
             port: 8737,
             stdio: false,
             budget: None,
@@ -121,6 +132,21 @@ impl Args {
                         Some(PathBuf::from(rest.get(i).ok_or("--profile needs a path")?));
                 }
                 "--stdio" => args.stdio = true,
+                // `setup`: the control plane. Flags exist so a machine can be
+                // provisioned without a prompt; without them it asks.
+                "--url" => {
+                    i += 1;
+                    args.control_url = Some(rest.get(i).ok_or("--url needs an address")?.clone());
+                }
+                "--public-key" => {
+                    i += 1;
+                    args.control_key = Some(rest.get(i).ok_or("--public-key needs hex")?.clone());
+                }
+                "--token" => {
+                    i += 1;
+                    args.control_token = Some(rest.get(i).ok_or("--token needs a value")?.clone());
+                }
+                "--offline" => args.offline = true,
                 "--bind" => {
                     i += 1;
                     args.bind = rest.get(i).ok_or("--bind needs an address")?.clone();
@@ -165,9 +191,33 @@ impl Args {
     /// whatever the org / project / user files say, then `--profile` as the session
     /// layer. Flags are applied on top of the resolved values, and only ever
     /// narrow (the kernel enforces the narrow-only arithmetic).
-    fn settings(&self) -> Result<loong_config::Profile, String> {
+    /// Resolve the configuration with the control plane's pack in place, if there is
+    /// one. The pack is the *verified* layer: nothing reaches the resolver that a user
+    /// could have written by hand (ADR-0008 §6).
+    fn settings_with_pack(&self) -> Result<(loong_config::Profile, Option<PackState>), String> {
+        let pack = sync_pack(self, self.offline)?;
         let layers = loong_config::layer_paths(&self.cwd, self.profile.as_deref());
-        loong_config::resolve(&layers, &self.cwd).map_err(|e| e.to_string())
+        let resolved = match &pack {
+            Some(state) => loong_config::resolve_with(
+                &layers,
+                &self.cwd,
+                Some((
+                    format!(
+                        "control plane: {} {}",
+                        state.provenance.issuer, state.provenance.version
+                    ),
+                    state.layer.clone(),
+                )),
+            ),
+            None => loong_config::resolve(&layers, &self.cwd),
+        }
+        .map_err(|e| e.to_string())?;
+        let mut resolved = resolved;
+        if let Some(state) = &pack {
+            resolved.control = Some(state.provenance.clone());
+            resolved.control_profile = Some(state.profile.name.clone());
+        }
+        Ok((resolved, pack))
     }
 
     /// The session file: explicit if asked, otherwise the per-project default.
@@ -204,52 +254,6 @@ fn non_empty_env(name: &str) -> Option<std::ffi::OsString> {
     std::env::var_os(name).filter(|value| !value.is_empty())
 }
 
-/// What the wizard collected, as data: rendering and writing are separate, so the
-/// answers can be tested without a terminal.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SetupPlan {
-    models: Vec<SetupModel>,
-    budget_tokens: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SetupModel {
-    name: String,
-    base_url: String,
-    model: String,
-    /// `Some(key)` when the key was pasted (it goes to the credentials file),
-    /// `None` when the profile should reference the environment.
-    key: Option<String>,
-    env_name: String,
-    budget_tokens: u64,
-}
-
-/// The providers the wizard knows. Only the base URL is pre-filled: model ids change
-/// every few months, and a wizard that hard-codes today's names is a wizard that goes
-/// stale silently. The user copies the id from their provider's docs.
-const PROVIDERS: &[(&str, &str, &str, &str)] = &[
-    (
-        "1",
-        "DeepSeek",
-        "https://api.deepseek.com",
-        "DEEPSEEK_API_KEY",
-    ),
-    (
-        "2",
-        "Moonshot / Kimi",
-        "https://api.moonshot.cn/v1",
-        "MOONSHOT_API_KEY",
-    ),
-    ("3", "OpenAI", "https://api.openai.com/v1", "OPENAI_API_KEY"),
-    (
-        "4",
-        "a local server (vLLM, LM Studio, Ollama)",
-        "http://127.0.0.1:8000/v1",
-        "LOONGAGENT_API_KEY",
-    ),
-    ("5", "something else", "", "LOONGAGENT_API_KEY"),
-];
-
 fn ask(prompt: &str, default: Option<&str>, lines: &mut dyn Iterator<Item = String>) -> String {
     print!("{prompt}");
     match default {
@@ -267,238 +271,506 @@ fn ask(prompt: &str, default: Option<&str>, lines: &mut dyn Iterator<Item = Stri
     }
 }
 
-/// Collect the answers. Split from input and from writing so it can be tested.
-fn plan_from(lines: &mut dyn Iterator<Item = String>) -> Result<SetupPlan, String> {
-    println!("Which provider?");
-    for (key, label, base, _) in PROVIDERS {
-        println!(
-            "  {key}) {label}{}",
-            if base.is_empty() {
-                String::new()
-            } else {
-                format!("  ({base})")
-            }
-        );
-    }
-    let choice = ask("choice", Some("1"), lines);
-    let (_, label, base_url, env_name) = PROVIDERS
-        .iter()
-        .find(|(key, ..)| *key == choice)
-        .ok_or_else(|| format!("{choice:?} is not one of the choices"))?;
+/// The client's side of the control plane: where it is, and the key this install
+/// pinned. Deliberately *not* the layered profile config — this is machine
+/// configuration, delivered with the binary (ADR-0016 §3).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ControlFile {
+    url: String,
+    /// Hex, the org's public key. The signature is what makes an org layer an org
+    /// layer, so this is the one value that must not be learned from the wire.
+    public_key: String,
+    /// A reference (`env:NAME`, `file:PATH#KEY`), never a literal token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    token: Option<String>,
+}
 
-    let base_url = ask("base_url", Some(base_url), lines);
-    if base_url.is_empty() {
-        return Err("a base_url is required".to_string());
-    }
-    println!("The model id comes from your provider's docs (e.g. their chat-completions model).");
-    let model = ask("model id", None, lines);
-    if model.is_empty() {
-        return Err("a model id is required".to_string());
-    }
-    let name = ask("a short name for it", Some(model.as_str()), lines);
+fn control_path() -> PathBuf {
+    config_dir().join("control.toml")
+}
 
-    let budget = ask(
-        "context budget in tokens (0 = no limit)",
-        Some("200000"),
-        lines,
-    )
-    .parse::<u64>()
-    .map_err(|_| "the budget must be a whole number".to_string())?;
-    // Asked last, so nothing else follows the secret on screen.
-    print!("api_key (paste it, or press Enter to reference ${env_name} instead): ");
-    let _ = std::io::stdout().flush();
-    let pasted = lines.next().unwrap_or_default().trim().to_string();
-    let key = if pasted.is_empty() {
-        None
-    } else {
-        Some(pasted)
+fn load_control() -> Result<Option<ControlFile>, String> {
+    let path = control_path();
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let file: ControlFile =
+        toml::from_str(&text).map_err(|e| format!("{} is not valid TOML: {e}", path.display()))?;
+    Ok(Some(file))
+}
+
+fn save_control(file: &ControlFile) -> Result<PathBuf, String> {
+    let path = control_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    let text = toml::to_string(file).map_err(|e| e.to_string())?;
+    std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(path)
+}
+
+/// Where the verified pack is cached. State, not configuration.
+fn pack_cache(config: &loong_control::ControlConfig) -> loong_control::Cache {
+    let state = non_empty_env("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| non_empty_env("HOME").map(|home| PathBuf::from(home).join(".local/state")))
+        .unwrap_or_else(std::env::temp_dir)
+        .join("loongagent");
+    loong_control::Cache::new(state, &config.origin())
+}
+
+/// The control-plane client configuration, with the token reference resolved.
+fn control_config(
+    file: &ControlFile,
+) -> Result<(loong_control::ControlConfig, Option<String>), String> {
+    let public_key = loong_pack::unhex(&file.public_key)
+        .ok_or_else(|| "the control plane's public key must be hex".to_string())?;
+    if public_key.len() != 32 {
+        return Err(format!(
+            "the public key must be a 32-byte Ed25519 key in hex ({} bytes given)",
+            public_key.len()
+        ));
+    }
+    let token = resolve_reference(file.token.as_deref(), &config_dir());
+    let config = loong_control::ControlConfig {
+        base_url: file.url.clone(),
+        public_key,
+        token: file.token.clone(),
+        profile: None,
     };
-    if key.is_some() {
-        println!(
-            "  → the key goes to the credentials file (mode 0600), and the profile references it"
-        );
-    } else {
-        println!("  → the profile will reference env:{env_name}; export it in your shell");
+    config.check_transport().map_err(|e| e.to_string())?;
+    Ok((config, token))
+}
+
+/// What a session needs to know about the pack it is about to run on.
+struct PackState {
+    provenance: loong_config::ControlProvenance,
+    profile: loong_config::NamedProfile,
+    layer: Vec<(String, loong_config::Value)>,
+    from_cache: bool,
+    note: Option<String>,
+}
+
+impl PackState {
+    fn summary(&self) -> String {
+        format!(
+            "{} — {}{}",
+            self.profile.name,
+            first_line(&self.profile.description),
+            if self.from_cache {
+                " (cached pack)"
+            } else {
+                ""
+            }
+        )
     }
+}
 
-    let first_base_url = base_url.clone();
-    let mut models = vec![SetupModel {
-        name,
-        base_url,
-        model,
-        key,
-        env_name: env_name.to_string(),
-        budget_tokens: budget,
-    }];
+fn first_line(text: &str) -> String {
+    text.lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
 
-    // A second model is what makes the router useful, so offer it rather than
-    // document it.
-    loop {
-        let more = ask("add another model for routing? (y/N)", Some("n"), lines);
-        if !more.eq_ignore_ascii_case("y") {
-            break;
+/// Fetch, verify and cache the pack (or fall back to the last verified one), then
+/// pick the profile this install runs.
+///
+/// The layers are read twice: once to learn `control.profile`, once with the pack in
+/// place. That keeps "the pack may not set the choice, the choice selects the pack"
+/// from becoming a special case in the resolver, and both passes are cheap.
+fn sync_pack(args: &Args, offline: bool) -> Result<Option<PackState>, String> {
+    let Some(file) = load_control()? else {
+        return Ok(None);
+    };
+    let (config, token) = control_config(&file)?;
+    let cache = pack_cache(&config);
+
+    let synced = if offline {
+        match cache.load() {
+            Some(envelope) => {
+                envelope
+                    .verify(&config.public_key, &[loong_pack::PROFILES_SCHEMA])
+                    .map_err(|e| e.to_string())?;
+                loong_control::Synced {
+                    envelope,
+                    from_cache: true,
+                    note: Some("using the cached pack (--offline)".to_string()),
+                }
+            }
+            None => {
+                return Err(
+                    "no pack has been synced yet, and --offline was asked for — run \
+                     `loongagent control sync` once with the control plane reachable"
+                        .to_string(),
+                )
+            }
         }
-        let base_url = ask("base_url", Some(first_base_url.as_str()), lines);
-        let model = ask("model id", None, lines);
-        if model.is_empty() {
-            return Err("a model id is required".to_string());
+    } else {
+        loong_control::sync(
+            &config,
+            &cache,
+            token.as_deref(),
+            loong_control::DEFAULT_TIMEOUT,
+        )
+        .map_err(|e| e.to_string())?
+    };
+
+    let pack = loong_config::profiles_from_payload(&synced.envelope.payload)
+        .map_err(|e| format!("the control plane's pack is not usable: {e}"))?;
+    let layers = loong_config::layer_paths(&args.cwd, args.profile.as_deref());
+    let without_pack = loong_config::resolve(&layers, &args.cwd).map_err(|e| e.to_string())?;
+    let chosen = without_pack.control_profile.clone();
+    let profile = pack
+        .pick(chosen.as_deref())
+        .map_err(|e| e.to_string())?
+        .clone();
+
+    Ok(Some(PackState {
+        provenance: loong_config::ControlProvenance {
+            issuer: synced.envelope.issuer.clone(),
+            version: synced.envelope.version.clone(),
+            key_id: synced.envelope.key_id.clone(),
+            profile: profile.name.clone(),
+        },
+        layer: loong_config::pack_layer(&profile),
+        profile,
+        from_cache: synced.from_cache,
+        note: synced.note,
+    }))
+}
+
+/// The pack this install last verified, without touching the network — what a client
+/// surface shows before a session starts.
+fn cached_pack_state(args: &Args) -> Result<Option<PackState>, String> {
+    let Some(file) = load_control()? else {
+        return Ok(None);
+    };
+    let (config, _token) = control_config(&file)?;
+    let Some(envelope) = pack_cache(&config).load() else {
+        return Ok(None);
+    };
+    envelope
+        .verify(&config.public_key, &[loong_pack::PROFILES_SCHEMA])
+        .map_err(|e| format!("the cached pack no longer verifies: {e}"))?;
+    let pack = loong_config::profiles_from_payload(&envelope.payload).map_err(|e| e.to_string())?;
+    let layers = loong_config::layer_paths(&args.cwd, args.profile.as_deref());
+    let without_pack = loong_config::resolve(&layers, &args.cwd).map_err(|e| e.to_string())?;
+    let profile = pack
+        .pick(without_pack.control_profile.as_deref())
+        .map_err(|e| e.to_string())?
+        .clone();
+    Ok(Some(PackState {
+        provenance: loong_config::ControlProvenance {
+            issuer: envelope.issuer.clone(),
+            version: envelope.version.clone(),
+            key_id: envelope.key_id.clone(),
+            profile: profile.name.clone(),
+        },
+        layer: loong_config::pack_layer(&profile),
+        profile,
+        from_cache: true,
+        note: None,
+    }))
+}
+
+/// Configure the control plane. This is the only thing a first run needs, and the
+/// only thing it may configure: which control plane, and which key this install
+/// trusts. Model endpoints and routing are not a user's to set (T-07, ADR-0016).
+fn setup(args: Args) -> Result<(), String> {
+    let existing = load_control()?;
+    println!("loongagent setup — connect this install to your firm's control plane");
+    println!("  configuration: {}", control_path().display());
+    if let Some(file) = &existing {
+        println!(
+            "  currently:     {} (key {}…)",
+            file.url,
+            &file.public_key[..file.public_key.len().min(16)]
+        );
+    }
+    println!();
+
+    let mut lines = std::io::stdin().lock().lines().map_while(Result::ok);
+    let url = match &args.control_url {
+        Some(url) => url.clone(),
+        None => {
+            println!("The control plane is the service your profile administrator runs.");
+            ask(
+                "control-plane address (https://…)",
+                existing.as_ref().map(|f| f.url.as_str()),
+                &mut lines,
+            )
         }
-        let name = ask("a short name for it", Some(model.as_str()), lines);
-        print!("api_key (paste it, or Enter for env:LOONGAGENT_API_KEY): ");
-        let _ = std::io::stdout().flush();
-        let pasted = lines.next().unwrap_or_default().trim().to_string();
-        models.push(SetupModel {
-            name,
-            base_url,
-            model,
-            key: if pasted.is_empty() {
+    };
+    if url.trim().is_empty() {
+        return Err("a control-plane address is required".to_string());
+    }
+    let public_key = match &args.control_key {
+        Some(key) => key.clone(),
+        None => {
+            println!();
+            println!("Paste the public key your profile administrator gave you (hex).");
+            println!(
+                "It is what makes the pack trustworthy; a pack signed by another key is refused."
+            );
+            ask(
+                "public key",
+                existing.as_ref().map(|f| f.public_key.as_str()),
+                &mut lines,
+            )
+        }
+    };
+    let token = match &args.control_token {
+        Some(token) => Some(token.clone()),
+        None => {
+            let answer = ask(
+                "token reference (env:NAME, or Enter for none)",
+                existing.as_ref().and_then(|f| f.token.as_deref()),
+                &mut lines,
+            );
+            if answer.trim().is_empty() {
                 None
             } else {
-                Some(pasted)
-            },
-            env_name: "LOONGAGENT_API_KEY".to_string(),
-            budget_tokens: budget,
-        });
-        println!("  (routing rules are written by hand; see the file's comments)");
-    }
-
-    println!("Configured {} from {label}.", models[0].name);
-    Ok(SetupPlan {
-        models,
-        budget_tokens: budget,
-    })
-}
-
-fn render_profile(plan: &SetupPlan) -> String {
-    let mut out = String::from(
-        "# Written by `loongagent setup`. Committed files may not contain secrets: keys are\n\
-         # references (env:NAME or file:PATH#KEY), never literals (ADR-0008 §5).\n\
-         profile = \"personal\"\n",
-    );
-    for model in &plan.models {
-        let key = match &model.key {
-            Some(_) => format!("file:credentials.toml#{}", model.env_name),
-            None => format!("env:{}", model.env_name),
-        };
-        out.push_str(&format!(
-            "\n[[models]]\nname = \"{name}\"\nkind = \"openai-compat\"\n\
-             base_url = \"{base}\"\nmodel = \"{id}\"\napi_key = \"{key}\"\n\
-             budget_tokens = {budget}\n",
-            name = model.name,
-            base = model.base_url,
-            id = model.model,
-            budget = model.budget_tokens,
-        ));
-    }
-    // A commented router: the shape is useful to see, and switching models silently
-    // is exactly what this project refuses to do.
-    out.push_str(&format!(
-        "\n[router]\ndefault = \"{}\"\n\n\
-         # Rules are first-match-wins, and the one that fired is recorded in the session:\n\
-         # [[router.rules]]\n\
-         # when = \"context_tokens > 150000\"\n\
-         # use = \"a-long-context-model\"\n",
-        plan.models[0].name
-    ));
-    out
-}
-
-fn render_credentials(plan: &SetupPlan) -> Option<String> {
-    let keys: Vec<&SetupModel> = plan.models.iter().filter(|m| m.key.is_some()).collect();
-    if keys.is_empty() {
-        return None;
-    }
-    let mut out = String::from(
-        "# Written by `loongagent setup`, mode 0600. Not configuration: this is the one\n\
-         # file that holds secrets, which is why the profile above only references it.\n\
-         [keys]\n",
-    );
-    for model in keys {
-        out.push_str(&format!(
-            "{} = {:?}\n",
-            model.env_name,
-            model.key.clone().unwrap_or_default()
-        ));
-    }
-    Some(out)
-}
-
-fn setup(args: Args) -> Result<(), String> {
-    let dir = config_dir();
-    let profile_path = args
-        .profile
-        .clone()
-        .unwrap_or_else(|| dir.join("profile.toml"));
-    let credentials_path = profile_path
-        .parent()
-        .unwrap_or(Path::new("."))
-        .join("credentials.toml");
-
-    println!("loongagent setup");
-    println!("  profile:     {}", profile_path.display());
-    println!("  credentials: {}", credentials_path.display());
-    println!();
-    let mut lines = std::io::stdin().lock().lines().map_while(Result::ok);
-    let plan = plan_from(&mut lines)?;
-
-    if let Some(parent) = profile_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("creating {}: {e}", parent.display()))?;
-    }
-    if profile_path.exists() {
-        let backup = profile_path.with_extension("toml.bak");
-        std::fs::rename(&profile_path, &backup)
-            .map_err(|e| format!("backing up {}: {e}", profile_path.display()))?;
-        println!("kept the previous profile as {}", backup.display());
-    }
-    std::fs::write(&profile_path, render_profile(&plan))
-        .map_err(|e| format!("writing {}: {e}", profile_path.display()))?;
-
-    if let Some(text) = render_credentials(&plan) {
-        std::fs::write(&credentials_path, text)
-            .map_err(|e| format!("writing {}: {e}", credentials_path.display()))?;
-        // 0600 before anything else can read it.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&credentials_path, std::fs::Permissions::from_mode(0o600))
-                .map_err(|e| {
-                    format!("setting permissions on {}: {e}", credentials_path.display())
-                })?;
+                Some(answer)
+            }
         }
-    }
+    };
 
+    let file = ControlFile {
+        url: url.trim().to_string(),
+        public_key: public_key.trim().to_string(),
+        token,
+    };
+    // Prove it before writing it: a configuration that cannot verify a pack is not
+    // worth saving.
+    let (config, resolved_token) = control_config(&file)?;
+    let cache = pack_cache(&config);
     println!();
-    println!("wrote {}", profile_path.display());
-    if render_credentials(&plan).is_some() {
-        println!("wrote {} (mode 0600)", credentials_path.display());
-    }
-    for model in plan.models.iter().filter(|m| m.key.is_none()) {
-        println!(
-            "export {}='…'   # the profile references it",
-            model.env_name
-        );
-    }
+    println!("contacting {} …", file.url);
+    let synced = loong_control::sync(
+        &config,
+        &cache,
+        resolved_token.as_deref(),
+        loong_control::DEFAULT_TIMEOUT,
+    )
+    .map_err(|e| e.to_string())?;
+    let pack = loong_config::profiles_from_payload(&synced.envelope.payload)
+        .map_err(|e| format!("the pack is not usable: {e}"))?;
+    let path = save_control(&file)?;
+    println!("wrote {}", path.display());
     println!();
-    println!("next:  loongagent tui          (in the project you want to work on)");
-    println!("       loongagent config show  (which layer set what)");
+    println!(
+        "verified pack: {} {} (key {}), {} profiles",
+        synced.envelope.issuer,
+        synced.envelope.version,
+        synced.envelope.key_id,
+        pack.profiles.len()
+    );
+    print_profiles(&pack, None);
+    println!();
+    println!("choose one with:  loongagent use <name>");
+    println!("then start:       loongagent tui");
     Ok(())
 }
 
-/// Read one secret out of a credentials file: `[keys]` NAME = "…".
-///
-/// `toml::from_str`, not `str::parse`: the `FromStr` implementation parses a *single
-/// value*, so a document with a `[keys]` table fails with "unexpected content".
-fn read_credential(path: &Path, key: &str) -> Option<String> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let parsed: toml::Value = toml::from_str(&text)
-        .map_err(|e| eprintln!("[config] {} is not valid TOML: {e}", path.display()))
-        .ok()?;
-    parsed
-        .get("keys")
-        .and_then(|keys| keys.get(key))
-        .and_then(|value| value.as_str())
-        .map(|secret| secret.to_string())
+fn print_profiles(pack: &loong_config::ProfilePack, selected: Option<&str>) {
+    for profile in &pack.profiles {
+        let marker = if Some(profile.name.as_str()) == selected {
+            " (selected)"
+        } else {
+            ""
+        };
+        println!("  {}{}", profile.name, marker);
+        if !profile.description.trim().is_empty() {
+            println!("      {}", profile.description.trim());
+        }
+        let models: Vec<&str> = profile.models.iter().map(|m| m.name.as_str()).collect();
+        println!("      models: {}", models.join(", "));
+    }
+}
+
+/// `loongagent control status|sync` — what this install trusts, and what it has.
+fn control(args: Args, rest: &[String]) -> Result<(), String> {
+    let sub = rest
+        .iter()
+        .find(|a| !a.starts_with("--") && **a != "control")
+        .cloned()
+        .unwrap_or_else(|| "status".to_string());
+    let file = load_control()?.ok_or_else(|| {
+        "no control plane is configured — run `loongagent setup` with the address your firm gave \
+         you"
+        .to_string()
+    })?;
+    match sub.as_str() {
+        "status" => {
+            let (config, token) = control_config(&file)?;
+            let cache = pack_cache(&config);
+            println!("control plane: {}", file.url);
+            println!(
+                "pinned key:    {}…",
+                &file.public_key[..file.public_key.len().min(16)]
+            );
+            println!(
+                "token:         {}",
+                file.token.as_deref().unwrap_or("(none)")
+            );
+            println!("cache:         {}", cache.path().display());
+            match cache.load() {
+                Some(envelope) => {
+                    println!(
+                        "cached pack:   {} {} (key {})",
+                        envelope.issuer, envelope.version, envelope.key_id
+                    );
+                    println!("  cached pack verifies: yes");
+                    if let Ok(pack) = loong_config::profiles_from_payload(&envelope.payload) {
+                        print_profiles(&pack, None);
+                    }
+                }
+                None => println!("cached pack:   none yet"),
+            }
+            if args.offline {
+                return Ok(());
+            }
+            println!();
+            println!("checking {} …", file.url);
+            match loong_control::sync(
+                &config,
+                &cache,
+                token.as_deref(),
+                loong_control::DEFAULT_TIMEOUT,
+            ) {
+                Ok(synced) => println!(
+                    "control plane: reachable; serving {} {}{}",
+                    synced.envelope.issuer,
+                    synced.envelope.version,
+                    if synced.from_cache {
+                        " (from cache — unreachable)"
+                    } else {
+                        ""
+                    }
+                ),
+                Err(e) => println!("control plane: {e}"),
+            }
+            Ok(())
+        }
+        "sync" => {
+            let (config, token) = control_config(&file)?;
+            let cache = pack_cache(&config);
+            let synced = loong_control::sync(
+                &config,
+                &cache,
+                token.as_deref(),
+                loong_control::DEFAULT_TIMEOUT,
+            )
+            .map_err(|e| e.to_string())?;
+            let pack = loong_config::profiles_from_payload(&synced.envelope.payload)
+                .map_err(|e| format!("the pack is not usable: {e}"))?;
+            println!(
+                "{} {} (key {}), {}{}",
+                synced.envelope.issuer,
+                synced.envelope.version,
+                synced.envelope.key_id,
+                if synced.from_cache {
+                    "from cache"
+                } else {
+                    "verified"
+                },
+                synced
+                    .note
+                    .as_deref()
+                    .map(|n| format!(" — {n}"))
+                    .unwrap_or_default()
+            );
+            print_profiles(&pack, None);
+            Ok(())
+        }
+        other => Err(format!(
+            "unknown control subcommand {other:?} — try `loongagent control status` or `sync`"
+        )),
+    }
+}
+
+/// `loongagent profiles` — what the control plane offers, and what this install runs.
+fn profiles(args: Args) -> Result<(), String> {
+    let state = cached_pack_state(&args)?.ok_or_else(|| {
+        "nothing is synced yet — run `loongagent setup` or `loongagent control sync`".to_string()
+    })?;
+    let file = load_control()?.expect("a pack implies a control plane");
+    let (config, _) = control_config(&file)?;
+    let envelope = pack_cache(&config)
+        .load()
+        .ok_or_else(|| "no cached pack".to_string())?;
+    let pack = loong_config::profiles_from_payload(&envelope.payload).map_err(|e| e.to_string())?;
+    println!(
+        "from {} {} (key {}), signed and verified",
+        envelope.issuer, envelope.version, envelope.key_id
+    );
+    print_profiles(&pack, Some(&state.profile.name));
+    println!();
+    println!("switch with: loongagent use <name>");
+    Ok(())
+}
+
+/// `loongagent use <name>` — the one profile-related choice a user owns.
+fn use_profile(args: Args, rest: &[String]) -> Result<(), String> {
+    // `rest` is everything after `use`, so the first non-flag word *is* the name.
+    let name = rest
+        .iter()
+        .find(|a| !a.starts_with("--"))
+        .cloned()
+        .ok_or_else(|| {
+            "usage: loongagent use <profile-name> (see `loongagent profiles`)".to_string()
+        })?;
+
+    // Refuse a name the pack does not offer, rather than storing a typo.
+    let state = cached_pack_state(&args)?.ok_or_else(|| {
+        "nothing is synced yet — run `loongagent setup` or `loongagent control sync`".to_string()
+    })?;
+    let file = load_control()?.expect("a pack implies a control plane");
+    let (config, _) = control_config(&file)?;
+    let envelope = pack_cache(&config).load().ok_or("no cached pack")?;
+    let pack = loong_config::profiles_from_payload(&envelope.payload).map_err(|e| e.to_string())?;
+    let chosen = pack.pick(Some(&name)).map_err(|e| e.to_string())?.clone();
+    let _ = state;
+
+    let path = loong_config::layer_paths(&args.cwd, None)
+        .into_iter()
+        .find(|(layer, _)| *layer == loong_config::Layer::User)
+        .map(|(_, path)| path)
+        .ok_or_else(|| "no user-layer configuration path on this machine".to_string())?;
+    let mut document: toml::Value = match std::fs::read_to_string(&path) {
+        Ok(text) => toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?,
+        Err(_) => toml::Value::Table(toml::map::Map::new()),
+    };
+    let table = document
+        .as_table_mut()
+        .ok_or_else(|| format!("{} is not a TOML table", path.display()))?;
+    let control = table
+        .entry("control".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+    let control = control
+        .as_table_mut()
+        .ok_or_else(|| "control is not a table in your profile".to_string())?;
+    control.insert(
+        "profile".to_string(),
+        toml::Value::String(chosen.name.clone()),
+    );
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    std::fs::write(
+        &path,
+        toml::to_string(&document).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("{}: {e}", path.display()))?;
+    println!("now running profile {} in {}", chosen.name, path.display());
+    if !chosen.description.trim().is_empty() {
+        println!("  {}", chosen.description.trim());
+    }
+    Ok(())
 }
 
 fn config_dir() -> PathBuf {
@@ -589,6 +861,9 @@ fn run() -> Result<(), String> {
             _ => Err(format!("mcp list | mcp trust\n\n{USAGE}")),
         },
         "setup" => setup(Args::parse(rest)?),
+        "control" => control(Args::parse(rest)?, rest),
+        "profiles" => profiles(Args::parse(rest)?),
+        "use" => use_profile(Args::parse(rest)?, rest),
         "tui" => full_screen(Args::parse(rest)?),
         "repl" => repl(Args::parse(rest)?),
         "web" => web(Args::parse(rest)?),
@@ -622,7 +897,19 @@ fn serve(args: Args) -> Result<(), String> {
     args.ensure_parent()?;
     // ADR-0007: the boundary is proven before the first tool call. A mechanism
     // that fails to deny is fatal; a platform without one is a loud degradation.
-    let settings = args.settings()?;
+    let (settings, pack) = args.settings_with_pack()?;
+    if let Some(state) = &pack {
+        eprintln!(
+            "[control] {} {} (key {}) — profile: {}",
+            state.provenance.issuer,
+            state.provenance.version,
+            state.provenance.key_id,
+            state.summary()
+        );
+        if let Some(note) = &state.note {
+            eprintln!("[control] {note}");
+        }
+    }
     for row in settings.explain_all() {
         eprintln!(
             "[config] {:<28} {:<9} {:<14} {}",
@@ -684,12 +971,22 @@ fn serve(args: Args) -> Result<(), String> {
         .unwrap_or_else(|| "default".to_string());
     config.settings = settings;
     let session_path = args.session_path();
-    let kernel = if session_path.exists() {
+    let mut kernel = if session_path.exists() {
         Kernel::open_with_models(&session_path, config, models)
     } else {
         Kernel::create_with_models(&session_path, config, models)
     }
     .map_err(|e| e.to_string())?;
+    // Provenance first, then what it means: a session should be able to answer "what
+    // policy was in force, and which profile did I run?" long after the fact.
+    if let Some(state) = &pack {
+        kernel
+            .record_control_synced(&state.provenance, state.from_cache, state.note.as_deref())
+            .map_err(|e| e.to_string())?;
+        kernel
+            .record_profile_selected(&state.profile)
+            .map_err(|e| e.to_string())?;
+    }
     Server::new(kernel, args.session_id())
         .run_stdio()
         .map_err(|e| e.to_string())
@@ -839,6 +1136,22 @@ fn build_model(
 
 /// Resolve a configuration reference (ADR-0008 §5: config carries a reference, not
 /// a secret). A bare value is passed through only for non-secret keys.
+/// Read one secret out of a credentials file: `[keys]` NAME = "…".
+///
+/// `toml::from_str`, not `str::parse`: the `FromStr` implementation parses a *single
+/// value*, so a document with a `[keys]` table fails with "unexpected content".
+fn read_credential(path: &Path, key: &str) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let parsed: toml::Value = toml::from_str(&text)
+        .map_err(|e| eprintln!("[config] {} is not valid TOML: {e}", path.display()))
+        .ok()?;
+    parsed
+        .get("keys")
+        .and_then(|keys| keys.get(key))
+        .and_then(|value| value.as_str())
+        .map(|secret| secret.to_string())
+}
+
 fn resolve_reference(value: Option<&str>, base: &Path) -> Option<String> {
     let value = value?;
     if let Some(name) = value.strip_prefix("env:") {
@@ -1053,7 +1366,15 @@ fn full_screen(args: Args) -> Result<(), String> {
     // is configured at all.
     // The client resolves the same layers the server does, so it can tell the user
     // whether a model exists without asking the server about it.
-    let settings = args.settings()?;
+    let (_settings, pack) = args.settings_with_pack()?;
+    if let Some(state) = &pack {
+        eprintln!(
+            "[control] {} {} — profile: {}",
+            state.provenance.issuer,
+            state.provenance.version,
+            state.summary()
+        );
+    }
     let mut intro = vec![format!("session: {}", args.session_path().display())];
     if attached.existing_events > 0 {
         intro.push(format!(
@@ -1061,12 +1382,15 @@ fn full_screen(args: Args) -> Result<(), String> {
             attached.existing_events
         ));
     }
-    if args.model.is_none() && settings.base_url.is_none() {
-        intro.push(
-            "no model configured — run `loongagent setup`, or pass --model demo-write to try the \
-             loop without one"
+    match cached_pack_state(&args) {
+        Ok(Some(state)) => intro.push(format!("profile: {}", state.summary())),
+        Ok(None) if args.model.is_none() => intro.push(
+            "not connected to a control plane — run `loongagent setup` with the address your \
+             firm gave you (or pass --model demo-write to try the loop with no model)"
                 .to_string(),
-        );
+        ),
+        Ok(None) => {}
+        Err(e) => intro.push(format!("control plane: {e}")),
     }
     loong_tui_app::run(
         client,
@@ -1133,7 +1457,15 @@ impl loong_web::Session for WebSession {
 
 fn web(args: Args) -> Result<(), String> {
     args.ensure_parent()?;
-    let settings = args.settings()?;
+    let (settings, pack) = args.settings_with_pack()?;
+    if let Some(state) = &pack {
+        eprintln!(
+            "[control] {} {} — profile: {}",
+            state.provenance.issuer,
+            state.provenance.version,
+            state.summary()
+        );
+    }
     let (transport, notes) = ChildTransport::spawn(&args, true)?;
     if let Some(notes) = notes {
         // The server's own diagnostics go to this terminal, where the operator is.
@@ -1287,7 +1619,15 @@ fn mcp_trust(args: Args) -> Result<(), String> {
 
 /// Every key answers "why is this the value?" (ADR-0008 §4).
 fn config_show(args: Args) -> Result<(), String> {
-    let settings = args.settings()?;
+    let (settings, pack) = args.settings_with_pack()?;
+    if let Some(state) = &pack {
+        eprintln!(
+            "[control] {} {} — profile: {}",
+            state.provenance.issuer,
+            state.provenance.version,
+            state.summary()
+        );
+    }
     for (layer, path) in loong_config::layer_paths(&args.cwd, args.profile.as_deref()) {
         let mark = if path.exists() { "  " } else { "· " };
         println!("{mark}{:<8} {}", layer.as_str(), path.display());
@@ -1315,7 +1655,15 @@ fn config_explain(args: Args) -> Result<(), String> {
         .first()
         .cloned()
         .ok_or_else(|| format!("config explain needs a key\n\n{USAGE}"))?;
-    let settings = args.settings()?;
+    let (settings, pack) = args.settings_with_pack()?;
+    if let Some(state) = &pack {
+        eprintln!(
+            "[control] {} {} — profile: {}",
+            state.provenance.issuer,
+            state.provenance.version,
+            state.summary()
+        );
+    }
     let base = key.split('.').next().unwrap_or(&key);
     let kind = loong_config::kind_of(base).ok_or_else(|| format!("unknown key {base:?}"))?;
     match settings.explain(&key) {
@@ -1354,7 +1702,15 @@ fn explain_kind(kind: loong_config::Kind) -> &'static str {
 fn skills_list(args: Args) -> Result<(), String> {
     // Honour the layered configuration: what this prints must be what a session
     // would actually get, or it is worse than not printing it.
-    let settings = args.settings()?;
+    let (settings, pack) = args.settings_with_pack()?;
+    if let Some(state) = &pack {
+        eprintln!(
+            "[control] {} {} — profile: {}",
+            state.provenance.issuer,
+            state.provenance.version,
+            state.summary()
+        );
+    }
     let set =
         loong_skills::SkillSet::load_in(&args.cwd, &settings.skill_dirs, &settings.disable_skills)
             .map_err(|e| e.to_string())?;
@@ -1510,55 +1866,54 @@ mod tests {
     }
 
     #[test]
-    fn the_wizard_turns_answers_into_a_profile_and_a_credentials_file() {
-        // choice, base_url, model id, name, budget, api_key, "another model?"
-        let mut lines = answers(&["1", "", "some-model", "small", "64000", "sk-secret", "n"]);
-        let plan = plan_from(&mut lines).unwrap();
-        assert_eq!(plan.models.len(), 1);
+    fn the_control_file_round_trips_and_its_key_is_checked() {
+        let file = ControlFile {
+            url: "https://control.acme.internal".to_string(),
+            public_key: "ab".repeat(32),
+            token: Some("env:LOONGAGENT_CONTROL_TOKEN".to_string()),
+        };
+        let text = toml::to_string(&file).unwrap();
+        let back: ControlFile = toml::from_str(&text).unwrap();
+        assert_eq!(back.url, file.url);
+        assert_eq!(back.public_key, file.public_key);
+        assert_eq!(back.token, file.token);
+        let (config, _) = control_config(&back).unwrap();
+        assert_eq!(config.base_url, "https://control.acme.internal");
+        assert_eq!(config.public_key.len(), 32);
+
+        // A key that is not a 32-byte hex Ed25519 key is refused before anything is
+        // sent anywhere.
+        let short = ControlFile {
+            public_key: "abcd".to_string(),
+            ..back.clone()
+        };
+        assert!(control_config(&short).unwrap_err().contains("32-byte"));
+        let not_hex = ControlFile {
+            public_key: "zz".repeat(32),
+            ..back.clone()
+        };
+        assert!(control_config(&not_hex).unwrap_err().contains("hex"));
+
+        // And the token is never a literal: only a reference resolves.
+        let literal = ControlFile {
+            token: Some("a-real-secret".to_string()),
+            ..back
+        };
         assert_eq!(
-            plan.models[0].base_url, "https://api.deepseek.com",
-            "the provider default"
+            resolve_reference(literal.token.as_deref(), Path::new("/tmp")),
+            Some("a-real-secret".to_string())
         );
-        assert_eq!(plan.models[0].name, "small");
-        assert_eq!(plan.models[0].budget_tokens, 64000);
-
-        let profile = render_profile(&plan);
-        assert!(profile.contains("name = \"small\""));
-        assert!(profile.contains("model = \"some-model\""));
-        assert!(profile.contains("api_key = \"file:credentials.toml#DEEPSEEK_API_KEY\""));
-        assert!(profile.contains("budget_tokens = 64000"));
-        assert!(
-            !profile.contains("sk-secret"),
-            "a secret never lands in the profile"
-        );
-        assert!(profile.contains("default = \"small\""));
-
-        let credentials = render_credentials(&plan).unwrap();
-        assert!(credentials.contains("DEEPSEEK_API_KEY = \"sk-secret\""));
     }
 
     #[test]
-    fn a_key_that_is_not_pasted_becomes_an_environment_reference() {
-        let mut lines = answers(&["3", "", "gpt-x", "", "1000", "", "n"]);
-        let plan = plan_from(&mut lines).unwrap();
-        assert!(plan.models[0].key.is_none());
-        assert!(render_profile(&plan).contains("api_key = \"env:OPENAI_API_KEY\""));
-        assert!(render_credentials(&plan).is_none(), "no secret, no file");
-    }
-
-    #[test]
-    fn a_second_model_becomes_a_second_entry_for_the_router() {
-        let mut lines = answers(&[
-            "4", "", "local-a", "a", "8000", "", "y", "", "local-b", "b", "", "n",
-        ]);
-        let plan = plan_from(&mut lines).unwrap();
-        assert_eq!(plan.models.len(), 2);
-        assert_eq!(plan.models[1].model, "local-b");
-        assert_eq!(
-            plan.models[1].base_url, plan.models[0].base_url,
-            "the first base_url is offered"
-        );
-        assert_eq!(render_profile(&plan).matches("[[models]]").count(), 2);
+    fn a_control_plane_address_that_would_leak_a_token_is_refused() {
+        let file = ControlFile {
+            url: "http://control.acme.internal".to_string(),
+            public_key: "ab".repeat(32),
+            token: Some("env:X".to_string()),
+        };
+        let error = control_config(&file).unwrap_err();
+        assert!(error.contains("TLS"), "{error}");
     }
 
     #[test]
@@ -1589,17 +1944,5 @@ mod tests {
         assert_eq!(read_credential(&path, "ANY"), None, "nor is nonsense");
         assert_eq!(read_credential(&dir.join("absent.toml"), "ANY"), None);
         std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn bad_answers_are_refused_with_a_reason() {
-        let mut lines = answers(&["1", "", "m", "n", "lots", "", "n"]);
-        assert!(plan_from(&mut lines).unwrap_err().contains("whole number"));
-        let mut lines = answers(&["9"]);
-        assert!(plan_from(&mut lines)
-            .unwrap_err()
-            .contains("not one of the choices"));
-        let mut lines = answers(&["1", "", "", "n", "1", "", "n"]);
-        assert!(plan_from(&mut lines).unwrap_err().contains("model id"));
     }
 }

@@ -186,6 +186,27 @@ export interface ModelSelected {
   context_tokens: number;
 }
 
+/** The policy pack a session is running on, and whether it was verified. Recorded once per session: this is the local half of 'policy is auditable'. */
+export interface ControlSynced {
+  issuer: string;
+  version: string;
+  key_id: string;
+  /** the named profile this session runs */
+  profile: string;
+  /** true when the control plane was unreachable and the last verified pack was used */
+  from_cache: boolean;
+  /** why the live pack was not used, when it was not */
+  note: string;
+}
+
+/** Which named profile a session runs, with the description the user was shown. Engineers declare intent; the org controls vendors (T-07). */
+export interface ProfileSelected {
+  profile: string;
+  description: string;
+  /** the models behind it, comma separated — transparency without giving away the choice */
+  models: string;
+}
+
 export const METHODS = {
   sessionAttach: "session.attach",
   promptSubmit: "prompt.submit",
@@ -202,6 +223,8 @@ export const EVENTS = {
   costRecorded: "cost.recorded",
   compactionApplied: "compaction.applied",
   hookFired: "hook.fired",
+  controlSynced: "control.synced",
+  profileSelected: "profile.selected",
   modelSelected: "model.selected",
   skillsLoaded: "skills.loaded",
   skillInvoked: "skill.invoked",

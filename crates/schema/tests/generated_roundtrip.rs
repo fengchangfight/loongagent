@@ -143,6 +143,20 @@ fn roundtrip_model_selected() {
 }
 
 #[test]
+fn roundtrip_control_synced() {
+    roundtrip::<g::ControlSynced>(
+        r#"{"issuer": "<string>","version": "<string>","key_id": "<string>","profile": "<string>","from_cache": true,"note": "<string>"}"#,
+    );
+}
+
+#[test]
+fn roundtrip_profile_selected() {
+    roundtrip::<g::ProfileSelected>(
+        r#"{"profile": "<string>","description": "<string>","models": "<string>"}"#,
+    );
+}
+
+#[test]
 fn declared_events_match_the_envelope_table() {
     assert_eq!(g::is_ignorable_event("message.appended"), Some(false));
     assert_eq!(g::is_ignorable_event("tool.call"), Some(false));
@@ -153,6 +167,8 @@ fn declared_events_match_the_envelope_table() {
     assert_eq!(g::is_ignorable_event("cost.recorded"), Some(false));
     assert_eq!(g::is_ignorable_event("compaction.applied"), Some(false));
     assert_eq!(g::is_ignorable_event("hook.fired"), Some(false));
+    assert_eq!(g::is_ignorable_event("control.synced"), Some(false));
+    assert_eq!(g::is_ignorable_event("profile.selected"), Some(false));
     assert_eq!(g::is_ignorable_event("model.selected"), Some(false));
     assert_eq!(g::is_ignorable_event("skills.loaded"), Some(false));
     assert_eq!(g::is_ignorable_event("skill.invoked"), Some(false));
@@ -183,6 +199,12 @@ fn every_event_payload_roundtrips() {
     );
     roundtrip::<g::HookFired>(
         r#"{"event": "<string>","hook_id": "<string>","kind": "<string>","verdict": "allow","reason": "<string>","duration_ms": 1,"failed": true}"#,
+    );
+    roundtrip::<g::ControlSynced>(
+        r#"{"issuer": "<string>","version": "<string>","key_id": "<string>","profile": "<string>","from_cache": true,"note": "<string>"}"#,
+    );
+    roundtrip::<g::ProfileSelected>(
+        r#"{"profile": "<string>","description": "<string>","models": "<string>"}"#,
     );
     roundtrip::<g::ModelSelected>(
         r#"{"model": "<string>","previous": "<string>","rule": "<string>","context_tokens": 1}"#,

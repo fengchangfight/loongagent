@@ -1409,6 +1409,55 @@ impl Kernel {
         Ok(seq)
     }
 
+    /// Record that a session is running on a control-plane pack (ADR-0016 §7). This
+    /// is provenance, not configuration: it answers "what policy was in force?" for a
+    /// session that has already happened.
+    pub fn record_control_synced(
+        &mut self,
+        provenance: &loong_config::ControlProvenance,
+        from_cache: bool,
+        note: Option<&str>,
+    ) -> Result<u64, KernelError> {
+        Ok(self
+            .log
+            .append(
+                gen::event::CONTROL_SYNCED,
+                json!({
+                    "issuer": provenance.issuer,
+                    "version": provenance.version,
+                    "key_id": provenance.key_id,
+                    "profile": provenance.profile,
+                    "from_cache": from_cache,
+                    "note": note.unwrap_or(""),
+                }),
+            )?
+            .seq)
+    }
+
+    /// Record the named profile a session runs, with what the user was told about it.
+    pub fn record_profile_selected(
+        &mut self,
+        profile: &loong_config::NamedProfile,
+    ) -> Result<u64, KernelError> {
+        let models = profile
+            .models
+            .iter()
+            .map(|m| m.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        Ok(self
+            .log
+            .append(
+                gen::event::PROFILE_SELECTED,
+                json!({
+                    "profile": profile.name,
+                    "description": profile.description,
+                    "models": models,
+                }),
+            )?
+            .seq)
+    }
+
     fn record_model_selected(
         &mut self,
         model: &str,

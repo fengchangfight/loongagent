@@ -243,6 +243,29 @@ pub struct ModelSelected {
     pub context_tokens: u64,
 }
 
+/// The policy pack a session is running on, and whether it was verified. Recorded once per session: this is the local half of 'policy is auditable'.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ControlSynced {
+    pub issuer: String,
+    pub version: String,
+    pub key_id: String,
+    /// the named profile this session runs
+    pub profile: String,
+    /// true when the control plane was unreachable and the last verified pack was used
+    pub from_cache: bool,
+    /// why the live pack was not used, when it was not
+    pub note: String,
+}
+
+/// Which named profile a session runs, with the description the user was shown. Engineers declare intent; the org controls vendors (T-07).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProfileSelected {
+    pub profile: String,
+    pub description: String,
+    /// the models behind it, comma separated — transparency without giving away the choice
+    pub models: String,
+}
+
 /// JSON-RPC method names (ADR-0002).
 pub mod method {
     /// Attach a thin client to the local agent server (ADR-0009).
@@ -264,6 +287,8 @@ pub mod event {
     pub const COST_RECORDED: &str = "cost.recorded";
     pub const COMPACTION_APPLIED: &str = "compaction.applied";
     pub const HOOK_FIRED: &str = "hook.fired";
+    pub const CONTROL_SYNCED: &str = "control.synced";
+    pub const PROFILE_SELECTED: &str = "profile.selected";
     pub const MODEL_SELECTED: &str = "model.selected";
     pub const SKILLS_LOADED: &str = "skills.loaded";
     pub const SKILL_INVOKED: &str = "skill.invoked";
@@ -290,6 +315,8 @@ pub const EVENT_KINDS: &[(&str, bool)] = &[
     ("cost.recorded", false),
     ("compaction.applied", false),
     ("hook.fired", false),
+    ("control.synced", false),
+    ("profile.selected", false),
     ("model.selected", false),
     ("skills.loaded", false),
     ("skill.invoked", false),

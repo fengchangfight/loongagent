@@ -115,6 +115,19 @@
       "previous": "<string>",
       "rule": "<string>",
       "context_tokens": 1
+    },
+    "ControlSynced": {
+      "issuer": "<string>",
+      "version": "<string>",
+      "key_id": "<string>",
+      "profile": "<string>",
+      "from_cache": true,
+      "note": "<string>"
+    },
+    "ProfileSelected": {
+      "profile": "<string>",
+      "description": "<string>",
+      "models": "<string>"
     }
   },
   "methods": [
@@ -178,6 +191,16 @@
     {
       "name": "hook.fired",
       "payload": "HookFired",
+      "ignorable": false
+    },
+    {
+      "name": "control.synced",
+      "payload": "ControlSynced",
+      "ignorable": false
+    },
+    {
+      "name": "profile.selected",
+      "payload": "ProfileSelected",
       "ignorable": false
     },
     {

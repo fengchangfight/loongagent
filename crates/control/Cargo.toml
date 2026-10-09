@@ -1,0 +1,17 @@
+[package]
+name = "loong-control"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pack distribution: the client half and the control plane half (ADR-0012, ADR-0016)"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+loong-pack.workspace = true
+loong-http.workspace = true
+loong-config.workspace = true
+
+[[bin]]
+name = "loongagent-control"
+path = "src/bin/loongagent-control.rs"

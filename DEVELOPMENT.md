@@ -47,10 +47,86 @@ same gates run wherever the repository is hosted. Both install rustfmt (the
 toolchain uses the `minimal` profile) and use the TUNA mirror, because this project
 is built from behind one.
 
+### The control plane (ADR-0012, ADR-0016)
+
+Two binaries, one shared crate, and a deliberate division of labour:
+
+| Binary | Who runs it | What it does |
+|---|---|---|
+| `loongagent` | every engineer | reads a signed pack, verifies it against a **pinned** key, runs the profile |
+| `loongagent-control` | a **profile administrator** | `keygen`, `sign`, `serve`, `publish` — distributes packs, and nothing else |
+
+```bash
+# once, by the profile administrator
+loongagent-control keygen --out /etc/loongagent/control      # private key, mode 0600
+#   prints the public key to pin in every install
+loongagent-control sign --pack profiles.toml --key control-key.pkcs8 \
+    --issuer acme-platform --version 2026.10.09-1 -o profile-pack.json
+CLIENT_TOKEN=… ADMIN_TOKEN=… loongagent-control serve \
+    --dir /var/lib/loongagent/control --public-key <hex> --issuer acme-platform \
+    --client-token-env CLIENT_TOKEN --admin-token-env ADMIN_TOKEN
+
+# on each machine
+loongagent setup --url https://control.acme.internal --public-key <hex> --token env:CLIENT_TOKEN
+loongagent profiles && loongagent use default && loongagent tui
+```
+
+Properties that are enforced, not documented:
+
+- **One envelope, one crate.** `loong-pack` holds the envelope and its sign/verify
+  path, and *both* binaries depend on it (ADR-0012 §1) — the two deploy
+  independently, so a duplicated verifier would eventually disagree.
+- **The signature covers everything but itself**: artifact, payload schema, version,
+  issuer, scope, issue time, key id and payload. A pack cannot be replayed as
+  another artifact or as another version.
+- **The key is pinned out of band.** The public key travels with the install (image,
+  MDM), never learned from the wire; a pack signed by another key is refused with
+  both fingerprints printed. The control plane refuses to *serve* a pack that does
+  not verify under its own pinned key, so a broken signing step is caught at
+  publish time rather than on every client.
+- **Tokens are separated.** Reading needs the client token every install has;
+  publishing needs the admin token. The client token cannot change policy.
+- **The verified pack is the `control` layer**, ranked above the local org file and
+  **locked**: project, user and session layers may narrow it, never rewrite it (an
+  attempt is an error naming the pack). The one profile-related key a user owns is
+  `control.profile` — the choice of bundle.
+- **Offline is degraded, not dead**: the last verified pack is cached under the state
+  directory and used when the control plane is unreachable; a pack that *fails*
+  verification never falls back to the cache.
+- **Transport**: HTTPS everywhere except loopback; the client refuses to send a
+  token in the clear to another machine.
+
+**Not built, and deliberately** (ADR-0012 §5): identity/SSO, the model gateway
+(provider keys, metering, shared prompt cache), rollup dashboards and the
+audit/statistics uplink. The client only ever *reads*. Also not built: key rotation
+and revocation policy, per-team scopes, and polling/push cadence — the envelope has
+`key_id` and `version` for them, the policy does not exist yet.
+
 ### Profiles: several models, and a router you can explain
 
-`loongagent setup` writes one interactively (it pre-fills the base URL, asks for the
-model id from your provider's docs, and keeps the key out of the profile). The format:
+A profile is a **named bundle** an administrator publishes (T-07), and the payload
+of a signed pack is where it lives:
+
+```toml
+default_profile = "default"
+
+[[profiles]]
+name = "default"
+description = "Balanced: a cheap model for the loop, escalating past 150k tokens."
+  [[profiles.models]]
+  name = "fast"
+  base_url = "https://api.deepseek.com"
+  model = "<the id from your provider's docs>"
+  api_key = "env:DEEPSEEK_API_KEY"     # or gateway: / file:PATH#KEY; never a literal
+  [profiles.router]
+  default = "fast"
+  [[profiles.router.rules]]
+  when = "context_tokens > 150000"
+  use = "long"
+```
+
+The same shape works as a local, unmanaged profile — one model, no control plane.
+The format:
 
 ```toml
 [[models]]
@@ -361,11 +437,14 @@ binary the TUI spawns as its server (used by the end-to-end test).
 8. **Post-tool hook verdicts are recorded but cannot undo anything**, and hooks
    deliberately cannot rewrite a tool call — the moment they could, the loop would
    stop being small enough to audit.
-9. **The TUI has no debug pane yet**: the context/ledger view (what the model is
+9. **The TUI has no in-app control-plane address form**: it prints the exact command
+   (`loongagent setup --url …`) instead of asking for the address inside the UI. The
+   remaining half of the earlier TUI request list.
+10. **The TUI has no debug pane yet**: the context/ledger view (what the model is
    actually being sent, entry by entry, with its token categories) is requested and
    not built. `loongagent config show` and `cat .loongagent/session.jsonl` are the
    current substitutes.
-10. **`cargo clippy` is not a gate yet**: the code has never had a lint sweep, and
+11. **`cargo clippy` is not a gate yet**: the code has never had a lint sweep, and
    adding a gate that fails on the first run is worse than not having it. It is the
    next hygiene step after the formatter sweep.
 11. **Configuration is layered but not yet distributed**: ADR-0008's signed pack

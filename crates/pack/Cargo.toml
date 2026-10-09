@@ -1,0 +1,11 @@
+[package]
+name = "loong-pack"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The one signed envelope every distributed artifact travels in (ADR-0008 §6, ADR-0016)"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+ring = { version = "0.17", default-features = false, features = ["alloc", "std"] }

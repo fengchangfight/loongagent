@@ -26,22 +26,45 @@ and the event log are all real; only the model is fake.
 Any OpenAI-compatible endpoint works over `http://` or `https://` (vLLM, LM Studio,
 llama.cpp, Ollama, DeepSeek, Moonshot/Kimi, OpenAI, an intranet gateway):
 
-```bash
-# DeepSeek
-export LOONGAGENT_BASE_URL=https://api.deepseek.com
-export LOONGAGENT_MODEL=deepseek-chat
-export LOONGAGENT_API_KEY=sk-…
-./target/release/loongagent web --cwd ~/some/project
+**If your firm runs a control plane** (the intended shape), one command connects
+this install and nothing else is configuration you own:
 
-# or keep it in a profile so the flags disappear (ADR-0008)
-mkdir -p ~/.config/loongagent
-cat > ~/.config/loongagent/profile.toml <<'TOML'
-base_url = "https://api.moonshot.cn/v1"
-model    = "kimi-k2-0905-preview"
-api_key  = "env:MOONSHOT_API_KEY"     # secrets never live in config
+```bash
+loongagent setup --url https://control.your-firm.internal --public-key <hex>
+loongagent profiles        # what the org offers, with a description of each
+loongagent use default     # the one profile-related choice you make
+loongagent tui
+```
+
+You see profile names and what they are for (`default` — balanced, `supersmart` —
+frontier throughout). Which vendor, which endpoint and which key are behind them is
+not yours to edit: the pack is signed, this install pins the public key, and a pack
+signed by another key is refused rather than used. **Model ids, endpoints and
+tokens never appear in your configuration.** Your session log records which pack
+version and which profile it ran under (`control.synced`, `profile.selected`), so
+"what policy was in force?" has an answer afterwards. With the control plane
+unreachable, the last verified pack keeps working.
+
+**Solo or unmanaged**, where there is no control plane yet, the local path still
+exists and is what you are configuring:
+
+```bash
+export LOONGAGENT_BASE_URL=https://api.deepseek.com
+export LOONGAGENT_MODEL=<the id from your provider's docs>
+export LOONGAGENT_API_KEY=sk-…
+./target/release/loongagent tui --model openai-compat --cwd ~/some/project
+```
+
+or, equivalently, in a local profile (ADR-0008) — the shape the control plane
+publishes, minus the control plane:
+
+```toml
+[[models]]
+name = "fast"
+base_url = "https://api.deepseek.com"
+model    = "<the id from your provider's docs>"
+api_key  = "env:DEEPSEEK_API_KEY"     # secrets never live in config
 budget_tokens = 200000
-TOML
-./target/release/loongagent web --cwd ~/some/project
 ```
 
 Answers **stream** as the model writes them: the page, the TUI and the terminal

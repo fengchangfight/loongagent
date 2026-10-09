@@ -770,6 +770,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "loong-control"
+version = "0.0.1"
+dependencies = [
+ "loong-config",
+ "loong-http",
+ "loong-pack",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "loong-eventlog"
 version = "0.0.1"
 dependencies = [
@@ -842,6 +853,15 @@ dependencies = [
  "serde",
  "serde_json",
  "toml",
+]
+
+[[package]]
+name = "loong-pack"
+version = "0.0.1"
+dependencies = [
+ "ring",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -954,10 +974,12 @@ name = "loongagent"
 version = "0.0.1"
 dependencies = [
  "loong-config",
+ "loong-control",
  "loong-eventlog",
  "loong-hooks",
  "loong-kernel",
  "loong-mcp",
+ "loong-pack",
  "loong-protocol",
  "loong-providers",
  "loong-sandbox",

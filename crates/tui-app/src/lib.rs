@@ -143,12 +143,16 @@ pub struct ApprovalInfo {
 /// else's colours. Two rows, because a mark that takes a third of the screen is a
 /// decoration that costs more than it gives.
 const MARK_ROWS: u16 = 3;
+const MARK_TOP: &str = "╭───────༺ ᛭ ༻────────────╮";
+const MARK_MID_LEFT: &str = "╞═══════";
+const MARK_MID_RIGHT: &str = "════════════╡";
+const MARK_BOTTOM: &str = "╰───────༻ ᛭ ༺────────────╯";
 /// Teal: the colour the transcript already uses for the agent doing something.
 const MARK_INK: Color = Color::Rgb(86, 182, 194);
 /// Violet: the colour it uses for policy — the second voice in the drawing.
 const MARK_ACCENT: Color = Color::Rgb(138, 138, 214);
 /// Where the name starts, so the two rows line up.
-const MARK_TEXT_COLUMN: usize = 26;
+const MARK_TEXT_COLUMN: usize = 36;
 /// Violet, for something that wants an answer rather than something that went wrong.
 const MARK_ACCENT_STYLE: Style = Style::new().fg(MARK_ACCENT);
 
@@ -404,21 +408,17 @@ impl App {
         );
     }
 
-    /// The dragon, and the name beside it.
-    ///
-    /// An eastern dragon's identifying parts, in kaomoji: a mane and horns above the
-    /// head, whiskers off the snout, and a long scaled body that curls away. The first
-    /// attempt was a snout and two horns, which is a small animal — a dragon needs a
-    /// body.
+    /// The mark, character for character as the owner asked for it: a sealed frame with
+    /// the traditional 龍 in the middle. Only the colours are ours.
     fn draw_banner(&self, frame: &mut Frame, area: ratatui::layout::Rect) {
-        let ink = Style::default().fg(MARK_INK);
-        let accent = Style::default().fg(MARK_ACCENT);
+        use unicode_width::UnicodeWidthStr;
+        let frame_ink = Style::default().fg(MARK_ACCENT);
+        let character = Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD);
         let rows: [(Vec<Span>, Option<(String, Style)>); 3] = [
             (
-                vec![
-                    Span::styled("   ﾉ彡⌒⌒⌒⌒ミヽ", ink),
-                    Span::styled("彡", accent),
-                ],
+                vec![Span::styled(MARK_TOP, frame_ink)],
                 Some((
                     "loongagent".to_string(),
                     Style::default()
@@ -428,27 +428,25 @@ impl App {
             ),
             (
                 vec![
-                    Span::styled(" （ ˶•ㅂ•˶ ）", ink),
-                    Span::styled("彡〜〜〜〜〜", accent),
-                    Span::styled("╮", ink),
+                    Span::styled(MARK_MID_LEFT, frame_ink),
+                    Span::styled("【", frame_ink),
+                    Span::raw(" "),
+                    Span::styled("龍", character),
+                    Span::raw(" "),
+                    Span::styled("】", frame_ink),
+                    Span::styled(MARK_MID_RIGHT, frame_ink),
                 ],
                 Some((
                     "a firm-internal coding agent".to_string(),
                     Style::default().fg(Color::DarkGray),
                 )),
             ),
-            (
-                vec![
-                    Span::styled("   ╰〜〜〜〜〜〜〜〜〜〜〜", ink),
-                    Span::styled("ﾉ", accent),
-                ],
-                None,
-            ),
+            (vec![Span::styled(MARK_BOTTOM, frame_ink)], None),
         ];
 
         let mut lines: Vec<Line> = Vec::new();
         for (mut spans, companion) in rows {
-            let drawn: usize = spans.iter().map(|span| span.content.chars().count()).sum();
+            let drawn: usize = spans.iter().map(|span| span.content.as_ref().width()).sum();
             if let Some((text, style)) = companion {
                 spans.push(Span::raw(
                     " ".repeat(MARK_TEXT_COLUMN.saturating_sub(drawn)),
@@ -2711,37 +2709,33 @@ mod tests {
     #[test]
     fn the_mark_is_drawn_and_can_be_put_away() {
         let mut app = App::new("s", "v");
-        let screen = draw(&mut app, 100, 30);
-        // Single characters on purpose: the cell buffer pads a wide glyph with a
-        // continuation cell, so adjacent-wide-character assertions are testing the
-        // buffer's spacing rather than the drawing.
-        assert!(screen.contains("ﾉ"), "a mane:\n{screen}");
-        assert!(screen.contains("⌒⌒"), "horns:\n{screen}");
-        assert!(screen.contains("ㅂ"), "a snout:\n{screen}");
-        assert!(screen.contains("彡"), "whiskers:\n{screen}");
-        assert!(screen.contains("╰"), "a body:\n{screen}");
+        let screen = draw(&mut app, 110, 30);
+        // The owner's own characters, verbatim.
+        assert!(screen.contains("༺ ᛭ ༻"), "the top ornament:\n{screen}");
+        assert!(screen.contains("༻ ᛭ ༺"), "and its mirror:\n{screen}");
+        // Apart, because the cell buffer pads a wide glyph with a continuation cell:
+        // an adjacent-wide-character assertion tests the buffer, not the drawing.
         assert!(
-            screen.contains("〜"),
-            "scales, curling away — without a body it is a small animal, not a dragon:\n{screen}"
+            screen.contains('【') && screen.contains('】'),
+            "framed:\n{screen}"
         );
+        assert!(
+            screen.contains('龍'),
+            "with the traditional character in it:\n{screen}"
+        );
+        assert!(screen.contains("╞"), "and the double rule:\n{screen}");
         assert!(screen.contains("loongagent"), "{screen}");
         assert!(
             screen.contains("firm-internal coding agent"),
             "and what it is:\n{screen}"
-        );
-        // Nothing shouts: no filled block, no colour of its own — the drawing is
-        // punctuation in the interface's palette.
-        assert!(
-            !screen.contains("██"),
-            "the old seal's blocks are gone:\n{screen}"
         );
 
         // `/logo` puts it away, and nothing else moves.
         type_text(&mut app, "/logo");
         assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::None);
         assert!(!app.logo);
-        let screen = draw(&mut app, 100, 30);
-        assert!(!screen.contains("ミヽ"), "{screen}");
+        let screen = draw(&mut app, 110, 30);
+        assert!(!screen.contains("龍"), "{screen}");
         assert!(
             screen.contains("enter send"),
             "the box and keys remain:\n{screen}"
@@ -2753,7 +2747,7 @@ mod tests {
         // A logo that squeezes the conversation costs more than it gives.
         let mut app = App::new("s", "v");
         let screen = draw(&mut app, 36, 12);
-        assert!(!screen.contains("ﾉﾉ"), "{screen}");
+        assert!(!screen.contains("龍"), "{screen}");
         assert!(screen.contains("enter send"), "{screen}");
     }
 

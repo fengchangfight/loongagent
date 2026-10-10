@@ -281,40 +281,25 @@ helper throws styles away on purpose, so there is a second helper that does not)
 
 ### The mark
 
-Three rows at the top when the terminal is at least 48 columns and 18 rows: a dragon drawn
-in **kaomoji** — a mane, horns, whiskers and a long scaled body — with the wordmark beside
-it.
+Three rows at the top when the terminal is at least 48 columns and 18 rows — the mark the
+owner specified, kept verbatim:
 
 ```
-   ﾉ彡⌒⌒⌒⌒ミヽ彡              loongagent
- （ ˶•ㅂ•˶ ）彡〜〜〜〜〜╮        a firm-internal coding agent
-   ╰〜〜〜〜〜〜〜〜〜〜〜ﾉ
+╭───────༺ ᛭ ༻────────────╮
+╞═══════【 龍 】════════════╡
+╰───────༻ ᛭ ༺────────────╯
 ```
 
-It is punctuation, in the interface's own palette: the drawing in the same teal the
-transcript uses for the agent doing something, the whiskers in its policy violet, the name
-white and the tagline dark grey. `/logo` puts it away, and a terminal narrower than 48
-columns never gets it.
+A sealed frame around the traditional 龍, with the wordmark beside the top rule and the
+tagline beside the middle. Only the colours are ours: the frame in the policy violet, the
+character in white bold, so nothing competes with the transcript. `/logo` puts it away, and
+a terminal narrower than 48 columns never gets it.
 
-Two earlier versions earned their notes. The first was a red-and-gold seal around the glyph
-龍 — accurate and too loud: a filled block of someone else's colours above a quiet
-transcript. The second was a snout with two horns, which is a small animal: a dragon needs a
-**body**, so the test asserts the curling tail, not just the face.
-
-### Copying, and the mouse
-
-A terminal application that tracks the mouse has **disabled the terminal's own text
-selection** — that is what mouse capture means — and the alternate screen means there is no
-scrollback to select from either, so the interface has to offer the copy itself:
-
-- **`/copy`** puts the whole transcript on the clipboard with **OSC 52** (the escape
-  sequence terminals honour, and the only way to reach a clipboard without the window
-  system) *and* writes it to `$TMPDIR/loongagent-<session>.txt`, then says the path. OSC 52
-  is size-limited and some terminals ignore it; a file always works, so both happen.
-- **`/mouse`** hands the mouse back: the terminal's own selection works again, at the price
-  of the wheel scrolling the terminal instead of the conversation.
-- Holding **Shift** while dragging is the standard way to bypass mouse capture in every
-  common terminal, and still works.
+Three earlier versions are worth remembering as a lesson in not re-typesetting someone's
+mark: a red-and-gold seal (accurate, too loud), a snout with two horns (a small animal, not
+a dragon), and a serpentine kaomoji (better, and still not what was asked for). The owner
+then supplied the art, and that is what is drawn — character for character, ornaments
+included.
 
 ### Watching a turn happen
 

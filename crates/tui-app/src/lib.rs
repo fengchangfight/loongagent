@@ -273,8 +273,10 @@ pub struct App {
     pub notes: Vec<String>,
     /// Whether the mark is drawn at the top (`/logo` turns it off).
     pub logo: bool,
-    /// Whether this program tracks the mouse. Off means the terminal's own selection
-    /// works again, at the price of the wheel scrolling the terminal instead of here.
+    /// Whether this program tracks the mouse. **Off by default**: tracking it is what
+    /// disables the terminal's own selection, and left-drag-select / right-click-copy is
+    /// what a shell does — a TUI should not take that away to gain a wheel. `/mouse`
+    /// trades it back for in-app scrolling, and page up/down work either way.
     pub mouse: bool,
     /// True while approval prompts are off for this session — the interface must show
     /// it, because the dangerous state is one where nobody notices it is on (ADR-0007 §5).
@@ -319,7 +321,7 @@ impl App {
             approval: None,
             choice: 0,
             logo: true,
-            mouse: true,
+            mouse: false,
             interrupt: None,
             activity: None,
             busy_since: None,
@@ -580,9 +582,9 @@ impl App {
                 self.push_lines(vec![format!(
                     "· mouse {state}{}",
                     if self.mouse {
-                        " (the wheel scrolls here)"
+                        " — the wheel scrolls here; hold shift to select (terminal rule)"
                     } else {
-                        " — select and copy with the terminal itself now"
+                        " — drag to select and copy as usual; page up/down scroll here"
                     }
                 )]);
                 Some(Action::Mouse(self.mouse))
@@ -1628,7 +1630,8 @@ pub fn run<T: Transport + Send + 'static>(
     let mut stdout = std::io::stdout();
     // Mouse capture so the wheel scrolls the conversation. Text selection then needs
     // the terminal's modifier (Shift or Option) — the usual trade for this.
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture).map_err(|e| e.to_string())?;
+    // Deliberately **not** `EnableMouseCapture`: see `App::mouse`.
+    execute!(stdout, EnterAlternateScreen).map_err(|e| e.to_string())?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).map_err(|e| e.to_string())?;
 

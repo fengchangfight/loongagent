@@ -332,7 +332,7 @@ asked for works.
 | `ctrl-c`, `ctrl-d` | leave |
 | `f2` | the context panel |
 | `pgup`/`pgdn`, mouse wheel | scroll the conversation; `ctrl-pgup`/`ctrl-pgdn` jump to the ends |
-| `a`/`y`, `d`/`n`, `esc` | approve / deny a pending action |
+| `↑`/`↓` (or `k`/`j`), `enter` | choose an answer when a decision is waiting; `esc` denies, and `a`/`d` still work |
 | `←`/`→`/`home`/`end`/`del`, `ctrl-a/e/u/k/w` | edit the line, by character so CJK works |
 
 `/exit` is in that table rather than in the skills because quitting is the surface's

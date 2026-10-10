@@ -28,6 +28,7 @@ pub enum ToWorker {
     Respond {
         request_id: String,
         granted: bool,
+        scope: loong_schema::generated::ApprovalScope,
     },
     /// Ask for the context view (the debug panel opening, or a refresh).
     RefreshContext,
@@ -47,6 +48,8 @@ pub enum FromWorker {
     },
     /// What the next request will carry: the debug panel's data.
     Context(Box<loong_schema::generated::ContextExplain>),
+    /// Something is waiting for a decision, with the detail needed to make one.
+    Approval(Box<ApprovalInfo>),
     /// What the turn is doing right now ("shell: cargo test"), so the interface can say
     /// so while it is happening rather than after.
     Working(String),
@@ -107,6 +110,25 @@ fn base64(bytes: &[u8]) -> String {
     out
 }
 
+/// One line's worth of a long string, by characters so a CJK path is not cut in half.
+fn clip(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(width.saturating_sub(1)).collect();
+    format!("{head}…")
+}
+
+/// What a pending approval is about: enough to decide, on one screen.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ApprovalInfo {
+    pub request_id: String,
+    pub class: String,
+    pub reason: String,
+    pub tool: String,
+    pub args: String,
+}
+
 /// A little dragon in kaomoji: horns, a snout, whiskers and a tail, drawn with
 /// punctuation in the interface's own palette rather than a font glyph in someone
 /// else's colours. Two rows, because a mark that takes a third of the screen is a
@@ -118,6 +140,8 @@ const MARK_INK: Color = Color::Rgb(86, 182, 194);
 const MARK_ACCENT: Color = Color::Rgb(138, 138, 214);
 /// Where the name starts, so the two rows line up.
 const MARK_TEXT_COLUMN: usize = 26;
+/// Violet, for something that wants an answer rather than something that went wrong.
+const MARK_ACCENT_STYLE: Style = Style::new().fg(MARK_ACCENT);
 
 /// What a line is, for colour. Classified from the line's own vocabulary — the renderer
 /// that produces those strings lives in `loong-tui`, next door, and a test renders real
@@ -248,6 +272,9 @@ pub struct App {
     /// Whether this program tracks the mouse. Off means the terminal's own selection
     /// works again, at the price of the wheel scrolling the terminal instead of here.
     pub mouse: bool,
+    /// The pending decision, and which choice is highlighted.
+    pub approval: Option<Box<ApprovalInfo>>,
+    pub choice: usize,
     /// How to ask the server to stop the running turn. `None` when the surface has no
     /// process to signal: the interface then says so instead of pretending.
     pub interrupt: Option<Box<dyn Fn()>>,
@@ -281,6 +308,8 @@ impl App {
             schema: schema.into(),
             busy: false,
             error: None,
+            approval: None,
+            choice: 0,
             logo: true,
             mouse: true,
             interrupt: None,
@@ -301,6 +330,63 @@ impl App {
     /// decoration that costs more than it gives, so a small terminal simply has none.
     fn show_banner(&self, area: ratatui::layout::Rect) -> bool {
         self.logo && area.height >= 18 && area.width >= 48
+    }
+
+    /// The question, its detail, and the three answers — a menu, because a decision
+    /// worth stopping for is worth showing the options for.
+    fn draw_approval(&self, frame: &mut Frame, area: ratatui::layout::Rect) {
+        let mut lines: Vec<Line> = Vec::new();
+        match &self.approval {
+            Some(info) => {
+                lines.push(Line::from(vec![
+                    Span::styled("outside the workspace", Style::default().fg(MARK_INK)),
+                    Span::raw("  "),
+                    Span::styled(info.class.clone(), Style::default().fg(MARK_ACCENT)),
+                ]));
+                if !info.reason.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        clip(&info.reason, area.width.saturating_sub(4) as usize),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "{} {}",
+                        info.tool,
+                        clip(&info.args, area.width.saturating_sub(20) as usize)
+                    ),
+                    Style::default().fg(Color::Gray),
+                )));
+            }
+            None => lines.push(Line::from(Span::styled(
+                "a decision is waiting for the details…",
+                Style::default().fg(Color::DarkGray),
+            ))),
+        }
+        for (index, (label, granted, _)) in Self::options().into_iter().enumerate() {
+            let chosen = index == self.choice;
+            let style = if chosen {
+                Style::default()
+                    .fg(if granted { Color::Green } else { Color::Red })
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(if chosen { "  ▸ " } else { "    " }, style),
+                Span::styled(label.to_string(), style),
+            ]));
+        }
+        frame.render_widget(
+            Paragraph::new(lines)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" needs your decision "),
+                )
+                .wrap(Wrap { trim: false }),
+            area,
+        );
     }
 
     /// The dragon, and the name beside it.
@@ -639,6 +725,12 @@ impl App {
             match worker.try_recv() {
                 Ok(FromWorker::Delta(piece)) => self.streaming.push_str(&piece),
                 Ok(FromWorker::Context(explained)) => self.context = Some(explained),
+                Ok(FromWorker::Approval(info)) => {
+                    // A new question resets the highlighted answer: carrying a previous
+                    // choice over could approve something nobody looked at.
+                    self.choice = 0;
+                    self.approval = Some(info);
+                }
                 Ok(FromWorker::Working(what)) => self.activity = Some(what),
                 Ok(FromWorker::Lines(lines)) => {
                     // The finished message supersedes the fragments on screen, and it
@@ -705,9 +797,30 @@ impl App {
                 self.quit = true;
                 Action::Quit
             }
-            KeyCode::Char('a') | KeyCode::Char('y') if self.pending.is_some() => self.answer(true),
-            KeyCode::Char('d') | KeyCode::Char('n') if self.pending.is_some() => self.answer(false),
-            KeyCode::Esc if self.pending.is_some() => self.answer(false),
+            // The decision is a menu, not a memorised keystroke: arrows move, enter
+            // answers, and the two letters stay for muscle memory.
+            KeyCode::Up | KeyCode::Char('k') if self.pending.is_some() => {
+                let count = Self::options().len();
+                self.choice = (self.choice + count - 1) % count;
+                Action::None
+            }
+            KeyCode::Down | KeyCode::Char('j') if self.pending.is_some() => {
+                self.choice = (self.choice + 1) % Self::options().len();
+                Action::None
+            }
+            KeyCode::Enter if self.pending.is_some() => {
+                let (_, granted, scope) = Self::options()[self.choice];
+                self.answer(granted, scope)
+            }
+            KeyCode::Char('a') | KeyCode::Char('y') if self.pending.is_some() => {
+                self.answer(true, loong_schema::generated::ApprovalScope::Once)
+            }
+            KeyCode::Char('d') | KeyCode::Char('n') if self.pending.is_some() => {
+                self.answer(false, loong_schema::generated::ApprovalScope::Once)
+            }
+            KeyCode::Esc if self.pending.is_some() => {
+                self.answer(false, loong_schema::generated::ApprovalScope::Once)
+            }
             // Readline-ish editing, so the line behaves like every other prompt.
             KeyCode::Left => {
                 self.cursor = self.cursor.saturating_sub(1);
@@ -849,20 +962,38 @@ impl App {
         }
     }
 
-    fn answer(&mut self, granted: bool) -> Action {
+    fn answer(&mut self, granted: bool, scope: loong_schema::generated::ApprovalScope) -> Action {
         let Some(request_id) = self.pending.take() else {
             return Action::None;
         };
-        self.push_lines(vec![format!(
-            "{} {request_id}",
-            if granted { "approved" } else { "denied" }
-        )]);
+        self.approval = None;
+        let how = if !granted {
+            "denied"
+        } else {
+            match scope {
+                loong_schema::generated::ApprovalScope::Once => "approved once",
+                loong_schema::generated::ApprovalScope::ActionClass => "approved for this class",
+                loong_schema::generated::ApprovalScope::Project => "approved for this project",
+            }
+        };
+        self.push_lines(vec![format!("⧗ {how}: {request_id}")]);
         self.busy = true;
         self.error = None;
         Action::Send(ToWorker::Respond {
             request_id,
             granted,
+            scope,
         })
+    }
+
+    /// The three answers, in the order they are drawn.
+    fn options() -> [(&'static str, bool, loong_schema::generated::ApprovalScope); 3] {
+        use loong_schema::generated::ApprovalScope;
+        [
+            ("Allow once", true, ApprovalScope::Once),
+            ("Allow in this project", true, ApprovalScope::Project),
+            ("Deny", false, ApprovalScope::Once),
+        ]
     }
 
     /// The scrollback the reader should see at this height.
@@ -912,14 +1043,24 @@ impl App {
                     0
                 }),
                 Constraint::Length(if self.notes.is_empty() { 0 } else { 2 }),
+                // A question waiting for an answer gets its own block: it is the one
+                // thing on screen that is blocked on a person.
+                Constraint::Length(if self.pending.is_some() { 6 } else { 0 }),
                 Constraint::Min(3),
                 Constraint::Length(input_rows + 2),
                 Constraint::Length(1),
             ])
             .split(conversation);
+        // Named, because five anonymous slices is how the notes strip once ended up
+        // drawn over the mark.
+        let (banner, notes, decision, transcript, entry, keys) =
+            (areas[0], areas[1], areas[2], areas[3], areas[4], areas[5]);
 
         if self.show_banner(conversation) {
-            self.draw_banner(frame, areas[0]);
+            self.draw_banner(frame, banner);
+        }
+        if self.pending.is_some() {
+            self.draw_approval(frame, decision);
         }
 
         if !self.notes.is_empty() {
@@ -936,22 +1077,22 @@ impl App {
             let widget = Paragraph::new(latest)
                 .style(Style::default().fg(severity))
                 .wrap(Wrap { trim: true });
-            frame.render_widget(widget, areas[1]);
+            frame.render_widget(widget, notes);
         }
 
-        let height = areas[2].height.saturating_sub(2) as usize;
+        let height = transcript.height.saturating_sub(2) as usize;
         let body = Paragraph::new(self.visible_lines(height))
             .block(Block::default().borders(Borders::ALL).title(format!(
                 "loongagent — session {} (schema {})",
                 self.session, self.schema
             )))
             .wrap(Wrap { trim: false });
-        frame.render_widget(body, areas[2]);
+        frame.render_widget(body, transcript);
 
         let (title, style) = match &self.pending {
-            Some(request_id) => (
-                format!("approval required: {request_id} — [a]pprove / [d]eny"),
-                Style::default().fg(Color::Yellow),
+            Some(_) => (
+                "waiting for your decision — ↑/↓ choose · enter confirm · esc deny".to_string(),
+                MARK_ACCENT_STYLE,
             ),
             // Busy: what it is doing and for how long. "working…" for two minutes
             // tells nobody whether it is thinking or stuck.
@@ -988,7 +1129,7 @@ impl App {
             ),
             None => ("prompt".to_string(), Style::default()),
         };
-        let inner_width = areas[3].width.saturating_sub(2);
+        let inner_width = entry.width.saturating_sub(2);
         let (lines, (caret_row, caret_column)) = self.wrapped_input(inner_width);
         // Show the end of the text when it is taller than the box, so the line being
         // typed is always the one on screen.
@@ -1003,13 +1144,13 @@ impl App {
         let input = Paragraph::new(visible)
             .block(Block::default().borders(Borders::ALL).title(title))
             .style(style);
-        frame.render_widget(input, areas[3]);
+        frame.render_widget(input, entry);
         // Show where typing goes. Without this the prompt is a guess, and the
         // terminal's own cursor stays hidden.
         if self.pending.is_none() {
             frame.set_cursor_position((
-                areas[3].x + 1 + caret_column,
-                areas[3].y + 1 + (caret_row - offset as u16),
+                entry.x + 1 + caret_column,
+                entry.y + 1 + (caret_row - offset as u16),
             ));
         }
 
@@ -1045,7 +1186,7 @@ impl App {
                 Style::default().fg(Color::Red),
             ));
         }
-        frame.render_widget(Paragraph::new(Line::from(hints)), areas[4]);
+        frame.render_widget(Paragraph::new(Line::from(hints)), keys);
     }
 }
 
@@ -1063,6 +1204,8 @@ pub fn spawn_worker<T: Transport + Send + 'static>(
                     // Deltas go out as they arrive; the finished lines follow.
                     let _ = events.send(FromWorker::Lines(Vec::new()));
                     let mut renderer = loong_tui::Renderer::default();
+                    // The tool a request is about, so the decision panel can show it.
+                    let mut last_call: Option<serde_json::Value> = None;
                     let outcome = client.submit_with(&text, &mut |method, params| {
                         if method == loong_schema::generated::notification::MODEL_DELTA {
                             if let Some(piece) = params.get("text").and_then(|t| t.as_str()) {
@@ -1073,10 +1216,40 @@ pub fn spawn_worker<T: Transport + Send + 'static>(
                         // The work itself, the moment it is recorded — this is the
                         // difference between watching an agent and waiting for one.
                         if let Some(line) = renderer.render(params) {
-                            if params.get("kind").and_then(|k| k.as_str())
-                                == Some(loong_schema::generated::event::TOOL_CALL)
-                            {
+                            let kind = params.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+                            if kind == loong_schema::generated::event::TOOL_CALL {
                                 let _ = events.send(FromWorker::Working(line.clone()));
+                                last_call = params.get("data").cloned();
+                            }
+                            if kind == loong_schema::generated::event::APPROVAL_REQUESTED {
+                                let data = params.get("data").cloned().unwrap_or_default();
+                                let call = last_call.clone().unwrap_or_default();
+                                let _ = events.send(FromWorker::Approval(Box::new(ApprovalInfo {
+                                    request_id: data
+                                        .get("request_id")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or_default()
+                                        .to_string(),
+                                    class: data
+                                        .get("action_class")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("?")
+                                        .to_string(),
+                                    reason: data
+                                        .get("reason")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or_default()
+                                        .to_string(),
+                                    tool: call
+                                        .get("tool")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("?")
+                                        .to_string(),
+                                    args: call
+                                        .get("args")
+                                        .map(|args| args.to_string())
+                                        .unwrap_or_default(),
+                                })));
                             }
                             let _ = events.send(FromWorker::Lines(vec![line]));
                         }
@@ -1088,12 +1261,8 @@ pub fn spawn_worker<T: Transport + Send + 'static>(
                 ToWorker::Respond {
                     request_id,
                     granted,
-                } => client.respond(
-                    &request_id,
-                    granted,
-                    loong_schema::generated::ApprovalScope::Once,
-                    None,
-                ),
+                    scope,
+                } => client.respond(&request_id, granted, scope, None),
                 ToWorker::Expand => {
                     // The session's own log holds the untouched output; the transcript
                     // holds only the summary. Asking the log is what makes `/expand`
@@ -1567,9 +1736,13 @@ mod tests {
     fn an_approval_repurposes_the_input_line_and_answers_it() {
         let mut app = App::new("s", "v");
         app.pending = Some("appr-1".to_string());
-        let screen = draw(&mut app, 70, 16);
-        assert!(screen.contains("approval required: appr-1"), "{screen}");
-        assert!(screen.contains("[a]pprove / [d]eny"), "{screen}");
+        let screen = draw(&mut app, 80, 22);
+        // A menu, not an orange line: the question, then the answers to pick from.
+        assert!(screen.contains("needs your decision"), "{screen}");
+        assert!(screen.contains("Allow once"), "{screen}");
+        assert!(screen.contains("Allow in this project"), "{screen}");
+        assert!(screen.contains("Deny"), "{screen}");
+        assert!(screen.contains("▸"), "the chosen one is marked: {screen}");
 
         app.handle_key(key(KeyCode::Char('z')));
         assert!(
@@ -1581,12 +1754,15 @@ mod tests {
             app.handle_key(key(KeyCode::Char('a'))),
             Action::Send(ToWorker::Respond {
                 request_id: "appr-1".to_string(),
-                granted: true
+                granted: true,
+                scope: loong_schema::generated::ApprovalScope::Once,
             })
         );
         assert!(app.pending.is_none());
         assert!(
-            app.lines.iter().any(|l| l.contains("approved appr-1")),
+            app.lines
+                .iter()
+                .any(|l| l.contains("approved once") && l.contains("appr-1")),
             "{:?}",
             app.lines
         );
@@ -1605,6 +1781,58 @@ mod tests {
     }
 
     #[test]
+    fn the_decision_is_a_menu_that_the_keyboard_drives() {
+        use loong_schema::generated::ApprovalScope;
+        let mut app = App::new("s", "v");
+        app.pending = Some("appr-9".to_string());
+
+        // Down moves the highlight, up wraps around, and Enter answers with what is
+        // highlighted — including the scope, which is the difference between "this once"
+        // and "in this project".
+        assert_eq!(app.handle_key(key(KeyCode::Down)), Action::None);
+        assert_eq!(app.choice, 1);
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            Action::Send(ToWorker::Respond {
+                request_id: "appr-9".to_string(),
+                granted: true,
+                scope: ApprovalScope::Project,
+            })
+        );
+
+        let mut app = App::new("s", "v");
+        app.pending = Some("appr-9".to_string());
+        app.handle_key(key(KeyCode::Up));
+        assert_eq!(app.choice, 2, "up from the first lands on the last");
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            Action::Send(ToWorker::Respond {
+                request_id: "appr-9".to_string(),
+                granted: false,
+                scope: ApprovalScope::Once,
+            }),
+            "the last option is Deny"
+        );
+
+        // A fresh question starts at the top: never inherit a choice nobody looked at.
+        let mut app = App::new("s", "v");
+        app.choice = 2;
+        let (to_app, from_worker) = channel::<FromWorker>();
+        to_app
+            .send(FromWorker::Approval(Box::new(ApprovalInfo {
+                request_id: "appr-10".to_string(),
+                class: "out_of_bounds".to_string(),
+                reason: "write".to_string(),
+                tool: "shell".to_string(),
+                args: "{\"command\":\"ls\"}".to_string(),
+            })))
+            .unwrap();
+        app.drain(&from_worker);
+        assert_eq!(app.choice, 0);
+        assert!(app.approval.is_some(), "and the detail is there to draw");
+    }
+
+    #[test]
     fn a_denial_is_an_answer_too() {
         let mut app = App::new("s", "v");
         app.pending = Some("appr-2".to_string());
@@ -1612,10 +1840,14 @@ mod tests {
             app.handle_key(key(KeyCode::Char('d'))),
             Action::Send(ToWorker::Respond {
                 request_id: "appr-2".to_string(),
-                granted: false
+                granted: false,
+                scope: loong_schema::generated::ApprovalScope::Once,
             })
         );
-        assert!(app.lines.iter().any(|l| l.contains("denied appr-2")));
+        assert!(app
+            .lines
+            .iter()
+            .any(|l| l.contains("denied") && l.contains("appr-2")));
     }
 
     #[test]

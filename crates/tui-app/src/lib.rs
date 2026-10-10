@@ -246,6 +246,11 @@ pub enum LineKind {
 
 /// The palette. Muted on purpose: a transcript where everything shouts is harder to read
 /// than one where only the things that matter are loud.
+///
+/// "Muted" is the terminal's own foreground dimmed, never a named dark colour. `DarkGray`
+/// is bright black, which is *the background* on a dark theme — the bookkeeping lines that
+/// say which skills loaded and which profile is in use were drawn into the wall. The
+/// foreground the person actually configured cannot be the same as the wall they put it on.
 pub fn style_for(kind: LineKind) -> Style {
     match kind {
         LineKind::User => Style::default().fg(Color::Cyan),
@@ -259,9 +264,9 @@ pub fn style_for(kind: LineKind) -> Style {
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
         LineKind::Policy => Style::default().fg(MARK_ACCENT),
-        LineKind::Note => Style::default().fg(Color::DarkGray),
+        LineKind::Note => MARK_QUIET,
         LineKind::Problem => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        LineKind::Notice => Style::default().fg(Color::DarkGray),
+        LineKind::Notice => MARK_QUIET,
         LineKind::Stopped => Style::default()
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
@@ -466,19 +471,19 @@ impl App {
                 if !reason.is_empty() {
                     details.push(Line::from(Span::styled(
                         one_line(reason, area.width.saturating_sub(4) as usize),
-                        Style::default().fg(Color::DarkGray),
+                        MARK_QUIET,
                     )));
                 }
                 if !args.is_empty() {
                     details.push(Line::from(Span::styled(
                         one_line(args, area.width.saturating_sub(4) as usize),
-                        Style::default().fg(Color::Gray),
+                        MARK_QUIET,
                     )));
                 }
             }
             None => details.push(Line::from(Span::styled(
                 "a decision is waiting for the details…",
-                Style::default().fg(Color::DarkGray),
+                MARK_QUIET,
             ))),
         }
         // The answers are the point: keep them, drop details if the box is short.
@@ -492,7 +497,11 @@ impl App {
                     .fg(if granted { Color::Green } else { Color::Red })
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::DarkGray)
+                // Readable, not quiet: these are the choices, and the only thing marking one
+                // out is that it is coloured and bold. They used to be `DarkGray` — the
+                // background itself on a dark theme — which is how a three-answer menu came
+                // to look like a single answer.
+                Style::default()
             };
             lines.push(Line::from(vec![
                 Span::styled(if chosen { "  ▸ " } else { "    " }, style),
@@ -619,10 +628,7 @@ impl App {
     fn draw_context(&self, frame: &mut Frame, area: ratatui::layout::Rect) {
         let mut lines: Vec<Line> = Vec::new();
         match &self.context {
-            None => lines.push(Line::from(Span::styled(
-                "asking the server…",
-                Style::default().fg(Color::DarkGray),
-            ))),
+            None => lines.push(Line::from(Span::styled("asking the server…", MARK_QUIET))),
             Some(explained) => {
                 let budget = explained.budget_tokens;
                 let used = explained.context_tokens;
@@ -632,7 +638,7 @@ impl App {
                     "no limit".to_string()
                 };
                 lines.push(Line::from(vec![
-                    Span::styled("tokens ", Style::default().fg(Color::DarkGray)),
+                    Span::styled("tokens ", MARK_QUIET),
                     Span::styled(
                         format!("{used}"),
                         Style::default().add_modifier(Modifier::BOLD),
@@ -650,12 +656,12 @@ impl App {
                         "{} messages · {} tools · {} compactions",
                         explained.messages, explained.tools, explained.compactions
                     ))
-                    .style(Style::default().fg(Color::DarkGray)),
+                    .style(MARK_QUIET),
                 );
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
                     "category            tokens",
-                    Style::default().fg(Color::DarkGray),
+                    MARK_QUIET,
                 )));
                 let widest = explained
                     .categories
@@ -675,7 +681,7 @@ impl App {
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
                     "entries (newest last)   p=pinned c=cleared",
-                    Style::default().fg(Color::DarkGray),
+                    MARK_QUIET,
                 )));
                 // The tail is what the next request is mostly made of.
                 let room = area.height.saturating_sub(lines.len() as u16 + 2) as usize;
@@ -689,7 +695,7 @@ impl App {
                         (false, false) => "  ",
                     };
                     let style = if entry.cleared {
-                        Style::default().fg(Color::DarkGray)
+                        MARK_QUIET
                     } else {
                         Style::default()
                     };
@@ -1376,7 +1382,11 @@ impl App {
             return (start..end).map(|at| styled(&open.lines[at])).collect();
         }
         let total = self.lines.len();
-        let mut end = total.saturating_sub(self.scroll);
+        // Scrolling back can only reveal what is above the window, and a transcript shorter
+        // than the window has nothing above it. Asking for more than there is used to push
+        // lines off the *end* instead: the newest output vanished while `up` was pressed,
+        // which is the opposite of what the key means.
+        let mut end = total - self.scroll.min(self.max_scroll(rows));
         let mut start = end.saturating_sub(rows);
         // A selection nobody can see is not a selection: when Tab has walked to a fold
         // that has scrolled out of the window, the window follows it.
@@ -1398,13 +1408,17 @@ impl App {
                 // two are never confused while the text grows.
                 Line::from(Span::styled(
                     piece.to_string(),
-                    Style::default()
-                        .fg(Color::Gray)
-                        .add_modifier(Modifier::ITALIC),
+                    MARK_QUIET.add_modifier(Modifier::ITALIC),
                 ))
             }));
         }
         shown
+    }
+
+    /// How far back the view can go with a window this tall: everything above it. A
+    /// transcript shorter than the window has nothing above it, so the answer is zero.
+    fn max_scroll(&self, rows: usize) -> usize {
+        self.lines.len().saturating_sub(rows.max(1))
     }
 
     /// One line of the transcript, with the fold's own business applied: the arrow that
@@ -1483,20 +1497,21 @@ impl App {
             let latest = self.notes.last().cloned().unwrap_or_default();
             // A warning is worth noticing; an ordinary startup note is not.
             let lower = latest.to_ascii_lowercase();
-            let severity = if lower.contains("error") || lower.contains("refused") {
-                Color::Red
+            let tone = if lower.contains("error") || lower.contains("refused") {
+                Style::default().fg(Color::Red)
             } else if lower.contains("warning") || lower.contains("failed") {
-                Color::Yellow
+                Style::default().fg(Color::Yellow)
             } else {
-                Color::DarkGray
+                MARK_QUIET
             };
-            let widget = Paragraph::new(latest)
-                .style(Style::default().fg(severity))
-                .wrap(Wrap { trim: true });
+            let widget = Paragraph::new(latest).style(tone).wrap(Wrap { trim: true });
             frame.render_widget(widget, notes);
         }
 
         let height = transcript.height.saturating_sub(2) as usize;
+        // Keep the count itself honest, so the `[n/total]` hint and the next key press mean
+        // what the window can actually show rather than what was asked for.
+        self.scroll = self.scroll.min(self.max_scroll(height));
         let title = match &self.open {
             // The one thing worth saying while reading: how to get back.
             Some(open) => format!(
@@ -2015,13 +2030,11 @@ fn draw_setup_form(frame: &mut ratatui::Frame, form: &SetupForm) {
         None => "tab next field · enter connect · esc skip (no control plane)".to_string(),
     };
     frame.render_widget(
-        ratatui::widgets::Paragraph::new(help).style(ratatui::style::Style::default().fg(
-            if form.error.is_some() {
-                ratatui::style::Color::Red
-            } else {
-                ratatui::style::Color::Gray
-            },
-        )),
+        ratatui::widgets::Paragraph::new(help).style(if form.error.is_some() {
+            Style::default().fg(Color::Red)
+        } else {
+            MARK_QUIET
+        }),
         chunks[4],
     );
 }
@@ -2444,6 +2457,76 @@ mod tests {
         app.push_lines(vec!["a new answer".to_string()]);
         assert_eq!(app.scroll, 0, "new output pulls the view back");
         assert!(draw(&mut app, 40, 20).contains("a new answer"));
+    }
+
+    #[test]
+    fn scrolling_back_cannot_push_the_newest_lines_off_the_end() {
+        let startup = [
+            "· skills available (1): help",
+            "· control.synced",
+            "· profile.selected",
+            "· new session 66mn884m",
+            "· resuming 3 events from that session",
+            "· profile: default — DeepSeek flash",
+        ];
+        let mut app = App::new("s", "v");
+        app.push_lines(startup.iter().map(|line| line.to_string()));
+        // A window with room to spare: there is nothing above these lines to scroll to, so
+        // `up` has to leave them where they are. It used to drop the newest ones instead —
+        // the opposite of what the key means, and it looked like output being erased.
+        for _ in 0..startup.len() {
+            app.handle_key(key(KeyCode::Up));
+        }
+        let screen = draw(&mut app, 60, 24);
+        for line in startup {
+            assert!(
+                screen.contains(line),
+                "{line:?} was pushed off the end:\n{screen}"
+            );
+        }
+        assert_eq!(app.scroll, 0, "and the count says what the screen says");
+    }
+
+    #[test]
+    fn the_bookkeeping_lines_are_not_drawn_into_the_wall() {
+        // `DarkGray` is bright black: on a dark theme it *is* the background, so the lines
+        // saying which skills loaded and which profile is in use were invisible — reported
+        // from a real screen, where scrolling appeared to grey the notes out. Quiet is the
+        // terminal's own foreground, dimmed, never a named colour that may be the wall.
+        for kind in [LineKind::Note, LineKind::Notice] {
+            let style = style_for(kind);
+            assert_eq!(
+                style.fg,
+                Some(Color::Reset),
+                "{kind:?} must not name a colour"
+            );
+            assert!(style.add_modifier.contains(Modifier::DIM), "{kind:?}");
+        }
+        let mut app = App::new("s", "v");
+        app.push_lines(vec!["· skills available (1): help".to_string()]);
+        assert_eq!(
+            color_of(&mut app, 60, 24, "· skills available"),
+            Some(ratatui::style::Color::Reset),
+            "and that is what reaches the screen"
+        );
+    }
+
+    #[test]
+    fn the_answers_that_are_not_chosen_are_still_readable() {
+        // The same colour, in the one place it decides something: every answer but the
+        // highlighted one was `DarkGray`, so a menu read as a single option — the earlier
+        // "the decision menu lost its answers" report had this in it too.
+        let mut app = App::new("s", "v");
+        app.pending = Some("appr-9".to_string());
+        assert_eq!(
+            color_of(&mut app, 80, 24, "Allow in this project"),
+            Some(ratatui::style::Color::Reset),
+            "an unchosen answer is dimmed, not drawn into the background"
+        );
+        assert_eq!(
+            color_of(&mut app, 80, 24, "Deny"),
+            Some(ratatui::style::Color::Reset)
+        );
     }
 
     /// The transcript the client writes for two summarised tool results: the summary

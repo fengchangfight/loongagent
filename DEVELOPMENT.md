@@ -293,12 +293,28 @@ turns that into a style, so there is one palette for the whole surface.
 | `! approval required …` | yellow, bold | the person has to answer |
 | `! …` | red, bold | something went wrong |
 | `· policy: …` | violet | a decision about permission, which is worth finding later |
-| `· …` | dark grey | bookkeeping: skills, tokens, compaction |
+| `· …` | the terminal's own foreground, dimmed | bookkeeping: skills, tokens, compaction |
 | anything else | default | the model's own answer, left alone |
 
+The palette names colours and never invents RGB, because a fixed tone is picked for one
+background and unreadable on the other. The same rule is why the quiet lines are the
+**terminal's own foreground, dimmed**, and not `DarkGray`: bright black *is* the background
+on a dark theme, so the lines saying which skills loaded and which profile is in use were
+drawn into the wall. Reported from a real screen, where scrolling at startup appeared to
+grey them out. `MARK_QUIET` is that decision, and a test pins both the style and the cells
+that reach the screen.
+
 The notes strip follows the same idea by severity — a line containing `warning` is yellow,
-`error` or `refused` is red, everything else dark grey — and the streaming preview is grey
+`error` or `refused` is red, everything else quiet — and the streaming preview is quiet
 italic, so text still being written is never mistaken for the settled answer.
+
+Every other secondary tone in the surface is that one style — the panel's details, the
+context panel's labels, the first-run form's own help line, and a cleared entry. `DarkGray`
+appeared in eleven of them and was wrong in all eleven for the same reason. It was worst in
+**the answers that were not chosen** in a decision menu: they were drawn in the background
+colour too, so a three-answer menu read as a single answer. Those are `default` now — the
+one thing marking the highlighted one is that it is coloured and bold, which only works if
+the others can be seen.
 
 A test renders real events through `loong_tui::render_event` and asserts that every
 **marked** line is classified: only the model's prose is allowed to fall through to
@@ -374,9 +390,17 @@ asked for works.
 | `ctrl-c`, `ctrl-d` | leave |
 | `f2` | the context panel |
 | `pgup`/`pgdn`, mouse wheel | scroll the conversation; `ctrl-pgup`/`ctrl-pgdn` jump to the ends |
+| `tab` / `shift-tab` | walk the folds (`… N more line(s)` markers); the selected one is drawn in reverse video behind `▸` |
+| `enter` on a selected fold | open it in full, and again to put it away; a prompt with text still sends on `enter` |
+| `esc` | close an open fold, then let the selection go — it only leaves when there is neither |
 | `↑`/`↓` (or `k`/`j`), `enter` | choose an answer when a decision is waiting; `esc` denies, and `a`/`d` still work |
 | `/yolo` | turn approval prompts **off** for this session; `/yolo` again turns them back on |
 | `←`/`→`/`home`/`end`/`del`, `ctrl-a/e/u/k/w` | edit the line, by character so CJK works |
+
+Scrolling stops where the transcript starts: `↑` can only reveal what is above the window,
+so a conversation shorter than the window stays where it is instead of pushing its newest
+lines off the end. The count is capped by the window at draw time, so the `[n/total]` hint
+and the next key press say the same thing the screen does.
 
 `/exit` is in that table rather than in the skills because quitting is the surface's
 business: a command that means "stop this program" has no meaning to a model. Everything

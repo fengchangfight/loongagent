@@ -119,6 +119,17 @@ fn kind_of(params: &serde_json::Value) -> &str {
     params.get("kind").and_then(|k| k.as_str()).unwrap_or("")
 }
 
+/// How many rows the decision panel asks for: two borders, three details, three answers,
+/// and one for air.
+const DECISION_ROWS: u16 = 9;
+
+/// A string forced onto one line and cut to fit: newlines become `⏎` so a shell command
+/// cannot wrap the answers out of their own box.
+fn one_line(text: &str, width: usize) -> String {
+    let flattened = text.replace('\n', "⏎ ").replace('\t', "  ");
+    clip(&flattened, width)
+}
+
 /// One line's worth of a long string, by characters so a CJK path is not cut in half.
 fn clip(text: &str, width: usize) -> String {
     if text.chars().count() <= width {
@@ -383,37 +394,43 @@ impl App {
         self.logo && area.height >= 18 && area.width >= 48
     }
 
-    /// The question, its detail, and the three answers — a menu, because a decision
-    /// worth stopping for is worth showing the options for.
+    /// The question, its detail, and the three answers — a menu, because a decision worth
+    /// stopping for is worth showing the options for.
+    ///
+    /// Every detail is forced onto **one line**: a shell command with newlines in it used to
+    /// wrap until the answers were pushed out of the box, which left a menu with one item.
     fn draw_approval(&self, frame: &mut Frame, area: ratatui::layout::Rect) {
-        let mut lines: Vec<Line> = Vec::new();
-        match &self.approval {
-            Some(info) => {
-                lines.push(Line::from(vec![
-                    Span::styled("outside the workspace", Style::default().fg(MARK_INK)),
+        let room = area.height.saturating_sub(2) as usize;
+        let mut details: Vec<Line> = Vec::new();
+        match &self.info() {
+            Some((class, reason, tool, args)) => {
+                details.push(Line::from(vec![
+                    Span::styled(class.to_string(), Style::default().fg(MARK_ACCENT)),
                     Span::raw("  "),
-                    Span::styled(info.class.clone(), Style::default().fg(MARK_ACCENT)),
+                    Span::styled(tool.to_string(), Style::default().fg(MARK_INK)),
                 ]));
-                if !info.reason.is_empty() {
-                    lines.push(Line::from(Span::styled(
-                        clip(&info.reason, area.width.saturating_sub(4) as usize),
+                if !reason.is_empty() {
+                    details.push(Line::from(Span::styled(
+                        one_line(reason, area.width.saturating_sub(4) as usize),
                         Style::default().fg(Color::DarkGray),
                     )));
                 }
-                lines.push(Line::from(Span::styled(
-                    format!(
-                        "{} {}",
-                        info.tool,
-                        clip(&info.args, area.width.saturating_sub(20) as usize)
-                    ),
-                    Style::default().fg(Color::Gray),
-                )));
+                if !args.is_empty() {
+                    details.push(Line::from(Span::styled(
+                        one_line(args, area.width.saturating_sub(4) as usize),
+                        Style::default().fg(Color::Gray),
+                    )));
+                }
             }
-            None => lines.push(Line::from(Span::styled(
+            None => details.push(Line::from(Span::styled(
                 "a decision is waiting for the details…",
                 Style::default().fg(Color::DarkGray),
             ))),
         }
+        // The answers are the point: keep them, drop details if the box is short.
+        let answers = Self::options().len();
+        let keep = room.saturating_sub(answers).max(1).min(details.len());
+        let mut lines: Vec<Line> = details.into_iter().take(keep).collect();
         for (index, (label, granted, _)) in Self::options().into_iter().enumerate() {
             let chosen = index == self.choice;
             let style = if chosen {
@@ -438,6 +455,18 @@ impl App {
                 .wrap(Wrap { trim: false }),
             area,
         );
+    }
+
+    /// The four facts a decision needs, as borrowed strings.
+    fn info(&self) -> Option<(&str, &str, &str, &str)> {
+        self.approval.as_ref().map(|info| {
+            (
+                info.class.as_str(),
+                info.reason.as_str(),
+                info.tool.as_str(),
+                info.args.as_str(),
+            )
+        })
     }
 
     /// The mark, character for character as the owner asked for it, with the sayings beside
@@ -1130,7 +1159,13 @@ impl App {
                 Constraint::Length(if self.notes.is_empty() { 0 } else { 2 }),
                 // A question waiting for an answer gets its own block: it is the one
                 // thing on screen that is blocked on a person.
-                Constraint::Length(if self.pending.is_some() { 6 } else { 0 }),
+                Constraint::Length(if self.pending.is_some() {
+                    // Two borders, one line per detail, three answers: the panel was six
+                    // rows tall and a detail with newlines in it ate the answers.
+                    DECISION_ROWS.min(conversation.height.saturating_sub(8))
+                } else {
+                    0
+                }),
                 Constraint::Min(3),
                 Constraint::Length(input_rows + 2),
                 Constraint::Length(1),
@@ -1900,6 +1935,43 @@ mod tests {
         assert!(screen.contains("/logo"), "and what else is here: {screen}");
         // And it is only a hint: the text is still a normal prompt buffer.
         assert_eq!(app.input, "/rev");
+    }
+
+    #[test]
+    fn a_long_command_does_not_push_the_answers_out_of_the_box() {
+        // Reported from a real session: a shell command with newlines in it wrapped until
+        // only `Allow once` was left, so the menu could not be answered properly.
+        let mut app = App::new("s", "v");
+        app.pending = Some("appr-1".to_string());
+        app.approval = Some(Box::new(ApprovalInfo {
+            request_id: "appr-1".to_string(),
+            class: "out_of_bounds".to_string(),
+            reason: "shell: out_of_bounds is Ask by builtin:out_of_bounds".to_string(),
+            tool: "shell".to_string(),
+            args: format!(
+                "{{\"command\":\"cd /home/x && python3 - <<'EOF' > /tmp/a.js\n{}\"}}",
+                "print('line')\n".repeat(30)
+            ),
+        }));
+        let screen = draw(&mut app, 200, 30);
+        assert!(screen.contains("Allow once"), "{screen}");
+        assert!(screen.contains("Allow in this project"), "{screen}");
+        assert!(screen.contains("Deny"), "{screen}");
+        // Every detail is one row, so the panel cannot grow past its share of the screen.
+        let panel: Vec<&str> = screen
+            .lines()
+            .skip_while(|line| !line.contains("needs your decision"))
+            .take_while(|line| !line.contains("session s"))
+            .collect();
+        assert!(
+            panel.len() <= DECISION_ROWS as usize + 1,
+            "{} rows: {panel:?}",
+            panel.len()
+        );
+        assert!(
+            panel.iter().any(|line| line.contains('⏎')),
+            "the command is flattened: {panel:?}"
+        );
     }
 
     #[test]

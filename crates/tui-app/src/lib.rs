@@ -169,12 +169,21 @@ const MARK_TEXT_COLUMN: usize = 36;
 /// thought and narrow ones get its shape.
 const MARK_SAYINGS: [&[(usize, &str)]; 3] = [
     &[(0, "loongagent")],
+    &[],
     &[
-        (37, "能大能小 · 大则吞云吐雾，小则隐介藏形"),
-        (19, "能大能小 · 能升能隐"),
-        (8, "能大能小"),
+        (30, "能大能小 · 不滞于形 · 动则必中"),
+        (19, "不滞于形 · 动则必中"),
+        (8, "动则必中"),
     ],
-    &[(19, "不滞于形 · 动则必中"), (8, "动则必中")],
+];
+
+/// The subline, as the owner wrote it, widest first: runes and brackets from the same
+/// alphabet as the frame, a `⋄` between the two halves. It sits beside 龍, where it reads as
+/// the inscription the character is stamped with.
+const MARK_SUBLINE: [(usize, &str); 3] = [
+    (28, "⟬ ᛭ 吞云吐雾 ⋄ 隐介藏形 ᛭ ⟭"),
+    (19, "吞云吐雾 ⋄ 隐介藏形"),
+    (8, "吞云吐雾"),
 ];
 /// Violet, for something that wants an answer rather than something that went wrong.
 const MARK_ACCENT_STYLE: Style = Style::new().fg(MARK_ACCENT);
@@ -431,61 +440,73 @@ impl App {
         );
     }
 
-    /// The mark, character for character as the owner asked for it: a sealed frame with
-    /// the traditional 龍 in the middle. Only the colours are ours.
+    /// The mark, character for character as the owner asked for it, with the sayings beside
+    /// it. Only the colours are ours.
     fn draw_banner(&self, frame: &mut Frame, area: ratatui::layout::Rect) {
         use unicode_width::UnicodeWidthStr;
         let frame_ink = Style::default().fg(MARK_ACCENT);
-        let character = MARK_TEXT;
+        let quiet = MARK_QUIET;
         let room_for = |drawn: usize| -> usize {
             (area.width as usize).saturating_sub(MARK_TEXT_COLUMN.max(drawn) + 2)
         };
-        let say = |row: usize, room: usize| -> Option<(String, Style)> {
+        let saying = |row: usize, room: usize| -> Vec<Span<'static>> {
             MARK_SAYINGS[row]
                 .iter()
                 .find(|(needs, _)| room >= *needs)
                 .map(|(_, text)| {
-                    (
+                    vec![Span::styled(
                         text.to_string(),
-                        if row == 0 { MARK_TEXT } else { MARK_QUIET },
-                    )
+                        if row == 0 { MARK_TEXT } else { quiet },
+                    )]
                 })
+                .unwrap_or_default()
         };
-        let rows: [(Vec<Span>, Option<(String, Style)>); 3] = [
+        let subline = |room: usize| -> Vec<Span<'static>> {
+            match MARK_SUBLINE.iter().find(|(needs, _)| room >= *needs) {
+                // Ornaments in the frame's colour, words in the text colour: that is what
+                // makes it read as an inscription rather than a caption.
+                Some((_, text)) if *text == MARK_SUBLINE[0].1 => vec![
+                    Span::styled("⟬ ᛭ ".to_string(), frame_ink),
+                    Span::styled("吞云吐雾".to_string(), MARK_TEXT),
+                    Span::styled(" ⋄ ".to_string(), frame_ink),
+                    Span::styled("隐介藏形".to_string(), MARK_TEXT),
+                    Span::styled(" ᛭ ⟭".to_string(), frame_ink),
+                ],
+                Some((_, text)) => vec![Span::styled(text.to_string(), quiet)],
+                None => Vec::new(),
+            }
+        };
+
+        let art: [(Vec<Span>, Vec<Span>); 3] = [
             (
                 vec![Span::styled(MARK_TOP, frame_ink)],
-                say(0, room_for(MARK_TOP.width())),
+                saying(0, room_for(MARK_TOP.width())),
             ),
             (
                 vec![
                     Span::styled(MARK_MID_LEFT, frame_ink),
                     Span::styled("【", frame_ink),
                     Span::raw(" "),
-                    Span::styled("龍", character),
+                    Span::styled("龍", MARK_TEXT),
                     Span::raw(" "),
                     Span::styled("】", frame_ink),
                     Span::styled(MARK_MID_RIGHT, frame_ink),
                 ],
-                say(
-                    1,
-                    room_for(MARK_MID_LEFT.width() + 6 + MARK_MID_RIGHT.width()),
-                ),
+                subline(room_for(MARK_MID_LEFT.width() + 6 + MARK_MID_RIGHT.width())),
             ),
             (
                 vec![Span::styled(MARK_BOTTOM, frame_ink)],
-                say(2, room_for(MARK_BOTTOM.width())),
+                saying(2, room_for(MARK_BOTTOM.width())),
             ),
         ];
 
         let mut lines: Vec<Line> = Vec::new();
-        for (mut spans, companion) in rows {
+        for (mut spans, companion) in art {
             let drawn: usize = spans.iter().map(|span| span.content.as_ref().width()).sum();
-            if let Some((text, style)) = companion {
-                spans.push(Span::raw(
-                    " ".repeat(MARK_TEXT_COLUMN.saturating_sub(drawn)),
-                ));
-                spans.push(Span::styled(text, style));
-            }
+            spans.push(Span::raw(
+                " ".repeat(MARK_TEXT_COLUMN.saturating_sub(drawn)),
+            ));
+            spans.extend(companion);
             lines.push(Line::from(spans));
         }
         frame.render_widget(Paragraph::new(lines), area);
@@ -2742,7 +2763,7 @@ mod tests {
     #[test]
     fn the_mark_is_drawn_and_can_be_put_away() {
         let mut app = App::new("s", "v");
-        // Wide: the whole thought, on the rows the art leaves.
+        // Wide: the frame, the character, the inscription beside it, the philosophy below.
         let screen = draw(&mut app, 150, 30);
         assert!(
             screen.contains("༺ ᛭ ༻") && screen.contains("༻ ᛭ ༺"),
@@ -2751,25 +2772,26 @@ mod tests {
         assert!(screen.contains('【') && screen.contains('】'), "{screen}");
         assert!(screen.contains('龍'), "{screen}");
         assert!(screen.contains("loongagent"), "{screen}");
+        assert!(
+            screen.contains('⟬') && screen.contains('⟭'),
+            "the inscription's brackets:\n{screen}"
+        );
+        assert!(screen.contains('⋄'), "and its divider:\n{screen}");
         // One character at a time: the cell buffer pads every wide glyph with a
         // continuation cell, so a phrase assertion would test the buffer's spacing.
         for glyph in [
-            '能', '吞', '云', '吐', '雾', '隐', '介', '藏', '不', '滞', '动', '必',
+            '吞', '云', '吐', '雾', '隐', '介', '藏', '形', '不', '滞', '动', '必', '中',
         ] {
             assert!(screen.contains(glyph), "missing {glyph}:\n{screen}");
         }
 
-        // Narrower: the shorter half of the thought, then the shortest. The widths are
-        // chosen from the room each line actually needs (37, 19, 8 columns).
-        let narrow = draw(&mut app, 69, 30);
-        assert!(narrow.contains('升'), "the short line:\n{narrow}");
-        assert!(!narrow.contains('吐'), "and not the long one:\n{narrow}");
+        // Narrower: the ornaments go, then the halves shorten; the mark stays.
+        let plain = draw(&mut app, 62, 30);
+        assert!(plain.contains('吞'), "{plain}");
+        assert!(!plain.contains('⟬'), "the brackets need room:\n{plain}");
         let shortest = draw(&mut app, 52, 30);
-        assert!(shortest.contains('大'), "{shortest}");
-        assert!(
-            !shortest.contains('升'),
-            "only four characters fit:\n{shortest}"
-        );
+        assert!(shortest.contains('龍'), "the mark itself:\n{shortest}");
+        assert!(!shortest.contains('藏'), "and only what fits:\n{shortest}");
 
         // `/logo` puts it away, and nothing else moves.
         type_text(&mut app, "/logo");

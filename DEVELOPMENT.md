@@ -291,10 +291,16 @@ owner specified, kept verbatim:
 ```
 
 A sealed frame around the traditional 龍, with the wordmark beside the top rule and the
-sayings beside the middle and bottom ones — the dragon of 煮酒论英雄, in the owner's words:
+sayings beside the middle and bottom ones — the dragon of 煮酒论英雄, in the owner's words.
+The inscription sits beside the character; the philosophy sits below it, with nothing
+repeated between them:
 
-    能大能小 · 大则吞云吐雾，小则隐介藏形
-    不滞于形 · 动则必中
+    ╭───────༺ ᛭ ༻────────────╮          loongagent
+    ╞═══════【 龍 】════════════╡       ⟬ ᛭ 吞云吐雾 ⋄ 隐介藏形 ᛭ ⟭
+    ╰───────༻ ᛭ ༺────────────╯          能大能小 · 不滞于形 · 动则必中
+
+The inscription's ornaments take the frame's colour and its words the text colour, which is
+what makes it read as an inscription rather than a caption.
 
 Each row picks the first line that fits the columns it has, from the whole thought to
 `能大能小`, so a narrow terminal keeps the mark and drops the words rather than clipping

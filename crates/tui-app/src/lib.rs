@@ -114,6 +114,11 @@ fn base64(bytes: &[u8]) -> String {
     out
 }
 
+/// The kind of a notification's params, for the few places that ask.
+fn kind_of(params: &serde_json::Value) -> &str {
+    params.get("kind").and_then(|k| k.as_str()).unwrap_or("")
+}
+
 /// One line's worth of a long string, by characters so a CJK path is not cut in half.
 fn clip(text: &str, width: usize) -> String {
     if text.chars().count() <= width {
@@ -1258,6 +1263,20 @@ pub fn spawn_worker<T: Transport + Send + 'static>(
                         }
                         // The work itself, the moment it is recorded — this is the
                         // difference between watching an agent and waiting for one.
+                        // The person's own line is already on screen — it was pushed the
+                        // moment they pressed enter, so it appears instantly. The event
+                        // that comes back is that same line, and rendering it again is how
+                        // a prompt appeared twice. History replay is a different path and
+                        // still renders it (see `Client::replay`).
+                        if kind_of(params) == loong_schema::generated::event::MESSAGE_APPENDED
+                            && params
+                                .get("data")
+                                .and_then(|data| data.get("role"))
+                                .and_then(|role| role.as_str())
+                                == Some("user")
+                        {
+                            return;
+                        }
                         if let Some(line) = renderer.render(params) {
                             let kind = params.get("kind").and_then(|k| k.as_str()).unwrap_or("");
                             if kind == loong_schema::generated::event::TOOL_CALL {
@@ -2571,6 +2590,31 @@ mod tests {
         assert_eq!(
             color_of(&mut app, 80, 20, "stopped by you"),
             Some(ratatui::style::Color::Yellow)
+        );
+    }
+
+    #[test]
+    fn the_person_s_own_line_is_matched_by_its_event_not_printed_twice() {
+        // The screen push happens on enter; the event that comes back is the same line.
+        // The worker skips exactly that one, and only while a turn is live.
+        let own = serde_json::json!({
+            "kind": loong_schema::generated::event::MESSAGE_APPENDED,
+            "data": {"role": "user", "text": "hi"},
+        });
+        assert_eq!(
+            kind_of(&own),
+            loong_schema::generated::event::MESSAGE_APPENDED
+        );
+        assert_eq!(own["data"]["role"].as_str(), Some("user"));
+
+        let assistant = serde_json::json!({
+            "kind": loong_schema::generated::event::MESSAGE_APPENDED,
+            "data": {"role": "assistant", "text": "hello"},
+        });
+        assert_ne!(
+            assistant["data"]["role"].as_str(),
+            Some("user"),
+            "the model's own words are still rendered"
         );
     }
 

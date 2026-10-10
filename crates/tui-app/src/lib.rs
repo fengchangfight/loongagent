@@ -58,20 +58,66 @@ pub enum FromWorker {
 pub enum Action {
     None,
     Send(ToWorker),
+    /// Put the transcript on the clipboard (and in a file, which always works).
+    Copy,
+    /// Tell the terminal whether this program is tracking the mouse.
+    Mouse(bool),
     Quit,
+}
+
+/// Put text on the clipboard with OSC 52 — the escape sequence terminals honour, and the
+/// only way to reach a clipboard from an application that is not the window system's — and
+/// also write it beside the session's other files. The file is the honest half: OSC 52 is
+/// size-limited and some terminals ignore it, whereas a path always works.
+fn copy_everywhere(text: &str, session: &str) -> String {
+    let path = std::env::temp_dir().join(format!("loongagent-{session}.txt"));
+    let _ = std::fs::write(&path, text);
+    let payload = base64(text.as_bytes());
+    use std::io::Write;
+    let mut out = std::io::stdout();
+    let _ = write!(out, "\x1b]52;c;{payload}\x1b\\");
+    let _ = out.flush();
+    path.display().to_string()
+}
+
+/// The forty lines of base64 this needs, rather than a dependency for forty lines.
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        out.push(ALPHABET[(n >> 18) as usize & 63] as char);
+        out.push(ALPHABET[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
 }
 
 /// A little dragon in kaomoji: horns, a snout, whiskers and a tail, drawn with
 /// punctuation in the interface's own palette rather than a font glyph in someone
 /// else's colours. Two rows, because a mark that takes a third of the screen is a
 /// decoration that costs more than it gives.
-const MARK_ROWS: u16 = 2;
+const MARK_ROWS: u16 = 3;
 /// Teal: the colour the transcript already uses for the agent doing something.
 const MARK_INK: Color = Color::Rgb(86, 182, 194);
 /// Violet: the colour it uses for policy — the second voice in the drawing.
 const MARK_ACCENT: Color = Color::Rgb(138, 138, 214);
 /// Where the name starts, so the two rows line up.
-const MARK_TEXT_COLUMN: usize = 24;
+const MARK_TEXT_COLUMN: usize = 26;
 
 /// What a line is, for colour. Classified from the line's own vocabulary — the renderer
 /// that produces those strings lives in `loong-tui`, next door, and a test renders real
@@ -97,6 +143,8 @@ pub enum LineKind {
     Problem,
     /// A turn the person stopped — their doing, so it is neither an error nor noise.
     Stopped,
+    /// A line the interface said about itself (copied, mouse mode).
+    Notice,
 }
 
 /// The palette. Muted on purpose: a transcript where everything shouts is harder to read
@@ -116,6 +164,7 @@ pub fn style_for(kind: LineKind) -> Style {
         LineKind::Policy => Style::default().fg(Color::Rgb(138, 138, 214)),
         LineKind::Note => Style::default().fg(Color::DarkGray),
         LineKind::Problem => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        LineKind::Notice => Style::default().fg(Color::DarkGray),
         LineKind::Stopped => Style::default()
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
@@ -137,6 +186,9 @@ pub fn classify(line: &str) -> LineKind {
         } else {
             LineKind::ToolFailed
         };
+    }
+    if line.starts_with("⧉ ") || line.starts_with("· mouse ") {
+        return LineKind::Notice;
     }
     if line.starts_with("⏹ ") {
         return LineKind::Stopped;
@@ -193,6 +245,9 @@ pub struct App {
     pub notes: Vec<String>,
     /// Whether the mark is drawn at the top (`/logo` turns it off).
     pub logo: bool,
+    /// Whether this program tracks the mouse. Off means the terminal's own selection
+    /// works again, at the price of the wheel scrolling the terminal instead of here.
+    pub mouse: bool,
     /// How to ask the server to stop the running turn. `None` when the surface has no
     /// process to signal: the interface then says so instead of pretending.
     pub interrupt: Option<Box<dyn Fn()>>,
@@ -227,6 +282,7 @@ impl App {
             busy: false,
             error: None,
             logo: true,
+            mouse: true,
             interrupt: None,
             activity: None,
             busy_since: None,
@@ -248,12 +304,20 @@ impl App {
     }
 
     /// The dragon, and the name beside it.
+    ///
+    /// An eastern dragon's identifying parts, in kaomoji: a mane and horns above the
+    /// head, whiskers off the snout, and a long scaled body that curls away. The first
+    /// attempt was a snout and two horns, which is a small animal — a dragon needs a
+    /// body.
     fn draw_banner(&self, frame: &mut Frame, area: ratatui::layout::Rect) {
         let ink = Style::default().fg(MARK_INK);
         let accent = Style::default().fg(MARK_ACCENT);
-        let rows: [(Vec<Span>, Option<(String, Style)>); 2] = [
+        let rows: [(Vec<Span>, Option<(String, Style)>); 3] = [
             (
-                vec![Span::styled("  ﾉﾉ ⌒ ⌒ ﾉﾉ", ink), Span::styled("彡", accent)],
+                vec![
+                    Span::styled("   ﾉ彡⌒⌒⌒⌒ミヽ", ink),
+                    Span::styled("彡", accent),
+                ],
                 Some((
                     "loongagent".to_string(),
                     Style::default()
@@ -264,12 +328,20 @@ impl App {
             (
                 vec![
                     Span::styled(" （ ˶•ㅂ•˶ ）", ink),
-                    Span::styled("彡〜〜〜", accent),
+                    Span::styled("彡〜〜〜〜〜", accent),
+                    Span::styled("╮", ink),
                 ],
                 Some((
                     "a firm-internal coding agent".to_string(),
                     Style::default().fg(Color::DarkGray),
                 )),
+            ),
+            (
+                vec![
+                    Span::styled("   ╰〜〜〜〜〜〜〜〜〜〜〜", ink),
+                    Span::styled("ﾉ", accent),
+                ],
+                None,
             ),
         ];
 
@@ -396,6 +468,30 @@ impl App {
                 self.input.clear();
                 self.cursor = 0;
                 Some(Action::Quit)
+            }
+            // A terminal application cannot be selected with the mouse while it is
+            // tracking the mouse, so it has to offer the copy itself.
+            "/copy" => {
+                self.input.clear();
+                self.cursor = 0;
+                Some(Action::Copy)
+            }
+            // And it has to be able to hand the mouse back, for someone who would rather
+            // use their terminal's own selection.
+            "/mouse" => {
+                self.input.clear();
+                self.cursor = 0;
+                self.mouse = !self.mouse;
+                let state = if self.mouse { "on" } else { "off" };
+                self.push_lines(vec![format!(
+                    "· mouse {state}{}",
+                    if self.mouse {
+                        " (the wheel scrolls here)"
+                    } else {
+                        " — select and copy with the terminal itself now"
+                    }
+                )]);
+                Some(Action::Mouse(self.mouse))
             }
             // The transcript shows a summary of long tool output; this asks the log for
             // the rest.
@@ -737,6 +833,11 @@ impl App {
         }
     }
 
+    /// Everything said so far, for `/copy`.
+    pub fn transcript(&self) -> String {
+        self.lines.join("\n")
+    }
+
     /// A mouse wheel event: scrolling the conversation is the one thing a wheel
     /// should do here, and it is what people try first.
     pub fn handle_mouse(&mut self, kind: ratatui::crossterm::event::MouseEventKind) {
@@ -879,8 +980,9 @@ impl App {
                     }
                     "/logo" => "enter shows or hides the mark".to_string(),
                     "/expand" => "enter shows the last tool result in full".to_string(),
-                    _ => "command — /help skills · /exit leaves · /logo mark · /expand result"
-                        .to_string(),
+                    "/copy" => "enter copies the whole transcript".to_string(),
+                    "/mouse" => "enter hands the mouse back to your terminal".to_string(),
+                    _ => "command — /help · /exit · /logo · /mouse · /copy · /expand".to_string(),
                 },
                 Style::default().fg(Color::Green),
             ),
@@ -1331,6 +1433,25 @@ pub fn run<T: Transport + Send + 'static>(
                         Action::Send(command) => {
                             let _ = to_worker.send(command);
                         }
+                        // The interface cannot reach the terminal or the clipboard from
+                        // `handle_key`; the loop that owns them does it here.
+                        Action::Copy => {
+                            let text = app.transcript();
+                            let path = copy_everywhere(&text, &app.session);
+                            app.push_lines(vec![format!(
+                                "⧉ copied {} line(s) → {path}",
+                                text.lines().count()
+                            )]);
+                        }
+                        Action::Mouse(on) => {
+                            let backend = terminal.backend_mut();
+                            if on {
+                                let _ = execute!(backend, EnableMouseCapture);
+                            } else {
+                                let _ = execute!(backend, DisableMouseCapture);
+                            }
+                            // The screen is redrawn next pass; the terminal is what changed.
+                        }
                         Action::Quit => return Ok(()),
                         Action::None => {}
                     },
@@ -1476,12 +1597,9 @@ mod tests {
         let mut app = App::new("s", "v");
         type_text(&mut app, "/rev");
         let screen = draw(&mut app, 70, 16);
-        assert!(screen.contains("command — /help skills"), "{screen}");
-        assert!(screen.contains("/exit leaves"), "and the way out: {screen}");
-        assert!(
-            screen.contains("/logo mark"),
-            "and what else is here: {screen}"
-        );
+        assert!(screen.contains("command — /help"), "{screen}");
+        assert!(screen.contains("/exit"), "and the way out: {screen}");
+        assert!(screen.contains("/logo"), "and what else is here: {screen}");
         // And it is only a hint: the text is still a normal prompt buffer.
         assert_eq!(app.input, "/rev");
     }
@@ -1705,12 +1823,10 @@ mod tests {
         let mut app = App::new("s", "v");
         type_text(&mut app, "/he");
         let screen = draw(&mut app, 100, 16);
-        assert!(screen.contains("/help skills"), "{screen}");
-        assert!(
-            screen.contains("/expand result"),
-            "and the rest of them: {screen}"
-        );
-        assert!(screen.contains("/exit leaves"), "{screen}");
+        assert!(screen.contains("/help"), "{screen}");
+        assert!(screen.contains("/copy"), "and the copy command: {screen}");
+        assert!(screen.contains("/mouse"), "and the mouse one: {screen}");
+        assert!(screen.contains("/exit"), "{screen}");
     }
 
     #[test]
@@ -2176,12 +2292,69 @@ mod tests {
     }
 
     #[test]
+    fn copy_puts_the_transcript_on_the_clipboard_and_in_a_file() {
+        let mut app = App::new("s", "v");
+        app.push_lines(vec!["you: hello".to_string(), "hi".to_string()]);
+        type_text(&mut app, "/copy");
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::Copy);
+        assert!(app.input.is_empty());
+        // The file half, which is what works everywhere: written beside nothing
+        // important, in the temporary directory, and named for the session.
+        let path = copy_everywhere(&app.transcript(), "testcopy");
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("you: hello"), "{written}");
+        assert!(written.contains("hi"), "{written}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn base64_is_base64() {
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foo"), "Zm9v");
+        assert_eq!(base64(b"foob"), "Zm9vYg==");
+        assert_eq!(base64(b"hello world"), "aGVsbG8gd29ybGQ=");
+    }
+
+    #[test]
+    fn the_mouse_can_be_handed_back_to_the_terminal() {
+        let mut app = App::new("s", "v");
+        assert!(
+            app.mouse,
+            "tracks the mouse by default, so the wheel scrolls here"
+        );
+        type_text(&mut app, "/mouse");
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::Mouse(false));
+        assert!(!app.mouse);
+        assert!(
+            app.lines
+                .iter()
+                .any(|line| line.contains("select and copy")),
+            "and says what that gives you: {:?}",
+            app.lines
+        );
+        type_text(&mut app, "/mouse");
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::Mouse(true));
+        assert!(app.mouse);
+    }
+
+    #[test]
     fn the_mark_is_drawn_and_can_be_put_away() {
         let mut app = App::new("s", "v");
         let screen = draw(&mut app, 100, 30);
-        assert!(screen.contains("ﾉﾉ"), "horns:\n{screen}");
+        // Single characters on purpose: the cell buffer pads a wide glyph with a
+        // continuation cell, so adjacent-wide-character assertions are testing the
+        // buffer's spacing rather than the drawing.
+        assert!(screen.contains("ﾉ"), "a mane:\n{screen}");
+        assert!(screen.contains("⌒⌒"), "horns:\n{screen}");
         assert!(screen.contains("ㅂ"), "a snout:\n{screen}");
         assert!(screen.contains("彡"), "whiskers:\n{screen}");
+        assert!(screen.contains("╰"), "a body:\n{screen}");
+        assert!(
+            screen.contains("〜"),
+            "scales, curling away — without a body it is a small animal, not a dragon:\n{screen}"
+        );
         assert!(screen.contains("loongagent"), "{screen}");
         assert!(
             screen.contains("firm-internal coding agent"),
@@ -2199,7 +2372,7 @@ mod tests {
         assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::None);
         assert!(!app.logo);
         let screen = draw(&mut app, 100, 30);
-        assert!(!screen.contains("ﾉﾉ"), "{screen}");
+        assert!(!screen.contains("ミヽ"), "{screen}");
         assert!(
             screen.contains("enter send"),
             "the box and keys remain:\n{screen}"

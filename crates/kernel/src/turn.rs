@@ -1734,11 +1734,16 @@ impl Kernel {
     /// How much input one request may carry, right now.
     ///
     /// Two ceilings, and the stricter wins because either one overflowing ends the same
-    /// way. The **budget** is what a person or a pack chose: it is about cost, and it fires
-    /// at `compact_at_percent` of itself. The **window** is what the model can physically
-    /// hold: it is about arithmetic, and it fires when the room left for the answer drops
-    /// below the reserve. `None` from both means nothing bounds the context — which is a
-    /// thing the CLI says out loud, because it means compaction never runs.
+    /// way. The **budget** is what a person or a pack chose: a cap on the input of **one
+    /// request**, which it reaches at `compact_at_percent` of itself. The **window** is what
+    /// the model can physically hold, and it is reached when the room left for the answer
+    /// drops below the reserve. `None` from both means nothing bounds the context — which is
+    /// a thing the CLI says out loud, because it means compaction never runs.
+    ///
+    /// Neither is a cumulative quota. What is measured is `ledger.total_tokens()`: the size
+    /// of the prompt about to be sent, kept history included. Twenty calls in one turn are
+    /// twenty measurements of a context, not twenty terms in a sum — a session is free to
+    /// spend far more than the ceiling in total, and nothing meters that.
     fn input_ceiling(&self) -> Option<u64> {
         let from_budget = self
             .ledger

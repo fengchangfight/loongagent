@@ -709,10 +709,15 @@ binary the TUI spawns as its server (used by the end-to-end test).
   compaction is an event with before/after tokens; a compaction that could free
   nothing is not an event at all.
 - **Two ceilings, and the stricter wins**, because either one overflowing ends the same
-  way. The **budget** is what a person or a pack chose — about cost — and it fires at
+  way. The **budget** is what a person or a pack chose — a cap on **one request's input**,
+  which is why the name is about spending while the number is about size — and it fires at
   `compact_at_percent` (default 80). The **window** is what the model can physically hold:
   a model declares `max_context_size`, and the input may reach the window minus
-  `reserved_context_size` (default 16 Ki), the room the answer needs. The reserve is the one
+  `reserved_context_size` (default 16 Ki), the room the answer needs. Neither is a
+  cumulative quota: what is measured before every model call is the size of the prompt about
+  to be sent (the kept history included), which compaction then brings back under the line.
+  A session may spend far more than either number in total — nothing meters that. The reserve
+  is the one
   narrow-only number whose strictness runs the other way: keeping *more* room is the
   conservative choice, so a layer may raise it and never shrink it (`stricter_for`).
   `--budget N` sets the budget (0 = no cap of your own; a configuration's still holds).

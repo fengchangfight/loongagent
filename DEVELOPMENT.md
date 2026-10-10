@@ -375,9 +375,22 @@ through an in-memory connection and hands back everything in order, response las
 In the TUI that shows up as the work appearing line by line (`→ read_file note.txt`,
 `← ok …`) and an input title that says what is running and for how long (`working 12s ·
 → shell cargo test`), because "working…" for two minutes tells nobody whether it is
-thinking or stuck. `run` and `repl` still print the turn when it finishes; handing them
-the same live callback is a small change, deliberately left until the surface that was
-asked for works.
+thinking or stuck.
+
+What a line is worth reading is bounded, not the event stream itself:
+
+- **a call shows what it carries, not only where it points.** `→ write_file game.html` says
+  nothing about the page, so the call's own text follows: the command's own lines, and for
+  an edit or a write the text being put in, marked the way a diff marks it. It is bounded by
+  `CALL_ROWS` (8) and `CALL_COLUMNS` (160), and its elision note deliberately does **not**
+  look like a fold pointer — folds are the log's tool *results*, counted from the oldest, so
+  a marker on a call would put the keyboard on a line the log cannot answer for.
+- **a result keeps `RESULT_ROWS` (10) lines and `RESULT_COLUMNS` (160) columns** before
+  folding, and the marker says which of the two happened. It was three lines at 100 columns,
+  and a clipped *line* produced `… 0 more line(s)` — a pointer that opened nothing.
+
+`run` and `repl` still print the turn when it finishes; handing them the same live callback
+is a small change, deliberately left until the surface that was asked for works.
 
 ### What the TUI answers to
 

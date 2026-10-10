@@ -58,14 +58,7 @@ fn render_event_with(envelope: &Value, full: bool) -> Option<String> {
         gen::event::TOOL_CALL => {
             let tool = data.get("tool").and_then(|t| t.as_str()).unwrap_or("?");
             let args = data.get("args").cloned().unwrap_or(Value::Null);
-            let detail = [
-                "command", "path", "pattern", "query", "url", "name", "prompt",
-            ]
-            .iter()
-            .find_map(|key| args.get(*key).and_then(|value| value.as_str()))
-            .map(|text| text.to_string())
-            .unwrap_or_else(|| truncate(&args.to_string(), 60));
-            Some(format!("→ {tool} {}", truncate(&detail, 80)))
+            Some(call_text(tool, &args))
         }
         gen::event::TOOL_RESULT => {
             let ok = data.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -200,37 +193,115 @@ pub fn folded_output(text: &str) -> bool {
     text.lines().any(is_fold_marker)
 }
 
+/// How many lines of a tool result the transcript keeps before folding the rest away.
+///
+/// It was three, which is enough to see that a command ran and not enough to see what it
+/// said. The fold pointer is always there for the rest, so the only cost of a larger window
+/// is scrollback — and a reader watching a turn would rather scroll than squint.
+const RESULT_ROWS: usize = 10;
+
+/// How wide a kept line may be. A line wider than this is clipped, and the fold marker says
+/// so rather than claiming zero lines were hidden.
+const RESULT_COLUMNS: usize = 160;
+
 /// A tool result, bounded. A chatty command must not turn the transcript into a wall of
 /// text, so a long one is summarised with the count and the way to see the rest.
 fn collapse_result(ok: bool, output: &str) -> String {
-    const MAX_ROWS: usize = 3;
-    const MAX_COLUMNS: usize = 100;
     let verdict = if ok { "ok" } else { "failed" };
     let lines: Vec<&str> = output.lines().collect();
     let shown: Vec<String> = lines
         .iter()
-        .take(MAX_ROWS)
-        .map(|line| truncate(line, MAX_COLUMNS))
+        .take(RESULT_ROWS)
+        .map(|line| truncate(line, RESULT_COLUMNS))
         .collect();
-    let cut = lines.len() > MAX_ROWS
-        || lines
-            .iter()
-            .take(MAX_ROWS)
-            .zip(shown.iter())
-            .any(|(raw, clipped)| raw.chars().count() > clipped.chars().count());
+    let clipped = lines
+        .iter()
+        .take(RESULT_ROWS)
+        .zip(shown.iter())
+        .any(|(raw, clipped)| raw.chars().count() > clipped.chars().count());
     let mut text = format!("← {verdict} {}", shown.first().cloned().unwrap_or_default());
     for line in shown.iter().skip(1) {
         text.push('\n');
         text.push_str("  ");
         text.push_str(line);
     }
-    if cut {
-        let hidden = lines.len().saturating_sub(MAX_ROWS);
+    // Say what is actually missing. Testing "was anything cut?" rather than "were lines
+    // hidden?" is what stops `… 0 more line(s)` — a pointer that opened nothing — from
+    // appearing whenever a single line was clipped.
+    let hidden = lines.len().saturating_sub(RESULT_ROWS);
+    if hidden > 0 {
         text.push('\n');
         text.push_str(&format!(
             "{FOLD_PREFIX}{hidden} more line(s), {} {FOLD_POINTER}",
             human_bytes(output.len())
         ));
+    } else if clipped {
+        text.push('\n');
+        text.push_str(&format!(
+            "{FOLD_PREFIX}line(s) clipped to {RESULT_COLUMNS} columns, {} {FOLD_POINTER}",
+            human_bytes(output.len())
+        ));
+    }
+    text
+}
+
+/// How many lines one tool call may put on screen: what it *is*, plus what it carries.
+const CALL_ROWS: usize = 8;
+/// How wide a call's line may be before it is clipped. Commands are read, not parsed.
+const CALL_COLUMNS: usize = 160;
+
+/// A tool call, in the words of its own arguments.
+///
+/// The first line says what the call **is** — a command, a path, a pattern. What it
+/// *carries* follows, because `→ write_file game.html` tells a reader nothing about the
+/// game being written, and "what did it just do to my file?" is the question a transcript
+/// should be able to answer. Added text is marked the way a diff marks it, so an edit reads
+/// as a change rather than as two blocks of text.
+///
+/// The elision note deliberately does **not** look like a fold pointer: folds are tool
+/// *results*, numbered from the log, and a marker here would put the keyboard on a line the
+/// log cannot answer for.
+fn call_text(tool: &str, args: &Value) -> String {
+    let arg = |key: &str| args.get(key).and_then(|v| v.as_str()).unwrap_or("");
+    let primary = [
+        "command", "path", "pattern", "query", "url", "name", "prompt",
+    ]
+    .iter()
+    .map(|key| arg(key))
+    .find(|value| !value.is_empty())
+    .map(|value| value.to_string())
+    .unwrap_or_else(|| truncate(&args.to_string(), 60));
+    let mut rows: Vec<String> = primary
+        .lines()
+        .enumerate()
+        .map(|(at, line)| {
+            let indent = if at == 0 { "" } else { "  " };
+            format!("{indent}{}", truncate(line, CALL_COLUMNS))
+        })
+        .collect();
+    if rows.is_empty() {
+        rows.push(String::new());
+    }
+    for (sign, key) in [('-', "old_string"), ('+', "new_string"), ('+', "content")] {
+        let value = arg(key);
+        if !value.is_empty() {
+            rows.extend(
+                value
+                    .lines()
+                    .map(|line| format!("  {sign} {}", truncate(line, CALL_COLUMNS - 4))),
+            );
+        }
+    }
+    let hidden = rows.len().saturating_sub(CALL_ROWS);
+    rows.truncate(CALL_ROWS);
+    let mut text = format!("→ {tool} {}", rows.remove(0));
+    for row in rows {
+        text.push('\n');
+        text.push_str(&row);
+    }
+    if hidden > 0 {
+        text.push('\n');
+        text.push_str(&format!("  ⋯ {hidden} more line(s) of the call"));
     }
     text
 }
@@ -671,16 +742,16 @@ mod tests {
         let rows: Vec<&str> = collapsed.lines().collect();
         assert_eq!(
             rows.len(),
-            4,
+            RESULT_ROWS + 1,
             "bounded, whatever the command printed: {rows:?}"
         );
         assert!(rows[0].starts_with("← ok line 1 of output"), "{rows:?}");
-        assert!(rows[3].contains("197 more line(s)"), "{rows:?}");
+        assert!(rows[RESULT_ROWS].contains("190 more line(s)"), "{rows:?}");
         assert!(
-            rows[3].contains("/expand"),
+            rows[RESULT_ROWS].contains("/expand"),
             "and says how to see them: {rows:?}"
         );
-        assert!(rows[3].contains("KiB"), "{rows:?}");
+        assert!(rows[RESULT_ROWS].contains("KiB"), "{rows:?}");
 
         // `/expand` is the other half: the log has everything, so nothing is lost.
         let expanded = render_event_full(&event).unwrap();
@@ -691,13 +762,32 @@ mod tests {
         );
         assert!(expanded.lines().count() > 100);
 
-        // A single long line is cut, and says so.
+        // Lines within the window are not summarised at all: a pointer to nothing is noise,
+        // and `… 0 more line(s)` is what a clipped *line* used to produce.
+        let exact = (1..=RESULT_ROWS)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let fits = json!({
+            "kind": gen::event::TOOL_RESULT,
+            "data": {"ok": true, "output": exact},
+        });
+        let collapsed = render_event(&fits).unwrap();
+        assert_eq!(collapsed.lines().count(), RESULT_ROWS, "{collapsed}");
+        assert!(!collapsed.contains("/expand"), "{collapsed}");
+
+        // A single too-wide line *is* cut, and the marker says which of the two happened.
         let one = json!({
             "kind": gen::event::TOOL_RESULT,
             "data": {"ok": true, "output": "x".repeat(500)},
         });
         let collapsed = render_event(&one).unwrap();
-        assert!(collapsed.lines().count() <= 4, "{collapsed}");
+        assert!(collapsed.lines().count() <= 3, "{collapsed}");
+        assert!(collapsed.contains("clipped to"), "{collapsed}");
+        assert!(
+            !collapsed.contains("0 more line(s)"),
+            "a clipped line is not a hidden line: {collapsed}"
+        );
         assert!(collapsed.contains("/expand"), "{collapsed}");
 
         // Short output is left exactly as it was.
@@ -733,6 +823,58 @@ mod tests {
         });
         let mut renderer = Renderer::default();
         assert_eq!(renderer.render(&quick).unwrap(), "← ok hi");
+    }
+
+    #[test]
+    fn a_call_shows_what_it_carries_not_just_where_it_points() {
+        // An edit is a change: the transcript should read like one, because "what did it
+        // just do to my file?" is the question a reader actually has.
+        let edit = json!({
+            "kind": gen::event::TOOL_CALL,
+            "data": {"tool": "edit", "args": {
+                "path": "game.html",
+                "old_string": "<canvas></canvas>",
+                "new_string": "<canvas id=\"c\"></canvas>\n<script>start()</script>",
+            }},
+        });
+        assert_eq!(
+            render_event(&edit).unwrap(),
+            "→ edit game.html\n  \
+             - <canvas></canvas>\n  \
+             + <canvas id=\"c\"></canvas>\n  \
+             + <script>start()</script>"
+        );
+
+        // A file being written shows the beginning of it, bounded — a page is not a
+        // transcript.
+        let page: Vec<String> = (1..=50).map(|n| format!("<p>{n}</p>")).collect();
+        let write = json!({
+            "kind": gen::event::TOOL_CALL,
+            "data": {"tool": "write_file", "args": {"path": "game.html", "content": page.join("\n")}},
+        });
+        let rendered = render_event(&write).unwrap();
+        let rows: Vec<&str> = rendered.lines().collect();
+        assert_eq!(rows.len(), CALL_ROWS + 1, "{rows:?}");
+        assert_eq!(rows[0], "→ write_file game.html");
+        assert_eq!(rows[1], "  + <p>1</p>", "{rows:?}");
+        assert!(
+            rows[CALL_ROWS].contains("more line(s) of the call"),
+            "{rows:?}"
+        );
+        // And it does not pretend to be a fold. Folds are the log's tool *results*, counted
+        // from the oldest, so a marker on a call would put the keyboard on a line the log
+        // cannot answer for — it would open somebody else's output.
+        assert!(
+            !rendered.lines().any(is_fold_marker),
+            "a call is not a fold: {rendered}"
+        );
+
+        // A one-line call reads exactly as it always did.
+        let shell = json!({
+            "kind": gen::event::TOOL_CALL,
+            "data": {"tool": "shell", "args": {"command": "cargo test"}},
+        });
+        assert_eq!(render_event(&shell).unwrap(), "→ shell cargo test");
     }
 
     #[test]

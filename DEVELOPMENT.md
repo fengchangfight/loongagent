@@ -291,35 +291,21 @@ owner specified, kept verbatim:
 ```
 
 A sealed frame around the traditional 龍, with the wordmark beside the top rule and the
-sayings beside the middle and bottom ones — the dragon of 煮酒论英雄, in the owner's words.
-The inscription sits beside the character; the philosophy sits below it, with nothing
-repeated between them:
+owner's inscription beside the character:
 
     ╭───────༺ ᛭ ༻────────────╮          loongagent
     ╞═══════【 龍 】════════════╡       ⟬ ᛭ 吞云吐雾 ⋄ 隐介藏形 ᛭ ⟭
-    ╰───────༻ ᛭ ༺────────────╯          能大能小 · 不滞于形 · 动则必中
+    ╰───────༻ ᛭ ༺────────────╯
 
-The inscription's ornaments take the frame's colour and its words the text colour, which is
-what makes it read as an inscription rather than a caption.
+The inscription's ornaments take the frame's colour and its words the terminal's foreground,
+so it reads as what the seal is stamped with. There is **nothing on the bottom rule**: an
+earlier version explained the dragon there too (`能大能小 · 不滞于形 · 动则必中`) and the
+owner's verdict was "too wordy" — the inscription already carries the thought, and a mark
+that explains itself twice talks too much.
 
-Each row picks the first line that fits the columns it has, from the whole thought to
-`能大能小`, so a narrow terminal keeps the mark and drops the words rather than clipping
-them. (An English line was tried and removed: it is *wider* than the short Chinese one, so
-a first-that-fits ladder could never reach it.) `/logo` puts it away, and a terminal narrower than 48 columns
-never gets it.
-
-**Colour comes from the theme, not from us.** `龍` and the wordmark are the terminal's own
-foreground in bold; the frame is ANSI magenta; the transcript's accents are ANSI cyan and
-magenta. Nothing in the palette is an absolute RGB or a literal white — the owner runs a
-light background, where `Color::White` is invisible and a fixed pale teal is barely there.
-Named colours are resolved against the palette the person configured, which is the only
-palette that is right on both a dark and a light terminal.
-
-Three earlier versions are worth remembering as a lesson in not re-typesetting someone's
-mark: a red-and-gold seal (accurate, too loud), a snout with two horns (a small animal, not
-a dragon), and a serpentine kaomoji (better, and still not what was asked for). The owner
-then supplied the art, and that is what is drawn — character for character, ornaments
-included.
+The inscription takes the first form that fits the columns it has — with ornaments (28),
+without them (19), then four characters (8) — so a narrow terminal drops the ornaments first
+and keeps the mark.
 
 ### Watching a turn happen
 

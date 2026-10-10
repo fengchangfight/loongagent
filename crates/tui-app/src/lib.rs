@@ -181,11 +181,9 @@ const MARK_TEXT_COLUMN: usize = 36;
 const MARK_SAYINGS: [&[(usize, &str)]; 3] = [
     &[(0, "loongagent")],
     &[],
-    &[
-        (30, "能大能小 · 不滞于形 · 动则必中"),
-        (19, "不滞于形 · 动则必中"),
-        (8, "动则必中"),
-    ],
+    // Nothing on the bottom rule: the inscription beside 龍 already says it, and a mark
+    // that explains itself twice talks too much.
+    &[],
 ];
 
 /// The subline, as the owner wrote it, widest first: runes and brackets from the same
@@ -2851,10 +2849,15 @@ mod tests {
         assert!(screen.contains('⋄'), "and its divider:\n{screen}");
         // One character at a time: the cell buffer pads every wide glyph with a
         // continuation cell, so a phrase assertion would test the buffer's spacing.
-        for glyph in [
-            '吞', '云', '吐', '雾', '隐', '介', '藏', '形', '不', '滞', '动', '必', '中',
-        ] {
+        for glyph in ['吞', '云', '吐', '雾', '隐', '介', '藏', '形'] {
             assert!(screen.contains(glyph), "missing {glyph}:\n{screen}");
+        }
+        // Nothing below the frame: the inscription is the whole saying.
+        for glyph in ['滞', '动', '必', '中'] {
+            assert!(
+                !screen.contains(glyph),
+                "the lower line is gone, but {glyph} is still here:\n{screen}"
+            );
         }
 
         // Narrower: the ornaments go, then the halves shorten; the mark stays.

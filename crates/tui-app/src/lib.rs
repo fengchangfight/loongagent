@@ -2639,23 +2639,27 @@ mod tests {
     #[test]
     fn the_mouse_can_be_handed_back_to_the_terminal() {
         let mut app = App::new("s", "v");
+        // Off by default: the terminal's own selection is not something a TUI may take
+        // away in exchange for a wheel.
+        assert!(!app.mouse, "does not track the mouse unless asked");
+
+        type_text(&mut app, "/mouse");
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::Mouse(true));
+        assert!(app.mouse);
         assert!(
-            app.mouse,
-            "tracks the mouse by default, so the wheel scrolls here"
+            app.lines.iter().any(|line| line.contains("wheel scrolls here")),
+            "and says what it costs: {:?}",
+            app.lines
         );
+
         type_text(&mut app, "/mouse");
         assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::Mouse(false));
         assert!(!app.mouse);
         assert!(
-            app.lines
-                .iter()
-                .any(|line| line.contains("select and copy")),
-            "and says what that gives you: {:?}",
+            app.lines.iter().any(|line| line.contains("drag to select")),
+            "and says what came back: {:?}",
             app.lines
         );
-        type_text(&mut app, "/mouse");
-        assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::Mouse(true));
-        assert!(app.mouse);
     }
 
     #[test]

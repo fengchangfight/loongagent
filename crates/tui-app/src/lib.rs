@@ -61,12 +61,17 @@ pub enum Action {
     Quit,
 }
 
-/// The seal: red ground, gold character — the traditional 龍, which is what a firm
-/// mark looks like. Three rows so the character sits *in* the square rather than
-/// beside it.
-const SEAL_ROWS: u16 = 3;
-const SEAL_RED: Color = Color::Rgb(150, 24, 24);
-const SEAL_GOLD: Color = Color::Rgb(255, 206, 84);
+/// A little dragon in kaomoji: horns, a snout, whiskers and a tail, drawn with
+/// punctuation in the interface's own palette rather than a font glyph in someone
+/// else's colours. Two rows, because a mark that takes a third of the screen is a
+/// decoration that costs more than it gives.
+const MARK_ROWS: u16 = 2;
+/// Teal: the colour the transcript already uses for the agent doing something.
+const MARK_INK: Color = Color::Rgb(86, 182, 194);
+/// Violet: the colour it uses for policy — the second voice in the drawing.
+const MARK_ACCENT: Color = Color::Rgb(138, 138, 214);
+/// Where the name starts, so the two rows line up.
+const MARK_TEXT_COLUMN: usize = 24;
 
 /// What a line is, for colour. Classified from the line's own vocabulary — the renderer
 /// that produces those strings lives in `loong-tui`, next door, and a test renders real
@@ -239,53 +244,45 @@ impl App {
     /// Whether there is room for the mark. A logo that squeezes the conversation is a
     /// decoration that costs more than it gives, so a small terminal simply has none.
     fn show_banner(&self, area: ratatui::layout::Rect) -> bool {
-        self.logo && area.height >= 18 && area.width >= 44
+        self.logo && area.height >= 18 && area.width >= 48
     }
 
-    /// The seal, and the name beside it.
+    /// The dragon, and the name beside it.
     fn draw_banner(&self, frame: &mut Frame, area: ratatui::layout::Rect) {
-        let seal = Style::default()
-            .bg(SEAL_RED)
-            .fg(SEAL_GOLD)
-            .add_modifier(Modifier::BOLD);
-        let ground = Style::default().bg(SEAL_RED);
-        // Ten columns wide, three rows tall: a red ground with the character centred in
-        // it, which is what a seal is.
-        let rows = [
-            Line::from(Span::styled("██████████", ground)),
-            Line::from(vec![
-                Span::styled("███ ", ground),
-                Span::styled("龍", seal),
-                Span::styled(" ███", ground),
-            ]),
-            Line::from(Span::styled("██████████", ground)),
-        ];
-        let mut lines: Vec<Line> = Vec::new();
-        for (index, row) in rows.into_iter().enumerate() {
-            // The middle two rows carry the name, so the mark and the word sit on one
-            // baseline instead of the text floating beside a block.
-            let companion = match index {
-                0 => Some((
+        let ink = Style::default().fg(MARK_INK);
+        let accent = Style::default().fg(MARK_ACCENT);
+        let rows: [(Vec<Span>, Option<(String, Style)>); 2] = [
+            (
+                vec![Span::styled("  ﾉﾉ ⌒ ⌒ ﾉﾉ", ink), Span::styled("彡", accent)],
+                Some((
                     "loongagent".to_string(),
                     Style::default()
                         .fg(Color::White)
                         .add_modifier(Modifier::BOLD),
                 )),
-                1 => Some((
+            ),
+            (
+                vec![
+                    Span::styled(" （ ˶•ㅂ•˶ ）", ink),
+                    Span::styled("彡〜〜〜", accent),
+                ],
+                Some((
                     "a firm-internal coding agent".to_string(),
                     Style::default().fg(Color::DarkGray),
                 )),
-                _ => None,
-            };
-            match companion {
-                Some((text, style)) => {
-                    let mut spans = row.spans;
-                    spans.push(Span::raw("  "));
-                    spans.push(Span::styled(text, style));
-                    lines.push(Line::from(spans));
-                }
-                None => lines.push(row),
+            ),
+        ];
+
+        let mut lines: Vec<Line> = Vec::new();
+        for (mut spans, companion) in rows {
+            let drawn: usize = spans.iter().map(|span| span.content.chars().count()).sum();
+            if let Some((text, style)) = companion {
+                spans.push(Span::raw(
+                    " ".repeat(MARK_TEXT_COLUMN.saturating_sub(drawn)),
+                ));
+                spans.push(Span::styled(text, style));
             }
+            lines.push(Line::from(spans));
         }
         frame.render_widget(Paragraph::new(lines), area);
     }
@@ -809,7 +806,7 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(if self.show_banner(conversation) {
-                    SEAL_ROWS + 1
+                    MARK_ROWS + 1
                 } else {
                     0
                 }),
@@ -2182,23 +2179,19 @@ mod tests {
     fn the_mark_is_drawn_and_can_be_put_away() {
         let mut app = App::new("s", "v");
         let screen = draw(&mut app, 100, 30);
-        assert!(
-            screen.contains("龍"),
-            "the traditional character:\n{screen}"
-        );
+        assert!(screen.contains("ﾉﾉ"), "horns:\n{screen}");
+        assert!(screen.contains("ㅂ"), "a snout:\n{screen}");
+        assert!(screen.contains("彡"), "whiskers:\n{screen}");
         assert!(screen.contains("loongagent"), "{screen}");
         assert!(
             screen.contains("firm-internal coding agent"),
             "and what it is:\n{screen}"
         );
-        // The character sits inside a seal, not beside it: the interior row is
-        // `███ 龍 ███`.
-        // The cell buffer pads the wide character with a continuation cell, so the
-        // rendered string has an extra space after 龍; the seal's left edge is what
-        // proves it is inside the square rather than beside it.
+        // Nothing shouts: no filled block, no colour of its own — the drawing is
+        // punctuation in the interface's palette.
         assert!(
-            screen.lines().any(|line| line.contains("███ 龍")),
-            "{screen}"
+            !screen.contains("██"),
+            "the old seal's blocks are gone:\n{screen}"
         );
 
         // `/logo` puts it away, and nothing else moves.
@@ -2206,7 +2199,7 @@ mod tests {
         assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::None);
         assert!(!app.logo);
         let screen = draw(&mut app, 100, 30);
-        assert!(!screen.contains("龍"), "{screen}");
+        assert!(!screen.contains("ﾉﾉ"), "{screen}");
         assert!(
             screen.contains("enter send"),
             "the box and keys remain:\n{screen}"
@@ -2218,7 +2211,7 @@ mod tests {
         // A logo that squeezes the conversation costs more than it gives.
         let mut app = App::new("s", "v");
         let screen = draw(&mut app, 36, 12);
-        assert!(!screen.contains("龍"), "{screen}");
+        assert!(!screen.contains("ﾉﾉ"), "{screen}");
         assert!(screen.contains("enter send"), "{screen}");
     }
 

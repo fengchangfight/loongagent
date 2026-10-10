@@ -263,12 +263,20 @@ helper throws styles away on purpose, so there is a second helper that does not)
 
 ### The mark
 
-Three rows at the top when the terminal is at least 44 columns and 18 rows: a red seal
-with the traditional **龍** in gold, the wordmark beside it. The character is the
-terminal's own glyph rather than hand-drawn blocks — a font renders 龍 better than any
-fixed bitmap this repository could carry, and the seal gives it the frame that makes it a
-mark rather than a floating character. `/logo` puts it away; a small terminal never gets
-it, because a logo that squeezes the conversation costs more than it gives.
+Two rows at the top when the terminal is at least 48 columns and 18 rows: a little dragon
+drawn in **kaomoji** — horns, a snout, whiskers, a tail — with the wordmark beside it.
+
+```
+  ﾉﾉ ⌒ ⌒ ﾉﾉ彡             loongagent
+ （ ˶•ㅂ•˶ ）彡〜〜〜        a firm-internal coding agent
+```
+
+It is punctuation, in the interface's own palette: the drawing in the same teal the
+transcript uses for the agent doing something, the whiskers in its policy violet, the name
+in white and the tagline in dark grey. An earlier version was a red-and-gold seal around
+the glyph 龍 — accurate, and too loud: a filled block of someone else's colours above a
+quiet transcript. `/logo` puts it away, and a small terminal never gets it, because a mark
+that squeezes the conversation costs more than it gives.
 
 ### Watching a turn happen
 

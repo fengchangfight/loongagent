@@ -115,6 +115,19 @@ pub struct TurnOutcome {
     pub interrupted: bool,
 }
 
+/// How many model calls one turn may take before the loop gives up.
+///
+/// A **step is a model completion**, and every tool round trip costs one: read, edit, run,
+/// fix is four, and a page of HTML that has to actually work is dozens. The limit is there
+/// to stop a model that *spins* — the same call over and over — not to decide how large a
+/// task may be, so it has to sit well above what honest work needs. It was 8, which is how
+/// an agent writing one file came to die mid-edit with "stopped after 8 steps".
+///
+/// A step is not how cost is bounded: the token budget and compaction are, and those are
+/// what a person actually chooses. This is the backstop behind them, and a config layer may
+/// still narrow it (`max_steps`, ADR-0008 §2).
+pub const DEFAULT_MAX_STEPS: usize = 100;
+
 #[derive(Debug, Clone)]
 pub struct KernelConfig {
     pub cwd: PathBuf,
@@ -140,7 +153,7 @@ impl KernelConfig {
             keep_newest_tokens: 20_000,
             compact_at_percent: 80,
             settings: Profile::default(),
-            max_steps: 8,
+            max_steps: DEFAULT_MAX_STEPS,
         }
     }
 }
@@ -1479,7 +1492,8 @@ impl Kernel {
             }
         }
         let note = format!(
-            "stopped after {} steps without finishing (step limit)",
+            "stopped after {} steps without finishing (step limit) — reply to continue, or \
+             raise `max_steps` in the configuration",
             self.config.max_steps
         );
         events.push(self.record_assistant(Some(&note), &[])?);
@@ -2321,6 +2335,37 @@ mod tests {
         let out = k.submit("go").unwrap();
         assert_eq!(out.steps, 3);
         assert!(out.final_text.unwrap().contains("step limit"));
+    }
+
+    #[test]
+    fn the_default_step_limit_leaves_room_for_a_real_task() {
+        // Writing one page is read, write, run, fix, repeat — dozens of model calls, not
+        // eight. A default that ordinary work can reach is the bug: the agent dies
+        // mid-edit and the transcript blames a "step limit". The limit is deliberately not
+        // set here, so it is the **default** under test.
+        let t = Temp::new();
+        std::fs::write(t.dir.join("a.txt"), "x").unwrap();
+        let rounds = 20;
+        let model = ScriptedModel::new(
+            (0..rounds)
+                .map(|round| {
+                    response(
+                        vec![call(
+                            &format!("c{round}"),
+                            "read_file",
+                            json!({"path": "a.txt"}),
+                        )],
+                        None,
+                    )
+                })
+                .collect(),
+        );
+        let config = KernelConfig::new(&t.dir);
+        let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+        let out = k.submit("write the page").unwrap();
+        // The script runs out after twenty rounds; ScriptedModel then answers "done".
+        assert_eq!(out.steps, rounds + 1, "{out:?}");
+        assert_eq!(out.final_text.as_deref(), Some("done"));
     }
 
     #[test]

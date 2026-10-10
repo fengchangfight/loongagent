@@ -660,7 +660,12 @@ binary the TUI spawns as its server (used by the end-to-end test).
   contradicts the schema is rejected.
 - **The loop**: user → model → tool call → PDP verdict → execute / ask / deny →
   results fed back, bounded by a step limit. Approvals stop the turn and resume
-  from an event.
+  from an event. A **step is a model completion**, so every tool round trip costs one: the
+  default (`DEFAULT_MAX_STEPS`, 100) is a backstop against a model that *spins*, not a
+  judgement about how large a task may be. It was 8, which is how an agent writing one page
+  came to stop mid-edit — read, edit, run, fix is already four of them. Cost is bounded by
+  the token budget and compaction, which are the limits a person actually chooses, and a
+  config layer may still narrow `max_steps` (ADR-0008 §2).
 - **The ledger**: every block that reaches the model is an entry with category,
   source, tokens and lifetime; eviction drops stale tool output before prose and
   never touches pinned entries; `explain()` answers "why is this in my context?".

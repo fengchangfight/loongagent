@@ -21,9 +21,30 @@ pub struct Client<T: Transport> {
     transport: T,
     session_id: String,
     next_id: u64,
-    pending_approval: Option<String>,
+    pending: Option<PendingDecision>,
+    /// The `tool.call` seen most recently, kept so an approval can name the call it is about.
+    last_tool_call: Option<Value>,
     /// Whether the last submitted prompt was accepted (a hook can refuse one).
     last_accepted: bool,
+}
+
+/// A decision the session is waiting for, with the detail needed to make one.
+///
+/// Assembled from the events as they are parsed rather than by whoever asked, because a
+/// question can be met in two places: a submit that stops for it, and a **resume** after the
+/// previous answer, which is where the next one is usually met. Only the first of those had a
+/// caller assembling this, so the second question arrived with no detail at all — the panel
+/// said "waiting for the details" about details the connection already had.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingDecision {
+    pub request_id: String,
+    /// The action class that needs a verdict.
+    pub class: String,
+    /// Why the policy asked, in its own words.
+    pub reason: String,
+    /// The tool the call is on, and its arguments: what is about to happen.
+    pub tool: String,
+    pub args: String,
 }
 
 /// Presentation only: turn one event into a line for a human.
@@ -381,7 +402,8 @@ impl<T: Transport> Client<T> {
             transport,
             session_id: session_id.into(),
             next_id: 1,
-            pending_approval: None,
+            pending: None,
+            last_tool_call: None,
             last_accepted: true,
         }
     }
@@ -391,7 +413,14 @@ impl<T: Transport> Client<T> {
     }
 
     pub fn pending_approval(&self) -> Option<&str> {
-        self.pending_approval.as_deref()
+        self.pending
+            .as_ref()
+            .map(|pending| pending.request_id.as_str())
+    }
+
+    /// The same question with the detail a person needs to answer it — however it was met.
+    pub fn pending_decision(&self) -> Option<&PendingDecision> {
+        self.pending.as_ref()
     }
 
     /// False when a `user_prompt_submit` hook refused the turn. The reason
@@ -583,7 +612,14 @@ impl<T: Transport> Client<T> {
             serde_json::to_value(params).unwrap(),
             &mut |_, _| {},
         )?;
-        self.pending_approval = None;
+        // Only *this* question is answered. A new one can be met while resuming from this
+        // one — the turn continues, another tool needs a verdict — and clearing
+        // unconditionally threw that question away. Nothing said so: the panel simply never
+        // appeared for the second question of a session, while the transcript showed the
+        // `! approval required` line for it.
+        if self.pending_approval() == Some(request_id) {
+            self.pending = None;
+        }
         Ok(lines)
     }
 
@@ -627,14 +663,42 @@ impl<T: Transport> Client<T> {
                 if notification.method == loong_protocol::EVENT_NOTIFICATION {
                     // State the connection needs to keep, which rendering does not own.
                     if notification.params.get("kind").and_then(|k| k.as_str())
+                        == Some(gen::event::TOOL_CALL)
+                    {
+                        self.last_tool_call = notification.params.get("data").cloned();
+                    }
+                    if notification.params.get("kind").and_then(|k| k.as_str())
                         == Some(gen::event::APPROVAL_REQUESTED)
                     {
-                        self.pending_approval = notification
+                        let data = notification
                             .params
                             .get("data")
-                            .and_then(|data| data.get("request_id"))
-                            .and_then(|id| id.as_str())
-                            .map(|id| id.to_string());
+                            .cloned()
+                            .unwrap_or(Value::Null);
+                        let call = self.last_tool_call.clone().unwrap_or(Value::Null);
+                        let text = |value: &Value, key: &str| {
+                            value
+                                .get(key)
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string()
+                        };
+                        self.pending = Some(PendingDecision {
+                            request_id: text(&data, "request_id"),
+                            class: match text(&data, "action_class") {
+                                class if class.is_empty() => "?".to_string(),
+                                class => class,
+                            },
+                            reason: text(&data, "reason"),
+                            tool: match text(&call, "tool") {
+                                tool if tool.is_empty() => "?".to_string(),
+                                tool => tool,
+                            },
+                            args: call
+                                .get("args")
+                                .map(|args| args.to_string())
+                                .unwrap_or_default(),
+                        });
                     }
                     if let Some(text) = render_event(&notification.params) {
                         rendered.push(text);
@@ -920,6 +984,55 @@ mod tests {
                 "it says hello".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn a_question_met_while_resuming_carries_its_detail_too() {
+        // The second question of a session is usually met while *resuming* from the answer to
+        // the first: the turn continues, runs another tool, and stops again. That path has no
+        // submit callback, so whoever asked for the detail found none — the panel said
+        // "waiting for the details" about details the connection had already parsed. The
+        // client assembles it from the events instead, so both paths are the same.
+        let fake = Fake::with(vec![
+            event(
+                1,
+                "tool.call",
+                json!({"call_id": "c1", "tool": "shell", "args": {"command": "ls"}}),
+            ),
+            event(
+                2,
+                "approval.requested",
+                json!({"request_id": "appr-1", "action_class": "out_of_bounds", "reason": "shell: out_of_bounds is Ask"}),
+            ),
+            response(2, json!({"turn_id": 1, "accepted": false})),
+            // The resume: another call, and the next question about it.
+            event(
+                3,
+                "tool.call",
+                json!({"call_id": "c2", "tool": "write_file", "args": {"path": "game.html", "content": "<html>"}}),
+            ),
+            event(
+                4,
+                "approval.requested",
+                json!({"request_id": "appr-2", "action_class": "out_of_bounds", "reason": "write_file: out_of_bounds is Ask"}),
+            ),
+            response(3, json!({"turn_id": 1, "accepted": true})),
+        ]);
+        let mut client = Client::new(fake, "s-1");
+        client.submit("go").unwrap();
+        let first = client.pending_decision().expect("the first question");
+        assert_eq!(first.request_id, "appr-1");
+        assert_eq!(first.tool, "shell", "named by the call it is about");
+        assert!(first.args.contains("ls"));
+        client
+            .respond("appr-1", true, gen::ApprovalScope::Once, None)
+            .unwrap();
+        let second = client.pending_decision().expect("the second question");
+        assert_eq!(second.request_id, "appr-2");
+        assert_eq!(second.class, "out_of_bounds");
+        assert!(second.reason.contains("write_file"), "{second:?}");
+        assert_eq!(second.tool, "write_file", "{second:?}");
+        assert!(second.args.contains("game.html"), "{second:?}");
     }
 
     #[test]

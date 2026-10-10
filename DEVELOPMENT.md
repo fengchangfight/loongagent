@@ -440,6 +440,20 @@ clipped to 76 characters — 150 columns — so it wrapped onto three rows and p
 of the panel, which is how a menu comes to look like the information above it. `one_line`
 becomes one line now, the class-and-tool row is clipped like the rest (a tool name can be
 anything), and the paragraph is rendered without wrapping so a miscount cannot hide an answer.
+A squeezed panel gives up its **details** before its answers, because a question you cannot
+answer is worse than one without context.
+
+A question is met in two places — a submit that stops for it, and a **resume** after the
+previous answer, which is where the next one usually appears, since answering continues the
+turn rather than ending it — and both have to produce the same panel. For a while only the
+first did. `Client::respond` cleared whatever was pending after every answer, *including a
+question it had just met while resuming*, so the client reported nothing pending, the worker
+sent `State { pending: None }`, and no menu was drawn at all; the transcript still showed
+`! approval required …` for a decision the interface would not let you make. Two things fixed
+it: `respond` clears only the question it answered, and the detail is assembled from the
+parsed events (`PendingDecision`, naming the tool and its arguments from the `tool.call` it is
+about) and sent whenever the pending question changes — not inside the submit callback, which
+the resume path never runs.
 
 `/exit` is in that table rather than in the skills because quitting is the surface's
 business: a command that means "stop this program" has no meaning to a model. Everything

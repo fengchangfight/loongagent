@@ -539,9 +539,11 @@ impl App {
                 MARK_QUIET,
             ))),
         }
-        // The answers are the point: keep them, drop details if the box is short.
+        // The answers are the point: keep them, and drop details first if the box is short.
+        // The `.max(1)` that used to be here kept one detail *even when there was no room for
+        // it*, so a squeezed panel lost an answer instead of a piece of context.
         let answers = Self::options().len();
-        let keep = room.saturating_sub(answers).max(1).min(details.len());
+        let keep = room.saturating_sub(answers).min(details.len());
         let mut lines: Vec<Line> = details.into_iter().take(keep).collect();
         for (index, (label, granted, _)) in Self::options().into_iter().enumerate() {
             let chosen = index == self.choice;
@@ -1537,7 +1539,14 @@ impl App {
                 Constraint::Length(if self.pending.is_some() {
                     // Two borders, one line per detail, three answers. Every detail is
                     // clipped to the width and never wrapped, so this is the whole height.
-                    DECISION_ROWS.min(conversation.height.saturating_sub(8))
+                    //
+                    // `DECISION_ROWS` is what it would like; the floor is the answers
+                    // themselves, because a question you cannot answer is worse than one
+                    // without context. The transcript gives up its rows first.
+                    let floor = 2 + Self::options().len() as u16;
+                    DECISION_ROWS
+                        .min(conversation.height.saturating_sub(8))
+                        .max(floor.min(conversation.height))
                 } else {
                     0
                 }),
@@ -1754,6 +1763,9 @@ pub fn spawn_worker<T: Transport + Send + 'static>(
     std::thread::spawn(move || {
         // Where the next fold the turn writes will sit among the ones already on screen.
         let mut folds = folded;
+        // The decision whose detail has been sent, so re-stating the same one does not
+        // re-send it: the panel would lose the highlighted answer on every state change.
+        let mut asked: Option<String> = None;
         while let Ok(command) = commands.recv() {
             let mut refreshed = false;
             let result = match command {
@@ -1761,8 +1773,9 @@ pub fn spawn_worker<T: Transport + Send + 'static>(
                     // Deltas go out as they arrive; the finished lines follow.
                     let _ = events.send(FromWorker::Lines(Vec::new()));
                     let mut renderer = loong_tui::Renderer::default();
-                    // The tool a request is about, so the decision panel can show it.
-                    let mut last_call: Option<serde_json::Value> = None;
+                    // What the turn is doing is named by the call events themselves. The
+                    // detail of a decision is assembled by the client and sent after every
+                    // command, so it covers the resume path too.
                     let outcome = client.submit_with(&text, &mut |method, params| {
                         if method == loong_schema::generated::notification::MODEL_DELTA {
                             if let Some(piece) = params.get("text").and_then(|t| t.as_str()) {
@@ -1805,37 +1818,6 @@ pub fn spawn_worker<T: Transport + Send + 'static>(
                             }
                             if kind == loong_schema::generated::event::TOOL_CALL {
                                 let _ = events.send(FromWorker::Working(line.clone()));
-                                last_call = params.get("data").cloned();
-                            }
-                            if kind == loong_schema::generated::event::APPROVAL_REQUESTED {
-                                let data = params.get("data").cloned().unwrap_or_default();
-                                let call = last_call.clone().unwrap_or_default();
-                                let _ = events.send(FromWorker::Approval(Box::new(ApprovalInfo {
-                                    request_id: data
-                                        .get("request_id")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or_default()
-                                        .to_string(),
-                                    class: data
-                                        .get("action_class")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("?")
-                                        .to_string(),
-                                    reason: data
-                                        .get("reason")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or_default()
-                                        .to_string(),
-                                    tool: call
-                                        .get("tool")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("?")
-                                        .to_string(),
-                                    args: call
-                                        .get("args")
-                                        .map(|args| args.to_string())
-                                        .unwrap_or_default(),
-                                })));
                             }
                             let _ = events.send(FromWorker::Lines(vec![line]));
                         }
@@ -1918,6 +1900,25 @@ pub fn spawn_worker<T: Transport + Send + 'static>(
             if !refreshed {
                 if let Ok(explained) = client.context() {
                     let _ = events.send(FromWorker::Context(Box::new(explained)));
+                }
+            }
+            // The panel's detail comes from here, after the command, rather than from inside
+            // the submit callback. A question is met in two places — a submit that stops for
+            // it, and a resume after the previous answer, which is where the next one usually
+            // appears — and only the first of those ran that callback. That is why the second
+            // question used to arrive with no detail at all, while the first was fine.
+            let pending = client.pending_decision().cloned();
+            let asking = pending.as_ref().map(|decision| decision.request_id.clone());
+            if asking != asked {
+                asked = asking;
+                if let Some(decision) = pending {
+                    let _ = events.send(FromWorker::Approval(Box::new(ApprovalInfo {
+                        request_id: decision.request_id,
+                        class: decision.class,
+                        reason: decision.reason,
+                        tool: decision.tool,
+                        args: decision.args,
+                    })));
                 }
             }
             let _ = events.send(FromWorker::State {
@@ -2486,6 +2487,31 @@ mod tests {
             clipped.trim_end_matches('│').trim_end().ends_with('…'),
             "a clipped detail says so, inside the box: {clipped:?}"
         );
+    }
+
+    #[test]
+    fn a_squeezed_panel_gives_up_its_details_before_its_answers() {
+        // A question you cannot answer is worse than one without context, so the details are
+        // what gives way. The panel used to keep at least one detail line *even when there was
+        // no room for it*, and on a short terminal that cost the reader an answer.
+        for height in 12..=24u16 {
+            let mut app = App::new("s", "v");
+            app.pending = Some("appr-1".to_string());
+            app.approval = Some(Box::new(ApprovalInfo {
+                request_id: "appr-1".to_string(),
+                class: "out_of_bounds".to_string(),
+                reason: "shell: out_of_bounds is Ask by builtin:out_of_bounds".to_string(),
+                tool: "shell".to_string(),
+                args: "{\"command\":\"ls\"}".to_string(),
+            }));
+            let screen = draw(&mut app, 80, height);
+            for answer in ["Allow once", "Allow in this project", "Deny"] {
+                assert!(
+                    screen.contains(answer),
+                    "at {height} rows, {answer} is missing:\n{screen}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -3825,6 +3851,108 @@ mod tests {
             draw(&mut app, 60, 20).contains("hidden 50"),
             "and the screen shows what was hidden"
         );
+    }
+
+    #[test]
+    fn the_second_question_of_a_session_reaches_the_screen() {
+        // Reported twice: the first approval was fine and the second was invisible. Answering
+        // a question *resumes* the turn, and the next question is usually met right there —
+        // but the client cleared whatever was pending after every answer, so the question it
+        // had just met was thrown away and the worker reported "nothing pending". The panel
+        // was never drawn; the transcript still showed the `! approval required` line for it.
+        struct Queue(std::cell::RefCell<std::collections::VecDeque<String>>);
+        impl loong_tui::Transport for Queue {
+            fn send(&mut self, _line: &str) -> Result<(), String> {
+                Ok(())
+            }
+            fn recv_line(&mut self) -> Result<Option<String>, String> {
+                Ok(self.0.borrow_mut().pop_front())
+            }
+        }
+        let line = |value: serde_json::Value| value.to_string();
+        // The worker asks for the context view after every command, so a canned answer keeps
+        // the queue aligned with the requests that are actually sent.
+        let context_result = || {
+            line(serde_json::json!({"jsonrpc": "2.0", "id": 9, "result": {
+                "context_tokens": 10, "budget_tokens": 0, "messages": 1, "tools": 1,
+                "compactions": 0, "categories": [], "entries": []}}))
+        };
+        let queue = vec![
+            line(
+                serde_json::json!({"jsonrpc": "2.0", "method": "event", "params": {
+                "seq": 1, "kind": "tool.call",
+                "data": {"call_id": "c1", "tool": "shell", "args": {"command": "ls"}}}}),
+            ),
+            line(
+                serde_json::json!({"jsonrpc": "2.0", "method": "event", "params": {
+                "seq": 2, "kind": "approval.requested",
+                "data": {"request_id": "appr-1", "action_class": "out_of_bounds",
+                         "reason": "shell: out_of_bounds is Ask by builtin:out_of_bounds"}}}),
+            ),
+            line(
+                serde_json::json!({"jsonrpc": "2.0", "id": 1, "result": {"turn_id": 1, "accepted": false}}),
+            ),
+            context_result(),
+            // The resume: another call, and the next question about it. Answering the first
+            // one continues the turn; it does not end it.
+            line(
+                serde_json::json!({"jsonrpc": "2.0", "method": "event", "params": {
+                "seq": 3, "kind": "tool.call",
+                "data": {"call_id": "c2", "tool": "write_file",
+                         "args": {"path": "game.html", "content": "<html>"}}}}),
+            ),
+            line(
+                serde_json::json!({"jsonrpc": "2.0", "method": "event", "params": {
+                "seq": 4, "kind": "approval.requested",
+                "data": {"request_id": "appr-2", "action_class": "out_of_bounds",
+                         "reason": "write_file: out_of_bounds is Ask by builtin:out_of_bounds"}}}),
+            ),
+            line(
+                serde_json::json!({"jsonrpc": "2.0", "id": 2, "result": {"turn_id": 1, "accepted": true}}),
+            ),
+            context_result(),
+        ];
+        let client = Client::new(Queue(std::cell::RefCell::new(queue.into())), "s-1");
+        let (to_worker, from_worker) = spawn_worker(client, 0);
+        let mut app = App::new("s-1", "v");
+        app.busy = true;
+        to_worker.send(ToWorker::Submit("go".to_string())).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline && app.pending.is_none() {
+            app.drain(&from_worker);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(app.pending.as_deref(), Some("appr-1"));
+        assert!(app.approval.is_some(), "the first question has its detail");
+
+        // Answer it, exactly as the run loop would.
+        match app.handle_key(key(KeyCode::Enter)) {
+            Action::Send(command) => to_worker.send(command).unwrap(),
+            other => panic!("expected an answer, got {other:?}"),
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline && app.pending.as_deref() != Some("appr-2") {
+            app.drain(&from_worker);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            app.pending.as_deref(),
+            Some("appr-2"),
+            "the second question is still a question"
+        );
+        let second = app
+            .approval
+            .as_ref()
+            .expect("and it has its detail, like the first");
+        assert_eq!(second.tool, "write_file", "{second:?}");
+        assert!(second.args.contains("game.html"), "{second:?}");
+
+        let screen = draw(&mut app, 100, 30);
+        assert!(screen.contains("needs your decision"), "{screen}");
+        assert!(screen.contains("write_file"), "{screen}");
+        for answer in ["Allow once", "Allow in this project", "Deny"] {
+            assert!(screen.contains(answer), "{answer} is on screen: {screen}");
+        }
     }
 
     #[test]

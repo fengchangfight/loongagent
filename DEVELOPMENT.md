@@ -290,22 +290,29 @@ owner specified, kept verbatim:
 ╰───────༻ ᛭ ༺────────────╯
 ```
 
-A sealed frame around the traditional 龍, with the wordmark beside the top rule and the
-owner's inscription beside the character:
+A frame with room to be imposing when the terminal has it — five rows, double rules, the
+character centred with air around it, and the owner's ornaments on the top and bottom rules:
 
-    ╭───────༺ ᛭ ༻────────────╮          loongagent
-    ╞═══════【 龍 】════════════╡       ⟬ ᛭ 吞云吐雾 ⋄ 隐介藏形 ᛭ ⟭
-    ╰───────༻ ᛭ ༺────────────╯
+    ╔═══════════════༺ ᛭ ༻═══════════════╗
+    ║                                   ║     loongagent
+    ║               【 龍 】              ║
+    ║                                   ║     ⟬ ᛭ 兴云吐雾 ⋄ 隐介藏形 ᛭ ⟭
+    ╚═══════════════༻ ᛭ ༺═══════════════╝
 
-The inscription's ornaments take the frame's colour and its words the terminal's foreground,
-so it reads as what the seal is stamped with. There is **nothing on the bottom rule**: an
-earlier version explained the dragon there too (`能大能小 · 不滞于形 · 动则必中`) and the
-owner's verdict was "too wordy" — the inscription already carries the thought, and a mark
-that explains itself twice talks too much.
+The words are the owner's and unchanged; only the frame grew. The rules are **built** from the
+interior width (`MARK_INNER`) with the ornaments measured at draw time, so the four sides line
+up even when a rune or a Tibetan mark measures differently than expected on a given terminal.
+`/logo` puts it away, and a terminal under 52 columns by 22 rows never gets it — five rows is
+a real cost to the conversation, so it is only paid where there is room.
 
-The inscription takes the first form that fits the columns it has — with ornaments (28),
-without them (19), then four characters (8) — so a narrow terminal drops the ornaments first
-and keeps the mark.
+The inscription takes the first form that fits — with ornaments (28), without them (19), then
+four characters (8) — and there is nothing on the bottom rule: the inscription carries the
+thought, and a mark that explains itself twice talks too much.
+
+**Colour comes from the theme, not from us.** `龍` and the wordmark are the terminal's own
+foreground in bold; the frame is ANSI magenta; the transcript's accents are ANSI cyan and
+magenta. Nothing in the palette is an absolute RGB or a literal white — the owner runs a
+light background, where `Color::White` is invisible and a fixed pale teal is barely there.
 
 ### Watching a turn happen
 

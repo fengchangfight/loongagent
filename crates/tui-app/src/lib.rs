@@ -153,11 +153,7 @@ pub struct ApprovalInfo {
 /// punctuation in the interface's own palette rather than a font glyph in someone
 /// else's colours. Two rows, because a mark that takes a third of the screen is a
 /// decoration that costs more than it gives.
-const MARK_ROWS: u16 = 3;
-const MARK_TOP: &str = "╭───────༺ ᛭ ༻────────────╮";
-const MARK_MID_LEFT: &str = "╞═══════";
-const MARK_MID_RIGHT: &str = "════════════╡";
-const MARK_BOTTOM: &str = "╰───────༻ ᛭ ༺────────────╯";
+const MARK_ROWS: u16 = 5;
 /// The transcript's accent for "the agent is doing something".
 ///
 /// Named colours, not RGB: a fixed teal or violet is chosen for one background and
@@ -172,7 +168,10 @@ const MARK_QUIET: Style = Style::new().fg(Color::Reset).add_modifier(Modifier::D
 /// inventing a colour that may vanish into the background.
 const MARK_TEXT: Style = Style::new().fg(Color::Reset).add_modifier(Modifier::BOLD);
 /// Where the name starts, so the two rows line up.
-const MARK_TEXT_COLUMN: usize = 36;
+const MARK_TEXT_COLUMN: usize = 39;
+/// Interior columns of the frame. The rules are built from it, so the top and bottom lines
+/// line up with the sides whatever the ornaments measure on a given terminal.
+const MARK_INNER: usize = 35;
 
 /// What the mark says about itself, widest first. The dragon of 煮酒论英雄: great enough to
 /// swallow cloud, small enough to hide in a scale — and, being neither, quick and exact.
@@ -190,9 +189,9 @@ const MARK_SAYINGS: [&[(usize, &str)]; 3] = [
 /// alphabet as the frame, a `⋄` between the two halves. It sits beside 龍, where it reads as
 /// the inscription the character is stamped with.
 const MARK_SUBLINE: [(usize, &str); 3] = [
-    (28, "⟬ ᛭ 吞云吐雾 ⋄ 隐介藏形 ᛭ ⟭"),
-    (19, "吞云吐雾 ⋄ 隐介藏形"),
-    (8, "吞云吐雾"),
+    (28, "⟬ ᛭ 兴云吐雾 ⋄ 隐介藏形 ᛭ ⟭"),
+    (19, "兴云吐雾 ⋄ 隐介藏形"),
+    (8, "兴云吐雾"),
 ];
 /// Violet, for something that wants an answer rather than something that went wrong.
 const MARK_ACCENT_STYLE: Style = Style::new().fg(MARK_ACCENT);
@@ -389,7 +388,8 @@ impl App {
     /// Whether there is room for the mark. A logo that squeezes the conversation is a
     /// decoration that costs more than it gives, so a small terminal simply has none.
     fn show_banner(&self, area: ratatui::layout::Rect) -> bool {
-        self.logo && area.height >= 18 && area.width >= 48
+        // Five rows and a gap: only where the conversation still has room.
+        self.logo && area.height >= 22 && area.width >= 52
     }
 
     /// The question, its detail, and the three answers — a menu, because a decision worth
@@ -467,12 +467,11 @@ impl App {
         })
     }
 
-    /// The mark, character for character as the owner asked for it, with the sayings beside
-    /// it. Only the colours are ours.
+    /// The mark: the owner's frame and ornaments, given room to be imposing — five rows, a
+    /// double rule, and the character centred with air around it. The words are unchanged.
     fn draw_banner(&self, frame: &mut Frame, area: ratatui::layout::Rect) {
         use unicode_width::UnicodeWidthStr;
         let frame_ink = Style::default().fg(MARK_ACCENT);
-        let quiet = MARK_QUIET;
         let room_for = |drawn: usize| -> usize {
             (area.width as usize).saturating_sub(MARK_TEXT_COLUMN.max(drawn) + 2)
         };
@@ -483,7 +482,7 @@ impl App {
                 .map(|(_, text)| {
                     vec![Span::styled(
                         text.to_string(),
-                        if row == 0 { MARK_TEXT } else { quiet },
+                        if row == 0 { MARK_TEXT } else { MARK_QUIET },
                     )]
                 })
                 .unwrap_or_default()
@@ -494,37 +493,59 @@ impl App {
                 // makes it read as an inscription rather than a caption.
                 Some((_, text)) if *text == MARK_SUBLINE[0].1 => vec![
                     Span::styled("⟬ ᛭ ".to_string(), frame_ink),
-                    Span::styled("吞云吐雾".to_string(), MARK_TEXT),
+                    Span::styled("兴云吐雾".to_string(), MARK_TEXT),
                     Span::styled(" ⋄ ".to_string(), frame_ink),
                     Span::styled("隐介藏形".to_string(), MARK_TEXT),
                     Span::styled(" ᛭ ⟭".to_string(), frame_ink),
                 ],
-                Some((_, text)) => vec![Span::styled(text.to_string(), quiet)],
+                Some((_, text)) => vec![Span::styled(text.to_string(), MARK_QUIET)],
                 None => Vec::new(),
             }
         };
 
-        let art: [(Vec<Span>, Vec<Span>); 3] = [
+        // Rules built from the interior width, so every row of the frame is the same length
+        // even when an ornament measures differently than expected.
+        let rule = |ornament: &str, closer: char| -> String {
+            let used = UnicodeWidthStr::width(ornament);
+            let side = MARK_INNER.saturating_sub(used) / 2;
+            let rest = MARK_INNER.saturating_sub(used + side);
+            format!(
+                "{}{}{}{}{}",
+                if closer == '╗' { '╔' } else { '╚' },
+                "═".repeat(side),
+                ornament,
+                "═".repeat(rest),
+                closer
+            )
+        };
+        let top = rule("༺ ᛭ ༻", '╗');
+        let bottom = rule("༻ ᛭ ༺", '╝');
+        let blank = format!("║{}║", " ".repeat(MARK_INNER));
+        // The character centred in the interior, whatever it measures.
+        let badge = "【 龍 】";
+        let left = (MARK_INNER.saturating_sub(UnicodeWidthStr::width(badge))) / 2;
+        let right = MARK_INNER.saturating_sub(left + UnicodeWidthStr::width(badge));
+
+        let art: [(Vec<Span>, Vec<Span>); 5] = [
             (
-                vec![Span::styled(MARK_TOP, frame_ink)],
-                saying(0, room_for(MARK_TOP.width())),
+                vec![Span::styled(top.clone(), frame_ink)],
+                saying(0, room_for(UnicodeWidthStr::width(top.as_str()))),
             ),
+            (vec![Span::styled(blank.clone(), frame_ink)], Vec::new()),
             (
                 vec![
-                    Span::styled(MARK_MID_LEFT, frame_ink),
+                    Span::styled(format!("║{}", " ".repeat(left)), frame_ink),
                     Span::styled("【", frame_ink),
                     Span::raw(" "),
                     Span::styled("龍", MARK_TEXT),
                     Span::raw(" "),
                     Span::styled("】", frame_ink),
-                    Span::styled(MARK_MID_RIGHT, frame_ink),
+                    Span::styled(format!("{}║", " ".repeat(right)), frame_ink),
                 ],
-                subline(room_for(MARK_MID_LEFT.width() + 6 + MARK_MID_RIGHT.width())),
+                subline(room_for(MARK_INNER + 2)),
             ),
-            (
-                vec![Span::styled(MARK_BOTTOM, frame_ink)],
-                saying(2, room_for(MARK_BOTTOM.width())),
-            ),
+            (vec![Span::styled(blank.clone(), frame_ink)], Vec::new()),
+            (vec![Span::styled(bottom.clone(), frame_ink)], Vec::new()),
         ];
 
         let mut lines: Vec<Line> = Vec::new();
@@ -2849,7 +2870,7 @@ mod tests {
         assert!(screen.contains('⋄'), "and its divider:\n{screen}");
         // One character at a time: the cell buffer pads every wide glyph with a
         // continuation cell, so a phrase assertion would test the buffer's spacing.
-        for glyph in ['吞', '云', '吐', '雾', '隐', '介', '藏', '形'] {
+        for glyph in ['兴', '云', '吐', '雾', '隐', '介', '藏', '形'] {
             assert!(screen.contains(glyph), "missing {glyph}:\n{screen}");
         }
         // Nothing below the frame: the inscription is the whole saying.
@@ -2862,7 +2883,7 @@ mod tests {
 
         // Narrower: the ornaments go, then the halves shorten; the mark stays.
         let plain = draw(&mut app, 62, 30);
-        assert!(plain.contains('吞'), "{plain}");
+        assert!(plain.contains('兴'), "{plain}");
         assert!(!plain.contains('⟬'), "the brackets need room:\n{plain}");
         let shortest = draw(&mut app, 52, 30);
         assert!(shortest.contains('龍'), "the mark itself:\n{shortest}");

@@ -11,7 +11,7 @@
 //! deterministic provider doubles so the whole slice can be exercised without a
 //! network or an API key; they disappear when a real adapter lands.
 
-use loong_kernel::{Kernel, KernelConfig};
+use loong_kernel::{steps_or_unlimited, Kernel, KernelConfig};
 use loong_providers::{
     ChatMessage, CompletionRequest, CompletionResponse, Model, ModelError, OpenAiCompat,
     ScriptedModel, ToolCallRequest, Usage,
@@ -42,6 +42,7 @@ USAGE:
   loongagent repl           [--session PATH] [--cwd DIR] [--model NAME]   line mode (any pipe)
   loongagent web            [--session PATH] [--cwd DIR] [--model NAME] [--port N] [--bind IP]
   loongagent run \"PROMPT\"   [--session PATH] [--cwd DIR] [--model NAME] [--budget N] [--keep-newest N]
+                            [--max-steps N]   a step is one model call; 0 means no limit
   loongagent --version
 
 MODELS (provider doubles, for a first run without keys):
@@ -104,6 +105,8 @@ struct Args {
     budget: Option<u64>,
     /// Newest context left verbatim when compaction runs.
     keep_newest: Option<u64>,
+    /// Model calls one turn may take; 0 means no limit.
+    max_steps: Option<usize>,
     positional: Vec<String>,
 }
 
@@ -127,6 +130,7 @@ impl Args {
             stdio: false,
             budget: None,
             keep_newest: None,
+            max_steps: None,
             positional: Vec::new(),
         };
         // Before anything resolves a reference: a pack says `env:NAME`, and this is
@@ -202,6 +206,18 @@ impl Args {
                             .ok_or("--keep-newest needs a token count")?
                             .parse()
                             .map_err(|_| "--keep-newest must be a number".to_string())?,
+                    );
+                }
+                // `--max-steps 0` is "no limit", the same shape as `--budget 0`: a step is
+                // a model call, so this is the knob a long task turns, not a number anyone
+                // should have to discover by hitting it.
+                "--max-steps" => {
+                    i += 1;
+                    args.max_steps = Some(
+                        rest.get(i)
+                            .ok_or("--max-steps needs a count")?
+                            .parse()
+                            .map_err(|_| "--max-steps must be a number".to_string())?,
                     );
                 }
                 other if other.starts_with("--") => {
@@ -1900,7 +1916,12 @@ fn serve(args: Args) -> Result<(), String> {
         config.compact_at_percent = percent;
     }
     if let Some(steps) = settings.max_steps {
-        config.max_steps = steps;
+        config.max_steps = steps_or_unlimited(steps);
+    }
+    // The flag is the caller's own request, and it outranks the resolved layers here —
+    // then the kernel takes the strictest of the two, so a ceiling in a layer still holds.
+    if let Some(steps) = args.max_steps {
+        config.max_steps = steps_or_unlimited(steps);
     }
     config.profile = settings
         .explain("profile")
@@ -2336,6 +2357,9 @@ impl ChildTransport {
         if let Some(keep) = args.keep_newest {
             command.arg("--keep-newest").arg(keep.to_string());
         }
+        if let Some(steps) = args.max_steps {
+            command.arg("--max-steps").arg(steps.to_string());
+        }
         let mut child = command
             .arg("--stdio")
             .arg("--session")
@@ -2757,8 +2781,21 @@ fn config_show(args: Args) -> Result<(), String> {
             row.source
         );
     }
+    // A default no layer sets is still the value a run uses. The step limit is the one that
+    // has bitten somebody — a turn stopped at 8 steps, and no command said where the 8 came
+    // from — so it is listed even when nothing configured it.
+    if settings.explain("max_steps").is_none() {
+        println!(
+            "{:<30} {:<16} {:<8} {}",
+            "max_steps",
+            loong_kernel::DEFAULT_MAX_STEPS,
+            loong_config::Kind::NarrowOnly.as_str(),
+            "<defaults>"
+        );
+    }
     println!();
     println!("(· = no such file; built-in defaults come from <defaults>)");
+    println!("(a step is one model call; `--max-steps 0` means no limit)");
     Ok(())
 }
 
@@ -2798,6 +2835,12 @@ fn config_explain(args: Args) -> Result<(), String> {
         None => {
             println!("{key} is not set by any layer");
             println!("  kind:   {} ({})", kind.as_str(), explain_kind(kind));
+            if key == "max_steps" {
+                println!(
+                    "  value:  {} (the built-in default; `--max-steps 0` means no limit)",
+                    loong_kernel::DEFAULT_MAX_STEPS
+                );
+            }
         }
     }
     Ok(())

@@ -9,4 +9,7 @@ pub mod ledger;
 pub mod turn;
 
 pub use ledger::{estimate_tokens, Category, Entry, EvictionReport, ExplainRow, Ledger, Lifetime};
-pub use turn::{Kernel, KernelConfig, KernelError, PendingCall, TurnOutcome};
+pub use turn::{
+    steps_or_unlimited, Kernel, KernelConfig, KernelError, PendingCall, TurnOutcome,
+    DEFAULT_MAX_STEPS,
+};

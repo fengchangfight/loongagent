@@ -128,6 +128,25 @@ pub struct TurnOutcome {
 /// still narrow it (`max_steps`, ADR-0008 §2).
 pub const DEFAULT_MAX_STEPS: usize = 100;
 
+/// A configured step count, with `0` meaning **no limit**.
+///
+/// Zero is never a sensible cap — it would end the turn before the model was asked anything —
+/// so it reads as the absence of one, the way `--budget 0` already means unbounded. That is
+/// the convention other agent loops use too: kimi-cli's `loop_control.max_steps_per_turn`
+/// documents "unset or `0` means unlimited", and Claude Code's `CLAUDE_CODE_MAX_TURNS`
+/// applies only "when no explicit limit is passed" — the limit is a knob a person turns, not
+/// a small number they discover by hitting it.
+///
+/// [`usize::MAX`] is the "no limit" value internally, so narrowing stays a plain `min` and a
+/// layer's ceiling still holds.
+pub fn steps_or_unlimited(steps: usize) -> usize {
+    if steps == 0 {
+        usize::MAX
+    } else {
+        steps
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct KernelConfig {
     pub cwd: PathBuf,
@@ -510,11 +529,11 @@ impl Kernel {
         config.compact_at_percent = config
             .compact_at_percent
             .min(config.settings.compact_at_percent.unwrap_or(u64::MAX));
-        config.max_steps = config.max_steps.min(
+        config.max_steps = steps_or_unlimited(config.max_steps).min(
             config
                 .settings
                 .max_steps
-                .map(|steps| steps.max(1))
+                .map(steps_or_unlimited)
                 .unwrap_or(usize::MAX),
         );
         let ledger = Ledger::new(config.budget_tokens);
@@ -2366,6 +2385,47 @@ mod tests {
         // The script runs out after twenty rounds; ScriptedModel then answers "done".
         assert_eq!(out.steps, rounds + 1, "{out:?}");
         assert_eq!(out.final_text.as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn zero_steps_is_no_limit_rather_than_no_work() {
+        // `0` reads as "unset" everywhere a person writes it — `--max-steps 0`, or
+        // `max_steps = 0` in a layer. It must never be taken literally: `1..=0` is an empty
+        // range, so a turn would end before the model was asked anything, which is the
+        // opposite of what "no limit" means.
+        assert_eq!(steps_or_unlimited(0), usize::MAX);
+        assert_eq!(steps_or_unlimited(7), 7);
+
+        let t = Temp::new();
+        std::fs::write(t.dir.join("a.txt"), "x").unwrap();
+        let model = ScriptedModel::new(vec![
+            response(
+                vec![call("c1", "read_file", json!({"path": "a.txt"}))],
+                None,
+            ),
+            response(
+                vec![call("c2", "read_file", json!({"path": "a.txt"}))],
+                None,
+            ),
+            response(vec![], Some("done")),
+        ]);
+        let mut config = KernelConfig::new(&t.dir);
+        config.max_steps = 0;
+        let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+        let out = k.submit("go").unwrap();
+        assert_eq!(
+            out.steps, 3,
+            "the turn ran to the model's own stop: {out:?}"
+        );
+        assert_eq!(out.final_text.as_deref(), Some("done"));
+
+        // And from a layer, where it is written as a number like any other.
+        let t = Temp::new();
+        let mut config = KernelConfig::new(&t.dir);
+        config.settings = settings_from(&t.dir, "max_steps = 0\n");
+        let model = ScriptedModel::saying("done");
+        let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+        assert_eq!(k.submit("go").unwrap().steps, 1);
     }
 
     #[test]

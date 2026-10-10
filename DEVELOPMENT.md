@@ -688,9 +688,14 @@ binary the TUI spawns as its server (used by the end-to-end test).
   from an event. A **step is a model completion**, so every tool round trip costs one: the
   default (`DEFAULT_MAX_STEPS`, 100) is a backstop against a model that *spins*, not a
   judgement about how large a task may be. It was 8, which is how an agent writing one page
-  came to stop mid-edit — read, edit, run, fix is already four of them. Cost is bounded by
-  the token budget and compaction, which are the limits a person actually chooses, and a
-  config layer may still narrow `max_steps` (ADR-0008 §2).
+  came to stop mid-edit — read, edit, run, fix is already four of them. `--max-steps N` sets
+  it, `--max-steps 0` means no limit, and a config layer may still narrow `max_steps`
+  (ADR-0008 §2). Cost is bounded by the token budget and compaction, which are the limits a
+  person actually chooses. Other agent loops treat it the same way: kimi-cli's
+  `loop_control.max_steps_per_turn` documents "unset or `0` means unlimited", and Claude
+  Code's `CLAUDE_CODE_MAX_TURNS` applies only when no explicit limit is passed. Because the
+  default comes from no layer, `config show` prints it with source `<defaults>` — a limit
+  nobody can see is how a turn came to stop at a number no command mentioned.
 - **The ledger**: every block that reaches the model is an entry with category,
   source, tokens and lifetime; eviction drops stale tool output before prose and
   never touches pinned entries; `explain()` answers "why is this in my context?".

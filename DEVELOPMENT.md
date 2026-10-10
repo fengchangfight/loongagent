@@ -373,9 +373,21 @@ through an in-memory connection and hands back everything in order, response las
 `handle_line_streaming(line, &Out)` writes as it goes and returns only the response.
 
 In the TUI that shows up as the work appearing line by line (`→ read_file note.txt`,
-`← ok …`) and an input title that says what is running and for how long (`working 12s ·
-→ shell cargo test`), because "working…" for two minutes tells nobody whether it is
-thinking or stuck.
+`← ok …`) and an input title that says what is running and for how long (`⠹ working 12s ·
+shell: cargo test`), because "working…" for two minutes tells nobody whether it is thinking
+or stuck. Watching it work needs two things:
+
+- **the mark turns.** The title carries a braille frame taken from the clock
+  (`spinner_frame`), so a line whose words have not changed for ten seconds still proves the
+  process is alive. Reading the frame from elapsed time rather than from a counter means a
+  missed redraw cannot freeze it, and a test can name the frame it wants instead of racing a
+  timer.
+- **the answer being written is the end of the transcript, not a thing below it.** It used
+  to be appended after a full window, so the box drew the *beginning* of the answer and
+  clipped the newest lines off the bottom: a long answer appeared to stop moving after one
+  screenful, which is the opposite of watching it be written. The window moves with the live
+  lines now. The preview stays dim and italic, and the recorded message replaces it — the
+  preview was never the record.
 
 What a line is worth reading is bounded, not the event stream itself:
 

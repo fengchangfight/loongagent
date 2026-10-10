@@ -331,9 +331,37 @@ fn styled(line: &str) -> Line<'static> {
     Line::from(Span::styled(line.to_string(), style_for(kind)))
 }
 
+/// A line of the answer while it is still being written: dimmer than the settled text and
+/// italic, so the two are never confused while the words grow. The recorded message
+/// replaces it the moment it arrives — the preview is not the record.
+fn live_line(piece: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        piece.to_string(),
+        MARK_QUIET.add_modifier(Modifier::ITALIC),
+    ))
+}
+
 /// How tall the input box may grow. Beyond this it scrolls, so a pasted file cannot
 /// take the whole screen away from the conversation.
 const MAX_INPUT_ROWS: u16 = 8;
+
+/// The frames of the "it is working" mark: braille, one cell each, so the mark turns in
+/// place without nudging the words beside it. A still word reads as a hang after a few
+/// seconds, and the one thing someone watching a long tool needs to know is that something
+/// is still moving.
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// How long one frame is held. Slower than the draw loop on purpose: this is a heartbeat,
+/// and a mark turning at the redraw rate reads as flicker.
+const SPINNER_MS: u128 = 120;
+
+/// The frame for a time already elapsed. Read from the clock rather than kept as state, so
+/// a missed redraw cannot freeze the mark, and a test can ask for the frame it wants
+/// instead of racing a timer.
+fn spinner_frame(since: Option<std::time::Instant>) -> &'static str {
+    let millis = since.map(|since| since.elapsed().as_millis()).unwrap_or(0);
+    SPINNER[(millis / SPINNER_MS) as usize % SPINNER.len()]
+}
 
 /// A tool result the reader opened: the log's full text, not the summary.
 ///
@@ -1381,7 +1409,13 @@ impl App {
             let start = end.saturating_sub(rows);
             return (start..end).map(|at| styled(&open.lines[at])).collect();
         }
-        let total = self.lines.len();
+        // What the model is writing right now is the **end of the transcript**, not a
+        // separate thing below it. Appending it after a full window is what made the live
+        // text stop moving: the box showed the beginning of the answer and clipped the
+        // newest lines off the bottom, so a long answer appeared to freeze after one
+        // screenful. Live lines are part of the content, and the window moves with them.
+        let live: Vec<&str> = self.live_lines();
+        let total = self.lines.len() + live.len();
         // Scrolling back can only reveal what is above the window, and a transcript shorter
         // than the window has nothing above it. Asking for more than there is used to push
         // lines off the *end* instead: the newest output vanished while `up` was pressed,
@@ -1399,26 +1433,28 @@ impl App {
                 end = (start + rows).min(total);
             }
         }
-        let mut shown: Vec<Line<'static>> =
-            (start..end).map(|at| self.transcript_line(at)).collect();
-        // What is being written right now goes below the finished output.
-        if !self.streaming.is_empty() {
-            shown.extend(self.streaming.split('\n').map(|piece| {
-                // Still being written: dimmer than the settled answer and italic, so the
-                // two are never confused while the text grows.
-                Line::from(Span::styled(
-                    piece.to_string(),
-                    MARK_QUIET.add_modifier(Modifier::ITALIC),
-                ))
-            }));
+        (start..end)
+            .map(|at| match self.lines.get(at) {
+                Some(_) => self.transcript_line(at),
+                None => live_line(live[at - self.lines.len()]),
+            })
+            .collect()
+    }
+
+    /// The answer being written this moment, as lines. Empty once it settles into the
+    /// transcript, which is the only copy that is recorded.
+    fn live_lines(&self) -> Vec<&str> {
+        if self.streaming.is_empty() {
+            Vec::new()
+        } else {
+            self.streaming.split('\n').collect()
         }
-        shown
     }
 
     /// How far back the view can go with a window this tall: everything above it. A
     /// transcript shorter than the window has nothing above it, so the answer is zero.
     fn max_scroll(&self, rows: usize) -> usize {
-        self.lines.len().saturating_sub(rows.max(1))
+        (self.lines.len() + self.live_lines().len()).saturating_sub(rows.max(1))
     }
 
     /// One line of the transcript, with the fold's own business applied: the arrow that
@@ -1555,7 +1591,9 @@ impl App {
                     .map(|what| format!(" · {what}"))
                     .unwrap_or_default();
                 (
-                    format!("working {secs}s{doing}"),
+                    // The mark turns, so the line proves the process is alive even while
+                    // the words beside it are the same ones it said ten seconds ago.
+                    format!("{} working {secs}s{doing}", spinner_frame(self.busy_since)),
                     Style::default().fg(Color::Cyan),
                 )
             }
@@ -2691,6 +2729,60 @@ mod tests {
             Some("the server closed the connection")
         );
         assert!(draw(&mut app, 80, 16).contains("the server closed the connection"));
+    }
+
+    #[test]
+    fn the_answer_being_written_stays_visible_to_its_last_line() {
+        let (to_app, from_worker) = channel::<FromWorker>();
+        let mut app = App::new("s", "v");
+        app.busy = true;
+        app.push_lines(vec!["you: 写个游戏".to_string()]);
+        // A model that writes more than one screenful. The screen has to show the **end**
+        // of it: the point of a live preview is watching the newest words arrive. The live
+        // text used to be appended below a full window, so the box clipped it and the
+        // answer appeared to stop moving after one screenful.
+        for n in 1..=30 {
+            to_app
+                .send(FromWorker::Delta(format!("thinking line {n}\n")))
+                .unwrap();
+        }
+        app.drain(&from_worker);
+        let screen = draw(&mut app, 60, 24);
+        assert!(screen.contains("thinking line 30"), "{screen}");
+        assert!(
+            !screen.contains("thinking line 1\n"),
+            "the oldest lines give way to the newest: {screen}"
+        );
+    }
+
+    #[test]
+    fn the_working_title_turns_so_a_wait_does_not_look_like_a_hang() {
+        // The frame is read from the clock, so a missed redraw cannot freeze the mark — and
+        // a test can name the frame it wants instead of racing a timer.
+        assert_eq!(spinner_frame(None), SPINNER[0]);
+        let start = std::time::Instant::now();
+        assert_eq!(spinner_frame(Some(start)), SPINNER[0]);
+        assert_ne!(
+            spinner_frame(Some(
+                start - std::time::Duration::from_millis(SPINNER_MS as u64)
+            )),
+            SPINNER[0],
+            "one frame later is a different mark"
+        );
+
+        let mut app = App::new("s", "v");
+        app.busy = true;
+        app.busy_since = Some(start);
+        app.activity = Some("shell: cargo test".to_string());
+        let screen = draw(&mut app, 60, 20);
+        assert!(
+            screen.contains("working 0s · shell: cargo test"),
+            "the words still say what it is doing: {screen}"
+        );
+        assert!(
+            SPINNER.iter().any(|frame| screen.contains(frame)),
+            "and a mark that moves is beside them: {screen}"
+        );
     }
 
     #[test]

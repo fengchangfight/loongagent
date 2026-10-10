@@ -1533,10 +1533,26 @@ impl Kernel {
             }
 
             events.push(self.record_assistant(response.text.as_deref(), &response.tool_calls)?);
-            for call in &response.tool_calls {
+            for (at, call) in response.tool_calls.iter().enumerate() {
                 match self.dispatch(call, &mut events)? {
                     Dispatch::Done => {}
                     Dispatch::Pending(pending) => {
+                        // The rest of this message was never dispatched, and the provider
+                        // requires an answer for **every** call it was told about: a request
+                        // carrying one assistant message with three calls and one result is
+                        // rejected outright, which is how a model that batches its calls — and
+                        // asks for permission on the first of them — breaks its own session.
+                        // Say they did not run; the model re-issues what it still wants.
+                        for skipped in &response.tool_calls[at + 1..] {
+                            events.push(self.record_tool_result(
+                                &skipped.call_id,
+                                false,
+                                &format!(
+                                    "not run: the turn stopped to ask about {} first",
+                                    pending.request_id
+                                ),
+                            )?);
+                        }
                         self.pending = Some(pending.clone());
                         return Ok(TurnOutcome {
                             steps: step,
@@ -2432,6 +2448,56 @@ mod tests {
         let out = k.submit("go").unwrap();
         assert_eq!(out.steps, 3);
         assert!(out.final_text.unwrap().contains("step limit"));
+    }
+
+    #[test]
+    fn a_message_that_stops_for_an_approval_still_answers_every_call_it_made() {
+        // Two calls in one message, the first of which asks. The turn stops there, and the
+        // second call was never dispatched — but the provider requires a result for every call
+        // it was shown, so a request carrying two calls and one result is refused. The model
+        // that batches its calls is the one that hits this, and it hits it while asking the
+        // person for permission.
+        let t = Temp::new();
+        std::fs::write(t.dir.join("a.txt"), "x").unwrap();
+        let (model, seen) = RecordingModel::new(vec![
+            response(
+                vec![
+                    call("c1", "read_file", json!({"path": "/etc/hostname"})),
+                    call("c2", "read_file", json!({"path": "a.txt"})),
+                ],
+                None,
+            ),
+            response(vec![], Some("done")),
+        ]);
+        let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        let asked = k.submit("read both").unwrap();
+        let pending = asked.pending_approval.expect("the first call asks");
+        k.respond_to_approval(&pending.request_id, true, gen::ApprovalScope::Once, None)
+            .unwrap();
+
+        let sent = seen.lock().unwrap();
+        let last = sent.last().expect("the model was called again");
+        let calls = last
+            .iter()
+            .map(|message| match message {
+                ChatMessage::Assistant { tool_calls, .. } => tool_calls.len(),
+                _ => 0,
+            })
+            .sum::<usize>();
+        let results = last
+            .iter()
+            .filter(|message| matches!(message, ChatMessage::Tool { .. }))
+            .count();
+        assert_eq!(calls, 2);
+        assert_eq!(results, 2, "every call has an answer: {last:?}");
+        assert!(
+            last.iter().any(|message| matches!(
+                message,
+                ChatMessage::Tool { call_id, output }
+                    if call_id == "c2" && output.contains("not run")
+            )),
+            "and the one that did not run says so: {last:?}"
+        );
     }
 
     #[test]

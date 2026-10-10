@@ -736,6 +736,12 @@ binary the TUI spawns as its server (used by the end-to-end test).
   it — a conversation that splits them is invalid to every provider. Each
   compaction is an event with before/after tokens; a compaction that could free
   nothing is not an event at all.
+- **A message that stops for a verdict answers every call it made.** A model may put several
+  tool calls in one assistant message; if one of them needs an approval the turn stops there,
+  and the calls after it were never dispatched. The provider requires a result for every
+  `tool_call_id` it was shown, so those get one that says they did not run rather than being
+  left dangling — a batched message that asked for permission used to make the *next* request
+  invalid, which OpenAI-compatible APIs refuse outright.
 - **Two ceilings, and the stricter wins**, because either one overflowing ends the same
   way. The **budget** is what a person or a pack chose — a cap on **one request's input**,
   which is why the name is about spending while the number is about size — and it fires at

@@ -26,6 +26,8 @@ pub struct OpenAiCompat {
     base: String,
     model: String,
     api_key: Option<String>,
+    /// What the model can hold in one request, when the configuration declares it.
+    context_window: Option<u64>,
 }
 
 impl OpenAiCompat {
@@ -35,7 +37,15 @@ impl OpenAiCompat {
             base: base.into().trim_end_matches('/').to_string(),
             model: model.into(),
             api_key,
+            context_window: None,
         }
+    }
+
+    /// Declare how many tokens this model can hold in one request — prompt and answer
+    /// together. The kernel compacts against it; see [`Model::context_window`].
+    pub fn with_context_window(mut self, tokens: u64) -> Self {
+        self.context_window = Some(tokens);
+        self
     }
 
     /// Convenience for the common local setup: `LOONGAGENT_BASE_URL`,
@@ -210,6 +220,10 @@ impl OpenAiCompat {
 }
 
 impl Model for OpenAiCompat {
+    fn context_window(&self) -> Option<u64> {
+        self.context_window
+    }
+
     /// Streamed: `stream: true`, and the deltas are reassembled into exactly the
     /// response the non-streaming call would have produced. That equality is the
     /// point — a surface shows a preview, the kernel consumes the same answer

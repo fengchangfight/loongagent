@@ -9,7 +9,7 @@
 //! | Kind | Keys | Rule |
 //! |---|---|---|
 //! | **free-override** | `model`, `base_url`, `profile` | the most local layer that sets it wins |
-//! | **narrow-only** | `budget_tokens`, `keep_newest_tokens`, `max_steps`, `compact_at_percent`, `[permissions]` | strictest wins; a lower layer may only narrow |
+//! | **narrow-only** | `budget_tokens`, `keep_newest_tokens`, `max_steps`, `compact_at_percent`, `max_context_size`, `reserved_context_size`, `[permissions]` | strictest wins; a lower layer may only narrow |
 //! | **add-only** | `skill_dirs`, `disable_skills` | union across layers (a project layer may *disable* an entry by identity — content is advisory, not enforcement) |
 //! | **reference** | `api_key` | names a source (`env:NAME`); a literal secret is refused outright |
 //!
@@ -92,7 +92,12 @@ pub fn kind_of(key: &str) -> Option<Kind> {
         }
         // The one profile-related key a user owns: which named bundle to run.
         "control.profile" => Kind::FreeOverride,
-        "budget_tokens" | "keep_newest_tokens" | "max_steps" | "compact_at_percent"
+        "budget_tokens"
+        | "keep_newest_tokens"
+        | "max_steps"
+        | "compact_at_percent"
+        | "max_context_size"
+        | "reserved_context_size"
         | "permissions" => Kind::NarrowOnly,
         "skill_dirs" | "disable_skills" => Kind::AddOnly,
         "api_key" => Kind::Reference,
@@ -172,6 +177,11 @@ pub struct ModelSpec {
     /// A *reference* (`env:NAME`, `file:PATH#KEY`, `keychain:…`), never a secret.
     pub api_key: Option<String>,
     pub budget_tokens: Option<u64>,
+    /// How many tokens this model can hold in one request — prompt and answer together.
+    ///
+    /// The physical ceiling, next to `budget_tokens` which is the one a person chooses.
+    /// `None` means nobody said, and the kernel then has no window to compact against.
+    pub max_context_size: Option<u64>,
 }
 
 /// The facts a routing rule may read. Deliberately small and inspectable: a model
@@ -333,6 +343,7 @@ pub fn profiles_from_payload(payload: &str) -> Result<ProfilePack, ConfigError> 
                 model: model.model,
                 api_key: model.api_key,
                 budget_tokens: model.budget_tokens,
+                max_context_size: model.max_context_size,
             });
         }
         if models.is_empty() {
@@ -481,6 +492,12 @@ pub struct Profile {
     pub keep_newest_tokens: Option<u64>,
     pub max_steps: Option<usize>,
     pub compact_at_percent: Option<u64>,
+    /// How many tokens this model can hold in one request. The shorthand form
+    /// (`model` + `base_url`) passes it on to the one model it builds.
+    pub max_context_size: Option<u64>,
+    /// Tokens held back for the model's answer: compaction runs when the room left in the
+    /// window falls below it. `0` or unset means the kernel's own default.
+    pub reserved_context_size: Option<u64>,
     /// Resolved per action class. A `Vec` rather than a map because the order of
     /// action classes is not meaningful — inventing one to satisfy a `BTreeMap`
     /// would be a lie about the domain.
@@ -551,6 +568,8 @@ struct RawProfile {
     keep_newest_tokens: Option<u64>,
     max_steps: Option<u64>,
     compact_at_percent: Option<u64>,
+    max_context_size: Option<u64>,
+    reserved_context_size: Option<u64>,
     #[serde(default)]
     skill_dirs: Vec<String>,
     #[serde(default)]
@@ -581,6 +600,8 @@ struct RawModel {
     model: String,
     api_key: Option<String>,
     budget_tokens: Option<u64>,
+    /// See [`ModelSpec::max_context_size`]. A pack may declare it, and so may a profile.
+    max_context_size: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -720,6 +741,7 @@ impl LayerValues {
                     model: model.model.clone(),
                     api_key: model.api_key.clone(),
                     budget_tokens: model.budget_tokens,
+                    max_context_size: model.max_context_size,
                 }),
             ));
         }
@@ -752,6 +774,8 @@ impl LayerValues {
             ("keep_newest_tokens", raw.keep_newest_tokens),
             ("max_steps", raw.max_steps),
             ("compact_at_percent", raw.compact_at_percent),
+            ("max_context_size", raw.max_context_size),
+            ("reserved_context_size", raw.reserved_context_size),
         ] {
             if let Some(value) = value {
                 values.push((key.to_string(), Value::Number(value)));
@@ -1087,6 +1111,7 @@ fn finish(profile: &mut Profile) -> Result<(), ConfigError> {
                 model,
                 api_key: profile.api_key.clone(),
                 budget_tokens: profile.budget_tokens,
+                max_context_size: profile.max_context_size,
             });
         }
     }
@@ -1174,7 +1199,7 @@ fn merge(layers: &[LayerValues]) -> Result<Profile, ConfigError> {
                             );
                         }
                         Some(current) => {
-                            let (keep_new, lose_old) = stricter(&current.value, value);
+                            let (keep_new, lose_old) = stricter_for(key, &current.value, value);
                             if keep_new {
                                 let old = current.value.clone();
                                 current.value = value.clone();
@@ -1201,6 +1226,17 @@ fn merge(layers: &[LayerValues]) -> Result<Profile, ConfigError> {
                                     (Some(a), None) => Some(a),
                                     (None, b) => b,
                                 };
+                                // The window a model holds is a fact about the model, not a
+                                // choice: a local redefinition may declare a *smaller* one
+                                // (which compacts earlier and is therefore safe) and must
+                                // not be able to lose or widen the one an organisation
+                                // declared — losing it would turn compaction off.
+                                merged.max_context_size =
+                                    match (old.max_context_size, new.max_context_size) {
+                                        (Some(a), Some(b)) => Some(a.min(b)),
+                                        (Some(a), None) => Some(a),
+                                        (None, b) => b,
+                                    };
                                 let old_value = current.value.clone();
                                 let old_layer = current.layer;
                                 current.value = Value::Model(merged);
@@ -1289,6 +1325,8 @@ fn merge(layers: &[LayerValues]) -> Result<Profile, ConfigError> {
             ("keep_newest_tokens", Value::Number(n)) => profile.keep_newest_tokens = Some(*n),
             ("max_steps", Value::Number(n)) => profile.max_steps = Some(*n as usize),
             ("compact_at_percent", Value::Number(n)) => profile.compact_at_percent = Some(*n),
+            ("max_context_size", Value::Number(n)) => profile.max_context_size = Some(*n),
+            ("reserved_context_size", Value::Number(n)) => profile.reserved_context_size = Some(*n),
             (key, Value::Model(spec)) if key.starts_with("models.") => {
                 profile.models.push(spec.clone())
             }
@@ -1314,6 +1352,21 @@ fn merge(layers: &[LayerValues]) -> Result<Profile, ConfigError> {
 
 /// Which of two narrow-only values is stricter. Returns
 /// `(new_is_stricter, old_should_be_recorded_as_overridden)`.
+/// Which of two narrow-only values is stricter.
+///
+/// Most caps are strictest when *smallest* — a smaller budget, fewer steps. A **reserve**
+/// is the other way round: keeping more room for the answer is the conservative choice, so
+/// a lower layer may raise it but never shrink it. Getting that backwards would let a
+/// project file quietly leave the model less room to answer than the organisation allowed.
+fn stricter_for(key: &str, current: &Value, candidate: &Value) -> (bool, bool) {
+    if key == "reserved_context_size" {
+        if let (Value::Number(a), Value::Number(b)) = (current, candidate) {
+            return (b > a, b < a);
+        }
+    }
+    stricter(current, candidate)
+}
+
 fn stricter(current: &Value, candidate: &Value) -> (bool, bool) {
     match (current, candidate) {
         (Value::Number(a), Value::Number(b)) => {
@@ -1461,6 +1514,38 @@ mod tests {
             row.overridden.len(),
             1,
             "and the widening attempt is recorded"
+        );
+    }
+
+    #[test]
+    fn a_reserve_is_stricter_when_it_is_bigger() {
+        // Every other narrow-only number is strictest when smallest. A reserve for the
+        // model's answer is the other way round: keeping more room is the conservative
+        // choice. So a later layer may *raise* it and may not shrink it — backwards, a
+        // project file could quietly leave the model less room to answer than the
+        // organisation allowed, which is the failure mode this table exists to prevent.
+        let ws = workspace();
+        let org = write(&ws, "org.toml", "reserved_context_size = 50000\n");
+        let user = write(&ws, "user.toml", "reserved_context_size = 5000\n");
+        let profile = resolve(&[(Layer::Org, org), (Layer::User, user)], &ws).unwrap();
+        assert_eq!(
+            profile.reserved_context_size,
+            Some(50_000),
+            "shrinking the reserve is not narrowing"
+        );
+        assert_eq!(
+            profile.explain("reserved_context_size").unwrap().layer,
+            Layer::Org
+        );
+
+        let ws = workspace();
+        let org = write(&ws, "org.toml", "reserved_context_size = 5000\n");
+        let user = write(&ws, "user.toml", "reserved_context_size = 50000\n");
+        let profile = resolve(&[(Layer::Org, org), (Layer::User, user)], &ws).unwrap();
+        assert_eq!(
+            profile.reserved_context_size,
+            Some(50_000),
+            "raising it is narrowing, and it wins"
         );
     }
 
@@ -1890,6 +1975,7 @@ description = \"Balanced: cheap for the loop, escalating past 150k tokens.\"\n\
   base_url = \"https://api.deepseek.com\"\n\
   model = \"an-id-from-the-docs\"\n\
   budget_tokens = 128000\n\
+  max_context_size = 131072\n\
   [[profiles.models]]\n\
   name = \"frontier\"\n\
   base_url = \"https://api.example.invalid/v1\"\n\
@@ -1916,6 +2002,10 @@ description = \"Air-gapped: nothing leaves the machine.\"\n\
         assert_eq!(pack.profiles[0].name, "default");
         assert!(pack.profiles[0].description.contains("Balanced"));
         assert_eq!(pack.profiles[0].models.len(), 2);
+        // The window a model holds belongs in the pack: it is a fact about the endpoint
+        // the pack names, and the engineer never sees the pack (T-07).
+        assert_eq!(pack.profiles[0].models[0].budget_tokens, Some(128_000));
+        assert_eq!(pack.profiles[0].models[0].max_context_size, Some(131_072));
         assert_eq!(pack.profiles[1].name, "local-only");
 
         // Choosing is by name, and a name that is not there is an error that lists

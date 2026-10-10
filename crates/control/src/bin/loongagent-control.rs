@@ -232,6 +232,12 @@ either check and says what to add to .gitignore.
 A PACK is TOML with `default_profile` and one or more `[[profiles]]`, each with a
 `description`, `[[profiles.models]]` and an optional `[profiles.router]`. Engineers
 see the name and the description; the endpoints stay here.
+
+Each `[[profiles.models]]` may carry `budget_tokens` (the context cap the session
+enforces) and `max_context_size` (how much the model can hold in one request, prompt
+and answer together). Both bound compaction, and the stricter of them wins; without
+either, and with no session-level budget, nothing bounds the context and a long
+session ends at the provider's limit.
 "
     .to_string()
 }

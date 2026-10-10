@@ -119,6 +119,17 @@ pub trait Model: Send {
         }
         Ok(response)
     }
+
+    /// How many tokens this model can hold in one request — prompt **and** answer
+    /// together.
+    ///
+    /// `None` means the adapter does not know, which is a better answer than a guess: told
+    /// too much, the provider rejects the request; told too little, the kernel throws away
+    /// context the model could have used. The kernel compacts against this, and against
+    /// what a person configured, whichever is stricter.
+    fn context_window(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// A scripted model for tests and for the first vertical slice: it returns the
@@ -127,6 +138,8 @@ pub trait Model: Send {
 pub struct ScriptedModel {
     responses: Vec<CompletionResponse>,
     cursor: usize,
+    /// A window for tests that exercise compaction; `None` means "does not know".
+    context_window: Option<u64>,
 }
 
 impl ScriptedModel {
@@ -134,7 +147,14 @@ impl ScriptedModel {
         Self {
             responses,
             cursor: 0,
+            context_window: None,
         }
+    }
+
+    /// Declare a context window, so a test can watch the kernel compact against it.
+    pub fn with_context_window(mut self, tokens: u64) -> Self {
+        self.context_window = Some(tokens);
+        self
     }
 
     /// A model that immediately answers with text and no tool calls.
@@ -157,6 +177,10 @@ impl ScriptedModel {
 }
 
 impl Model for ScriptedModel {
+    fn context_window(&self) -> Option<u64> {
+        self.context_window
+    }
+
     fn complete(&mut self, _req: &CompletionRequest) -> Result<CompletionResponse, ModelError> {
         let response = self
             .responses
@@ -178,6 +202,18 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn a_model_can_declare_how_much_it_holds() {
+        // `None` is the honest default: an adapter that does not know must not invent a
+        // window, because the kernel compacts against whatever it is told.
+        assert_eq!(ScriptedModel::saying("hi").context_window(), None);
+        assert_eq!(
+            ScriptedModel::saying("hi")
+                .with_context_window(131_072)
+                .context_window(),
+            Some(131_072)
+        );
+    }
+
     fn scripted_model_plays_its_script_then_stops() {
         let mut m = ScriptedModel::new(vec![CompletionResponse {
             text: None,

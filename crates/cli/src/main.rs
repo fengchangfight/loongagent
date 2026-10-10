@@ -1903,6 +1903,20 @@ fn serve(args: Args) -> Result<(), String> {
         }
     }
     let models = build_models(&args, &settings)?;
+    // Nothing bounds the context when no budget is set anywhere and no model declares a
+    // window: `compact_if_needed` returns immediately, and a long session ends at the
+    // provider's context limit with nothing said beforehand. Say it now.
+    let bounded = loong_kernel::effective_budget(args.budget, &settings).is_some()
+        || models
+            .iter()
+            .any(|(_, model)| model.context_window().is_some());
+    if !bounded {
+        eprintln!(
+            "[context] no budget_tokens and no max_context_size anywhere — compaction is \
+             off, and a long session will end at the provider's context limit. Set one of \
+             them (or --budget N) to have context cleared instead."
+        );
+    }
     let mut config = KernelConfig::new(&args.cwd);
     // `--budget 0` means "unbounded", which is the widest: the kernel takes the
     // strictest of this and the configuration, so a ceiling still holds.
@@ -1987,7 +2001,11 @@ fn build_models(
                         spec.name
                     );
                 }
-                Box::new(OpenAiCompat::new(base_url, spec.model.clone(), key)) as Box<dyn Model>
+                let mut adapter = OpenAiCompat::new(base_url, spec.model.clone(), key);
+                if let Some(tokens) = spec.max_context_size {
+                    adapter = adapter.with_context_window(tokens);
+                }
+                Box::new(adapter) as Box<dyn Model>
             }
             other => {
                 return Err(format!(
@@ -2780,6 +2798,33 @@ fn config_show(args: Args) -> Result<(), String> {
             row.kind.as_str(),
             row.source
         );
+    }
+    // A budget may be declared on a model rather than on the session, and the strictest one
+    // is what a run enforces (`effective_budget`). That is how the pack this repository
+    // ships wrote `budget_tokens = 128000`: the session key was never set, so the table
+    // showed nothing and the cap did nothing. Say who is setting it.
+    let declared = settings
+        .models
+        .iter()
+        .filter_map(|model| {
+            model
+                .budget_tokens
+                .map(|budget| (model.name.clone(), budget))
+        })
+        .min_by_key(|(_, budget)| *budget);
+    if let Some((name, tokens)) = declared {
+        if settings
+            .budget_tokens
+            .map_or(true, |session| tokens < session)
+        {
+            println!(
+                "{:<30} {:<16} {:<8} {}",
+                "budget_tokens",
+                tokens,
+                loong_config::Kind::NarrowOnly.as_str(),
+                format!("the cap on model {name}")
+            );
+        }
     }
     // A default no layer sets is still the value a run uses. The step limit is the one that
     // has bitten somebody — a turn stopped at 8 steps, and no command said where the 8 came

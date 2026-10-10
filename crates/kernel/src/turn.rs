@@ -128,6 +128,15 @@ pub struct TurnOutcome {
 /// still narrow it (`max_steps`, ADR-0008 §2).
 pub const DEFAULT_MAX_STEPS: usize = 100;
 
+/// How much room to leave in the model's window for its own answer, by default.
+///
+/// A request carries the prompt **and** the completion, and both fit in one window. Fill it
+/// with prompt and the model has nowhere to write, so compaction has to fire while there is
+/// still room. 16 Ki is about what a long answer needs plus a margin; it is a narrow-only
+/// key (`reserved_context_size`), and a bigger reserve is the *stricter* setting, so a layer
+/// may raise it but never shrink it.
+pub const DEFAULT_RESERVED_CONTEXT: u64 = 16_384;
+
 /// A configured step count, with `0` meaning **no limit**.
 ///
 /// Zero is never a sensible cap — it would end the turn before the model was asked anything —
@@ -157,6 +166,9 @@ pub struct KernelConfig {
     /// Compact once context passes this fraction of the budget (80%).
     pub compact_at_percent: u64,
     pub max_steps: usize,
+    /// Tokens held back for the model's answer: compaction fires while the room left in the
+    /// model's window is smaller than this. See [`DEFAULT_RESERVED_CONTEXT`].
+    pub reserved_context_size: u64,
     /// The resolved layered settings (ADR-0008) — distinct from `profile`, which is
     /// the profile's *name*. The kernel uses it for the two things it owns:
     /// narrowing the PDP ladder, and which skills exist.
@@ -173,6 +185,7 @@ impl KernelConfig {
             compact_at_percent: 80,
             settings: Profile::default(),
             max_steps: DEFAULT_MAX_STEPS,
+            reserved_context_size: DEFAULT_RESERVED_CONTEXT,
         }
     }
 }
@@ -355,6 +368,23 @@ fn attach_mcp(workspace: &Path, tools: &mut Registry) -> Result<AttachedMcp, Ker
 
 /// The strictest of a caller's budget and the configuration's: `None` means
 /// unbounded, which is the widest, so a limit from either side holds.
+/// The context budget a session runs with.
+///
+/// The strictest of three things: what the caller asked for (`--budget`), the session-wide
+/// `budget_tokens` key, and whatever cap a **configured model** declares. That last one was
+/// parsed, merged, and then read by nothing — the pack this repository ships declares
+/// `budget_tokens = 128000` on its only model, and the session it configured ran with no
+/// budget at all: compaction never ran, and the context grew until the provider refused it.
+/// A model the router may pick is a model the cap has to cover, so the strictest one holds.
+pub fn effective_budget(caller: Option<u64>, settings: &Profile) -> Option<u64> {
+    let declared = settings
+        .models
+        .iter()
+        .filter_map(|model| model.budget_tokens)
+        .min();
+    narrow_budget(narrow_budget(caller, settings.budget_tokens), declared)
+}
+
 fn narrow_budget(caller: Option<u64>, configured: Option<u64>) -> Option<u64> {
     match (caller, configured) {
         (Some(a), Some(b)) => Some(a.min(b)),
@@ -522,7 +552,17 @@ impl Kernel {
         // Narrow-only keys (ADR-0008 §2): the strictest of what the caller asked for
         // and what the layered configuration says. One place does this arithmetic,
         // so a session flag can never widen a cap that config set.
-        config.budget_tokens = narrow_budget(config.budget_tokens, config.settings.budget_tokens);
+        config.budget_tokens = effective_budget(config.budget_tokens, &config.settings);
+        // Larger is stricter for a reserve — keeping more room for the answer is the
+        // conservative choice — so a layer may raise it but never shrink it. `0` and unset
+        // both mean "use the default".
+        if let Some(size) = config
+            .settings
+            .reserved_context_size
+            .filter(|size| *size > 0)
+        {
+            config.reserved_context_size = config.reserved_context_size.max(size);
+        }
         config.keep_newest_tokens = config
             .keep_newest_tokens
             .min(config.settings.keep_newest_tokens.unwrap_or(u64::MAX));
@@ -1691,16 +1731,49 @@ impl Kernel {
     /// exchanges dropped, and never across a tool pair: an assistant's tool call
     /// keeps its answer, because a conversation that splits them is invalid to
     /// every provider.
+    /// How much input one request may carry, right now.
+    ///
+    /// Two ceilings, and the stricter wins because either one overflowing ends the same
+    /// way. The **budget** is what a person or a pack chose: it is about cost, and it fires
+    /// at `compact_at_percent` of itself. The **window** is what the model can physically
+    /// hold: it is about arithmetic, and it fires when the room left for the answer drops
+    /// below the reserve. `None` from both means nothing bounds the context — which is a
+    /// thing the CLI says out loud, because it means compaction never runs.
+    fn input_ceiling(&self) -> Option<u64> {
+        let from_budget = self
+            .ledger
+            .budget()
+            .map(|budget| budget.saturating_mul(self.config.compact_at_percent) / 100);
+        let from_window = self.current_window().map(|window| {
+            // A reserve larger than the window would hold back everything; half the window
+            // is as much as it can sensibly keep for the answer.
+            let reserve = self.config.reserved_context_size.min(window / 2);
+            window.saturating_sub(reserve)
+        });
+        match (from_budget, from_window) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    /// The window of the model this session is on. Routing is picked per step and the
+    /// selection is recorded before the call, so a switch is picked up on the next step;
+    /// the reserve makes one stale step harmless.
+    fn current_window(&self) -> Option<u64> {
+        self.models
+            .get(&self.selected_model)
+            .and_then(|model| model.context_window())
+    }
+
     fn compact_if_needed(&mut self, events: &mut Vec<u64>) -> Result<(), KernelError> {
-        let Some(budget) = self.ledger.budget() else {
+        let Some(ceiling) = self.input_ceiling() else {
             return Ok(());
         };
-        let threshold = budget.saturating_mul(self.config.compact_at_percent) / 100;
         let before = self.ledger.total_tokens();
-        if before <= threshold {
+        if before <= ceiling {
             return Ok(());
         }
-        let keep = self.config.keep_newest_tokens.min(budget / 2);
+        let keep = self.config.keep_newest_tokens.min(ceiling / 2);
 
         // Phase 1: clear stale tool output, oldest first, outside the new window.
         let cleared = self.ledger.clear_tool_outputs(keep, |entry| {
@@ -1727,7 +1800,7 @@ impl Kernel {
 
         // Phase 2: only if still over, drop the oldest whole exchanges.
         let mut dropped_messages = 0;
-        while self.ledger.total_tokens() > threshold {
+        while self.ledger.total_tokens() > ceiling {
             let removed = self.drop_oldest_exchange();
             if removed == 0 {
                 break; // nothing safe left to drop (a single long turn)
@@ -2429,6 +2502,85 @@ mod tests {
     }
 
     #[test]
+    fn a_budget_a_model_declares_is_the_sessions_budget() {
+        // The pack this repository ships writes `budget_tokens = 128000` on its only model.
+        // That value was parsed, merged, and then read by nothing: the session it configured
+        // ran with no budget at all, so compaction never ran and the context grew until the
+        // provider refused it. A model the router may pick is a model the cap has to cover,
+        // so the strictest declared cap is the one that holds.
+        let t = Temp::new();
+        let settings = settings_from(
+            &t.dir,
+            "[[models]]\nname = \"flash\"\nbase_url = \"http://x/v1\"\nmodel = \"m\"\n\
+             budget_tokens = 128000\n",
+        );
+        assert_eq!(effective_budget(None, &settings), Some(128_000));
+        // A request may only tighten it, never widen it.
+        assert_eq!(effective_budget(Some(1_000), &settings), Some(1_000));
+        assert_eq!(
+            effective_budget(Some(999_999), &settings),
+            Some(128_000),
+            "the model's own cap still holds"
+        );
+
+        // Two models, and the router may pick either: the strictest covers both.
+        let t = Temp::new();
+        let two = settings_from(
+            &t.dir,
+            "[[models]]\nname = \"flash\"\nbase_url = \"http://x/v1\"\nmodel = \"m\"\n\
+             budget_tokens = 128000\n\
+             [[models]]\nname = \"pro\"\nbase_url = \"http://x/v1\"\nmodel = \"p\"\n\
+             budget_tokens = 32000\n",
+        );
+        assert_eq!(effective_budget(None, &two), Some(32_000));
+    }
+
+    #[test]
+    fn the_models_window_bounds_the_context_when_no_budget_does() {
+        // Same prompts, same everything but the window: one compacts, the other has nothing
+        // to compact against. Before this, only a budget could bound a session — and the
+        // budget was optional, so the default was "grow until the provider says no".
+        let filler = "x".repeat(2_000);
+        let rounds = 3;
+        let compactions = |window: Option<u64>| {
+            let t = Temp::new();
+            let answers: Vec<String> = (0..rounds).map(|n| format!("answer {n}")).collect();
+            let responses = answers
+                .iter()
+                .map(|answer| response(vec![], Some(answer)))
+                .collect();
+            let (model, _seen) = RecordingModel::with_window(responses, window);
+            let mut config = KernelConfig::new(&t.dir);
+            config.keep_newest_tokens = 100;
+            config.reserved_context_size = 256;
+            assert!(
+                config.budget_tokens.is_none(),
+                "this is about the window, not the budget"
+            );
+            let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+            for turn in 1..=rounds {
+                k.submit(&format!("turn {turn} {filler}")).unwrap();
+            }
+            loong_eventlog::replay(&t.log)
+                .unwrap()
+                .events
+                .iter()
+                .filter(|event| event.kind == ev::COMPACTION_APPLIED)
+                .count()
+        };
+
+        assert!(
+            compactions(Some(1_024)) > 0,
+            "a window with a small reserve leaves no room, so it compacts"
+        );
+        assert_eq!(
+            compactions(None),
+            0,
+            "with neither a window nor a budget, nothing bounds the context"
+        );
+    }
+
+    #[test]
     fn the_ledger_and_the_conversation_stay_in_step() {
         let t = Temp::new();
         std::fs::write(t.dir.join("a.txt"), "x").unwrap();
@@ -2936,15 +3088,25 @@ mod tests {
     struct RecordingModel {
         responses: std::collections::VecDeque<CompletionResponse>,
         seen: Arc<Mutex<Vec<Vec<ChatMessage>>>>,
+        window: Option<u64>,
     }
 
     impl RecordingModel {
         fn new(responses: Vec<CompletionResponse>) -> (Self, Arc<Mutex<Vec<Vec<ChatMessage>>>>) {
+            Self::with_window(responses, None)
+        }
+
+        /// A model that declares how much it can hold, for the compaction tests.
+        fn with_window(
+            responses: Vec<CompletionResponse>,
+            window: Option<u64>,
+        ) -> (Self, Arc<Mutex<Vec<Vec<ChatMessage>>>>) {
             let seen = Arc::new(Mutex::new(Vec::new()));
             (
                 Self {
                     responses: responses.into(),
                     seen: Arc::clone(&seen),
+                    window,
                 },
                 seen,
             )
@@ -2952,6 +3114,10 @@ mod tests {
     }
 
     impl Model for RecordingModel {
+        fn context_window(&self) -> Option<u64> {
+            self.window
+        }
+
         fn complete(
             &mut self,
             request: &CompletionRequest,

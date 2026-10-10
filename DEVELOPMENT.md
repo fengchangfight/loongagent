@@ -291,7 +291,15 @@ owner specified, kept verbatim:
 ```
 
 A sealed frame around the traditional 龍, with the wordmark beside the top rule and the
-tagline beside the middle. `/logo` puts it away, and a terminal narrower than 48 columns
+sayings beside the middle and bottom ones — the dragon of 煮酒论英雄, in the owner's words:
+
+    能大能小 · 大则吞云吐雾，小则隐介藏形
+    不滞于形 · 动则必中
+
+Each row picks the first line that fits the columns it has, from the whole thought to
+`能大能小`, so a narrow terminal keeps the mark and drops the words rather than clipping
+them. (An English line was tried and removed: it is *wider* than the short Chinese one, so
+a first-that-fits ladder could never reach it.) `/logo` puts it away, and a terminal narrower than 48 columns
 never gets it.
 
 **Colour comes from the theme, not from us.** `龍` and the wordmark are the terminal's own

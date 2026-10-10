@@ -155,11 +155,27 @@ const MARK_BOTTOM: &str = "╰───────༻ ᛭ ༺──────
 const MARK_INK: Color = Color::Cyan;
 /// The second voice in the drawing, for policies and the mark's frame.
 const MARK_ACCENT: Color = Color::Magenta;
+/// The sayings: the terminal's own foreground, dimmed. Present, not shouting.
+const MARK_QUIET: Style = Style::new().fg(Color::Reset).add_modifier(Modifier::DIM);
 /// Whatever the terminal uses for ordinary text. Bold, so it stands out without
 /// inventing a colour that may vanish into the background.
 const MARK_TEXT: Style = Style::new().fg(Color::Reset).add_modifier(Modifier::BOLD);
 /// Where the name starts, so the two rows line up.
 const MARK_TEXT_COLUMN: usize = 36;
+
+/// What the mark says about itself, widest first. The dragon of 煮酒论英雄: great enough to
+/// swallow cloud, small enough to hide in a scale — and, being neither, quick and exact.
+/// Each row picks the first line that fits the room it has, so wide terminals get the whole
+/// thought and narrow ones get its shape.
+const MARK_SAYINGS: [&[(usize, &str)]; 3] = [
+    &[(0, "loongagent")],
+    &[
+        (37, "能大能小 · 大则吞云吐雾，小则隐介藏形"),
+        (19, "能大能小 · 能升能隐"),
+        (8, "能大能小"),
+    ],
+    &[(19, "不滞于形 · 动则必中"), (8, "动则必中")],
+];
 /// Violet, for something that wants an answer rather than something that went wrong.
 const MARK_ACCENT_STYLE: Style = Style::new().fg(MARK_ACCENT);
 
@@ -421,10 +437,24 @@ impl App {
         use unicode_width::UnicodeWidthStr;
         let frame_ink = Style::default().fg(MARK_ACCENT);
         let character = MARK_TEXT;
+        let room_for = |drawn: usize| -> usize {
+            (area.width as usize).saturating_sub(MARK_TEXT_COLUMN.max(drawn) + 2)
+        };
+        let say = |row: usize, room: usize| -> Option<(String, Style)> {
+            MARK_SAYINGS[row]
+                .iter()
+                .find(|(needs, _)| room >= *needs)
+                .map(|(_, text)| {
+                    (
+                        text.to_string(),
+                        if row == 0 { MARK_TEXT } else { MARK_QUIET },
+                    )
+                })
+        };
         let rows: [(Vec<Span>, Option<(String, Style)>); 3] = [
             (
                 vec![Span::styled(MARK_TOP, frame_ink)],
-                Some(("loongagent".to_string(), MARK_TEXT)),
+                say(0, room_for(MARK_TOP.width())),
             ),
             (
                 vec![
@@ -436,12 +466,15 @@ impl App {
                     Span::styled("】", frame_ink),
                     Span::styled(MARK_MID_RIGHT, frame_ink),
                 ],
-                Some((
-                    "a firm-internal coding agent".to_string(),
-                    Style::default().fg(Color::DarkGray),
-                )),
+                say(
+                    1,
+                    room_for(MARK_MID_LEFT.width() + 6 + MARK_MID_RIGHT.width()),
+                ),
             ),
-            (vec![Span::styled(MARK_BOTTOM, frame_ink)], None),
+            (
+                vec![Span::styled(MARK_BOTTOM, frame_ink)],
+                say(2, room_for(MARK_BOTTOM.width())),
+            ),
         ];
 
         let mut lines: Vec<Line> = Vec::new();
@@ -2709,33 +2742,41 @@ mod tests {
     #[test]
     fn the_mark_is_drawn_and_can_be_put_away() {
         let mut app = App::new("s", "v");
-        let screen = draw(&mut app, 110, 30);
-        // The owner's own characters, verbatim.
-        assert!(screen.contains("༺ ᛭ ༻"), "the top ornament:\n{screen}");
-        assert!(screen.contains("༻ ᛭ ༺"), "and its mirror:\n{screen}");
-        // Apart, because the cell buffer pads a wide glyph with a continuation cell:
-        // an adjacent-wide-character assertion tests the buffer, not the drawing.
+        // Wide: the whole thought, on the rows the art leaves.
+        let screen = draw(&mut app, 150, 30);
         assert!(
-            screen.contains('【') && screen.contains('】'),
-            "framed:\n{screen}"
+            screen.contains("༺ ᛭ ༻") && screen.contains("༻ ᛭ ༺"),
+            "{screen}"
         );
-        assert!(
-            screen.contains('龍'),
-            "with the traditional character in it:\n{screen}"
-        );
-        assert!(screen.contains("╞"), "and the double rule:\n{screen}");
+        assert!(screen.contains('【') && screen.contains('】'), "{screen}");
+        assert!(screen.contains('龍'), "{screen}");
         assert!(screen.contains("loongagent"), "{screen}");
+        // One character at a time: the cell buffer pads every wide glyph with a
+        // continuation cell, so a phrase assertion would test the buffer's spacing.
+        for glyph in [
+            '能', '吞', '云', '吐', '雾', '隐', '介', '藏', '不', '滞', '动', '必',
+        ] {
+            assert!(screen.contains(glyph), "missing {glyph}:\n{screen}");
+        }
+
+        // Narrower: the shorter half of the thought, then the shortest. The widths are
+        // chosen from the room each line actually needs (37, 19, 8 columns).
+        let narrow = draw(&mut app, 69, 30);
+        assert!(narrow.contains('升'), "the short line:\n{narrow}");
+        assert!(!narrow.contains('吐'), "and not the long one:\n{narrow}");
+        let shortest = draw(&mut app, 52, 30);
+        assert!(shortest.contains('大'), "{shortest}");
         assert!(
-            screen.contains("firm-internal coding agent"),
-            "and what it is:\n{screen}"
+            !shortest.contains('升'),
+            "only four characters fit:\n{shortest}"
         );
 
         // `/logo` puts it away, and nothing else moves.
         type_text(&mut app, "/logo");
         assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::None);
         assert!(!app.logo);
-        let screen = draw(&mut app, 110, 30);
-        assert!(!screen.contains("龍"), "{screen}");
+        let screen = draw(&mut app, 150, 30);
+        assert!(!screen.contains('龍'), "{screen}");
         assert!(
             screen.contains("enter send"),
             "the box and keys remain:\n{screen}"

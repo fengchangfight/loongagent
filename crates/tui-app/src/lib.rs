@@ -2647,7 +2647,9 @@ mod tests {
         assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::Mouse(true));
         assert!(app.mouse);
         assert!(
-            app.lines.iter().any(|line| line.contains("wheel scrolls here")),
+            app.lines
+                .iter()
+                .any(|line| line.contains("wheel scrolls here")),
             "and says what it costs: {:?}",
             app.lines
         );

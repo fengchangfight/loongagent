@@ -34,6 +34,8 @@ pub enum ToWorker {
     RefreshContext,
     /// Show the most recent tool result in full — the counterpart of collapsing it.
     Expand,
+    /// Turn approval prompts off or on for this session.
+    Yolo(bool),
 }
 
 /// What the worker reports back.
@@ -50,6 +52,8 @@ pub enum FromWorker {
     Context(Box<loong_schema::generated::ContextExplain>),
     /// Something is waiting for a decision, with the detail needed to make one.
     Approval(Box<ApprovalInfo>),
+    /// Approval prompts were turned off or on.
+    Yolo(bool),
     /// What the turn is doing right now ("shell: cargo test"), so the interface can say
     /// so while it is happening rather than after.
     Working(String),
@@ -272,6 +276,9 @@ pub struct App {
     /// Whether this program tracks the mouse. Off means the terminal's own selection
     /// works again, at the price of the wheel scrolling the terminal instead of here.
     pub mouse: bool,
+    /// True while approval prompts are off for this session — the interface must show
+    /// it, because the dangerous state is one where nobody notices it is on (ADR-0007 §5).
+    pub yolo: bool,
     /// The pending decision, and which choice is highlighted.
     pub approval: Option<Box<ApprovalInfo>>,
     pub choice: usize,
@@ -308,6 +315,7 @@ impl App {
             schema: schema.into(),
             busy: false,
             error: None,
+            yolo: false,
             approval: None,
             choice: 0,
             logo: true,
@@ -579,6 +587,12 @@ impl App {
                 )]);
                 Some(Action::Mouse(self.mouse))
             }
+            // Opting out of the prompts, for a session that is unattended on purpose.
+            "/yolo" => {
+                self.input.clear();
+                self.cursor = 0;
+                Some(Action::Send(ToWorker::Yolo(!self.yolo)))
+            }
             // The transcript shows a summary of long tool output; this asks the log for
             // the rest.
             "/expand" => {
@@ -725,6 +739,18 @@ impl App {
             match worker.try_recv() {
                 Ok(FromWorker::Delta(piece)) => self.streaming.push_str(&piece),
                 Ok(FromWorker::Context(explained)) => self.context = Some(explained),
+                Ok(FromWorker::Yolo(on)) => {
+                    self.yolo = on;
+                    self.push_lines(vec![format!(
+                        "⚠ approval prompts {}{}",
+                        if on { "off" } else { "on" },
+                        if on {
+                            " — the sandbox still applies; writes outside the workspace are still refused"
+                        } else {
+                            ""
+                        }
+                    )]);
+                }
                 Ok(FromWorker::Approval(info)) => {
                     // A new question resets the highlighted answer: carrying a previous
                     // choice over could approve something nobody looked at.
@@ -1096,6 +1122,15 @@ impl App {
             ),
             // Busy: what it is doing and for how long. "working…" for two minutes
             // tells nobody whether it is thinking or stuck.
+            // The one state that must never be invisible.
+            Some(_) if self.yolo => (
+                "⚠ YOLO — NOT ASKING · this session approves for you".to_string(),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            None if self.yolo => (
+                "⚠ YOLO — approvals off, sandbox still on (/yolo to restore)".to_string(),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
             None if self.busy => {
                 let secs = self
                     .busy_since
@@ -1121,6 +1156,7 @@ impl App {
                     }
                     "/logo" => "enter shows or hides the mark".to_string(),
                     "/expand" => "enter shows the last tool result in full".to_string(),
+                    "/yolo" => "enter turns approval prompts off (the sandbox stays)".to_string(),
                     "/copy" => "enter copies the whole transcript".to_string(),
                     "/mouse" => "enter hands the mouse back to your terminal".to_string(),
                     _ => "command — /help · /exit · /logo · /mouse · /copy · /expand".to_string(),
@@ -1170,6 +1206,11 @@ impl App {
                 Style::default().add_modifier(Modifier::BOLD),
             ),
             Span::raw(" transcript  "),
+            Span::styled(
+                if self.yolo { "⚠ yolo" } else { "" },
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(if self.yolo { "  " } else { "" }),
             Span::styled("ctrl-c", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(if self.busy { " interrupt" } else { " quit" }),
         ];
@@ -1263,6 +1304,13 @@ pub fn spawn_worker<T: Transport + Send + 'static>(
                     granted,
                     scope,
                 } => client.respond(&request_id, granted, scope, None),
+                ToWorker::Yolo(on) => match client.set_auto_approve(on) {
+                    Ok(state) => {
+                        let _ = events.send(FromWorker::Yolo(state));
+                        Ok(Vec::new())
+                    }
+                    Err(e) => Err(e),
+                },
                 ToWorker::Expand => {
                     // The session's own log holds the untouched output; the transcript
                     // holds only the summary. Asking the log is what makes `/expand`
@@ -2521,6 +2569,42 @@ mod tests {
             color_of(&mut app, 80, 20, "stopped by you"),
             Some(ratatui::style::Color::Yellow)
         );
+    }
+
+    #[test]
+    fn yolo_is_a_command_and_is_never_invisible() {
+        let mut app = App::new("s", "v");
+        type_text(&mut app, "/yolo");
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            Action::Send(ToWorker::Yolo(true)),
+            "the command asks the server, which records the opt-out"
+        );
+        assert!(app.input.is_empty());
+
+        // Until the server answers, the state is unchanged: the interface does not
+        // pretend a permission it does not have.
+        assert!(!app.yolo);
+        let (to_app, from_worker) = channel::<FromWorker>();
+        to_app.send(FromWorker::Yolo(true)).unwrap();
+        app.drain(&from_worker);
+        assert!(app.yolo);
+        assert!(
+            app.lines
+                .iter()
+                .any(|line| line.contains("approval prompts off") && line.contains("sandbox")),
+            "it says what changed and what did not: {:?}",
+            app.lines
+        );
+
+        // Visible in the input box, always.
+        let screen = draw(&mut app, 100, 24);
+        assert!(screen.contains("YOLO"), "the state is on screen: {screen}");
+        assert!(screen.contains("sandbox still on"), "{screen}");
+
+        // And it can be turned back on, from the command or the state.
+        let screen = draw(&mut app, 100, 24);
+        assert!(screen.contains("/yolo"), "{screen}");
     }
 
     #[test]

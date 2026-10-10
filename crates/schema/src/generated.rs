@@ -253,6 +253,19 @@ pub struct ContextCategory {
     pub tokens: u64,
 }
 
+/// Turn this session's approval prompts off or on. The sandbox is a different axis and is untouched (ADR-0007 §5).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PermissionsSetParams {
+    pub session_id: String,
+    /// true: rulings that would ask are allowed instead, and the override is recorded
+    pub auto_approve: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PermissionsState {
+    pub auto_approve: bool,
+}
+
 /// A session's own record that it is a child: which session it came from, how, and where in that session. ADR-0015's second tree level. The child stores none of the parent's events — it references them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionForked {
@@ -267,6 +280,13 @@ pub struct SessionForked {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TurnInterrupted {
     /// interrupted | budget | steps (the limits that end a turn early)
+    pub reason: String,
+}
+
+/// Approval prompts were turned off or on for this session. ADR-0007 §5: opting out is itself an event, and it travels with the session.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PermissionsRelaxed {
+    pub auto_approve: bool,
     pub reason: String,
 }
 
@@ -341,6 +361,8 @@ pub mod method {
     pub const CONTEXT_EXPLAIN: &str = "context.explain";
     /// Attach a thin client to the local agent server (ADR-0009).
     pub const SESSION_ATTACH: &str = "session.attach";
+    /// Opt out of approval prompts for this session. Opting out is itself an event, and the interface must show it (ADR-0007 §5).
+    pub const PERMISSIONS_SET: &str = "permissions.set";
     /// Replay the session's own log, so an attaching client is not blind to its past. A read: it records nothing.
     pub const SESSION_REPLAY: &str = "session.replay";
     /// Submit a user turn.
@@ -352,6 +374,7 @@ pub mod method {
 /// Event kind names (ADR-0003).
 pub mod event {
     pub const TURN_INTERRUPTED: &str = "turn.interrupted";
+    pub const PERMISSIONS_RELAXED: &str = "permissions.relaxed";
     pub const SESSION_FORKED: &str = "session.forked";
     pub const MESSAGE_APPENDED: &str = "message.appended";
     pub const TOOL_CALL: &str = "tool.call";
@@ -382,6 +405,7 @@ pub mod notification {
 /// Event kinds. The bool is the `ignorable` envelope marker (ADR-0003).
 pub const EVENT_KINDS: &[(&str, bool)] = &[
     ("turn.interrupted", false),
+    ("permissions.relaxed", false),
     ("session.forked", false),
     ("message.appended", false),
     ("tool.call", false),

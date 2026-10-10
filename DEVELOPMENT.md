@@ -211,6 +211,24 @@ session and asserts the earlier prompt is on screen.
   of state that needs (the last call's time). When a turn ends, the transcript says how
   long the whole turn took as a `· turn took 42.1s` note.
 
+### YOLO: opting out of the prompts, visibly
+
+`/yolo` turns approval prompts off for the session. ADR-0007 §5 asks for exactly three
+things, and all three are done:
+
+- **it is an explicit opt-out** — a command someone types, not a config key. No layer may
+  loosen the ladder (the narrow-only rule is tested), so this cannot arrive by inheritance
+  from a project file or a control-plane pack;
+- **opting out is itself an event** — `permissions.relaxed { auto_approve, reason }` is
+  written before anything is allowed by it, and a ruling that would have asked is recorded
+  as `verdict: allow, rule: "yolo:<class>"`, so a session that never asked says why;
+- **it is visible in the UI** — the input box and the footer both carry `⚠ YOLO`, in red,
+  for as long as it is on. The dangerous state is the one nobody notices.
+
+**The sandbox is a different axis and is untouched**: YOLO removes the *question*, not the
+*boundary*. A write outside the workspace still cannot happen — what changes is that the
+tool runs and returns its refusal, instead of the turn stopping to ask.
+
 ### Stopping a turn
 
 `Ctrl-C` (or `Esc`) while a turn is running **stops the turn**; with nothing running it
@@ -333,6 +351,7 @@ asked for works.
 | `f2` | the context panel |
 | `pgup`/`pgdn`, mouse wheel | scroll the conversation; `ctrl-pgup`/`ctrl-pgdn` jump to the ends |
 | `↑`/`↓` (or `k`/`j`), `enter` | choose an answer when a decision is waiting; `esc` denies, and `a`/`d` still work |
+| `/yolo` | turn approval prompts **off** for this session; `/yolo` again turns them back on |
 | `←`/`→`/`home`/`end`/`del`, `ctrl-a/e/u/k/w` | edit the line, by character so CJK works |
 
 `/exit` is in that table rather than in the skills because quitting is the surface's

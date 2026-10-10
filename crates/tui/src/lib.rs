@@ -353,6 +353,22 @@ impl<T: Transport> Client<T> {
         })
     }
 
+    /// Turn this session's approval prompts off or on. The sandbox is a different axis and
+    /// is untouched (ADR-0007 §5).
+    pub fn set_auto_approve(&mut self, on: bool) -> Result<bool, String> {
+        let params = gen::PermissionsSetParams {
+            session_id: self.session_id.clone(),
+            auto_approve: on,
+        };
+        let (_, result) = self.call(
+            gen::method::PERMISSIONS_SET,
+            serde_json::to_value(params).unwrap(),
+        )?;
+        let state: gen::PermissionsState =
+            serde_json::from_value(result).map_err(|e| format!("permissions.set: {e}"))?;
+        Ok(state.auto_approve)
+    }
+
     /// The session so far, rendered exactly the way live events are. Attaching to a
     /// session that already has a past should show that past; an empty screen that is
     /// quietly appending to yesterday's conversation is worse than useless.

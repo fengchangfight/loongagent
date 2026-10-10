@@ -309,6 +309,28 @@ doc = "Attach a thin client to the local agent server (ADR-0009)."
 params = "SessionAttachParams"
 result = "SessionAttachResult"
 
+[[types]]
+name = "PermissionsSetParams"
+kind = "struct"
+doc = "Turn this session's approval prompts off or on. The sandbox is a different axis and is untouched (ADR-0007 §5)."
+fields = [
+  { name = "session_id", type = "string" },
+  { name = "auto_approve", type = "bool", doc = "true: rulings that would ask are allowed instead, and the override is recorded" },
+]
+
+[[types]]
+name = "PermissionsState"
+kind = "struct"
+fields = [
+  { name = "auto_approve", type = "bool" },
+]
+
+[[methods]]
+name = "permissions.set"
+doc = "Opt out of approval prompts for this session. Opting out is itself an event, and the interface must show it (ADR-0007 §5)."
+params = "PermissionsSetParams"
+result = "PermissionsState"
+
 [[methods]]
 name = "session.replay"
 doc = "Replay the session's own log, so an attaching client is not blind to its past. A read: it records nothing."
@@ -350,6 +372,20 @@ fields = [
 [[events]]
 name = "turn.interrupted"
 payload = "TurnInterrupted"
+ignorable = false
+
+[[types]]
+name = "PermissionsRelaxed"
+kind = "struct"
+doc = "Approval prompts were turned off or on for this session. ADR-0007 §5: opting out is itself an event, and it travels with the session."
+fields = [
+  { name = "auto_approve", type = "bool" },
+  { name = "reason", type = "string" },
+]
+
+[[events]]
+name = "permissions.relaxed"
+payload = "PermissionsRelaxed"
 ignorable = false
 
 [[events]]

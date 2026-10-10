@@ -196,6 +196,37 @@ impl Server {
                     "context.explain",
                 )
             }
+            gen::method::PERMISSIONS_SET => {
+                let params: gen::PermissionsSetParams = match request.params_as() {
+                    Ok(p) => p,
+                    Err(e) => return vec![e.to_line()],
+                };
+                if let Some(bad) = self.wrong_session(&params.session_id) {
+                    return vec![bad];
+                }
+                match self.kernel.set_auto_approve(params.auto_approve) {
+                    Ok(()) => {
+                        // Said out loud, because a session that stops asking is a session
+                        // whose log has to say why (ADR-0007 §5).
+                        eprintln!(
+                            "approval prompts {}",
+                            if params.auto_approve {
+                                "off (YOLO)"
+                            } else {
+                                "on"
+                            }
+                        );
+                        self.respond(
+                            id,
+                            gen::PermissionsState {
+                                auto_approve: params.auto_approve,
+                            },
+                            "permissions.set",
+                        )
+                    }
+                    Err(e) => self.fail(id, e),
+                }
+            }
             gen::method::SESSION_REPLAY => {
                 let params: gen::SessionOnlyParams = match request.params_as() {
                     Ok(p) => p,

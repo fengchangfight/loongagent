@@ -383,6 +383,10 @@ pub struct Kernel {
     messages: Vec<ChatMessage>,
     /// Called for every event the moment it is written (the server's liveness hook).
     event_sink: Option<Box<dyn FnMut(&gen::EventEnvelope)>>,
+    /// Approval prompts are off for this session (ADR-0007 §5: YOLO is a visible opt-out,
+    /// and opting out is itself an event). The sandbox is a different axis and is
+    /// untouched: an out-of-bounds *write* still cannot leave the workspace.
+    auto_approve: bool,
     /// Set from outside — a signal handler, in practice — to stop the running turn at the
     /// next step boundary. Cooperative on purpose: a tool that has begun finishes, and the
     /// turn stops between steps rather than in the middle of one.
@@ -600,6 +604,7 @@ impl Kernel {
             selected_model,
             config,
             messages: Vec::new(),
+            auto_approve: false,
             event_sink: None,
             interrupted: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             entry_of: Vec::new(),
@@ -1555,6 +1560,37 @@ impl Kernel {
                 )?;
                 Ok(Dispatch::Done)
             }
+            // Opted out: the ruling is allowed instead of asking, and the event says the
+            // autonomy was relaxed rather than that the policy changed.
+            // Opted out: the ruling is allowed instead of asking, and the event says the
+            // autonomy was relaxed rather than that the policy changed (ADR-0007 §5).
+            Verdict::Ask if self.auto_approve => {
+                events.push(self.append(
+                    gen::event::POLICY_DECIDED,
+                    &json!({
+                        "verdict": Verdict::Allow,
+                        "rule": format!("yolo:{class:?}"),
+                        "tool": tool_name,
+                    }),
+                )?);
+                events.push(self.append(
+                    gen::event::TOOL_CALL,
+                    &gen::ToolCall {
+                        call_id: call.call_id.clone(),
+                        tool: tool_name.clone(),
+                        args: call.args.clone(),
+                        action_class: class,
+                    },
+                )?);
+                let (ok, output) = self.execute(&call.tool, &call.args);
+                events.push(self.record_tool_result(&call.call_id, ok, &output)?);
+                self.fire_hooks(
+                    HookEvent::PostTool,
+                    json!({"tool": tool_name, "call_id": call.call_id, "ok": ok, "output": output}),
+                    events,
+                )?;
+                Ok(Dispatch::Done)
+            }
             Verdict::Ask => {
                 let request_id = format!("appr-{}", self.approvals + 1);
                 self.approvals += 1;
@@ -1741,6 +1777,27 @@ impl Kernel {
             sink(&envelope);
         }
         Ok(envelope.seq)
+    }
+
+    /// Turn approval prompts off or on. Recorded, because a session that never asks is a
+    /// session whose log has to say why (ADR-0007 §5).
+    pub fn set_auto_approve(&mut self, on: bool) -> Result<(), KernelError> {
+        if self.auto_approve == on {
+            return Ok(());
+        }
+        self.auto_approve = on;
+        self.append(
+            gen::event::PERMISSIONS_RELAXED,
+            &gen::PermissionsRelaxed {
+                auto_approve: on,
+                reason: "the person asked for it with /yolo".to_string(),
+            },
+        )?;
+        Ok(())
+    }
+
+    pub fn auto_approve(&self) -> bool {
+        self.auto_approve
     }
 
     /// The flag a signal handler sets to stop the running turn. Handing it out is how the
@@ -2080,6 +2137,52 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("hi from the workspace"));
+    }
+
+    #[test]
+    fn opting_out_of_prompts_allows_the_action_and_says_so_in_the_log() {
+        let t = Temp::new();
+        let escape = t.dir.parent().unwrap().join("loong-kernel-yolo.txt");
+        let _ = std::fs::remove_file(&escape);
+        let model = ScriptedModel::new(vec![
+            response(
+                vec![call(
+                    "c1",
+                    "write_file",
+                    json!({"path": escape.to_string_lossy(), "content": "x"}),
+                )],
+                None,
+            ),
+            response(vec![], Some("done")),
+        ]);
+        let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+
+        // The opt-out is itself an event, before anything is allowed by it.
+        k.set_auto_approve(true).unwrap();
+        let kinds = kinds(&t.log);
+        assert!(
+            kinds.contains(&gen::event::PERMISSIONS_RELAXED.to_string()),
+            "{kinds:?}"
+        );
+
+        let outcome = k.submit("write outside").unwrap();
+        assert!(
+            outcome.pending_approval.is_none(),
+            "nothing waits for a human now: {:?}",
+            outcome.pending_approval
+        );
+        let events = loong_eventlog::replay(&t.log).unwrap().events;
+        let ruling = events
+            .iter()
+            .filter(|e| e.kind == ev::POLICY_DECIDED)
+            .find(|e| e.data["rule"].as_str().unwrap_or("").starts_with("yolo:"))
+            .expect("the override is recorded, so the log says why nothing asked");
+        assert_eq!(ruling.data["verdict"], "allow");
+
+        // The **sandbox** is a different axis: the write still happened where the tool
+        // could reach it, and the boundary is not what the opt-out changed. Asserting the
+        // permission path, not the filesystem: the point is that nothing was asked.
+        let _ = std::fs::remove_file(&escape);
     }
 
     #[test]

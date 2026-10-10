@@ -195,6 +195,17 @@ export interface ContextCategory {
   tokens: number;
 }
 
+/** Turn this session's approval prompts off or on. The sandbox is a different axis and is untouched (ADR-0007 §5). */
+export interface PermissionsSetParams {
+  session_id: string;
+  /** true: rulings that would ask are allowed instead, and the override is recorded */
+  auto_approve: boolean;
+}
+
+export interface PermissionsState {
+  auto_approve: boolean;
+}
+
 /** A session's own record that it is a child: which session it came from, how, and where in that session. ADR-0015's second tree level. The child stores none of the parent's events — it references them. */
 export interface SessionForked {
   /** fork | delegation | import */
@@ -207,6 +218,12 @@ export interface SessionForked {
 /** The person stopped the turn. Recorded rather than merely reported: why a session has no answer is part of the session. */
 export interface TurnInterrupted {
   /** interrupted | budget | steps (the limits that end a turn early) */
+  reason: string;
+}
+
+/** Approval prompts were turned off or on for this session. ADR-0007 §5: opting out is itself an event, and it travels with the session. */
+export interface PermissionsRelaxed {
+  auto_approve: boolean;
   reason: string;
 }
 
@@ -272,6 +289,7 @@ export interface ProfileSelected {
 export const METHODS = {
   contextExplain: "context.explain",
   sessionAttach: "session.attach",
+  permissionsSet: "permissions.set",
   sessionReplay: "session.replay",
   promptSubmit: "prompt.submit",
   approvalRespond: "approval.respond",
@@ -279,6 +297,7 @@ export const METHODS = {
 
 export const EVENTS = {
   turnInterrupted: "turn.interrupted",
+  permissionsRelaxed: "permissions.relaxed",
   sessionForked: "session.forked",
   messageAppended: "message.appended",
   toolCall: "tool.call",

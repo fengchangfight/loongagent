@@ -138,12 +138,23 @@
       "category": "<string>",
       "tokens": 1
     },
+    "PermissionsSetParams": {
+      "session_id": "<string>",
+      "auto_approve": true
+    },
+    "PermissionsState": {
+      "auto_approve": true
+    },
     "SessionForked": {
       "origin": "<string>",
       "parent_session": "<string>",
       "parent_seq": 1
     },
     "TurnInterrupted": {
+      "reason": "<string>"
+    },
+    "PermissionsRelaxed": {
+      "auto_approve": true,
       "reason": "<string>"
     },
     "SkillsLoaded": {
@@ -195,6 +206,11 @@
       "result": "SessionAttachResult"
     },
     {
+      "name": "permissions.set",
+      "params": "PermissionsSetParams",
+      "result": "PermissionsState"
+    },
+    {
       "name": "session.replay",
       "params": "SessionOnlyParams",
       "result": "SessionReplayResult"
@@ -214,6 +230,11 @@
     {
       "name": "turn.interrupted",
       "payload": "TurnInterrupted",
+      "ignorable": false
+    },
+    {
+      "name": "permissions.relaxed",
+      "payload": "PermissionsRelaxed",
       "ignorable": false
     },
     {

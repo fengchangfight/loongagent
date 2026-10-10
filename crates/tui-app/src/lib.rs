@@ -1116,6 +1116,10 @@ impl App {
         frame.render_widget(body, transcript);
 
         let (title, style) = match &self.pending {
+            Some(_) if self.yolo => (
+                "⚠ YOLO — NOT ASKING · this session approves for you".to_string(),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
             Some(_) => (
                 "waiting for your decision — ↑/↓ choose · enter confirm · esc deny".to_string(),
                 MARK_ACCENT_STYLE,
@@ -1123,10 +1127,6 @@ impl App {
             // Busy: what it is doing and for how long. "working…" for two minutes
             // tells nobody whether it is thinking or stuck.
             // The one state that must never be invisible.
-            Some(_) if self.yolo => (
-                "⚠ YOLO — NOT ASKING · this session approves for you".to_string(),
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ),
             None if self.yolo => (
                 "⚠ YOLO — approvals off, sandbox still on (/yolo to restore)".to_string(),
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),

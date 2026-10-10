@@ -427,6 +427,20 @@ so a conversation shorter than the window stays where it is instead of pushing i
 lines off the end. The count is capped by the window at draw time, so the `[n/total]` hint
 and the next key press say the same thing the screen does.
 
+### A decision waits where the work put it
+
+The panel appears **after** the transcript and immediately above the input box, because the
+flow reads downwards: what happened, then the question it raised, then the box you answer in.
+It used to sit above the transcript, which put the decision before the evidence for it.
+
+Every detail in it is clipped to the panel's width by **display columns** and is never
+wrapped, so each one is exactly one row and the three answers are always inside the box. That
+is not decoration. `clip` counted *characters*: a command carrying Chinese comments was
+clipped to 76 characters — 150 columns — so it wrapped onto three rows and pushed `Deny` out
+of the panel, which is how a menu comes to look like the information above it. `one_line`
+becomes one line now, the class-and-tool row is clipped like the rest (a tool name can be
+anything), and the paragraph is rendered without wrapping so a miscount cannot hide an answer.
+
 `/exit` is in that table rather than in the skills because quitting is the surface's
 business: a command that means "stop this program" has no meaning to a model. Everything
 else beginning with `/` — `/help`, workspace skills, MCP prompts — goes to the server,

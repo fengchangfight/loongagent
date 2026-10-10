@@ -141,6 +141,10 @@ fn kind_of(params: &serde_json::Value) -> &str {
 
 /// How many rows the decision panel asks for: two borders, three details, three answers,
 /// and one for air.
+///
+/// Every detail is clipped to the panel's width and nothing wraps, so each one is one row and
+/// this is the whole height — the answers cannot be pushed out of their own box. It is also
+/// read as a ceiling when the terminal is short: the transcript keeps at least three rows.
 const DECISION_ROWS: u16 = 9;
 
 /// A string forced onto one line and cut to fit: newlines become `⏎` so a shell command
@@ -150,12 +154,26 @@ fn one_line(text: &str, width: usize) -> String {
     clip(&flattened, width)
 }
 
-/// One line's worth of a long string, by characters so a CJK path is not cut in half.
-fn clip(text: &str, width: usize) -> String {
-    if text.chars().count() <= width {
+/// One line's worth of a long string, cut to **display columns**.
+///
+/// Columns, not characters: a Chinese character is two of them, so a 76-character line of
+/// CJK is 150 columns wide. Counting characters is what let a clipped command wrap to three
+/// rows inside the decision panel and push the answers out of their own box.
+fn clip(text: &str, columns: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    if text.width() <= columns {
         return text.to_string();
     }
-    let head: String = text.chars().take(width.saturating_sub(1)).collect();
+    let mut head = String::new();
+    let mut used = 0usize;
+    for ch in text.chars() {
+        let char_width = ch.width().unwrap_or(0);
+        if used + char_width > columns.saturating_sub(1) {
+            break;
+        }
+        head.push(ch);
+        used += char_width;
+    }
     format!("{head}…")
 }
 
@@ -491,10 +509,17 @@ impl App {
         let mut details: Vec<Line> = Vec::new();
         match &self.info() {
             Some((class, reason, tool, args)) => {
+                // This line was the one detail nobody clipped, on the assumption that a
+                // class and a tool name are short. A tool name can be anything — an MCP
+                // server's, or the model's own — so it is clipped like the rest.
+                use unicode_width::UnicodeWidthStr;
+                let room = (area.width.saturating_sub(4) as usize)
+                    .saturating_sub(class.width() + 2)
+                    .max(1);
                 details.push(Line::from(vec![
                     Span::styled(class.to_string(), Style::default().fg(MARK_ACCENT)),
                     Span::raw("  "),
-                    Span::styled(tool.to_string(), Style::default().fg(MARK_INK)),
+                    Span::styled(clip(tool, room), Style::default().fg(MARK_INK)),
                 ]));
                 if !reason.is_empty() {
                     details.push(Line::from(Span::styled(
@@ -536,14 +561,15 @@ impl App {
                 Span::styled(label.to_string(), style),
             ]));
         }
+        // Deliberately **not** wrapped. Every line above is one row tall by construction, and
+        // the answers are the point of the panel; letting the widget wrap means any line that
+        // slips past the clip pushes the last answer out of the box, which is exactly the bug.
         frame.render_widget(
-            Paragraph::new(lines)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(" needs your decision "),
-                )
-                .wrap(Wrap { trim: false }),
+            Paragraph::new(lines).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" needs your decision "),
+            ),
             area,
         );
     }
@@ -1503,23 +1529,25 @@ impl App {
                     0
                 }),
                 Constraint::Length(if self.notes.is_empty() { 0 } else { 2 }),
-                // A question waiting for an answer gets its own block: it is the one
-                // thing on screen that is blocked on a person.
+                Constraint::Min(3),
+                // A question waiting for an answer gets its own block, and it comes **after**
+                // the work it is about: the flow reads downwards — events, then the question
+                // raised by them, then the box you answer in. It used to sit above the
+                // transcript, which put the decision before the evidence for it.
                 Constraint::Length(if self.pending.is_some() {
-                    // Two borders, one line per detail, three answers: the panel was six
-                    // rows tall and a detail with newlines in it ate the answers.
+                    // Two borders, one line per detail, three answers. Every detail is
+                    // clipped to the width and never wrapped, so this is the whole height.
                     DECISION_ROWS.min(conversation.height.saturating_sub(8))
                 } else {
                     0
                 }),
-                Constraint::Min(3),
                 Constraint::Length(input_rows + 2),
                 Constraint::Length(1),
             ])
             .split(conversation);
         // Named, because five anonymous slices is how the notes strip once ended up
         // drawn over the mark.
-        let (banner, notes, decision, transcript, entry, keys) =
+        let (banner, notes, transcript, decision, entry, keys) =
             (areas[0], areas[1], areas[2], areas[3], areas[4], areas[5]);
 
         if self.show_banner(conversation) {
@@ -2386,23 +2414,97 @@ mod tests {
             ),
         }));
         let screen = draw(&mut app, 200, 30);
-        assert!(screen.contains("Allow once"), "{screen}");
-        assert!(screen.contains("Allow in this project"), "{screen}");
-        assert!(screen.contains("Deny"), "{screen}");
-        // Every detail is one row, so the panel cannot grow past its share of the screen.
+        // Every detail is one row, so the panel cannot grow past its share of the screen —
+        // and every answer is inside those rows, which is the part that matters.
         let panel: Vec<&str> = screen
             .lines()
             .skip_while(|line| !line.contains("needs your decision"))
-            .take_while(|line| !line.contains("session s"))
+            .take_while(|line| !line.starts_with('└'))
             .collect();
         assert!(
-            panel.len() <= DECISION_ROWS as usize + 1,
+            panel.len() <= DECISION_ROWS as usize,
             "{} rows: {panel:?}",
             panel.len()
         );
+        for answer in ["Allow once", "Allow in this project", "Deny"] {
+            assert!(
+                panel.iter().any(|line| line.contains(answer)),
+                "{answer} left the panel: {panel:?}"
+            );
+        }
         assert!(
             panel.iter().any(|line| line.contains('⏎')),
             "the command is flattened: {panel:?}"
+        );
+    }
+
+    #[test]
+    fn a_command_full_of_cjk_does_not_push_the_answers_out_of_the_box() {
+        // The same report, one session later: the first decision was readable and the second
+        // was not. Its command carried Chinese comments, and `clip` counted *characters* —
+        // 76 of them are 150 columns, so the line wrapped to three rows and pushed `Deny`
+        // out of the panel, leaving the details and the answers reading as one jumble.
+        let mut app = App::new("s", "v");
+        app.pending = Some("appr-2".to_string());
+        app.approval = Some(Box::new(ApprovalInfo {
+            request_id: "appr-2".to_string(),
+            class: "out_of_bounds".to_string(),
+            reason: "shell: 在目标目录之外执行命令，需要你确认是否允许这一次写入操作，\
+                     因为它会修改工作区之外的文件内容"
+                .to_string(),
+            tool: "shell".to_string(),
+            args: "{\"command\": \"python3 - <<'EOF'\n# 把写好的单页游戏复制到目标目录，并检查标题、脚本标签和字符集是否正确\nEOF\"}"
+                .to_string(),
+        }));
+        // A narrow terminal, where a wide line has the least room.
+        let screen = draw(&mut app, 80, 30);
+        let panel: Vec<&str> = screen
+            .lines()
+            .skip_while(|line| !line.contains("needs your decision"))
+            .take_while(|line| !line.starts_with('└'))
+            .collect();
+        assert!(
+            panel.len() <= DECISION_ROWS as usize,
+            "{} rows: {panel:?}",
+            panel.len()
+        );
+        for answer in ["Allow once", "Allow in this project", "Deny"] {
+            assert!(
+                panel.iter().any(|line| line.contains(answer)),
+                "{answer} left the panel: {panel:?}"
+            );
+        }
+        // And the clipping is *visible*: a line cut to display columns ends in `…` inside the
+        // box. Clipping by characters instead would put the ellipsis past the right edge, so
+        // the reader would see text simply stop — and the answers would still be there, which
+        // is why this half needs its own assertion.
+        let clipped = panel
+            .iter()
+            .find(|line| line.contains("{\"command\""))
+            .expect("the command row");
+        assert!(
+            clipped.trim_end_matches('│').trim_end().ends_with('…'),
+            "a clipped detail says so, inside the box: {clipped:?}"
+        );
+    }
+
+    #[test]
+    fn the_decision_comes_after_the_work_it_is_about() {
+        // The flow reads downwards: events, then the question they raised, then the box you
+        // answer in. The panel used to sit above the transcript, which put the decision
+        // before the evidence for it.
+        let mut app = App::new("s", "v");
+        app.push_lines(vec!["→ shell ls".to_string()]);
+        app.pending = Some("appr-1".to_string());
+        let screen = draw(&mut app, 80, 30);
+        let transcript = screen.find("loongagent — session").expect("the transcript");
+        let decision = screen.find("needs your decision").expect("the decision");
+        let prompt = screen
+            .find("waiting for your decision")
+            .expect("the prompt title");
+        assert!(
+            transcript < decision && decision < prompt,
+            "transcript {transcript}, decision {decision}, prompt {prompt}:\n{screen}"
         );
     }
 

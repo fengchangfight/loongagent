@@ -205,6 +205,32 @@ session and asserts the earlier prompt is on screen.
   into a wall of text. **`/expand`** asks the session's own log (through
   `session.replay`) for the most recent tool result in full, so the summary in the
   transcript is never the only copy of anything.
+- Those markers are **reachable from the keyboard, with no mouse involved** (so
+  left-drag selection and right-click copy keep working): `tab` / `shift-tab` walk the
+  folds, the selected marker is drawn in reverse video and prefixed with `▸`, and `enter`
+  opens that one. What opens is the log's own text — the transcript keeps the summary, so
+  looking at something never rewrites the record. While it is open the output takes the
+  transcript's place and `pgup`/`pgdn` walk through it, read the way a terminal reads a
+  command's output: the end first, paging back towards the start. `esc` closes the output,
+  `esc` again lets the fold go, and a prompt with text in it always sends on `enter` — a
+  fold can never take the prompt's key away.
+- A fold is named by **its place counting from the oldest**, which is the order the
+  markers appear in on screen: `loong_tui::Client::expand_tool_result(at)` and
+  `App::fold_at` are the two halves of one count, so no identifier has to be shown to
+  anybody. From the oldest and not from the newest because the log only grows: a name that
+  is asked for while a turn is running still means the same result when the answer comes
+  back, where a count from the end would have quietly moved on to the next fold.
+- **Opening a fold does not ask the log while a turn is running.** A turn owns the
+  connection — `submit_with` is blocked reading the turn's own stream, the same fact that
+  makes interrupting a signal rather than a message — so a request sent then would sit in
+  the queue until the whole turn ended, which is exactly when nobody is reading anymore.
+  It does not have to be sent: the full text of every tool result already came past on that
+  stream, and the transcript is only a summary of it. The worker sends each fold's text
+  with the summary line that stands for it (`FromWorker::Fold`), and the view keeps the
+  newest `FOLD_KEEP` (32) of them, so `enter` is a local act. The folds a resumed session
+  starts with are read once at startup (`Client::folded_results`) for the same reason. What
+  the view does not hold — a fold older than the bound — is fetched from `session.replay`
+  as before, which the running turn may delay; that is the only case where it does.
 - Each tool result carries **how long the tool took** — `← ok all good  (2.4s)` — taken
   from the `time_ms` on the events rather than from a stopwatch in the interface, so it
   measures the work rather than the rendering. `loong_tui::Renderer` keeps the one piece

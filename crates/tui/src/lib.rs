@@ -183,6 +183,23 @@ fn render_event_with(envelope: &Value, full: bool) -> Option<String> {
     }
 }
 
+/// Where a fold begins and what points at it. Shared with the interface that draws the
+/// markers, so "is this line a fold?" cannot drift away from "does this result get
+/// folded?" — the two questions have to have the same answer or the keyboard would land
+/// on lines that are not there.
+pub const FOLD_PREFIX: &str = "  … ";
+pub const FOLD_POINTER: &str = "· /expand";
+
+/// The line a summarised result ends with.
+pub fn is_fold_marker(line: &str) -> bool {
+    line.starts_with(FOLD_PREFIX) && line.ends_with(FOLD_POINTER)
+}
+
+/// Whether this rendered result was summarised (and so has a marker to move to).
+pub fn folded_output(text: &str) -> bool {
+    text.lines().any(is_fold_marker)
+}
+
 /// A tool result, bounded. A chatty command must not turn the transcript into a wall of
 /// text, so a long one is summarised with the count and the way to see the rest.
 fn collapse_result(ok: bool, output: &str) -> String {
@@ -211,7 +228,7 @@ fn collapse_result(ok: bool, output: &str) -> String {
         let hidden = lines.len().saturating_sub(MAX_ROWS);
         text.push('\n');
         text.push_str(&format!(
-            "  … {hidden} more line(s), {} · /expand",
+            "{FOLD_PREFIX}{hidden} more line(s), {} {FOLD_POINTER}",
             human_bytes(output.len())
         ));
     }
@@ -335,6 +352,48 @@ impl<T: Transport> Client<T> {
     /// session's log through `session.replay`, so the summary in the transcript is never
     /// the only copy of anything.
     pub fn expand_last_tool_result(&mut self) -> Result<Vec<String>, String> {
+        let results = self.tool_results()?;
+        Ok(
+            match results.last().and_then(|event| render_event_full(event)) {
+                Some(text) => text.split('\n').map(|line| line.to_string()).collect(),
+                None => Vec::new(),
+            },
+        )
+    }
+
+    /// Every **summarised** tool result in this session's log, in full, oldest first.
+    ///
+    /// This is the list both sides count. The transcript names a fold by where it sits
+    /// among the others — the keyboard walks the markers, and the marker's place is what
+    /// gets asked for — so the log has to agree on that order, and this is the one
+    /// definition of it. Folding is the client's own decision (`folded_output`), so which
+    /// results are on the list cannot drift from which lines get a marker.
+    pub fn folded_results(&mut self) -> Result<Vec<String>, String> {
+        Ok(self
+            .tool_results()?
+            .iter()
+            .filter(|event| render_event(event).is_some_and(|text| folded_output(&text)))
+            .filter_map(render_event_full)
+            .collect())
+    }
+
+    /// One summarised tool result in full, by its place counting from the **oldest** fold,
+    /// which is the order the transcript draws them in.
+    ///
+    /// From the oldest rather than from the newest on purpose: the log only grows, so
+    /// "the third fold" means the same result before and after the next tool runs. A count
+    /// from the end would quietly point at a different result the moment the turn produced
+    /// another one — which is exactly what happens to a request made while a turn is
+    /// running and answered after it.
+    pub fn expand_tool_result(&mut self, at: usize) -> Result<Vec<String>, String> {
+        Ok(match self.folded_results()?.get(at) {
+            Some(text) => text.split('\n').map(|line| line.to_string()).collect(),
+            None => Vec::new(),
+        })
+    }
+
+    /// Every tool result this session's log holds, oldest first.
+    fn tool_results(&mut self) -> Result<Vec<Value>, String> {
         let params = gen::SessionOnlyParams {
             session_id: self.session_id.clone(),
         };
@@ -344,13 +403,13 @@ impl<T: Transport> Client<T> {
         )?;
         let replay: gen::SessionReplayResult =
             serde_json::from_value(result).map_err(|e| format!("session.replay: {e}"))?;
-        let last = replay.events.iter().rev().find(|event| {
-            event.get("kind").and_then(|k| k.as_str()) == Some(gen::event::TOOL_RESULT)
-        });
-        Ok(match last.and_then(render_event_full) {
-            Some(text) => text.split('\n').map(|line| line.to_string()).collect(),
-            None => Vec::new(),
-        })
+        Ok(replay
+            .events
+            .into_iter()
+            .filter(|event| {
+                event.get("kind").and_then(|k| k.as_str()) == Some(gen::event::TOOL_RESULT)
+            })
+            .collect())
     }
 
     /// Turn this session's approval prompts off or on. The sandbox is a different axis and
@@ -574,6 +633,12 @@ mod tests {
 
     fn response(id: u64, result: Value) -> Value {
         json!({"jsonrpc": "2.0", "id": id, "result": result})
+    }
+
+    /// An event the way `session.replay` returns it: the envelope's params, not the
+    /// notification wrapped around them.
+    fn bare(seq: u64, kind: &str, data: Value) -> Value {
+        json!({"seq": seq, "id": format!("e{seq}"), "kind": kind, "ignorable": false, "time_ms": 0, "data": data})
     }
 
     #[test]
@@ -808,6 +873,96 @@ mod tests {
             "{}",
             lines[0]
         );
+    }
+
+    #[test]
+    fn a_fold_is_found_by_its_place_in_the_log_not_by_its_distance_from_the_end() {
+        // Three results: a short one, then two the transcript summarised. The short one
+        // has no marker on screen, so it is not one of the ones a reader can walk to.
+        let noisy = |tag: &str| {
+            (1..=50)
+                .map(|n| format!("{tag} {n}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let replay = || {
+            response(
+                1,
+                json!({"events": [
+                    bare(1, "tool.result", json!({"call_id": "c1", "ok": true, "output": noisy("older")})),
+                    bare(2, "tool.result", json!({"call_id": "c2", "ok": true, "output": noisy("newest")})),
+                    bare(3, "tool.result", json!({"call_id": "c3", "ok": true, "output": "short"})),
+                ]}),
+            )
+        };
+        let fake = Fake::with(vec![replay(), replay(), replay(), replay()]);
+        let mut client = Client::new(fake, "s-1");
+        // The two folded ones are what the transcript draws a marker for, in this order.
+        let older = client.expand_tool_result(0).unwrap();
+        assert!(older[0].contains("older 1"), "{:?}", older[0]);
+        assert!(older.iter().any(|line| line.contains("older 50")));
+        let newest = client.expand_tool_result(1).unwrap();
+        assert!(newest[0].contains("newest 1"), "{:?}", newest[0]);
+        // Past the end there is nothing to name, and `/expand` still means the last result
+        // of all — the short one, which is what it says on the tin.
+        assert!(client.expand_tool_result(2).unwrap().is_empty());
+        assert_eq!(
+            client.expand_last_tool_result().unwrap(),
+            vec!["← ok short"]
+        );
+    }
+
+    #[test]
+    fn a_folds_name_survives_the_log_growing_underneath_it() {
+        // The same two folds, and then a third the turn has just written. Counting from
+        // the oldest still names the result that was asked for; counting from the newest
+        // would have silently moved to the fold below it.
+        let noisy = |tag: &str| {
+            (1..=50)
+                .map(|n| format!("{tag} {n}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let log = |third: bool| {
+            let mut events = vec![
+                bare(
+                    1,
+                    "tool.result",
+                    json!({"call_id": "c1", "ok": true, "output": noisy("first")}),
+                ),
+                bare(
+                    2,
+                    "tool.result",
+                    json!({"call_id": "c2", "ok": true, "output": noisy("second")}),
+                ),
+            ];
+            if third {
+                events.push(bare(
+                    3,
+                    "tool.result",
+                    json!({"call_id": "c3", "ok": true, "output": noisy("third")}),
+                ));
+            }
+            response(1, json!({ "events": events }))
+        };
+        let mut lines = vec![log(false)];
+        lines.extend([log(true), log(true), log(true)]);
+        let mut client = Client::new(Fake::with(lines), "s-1");
+        assert!(client.expand_tool_result(0).unwrap()[0].contains("first 1"));
+        // The name still means the same fold once another one has landed after it, and
+        // the new fold is simply the next name.
+        assert!(client.expand_tool_result(0).unwrap()[0].contains("first 1"));
+        assert!(client.expand_tool_result(1).unwrap()[0].contains("second 1"));
+        assert!(client.expand_tool_result(2).unwrap()[0].contains("third 1"));
+    }
+
+    #[test]
+    fn a_marker_is_the_line_the_summary_ends_with() {
+        assert!(is_fold_marker("  … 197 more line(s), 5.0 KiB · /expand"));
+        assert!(!is_fold_marker("  … 197 more line(s), 5.0 KiB"));
+        assert!(!is_fold_marker("← ok /expand"));
+        assert!(folded_output("← ok a\n  … 2 more line(s), 8 B · /expand"));
+        assert!(!folded_output("← ok a\nb"));
     }
 
     #[test]

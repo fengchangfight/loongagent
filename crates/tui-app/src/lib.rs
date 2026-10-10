@@ -34,6 +34,13 @@ pub enum ToWorker {
     RefreshContext,
     /// Show the most recent tool result in full — the counterpart of collapsing it.
     Expand,
+    /// Show one summarised tool result in full, by its place counting from the **oldest**
+    /// fold on screen. From the oldest, not from the newest, because the log only grows:
+    /// a name that is asked for while a turn is running still means the same result when
+    /// the turn lets go of the connection and the answer is fetched.
+    ExpandAt {
+        at: usize,
+    },
     /// Turn approval prompts off or on for this session.
     Yolo(bool),
 }
@@ -57,6 +64,19 @@ pub enum FromWorker {
     /// What the turn is doing right now ("shell: cargo test"), so the interface can say
     /// so while it is happening rather than after.
     Working(String),
+    /// The full text of one folded tool result, as asked for by `ExpandAt`.
+    Expanded {
+        at: usize,
+        lines: Vec<String>,
+    },
+    /// The full text of a fold the turn has just written, sent with the summary line that
+    /// stands for it. The view keeps it so a fold can be opened without asking the log —
+    /// a turn owns the connection while it runs, and reading is exactly what someone does
+    /// while a long tool works.
+    Fold {
+        at: usize,
+        lines: Vec<String>,
+    },
     Failed(String),
 }
 
@@ -310,6 +330,21 @@ fn styled(line: &str) -> Line<'static> {
 /// take the whole screen away from the conversation.
 const MAX_INPUT_ROWS: u16 = 8;
 
+/// A tool result the reader opened: the log's full text, not the summary.
+///
+/// It is held apart from `lines` on purpose. The transcript is a record and the fold is a
+/// view of it, so opening one changes nothing about what was recorded — the same reason
+/// `/mouse` is a view toggle rather than a mode the agent knows about.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OpenFold {
+    /// The marker line in `lines` this came from.
+    pub marker: usize,
+    /// Every line of the result, exactly as the log has it.
+    pub lines: Vec<String>,
+    /// Rows scrolled up from the end, read the same way the transcript's is.
+    pub scroll: usize,
+}
+
 pub struct App {
     /// The rendered conversation, oldest first.
     pub lines: Vec<String>,
@@ -351,8 +386,26 @@ pub struct App {
     pub streaming: String,
     /// Lines scrolled up from the bottom.
     pub scroll: usize,
+    /// Which folded tool result the keyboard is on, by the index of its marker line. A
+    /// transcript only ever appends, so an index into it stays true; and nothing has to
+    /// be re-found when new output arrives.
+    pub fold: Option<usize>,
+    /// The fold the reader opened, if any. While it is open the output takes the
+    /// transcript's place: reading a result is the one thing on screen worth the room.
+    pub open: Option<OpenFold>,
+    /// The full text of folds this view already holds, by the number both sides count them
+    /// by. Keeping it here rather than asking the log is what makes `enter` work **while a
+    /// turn is running**: the turn owns the connection, and this text arrived on it.
+    ///
+    /// Bounded by [`FOLD_KEEP`]: a session can run all day, and the oldest folds can always
+    /// be fetched from the log — just not until the turn lets go of the connection.
+    pub folded: std::collections::BTreeMap<usize, Vec<String>>,
     pub quit: bool,
 }
+
+/// How many folds the view keeps in full. At the default 64 KiB per stream this is a few
+/// megabytes at worst, and it covers everything anyone opens while watching a turn.
+const FOLD_KEEP: usize = 32;
 
 impl App {
     pub fn new(session: impl Into<String>, schema: impl Into<String>) -> Self {
@@ -378,6 +431,9 @@ impl App {
             context: None,
             streaming: String::new(),
             scroll: 0,
+            fold: None,
+            open: None,
+            folded: std::collections::BTreeMap::new(),
             quit: false,
         }
     }
@@ -865,6 +921,14 @@ impl App {
                     self.approval = Some(info);
                 }
                 Ok(FromWorker::Working(what)) => self.activity = Some(what),
+                Ok(FromWorker::Expanded { at, lines }) => {
+                    if lines.is_empty() {
+                        self.push_lines(vec!["· no tool result to expand yet".to_string()]);
+                    } else {
+                        self.opened(at, lines);
+                    }
+                }
+                Ok(FromWorker::Fold { at, lines }) => self.remember_fold(at, lines),
                 Ok(FromWorker::Lines(lines)) => {
                     // The finished message supersedes the fragments on screen, and it
                     // is the only one of the two that exists in the log.
@@ -919,6 +983,19 @@ impl App {
             KeyCode::Char('d') if ctrl => {
                 self.quit = true;
                 Action::Quit
+            }
+            // A question waiting for an answer outranks everything below it, and a fold
+            // that is open is next in line: esc puts the output away rather than
+            // interrupting or leaving. Ctrl-C still stops the turn, as always.
+            KeyCode::Esc if self.open.is_some() && self.pending.is_none() => {
+                self.open = None;
+                Action::None
+            }
+            // One more esc lets go of the selected fold, so the keyboard can always get
+            // back to the prompt without leaving — a mode you cannot leave is a trap.
+            KeyCode::Esc if self.fold.is_some() && self.pending.is_none() => {
+                self.fold = None;
+                Action::None
             }
             // Esc is the same idea, and free unless an approval is waiting (then it
             // denies, above).
@@ -1011,6 +1088,18 @@ impl App {
                 }
                 Action::None
             }
+            // Tab walks the folds, newest first: the summary lines are the only place a
+            // reader has to go to see the rest, and they should not need a command for it.
+            // Shift-Tab walks back the other way. Neither touches the mouse, so selecting
+            // text with it keeps working.
+            KeyCode::Tab if self.pending.is_none() => self.move_fold(true),
+            KeyCode::BackTab if self.pending.is_none() => self.move_fold(false),
+            // Paging through an open fold is the same gesture as paging through the
+            // transcript, which is the point of it taking the same keys.
+            KeyCode::PageUp if self.open.is_some() => self.scroll_fold(5),
+            KeyCode::PageDown if self.open.is_some() => self.scroll_fold(-5),
+            KeyCode::Up if self.open.is_some() => self.scroll_fold(1),
+            KeyCode::Down if self.open.is_some() => self.scroll_fold(-1),
             KeyCode::PageUp => {
                 self.scroll = (self.scroll + 5).min(self.lines.len());
                 Action::None
@@ -1050,6 +1139,17 @@ impl App {
                 self.delete_before_cursor();
                 Action::None
             }
+            // Enter opens the fold it is on — the key that "clicks" the marker the keyboard
+            // walked to. Only while the prompt is empty: the moment there is something to
+            // send, enter sends it, because that is what a prompt means. With no fold
+            // selected nothing here changes.
+            KeyCode::Enter if self.open.is_some() => {
+                self.open = None;
+                Action::None
+            }
+            KeyCode::Enter if self.fold.is_some() && self.input.trim().is_empty() => {
+                self.toggle_fold()
+            }
             KeyCode::Enter if self.pending.is_none() => {
                 let text = self.input.trim().to_string();
                 if text.is_empty() {
@@ -1064,6 +1164,9 @@ impl App {
                 }
                 self.input.clear();
                 self.cursor = 0;
+                // Sending is a return to the prompt, so the keyboard's place among the
+                // folds is given up with it.
+                self.fold = None;
                 self.push_lines(vec![format!("you: {text}")]);
                 self.busy = true;
                 self.busy_since = Some(std::time::Instant::now());
@@ -1079,16 +1182,145 @@ impl App {
         }
     }
 
+    /// Every fold marker in the transcript, oldest first. Markers are the client's own
+    /// lines (`loong_tui::is_fold_marker`), so the two halves of folding cannot disagree
+    /// about which lines the keyboard can land on.
+    fn folds(&self) -> Vec<usize> {
+        self.lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| loong_tui::is_fold_marker(line))
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// Which fold this marker is, counting from the oldest — the name the client knows the
+    /// same result by. Both sides count the same lines in the same order, which is the
+    /// whole trick: no identifier has to be shown to anybody. From the oldest rather than
+    /// from the newest because the transcript only ever appends, so a fold's number never
+    /// changes — not even while the answer is on its way back.
+    fn fold_at(&self, marker: usize) -> usize {
+        self.lines
+            .iter()
+            .take(marker)
+            .filter(|line| loong_tui::is_fold_marker(line))
+            .count()
+    }
+
+    /// Keep the full text of a fold this view was shown. A number already held is replaced:
+    /// the newest fold is the one anyone is about to open, so what must not survive is the
+    /// oldest, and the log still has every one of them.
+    fn remember_fold(&mut self, at: usize, lines: Vec<String>) {
+        self.folded.insert(at, lines);
+        while self.folded.len() > FOLD_KEEP {
+            self.folded.pop_first();
+        }
+    }
+
+    /// Move the keyboard to the fold above (`older`) or below, wrapping at either end. A
+    /// first press lands on the newest fold — the one just written, which is the one the
+    /// reader is looking at.
+    fn move_fold(&mut self, older: bool) -> Action {
+        let folds = self.folds();
+        let Some(newest) = folds.last().copied() else {
+            self.fold = None;
+            return Action::None;
+        };
+        self.fold = Some(
+            match self.fold.and_then(|at| folds.iter().position(|f| *f == at)) {
+                None => {
+                    if older {
+                        newest
+                    } else {
+                        folds[0]
+                    }
+                }
+                Some(at) => {
+                    let step = if older {
+                        (at + folds.len() - 1) % folds.len()
+                    } else {
+                        (at + 1) % folds.len()
+                    };
+                    folds[step]
+                }
+            },
+        );
+        Action::None
+    }
+
+    /// Move inside an open fold. Positive rows walk back through the output, the same
+    /// direction PageUp walks through the transcript.
+    fn scroll_fold(&mut self, rows: isize) -> Action {
+        if let Some(open) = &mut self.open {
+            let last = open.lines.len().saturating_sub(1);
+            open.scroll = if rows >= 0 {
+                (open.scroll + rows as usize).min(last)
+            } else {
+                open.scroll.saturating_sub(rows.unsigned_abs())
+            };
+        }
+        Action::None
+    }
+
+    /// Open the fold the keyboard is on, or put it away if it is already open — the same
+    /// key both ways, because that is what a fold is.
+    fn toggle_fold(&mut self) -> Action {
+        let Some(marker) = self.fold else {
+            return Action::None;
+        };
+        if self.open.as_ref().is_some_and(|open| open.marker == marker) {
+            self.open = None;
+            return Action::None;
+        }
+        let at = self.fold_at(marker);
+        // The text is already here whenever the turn sent it, and that is the only way to
+        // open a fold **while the turn is still running**: the connection is not free to ask
+        // on. A fold this view does not hold — the session's earlier history, or one long
+        // since let go — is fetched from the log instead, which the turn may delay.
+        if let Some(lines) = self.folded.get(&at).cloned() {
+            return self.opened(at, lines);
+        }
+        Action::Send(ToWorker::ExpandAt { at })
+    }
+
+    /// Take delivery of a result the reader asked to see in full. The reply is matched by
+    /// the name that was asked for, not by where the fold sits from the end: the answer may
+    /// arrive after the turn has written more folds, and the name is the one thing that
+    /// still means the same result when it does.
+    fn opened(&mut self, at: usize, lines: Vec<String>) -> Action {
+        let folds = self.folds();
+        let Some(marker) = folds.get(at).copied() else {
+            self.push_lines(vec![
+                "· that tool result is no longer in the transcript".to_string()
+            ]);
+            return Action::None;
+        };
+        self.fold = Some(marker);
+        self.open = Some(OpenFold {
+            marker,
+            lines,
+            scroll: 0,
+        });
+        Action::None
+    }
+
     /// Everything said so far, for `/copy`.
     pub fn transcript(&self) -> String {
         self.lines.join("\n")
     }
 
     /// A mouse wheel event: scrolling the conversation is the one thing a wheel
-    /// should do here, and it is what people try first.
+    /// should do here, and it is what people try first. Over an open fold it scrolls the
+    /// output instead — the wheel follows what is on screen.
     pub fn handle_mouse(&mut self, kind: ratatui::crossterm::event::MouseEventKind) {
         use ratatui::crossterm::event::MouseEventKind;
         match kind {
+            MouseEventKind::ScrollUp if self.open.is_some() => {
+                self.scroll_fold(3);
+            }
+            MouseEventKind::ScrollDown if self.open.is_some() => {
+                self.scroll_fold(-3);
+            }
             MouseEventKind::ScrollUp => self.scroll = (self.scroll + 3).min(self.lines.len()),
             MouseEventKind::ScrollDown => self.scroll = self.scroll.saturating_sub(3),
             _ => {}
@@ -1130,12 +1362,35 @@ impl App {
     }
 
     /// The scrollback the reader should see at this height.
+    ///
+    /// An open fold takes the whole area. It is the one thing on screen the reader asked
+    /// to look at, and printing the full output beside the summary of itself would be two
+    /// copies of one thing — where the summary is, the output goes.
     pub fn visible_lines(&self, height: usize) -> Vec<Line<'static>> {
+        let rows = height.max(1);
+        if let Some(open) = &self.open {
+            // Read the way a terminal reads a command's output: the end is what you are
+            // looking at, and paging back walks towards the start.
+            let end = open.lines.len().saturating_sub(open.scroll);
+            let start = end.saturating_sub(rows);
+            return (start..end).map(|at| styled(&open.lines[at])).collect();
+        }
         let total = self.lines.len();
-        let end = total.saturating_sub(self.scroll);
-        let start = end.saturating_sub(height.max(1));
+        let mut end = total.saturating_sub(self.scroll);
+        let mut start = end.saturating_sub(rows);
+        // A selection nobody can see is not a selection: when Tab has walked to a fold
+        // that has scrolled out of the window, the window follows it.
+        if let Some(fold) = self.fold {
+            if fold >= end {
+                end = fold + 1;
+                start = end.saturating_sub(rows);
+            } else if fold < start {
+                start = fold.saturating_sub(rows / 2);
+                end = (start + rows).min(total);
+            }
+        }
         let mut shown: Vec<Line<'static>> =
-            self.lines[start..end].iter().map(|l| styled(l)).collect();
+            (start..end).map(|at| self.transcript_line(at)).collect();
         // What is being written right now goes below the finished output.
         if !self.streaming.is_empty() {
             shown.extend(self.streaming.split('\n').map(|piece| {
@@ -1150,6 +1405,28 @@ impl App {
             }));
         }
         shown
+    }
+
+    /// One line of the transcript, with the fold's own business applied: the arrow that
+    /// marks a summary, and the highlight that says the keyboard is here. Neither is
+    /// stored in `lines`: the transcript is the record, and the fold is a way of looking
+    /// at it.
+    fn transcript_line(&self, at: usize) -> Line<'static> {
+        let Some(line) = self.lines.get(at) else {
+            return Line::default();
+        };
+        if !loong_tui::is_fold_marker(line) {
+            return styled(line);
+        }
+        // The marker's own text stays readable: only the arrow in front of it is added,
+        // so the count and the size keep sitting exactly where they were.
+        let style = if self.fold == Some(at) {
+            // Reverse video is the one highlight every terminal has.
+            style_for(LineKind::Note).add_modifier(Modifier::REVERSED)
+        } else {
+            style_for(LineKind::Note)
+        };
+        Line::from(Span::styled(format!("▸ {}", line.trim_start()), style))
     }
 
     pub fn draw(&mut self, frame: &mut Frame) {
@@ -1220,11 +1497,19 @@ impl App {
         }
 
         let height = transcript.height.saturating_sub(2) as usize;
-        let body = Paragraph::new(self.visible_lines(height))
-            .block(Block::default().borders(Borders::ALL).title(format!(
+        let title = match &self.open {
+            // The one thing worth saying while reading: how to get back.
+            Some(open) => format!(
+                "tool result ({} lines) — esc closes, pgup/pgdn scroll",
+                open.lines.len()
+            ),
+            None => format!(
                 "loongagent — session {} (schema {})",
                 self.session, self.schema
-            )))
+            ),
+        };
+        let body = Paragraph::new(self.visible_lines(height))
+            .block(Block::default().borders(Borders::ALL).title(title))
             .wrap(Wrap { trim: false });
         frame.render_widget(body, transcript);
 
@@ -1268,7 +1553,9 @@ impl App {
                         "enter leaves loongagent (ctrl-c does too)".to_string()
                     }
                     "/logo" => "enter shows or hides the mark".to_string(),
-                    "/expand" => "enter shows the last tool result in full".to_string(),
+                    "/expand" => {
+                        "enter shows the last tool result in full (tab walks the folds)".to_string()
+                    }
                     "/yolo" => "enter turns approval prompts off (the sandbox stays)".to_string(),
                     "/copy" => "enter copies the whole transcript".to_string(),
                     "/mouse" => "enter hands the mouse back to your terminal".to_string(),
@@ -1307,26 +1594,54 @@ impl App {
             self.draw_context(frame, panel);
         }
 
-        let mut hints = vec![
-            Span::styled("enter", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" send  "),
-            Span::styled("pgup/pgdn", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" scroll  "),
-            Span::styled("f2", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" context  "),
-            Span::styled(
-                "ctrl-pgup/pgdn",
+        let mut hints = if self.open.is_some() {
+            vec![
+                Span::styled("esc", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" close  "),
+                Span::styled("pgup/pgdn", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" scroll"),
+            ]
+        } else {
+            vec![
+                Span::styled("enter", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" send  "),
+                Span::styled("pgup/pgdn", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" scroll  "),
+                Span::styled("f2", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" context  "),
+                Span::styled(
+                    "ctrl-pgup/pgdn",
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" transcript  "),
+                Span::styled(
+                    if self.yolo { "⚠ yolo" } else { "" },
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(if self.yolo { "  " } else { "" }),
+                Span::styled("ctrl-c", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(if self.busy { " interrupt" } else { " quit" }),
+            ]
+        };
+        // Where the keyboard is among the folds, and how to move it. Only when there is
+        // something to move to: a hint for a key that does nothing is noise.
+        let folds = self.folds();
+        if self.open.is_none() && !folds.is_empty() {
+            hints.push(Span::raw("  "));
+            hints.push(Span::styled(
+                "tab",
                 Style::default().add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" transcript  "),
-            Span::styled(
-                if self.yolo { "⚠ yolo" } else { "" },
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(if self.yolo { "  " } else { "" }),
-            Span::styled("ctrl-c", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(if self.busy { " interrupt" } else { " quit" }),
-        ];
+            ));
+            hints.push(Span::raw(format!(
+                " {} fold(s){}",
+                folds.len(),
+                if self.fold.is_some() {
+                    " · enter expands · esc lets go"
+                } else {
+                    ""
+                }
+            )));
+        }
         if self.scroll > 0 {
             hints.push(Span::raw(format!(
                 "  [{}/{}]",
@@ -1345,12 +1660,19 @@ impl App {
 }
 
 /// Own the client on a worker thread so a blocking turn never blocks the screen.
+///
+/// `folded` is how many folds the transcript already shows, so the worker can number the
+/// ones it streams next: they are the same list the keyboard walks, and a fold's number has
+/// to mean the same thing on both sides of the channel.
 pub fn spawn_worker<T: Transport + Send + 'static>(
     mut client: Client<T>,
+    folded: usize,
 ) -> (Sender<ToWorker>, Receiver<FromWorker>) {
     let (to_worker, commands) = channel::<ToWorker>();
     let (events, from_worker) = channel::<FromWorker>();
     std::thread::spawn(move || {
+        // Where the next fold the turn writes will sit among the ones already on screen.
+        let mut folds = folded;
         while let Ok(command) = commands.recv() {
             let mut refreshed = false;
             let result = match command {
@@ -1385,6 +1707,21 @@ pub fn spawn_worker<T: Transport + Send + 'static>(
                         }
                         if let Some(line) = renderer.render(params) {
                             let kind = params.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+                            // The summary is what the transcript keeps and what this line
+                            // is; the whole of it is what the keyboard may ask for while
+                            // the turn is still running, and it is on this very message.
+                            // Sending it now is what makes opening a fold a local act.
+                            if kind == loong_schema::generated::event::TOOL_RESULT
+                                && loong_tui::folded_output(&line)
+                            {
+                                if let Some(full) = loong_tui::render_event_full(params) {
+                                    let _ = events.send(FromWorker::Fold {
+                                        at: folds,
+                                        lines: full.split('\n').map(|l| l.to_string()).collect(),
+                                    });
+                                }
+                                folds += 1;
+                            }
                             if kind == loong_schema::generated::event::TOOL_CALL {
                                 let _ = events.send(FromWorker::Working(line.clone()));
                                 last_call = params.get("data").cloned();
@@ -1450,6 +1787,20 @@ pub fn spawn_worker<T: Transport + Send + 'static>(
                         }
                         Ok(lines) => {
                             let _ = events.send(FromWorker::Lines(lines));
+                        }
+                        Err(e) => {
+                            let _ = events.send(FromWorker::Failed(e));
+                        }
+                    }
+                    refreshed = true;
+                    Ok(Vec::new())
+                }
+                ToWorker::ExpandAt { at } => {
+                    // The reader picked a specific summary line off the screen; the log is
+                    // asked for that same one, by the number both sides count it by.
+                    match client.expand_tool_result(at) {
+                        Ok(lines) => {
+                            let _ = events.send(FromWorker::Expanded { at, lines });
                         }
                         Err(e) => {
                             let _ = events.send(FromWorker::Failed(e));
@@ -1738,9 +2089,20 @@ pub fn run<T: Transport + Send + 'static>(
     // nothing (ADR-0009: the log is the record, and this is a read of it).
     let mut client = client;
     let history = client.replay().unwrap_or_else(|_| Vec::new());
-    let (to_worker, from_worker) = spawn_worker(client);
+    // The full text of the folds that history shows, so opening one is a local act from the
+    // first key press: a turn that is already running owns the connection, and the view
+    // should not have to wait for it to read its own transcript.
+    let folded = client.folded_results().unwrap_or_default();
+    let shown = history
+        .iter()
+        .filter(|line| loong_tui::is_fold_marker(line))
+        .count();
+    let (to_worker, from_worker) = spawn_worker(client, shown);
     let mut app = App::new(session, schema);
     app.interrupt = interrupt;
+    for (at, text) in folded.into_iter().enumerate().take(shown) {
+        app.remember_fold(at, text.split('\n').map(|line| line.to_string()).collect());
+    }
     app.push_lines(history);
     // Intro lines belong in the conversation view, not the one-line diagnostics
     // strip: the session path and "no model configured" both need to be readable.
@@ -2082,6 +2444,139 @@ mod tests {
         app.push_lines(vec!["a new answer".to_string()]);
         assert_eq!(app.scroll, 0, "new output pulls the view back");
         assert!(draw(&mut app, 40, 20).contains("a new answer"));
+    }
+
+    /// The transcript the client writes for two summarised tool results: the summary
+    /// lines, then the marker that stands for the rest.
+    fn two_folds(app: &mut App) {
+        app.push_lines(vec![
+            "you: run it".to_string(),
+            "→ shell cargo test".to_string(),
+            "← ok older 1".to_string(),
+            "  older 2".to_string(),
+            "  … 47 more line(s), 900 B · /expand".to_string(),
+            "→ shell cargo build".to_string(),
+            "← ok newest 1".to_string(),
+            "  … 49 more line(s), 900 B · /expand".to_string(),
+        ]);
+    }
+
+    #[test]
+    fn tab_walks_the_folds_and_enter_shows_what_they_hide() {
+        let mut app = App::new("s", "v");
+        two_folds(&mut app);
+        let screen = draw(&mut app, 72, 24);
+        assert!(
+            screen.contains("▸ … 47 more line(s), 900 B · /expand"),
+            "a summary says what is hidden and how to get it: {screen}"
+        );
+
+        // Tab lands on the newest fold: the one just written, which is the one being read.
+        assert_eq!(app.handle_key(key(KeyCode::Tab)), Action::None);
+        assert_eq!(app.fold, Some(7));
+        let selected = app
+            .visible_lines(20)
+            .into_iter()
+            .find(|line| {
+                line.spans
+                    .iter()
+                    .any(|span| span.content.contains("49 more"))
+            })
+            .expect("the marker is on screen");
+        assert!(
+            selected.spans[0]
+                .style
+                .add_modifier
+                .contains(Modifier::REVERSED),
+            "the keyboard's place is visible, not just remembered"
+        );
+        // Tab again walks to the older one, and shift-tab comes back.
+        app.handle_key(key(KeyCode::Tab));
+        assert_eq!(app.fold, Some(4));
+        app.handle_key(key(KeyCode::BackTab));
+        assert_eq!(app.fold, Some(7));
+
+        // Enter asks the log for that same result, by the number the two sides share — and
+        // the answer is what fills the screen.
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            Action::Send(ToWorker::ExpandAt { at: 1 })
+        );
+        let (says, worker) = channel();
+        says.send(FromWorker::Expanded {
+            at: 1,
+            lines: (1..=50).map(|n| format!("newest {n}")).collect(),
+        })
+        .unwrap();
+        app.drain(&worker);
+        let screen = draw(&mut app, 72, 24);
+        assert!(screen.contains("tool result (50 lines)"), "{screen}");
+        assert!(
+            screen.contains("newest 50"),
+            "the end is what is read: {screen}"
+        );
+        app.handle_key(key(KeyCode::PageUp));
+        assert!(
+            draw(&mut app, 72, 24).contains("newest"),
+            "and paging back works"
+        );
+        // Esc closes the output and keeps the fold; one more esc lets the fold go.
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.open.is_none());
+        assert_eq!(app.fold, Some(7));
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(app.fold, None);
+        assert!(
+            draw(&mut app, 72, 24).contains("session s"),
+            "and does not leave"
+        );
+    }
+
+    #[test]
+    fn a_fold_never_takes_enter_away_from_a_prompt() {
+        let mut app = App::new("s", "v");
+        two_folds(&mut app);
+        // With nothing selected, enter sends — exactly as it did before folds existed.
+        type_text(&mut app, "hello");
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            Action::Send(ToWorker::Submit("hello".to_string()))
+        );
+        // With a fold selected and something typed, enter still sends: a prompt with text
+        // in it means send, and the fold is let go with it.
+        app.handle_key(key(KeyCode::Tab));
+        type_text(&mut app, "again");
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            Action::Send(ToWorker::Submit("again".to_string()))
+        );
+        assert_eq!(app.fold, None, "sending is a return to the prompt");
+    }
+
+    #[test]
+    fn enter_opens_a_fold_the_turn_sent_without_asking_the_log() {
+        let mut app = App::new("s", "v");
+        two_folds(&mut app);
+        // The turn sent the newest fold's own text along with its summary line, which is
+        // what it does for every fold it writes.
+        app.remember_fold(1, (1..=50).map(|n| format!("newest {n}")).collect());
+        app.handle_key(key(KeyCode::Tab));
+        assert_eq!(app.fold, Some(7));
+        // Enter asks nobody: the text is already here. That is what makes this work while
+        // the turn is still running, when the connection is not free to ask on.
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::None);
+        let screen = draw(&mut app, 72, 24);
+        assert!(screen.contains("tool result (50 lines)"), "{screen}");
+        assert!(screen.contains("newest 50"), "{screen}");
+        // A fold the view does not hold is still fetched from the log, in full.
+        app.handle_key(key(KeyCode::Esc));
+        app.handle_key(key(KeyCode::Esc));
+        app.handle_key(key(KeyCode::Tab));
+        app.handle_key(key(KeyCode::Tab));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            Action::Send(ToWorker::ExpandAt { at: 0 })
+        );
     }
 
     #[test]
@@ -2991,7 +3486,7 @@ mod tests {
             }
         }
         let client = Client::new(Echo, "s-worker");
-        let (to_worker, from_worker) = spawn_worker(client);
+        let (to_worker, from_worker) = spawn_worker(client, 0);
         to_worker
             .send(ToWorker::Submit("hello".to_string()))
             .unwrap();
@@ -3004,5 +3499,141 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert!(!app.busy, "the worker reported a state change");
+    }
+
+    #[test]
+    fn the_worker_fetches_the_fold_the_keyboard_picked() {
+        /// Answers every request with a log holding one summarised tool result.
+        struct Log;
+        impl loong_tui::Transport for Log {
+            fn send(&mut self, _line: &str) -> Result<(), String> {
+                Ok(())
+            }
+            fn recv_line(&mut self) -> Result<Option<String>, String> {
+                let output = (1..=50)
+                    .map(|n| format!("hidden {n}"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                Ok(Some(
+                    serde_json::json!({
+                        "jsonrpc": "2.0", "id": 1,
+                        "result": {"events": [
+                            {"seq": 1, "kind": "tool.result",
+                             "data": {"call_id": "c1", "ok": true, "output": output}},
+                        ]}
+                    })
+                    .to_string(),
+                ))
+            }
+        }
+        let client = Client::new(Log, "s-worker");
+        let (to_worker, from_worker) = spawn_worker(client, 0);
+        to_worker.send(ToWorker::ExpandAt { at: 0 }).unwrap();
+        let mut app = App::new("s-worker", "v");
+        app.push_lines(vec![
+            "← ok hidden 1".to_string(),
+            "  … 47 more line(s), 900 B · /expand".to_string(),
+        ]);
+        app.fold = Some(1);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline && app.open.is_none() {
+            app.drain(&from_worker);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            app.open.is_some(),
+            "the worker answered with the log's text"
+        );
+        assert!(
+            draw(&mut app, 60, 20).contains("hidden 50"),
+            "and the screen shows what was hidden"
+        );
+    }
+
+    #[test]
+    fn a_fold_the_turn_wrote_is_readable_while_the_turn_is_still_running() {
+        /// A turn that streams one summarised result and then keeps working — saying
+        /// nothing more — until the test lets it finish. This is the quiet stretch a real
+        /// long tool spends, and the one a reader has time to look around in.
+        struct SlowStream {
+            streamed: bool,
+            release: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        }
+        impl loong_tui::Transport for SlowStream {
+            fn send(&mut self, _line: &str) -> Result<(), String> {
+                Ok(())
+            }
+            fn recv_line(&mut self) -> Result<Option<String>, String> {
+                if !self.streamed {
+                    self.streamed = true;
+                    let output = (1..=50)
+                        .map(|n| format!("mid-turn {n}"))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    return Ok(Some(
+                        serde_json::json!({
+                            "jsonrpc": "2.0", "method": "event",
+                            "params": {"seq": 9, "kind": "tool.result",
+                                       "data": {"call_id": "c1", "ok": true, "output": output}}
+                        })
+                        .to_string(),
+                    ));
+                }
+                while !self.release.load(std::sync::atomic::Ordering::SeqCst) {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Ok(Some(
+                    serde_json::json!({
+                        "jsonrpc": "2.0", "id": 1,
+                        "result": {"turn_id": 1, "accepted": true}
+                    })
+                    .to_string(),
+                ))
+            }
+        }
+
+        let release = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let client = Client::new(
+            SlowStream {
+                streamed: false,
+                release: release.clone(),
+            },
+            "s-running",
+        );
+        let (to_worker, from_worker) = spawn_worker(client, 0);
+        let mut app = App::new("s-running", "v");
+        app.busy = true;
+        to_worker.send(ToWorker::Submit("go".to_string())).unwrap();
+
+        // Wait for the fold to reach the screen. The turn is still working: nothing has
+        // let it go, so the connection it holds cannot be asked for anything.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline && app.folded.is_empty() {
+            app.drain(&from_worker);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            !app.folded.is_empty(),
+            "the fold's own text came with its summary"
+        );
+        assert!(app.busy, "the turn is still running, as the test arranged");
+        assert!(
+            app.folded.contains_key(&0),
+            "and it is named the way the keyboard counts it"
+        );
+
+        // The keyboard opens it now, with nothing asked of the busy worker.
+        app.handle_key(key(KeyCode::Tab));
+        assert!(app.fold.is_some(), "the fold is on screen to walk to");
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::None);
+        let screen = draw(&mut app, 60, 20);
+        assert!(screen.contains("tool result (50 lines)"), "{screen}");
+        assert!(
+            screen.contains("mid-turn 50"),
+            "what was hidden is readable while the turn still works: {screen}"
+        );
+
+        // Let the turn finish so the worker is not left mid-request.
+        release.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }

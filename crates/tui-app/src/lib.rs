@@ -147,10 +147,17 @@ const MARK_TOP: &str = "╭───────༺ ᛭ ༻───────
 const MARK_MID_LEFT: &str = "╞═══════";
 const MARK_MID_RIGHT: &str = "════════════╡";
 const MARK_BOTTOM: &str = "╰───────༻ ᛭ ༺────────────╯";
-/// Teal: the colour the transcript already uses for the agent doing something.
-const MARK_INK: Color = Color::Rgb(86, 182, 194);
-/// Violet: the colour it uses for policy — the second voice in the drawing.
-const MARK_ACCENT: Color = Color::Rgb(138, 138, 214);
+/// The transcript's accent for "the agent is doing something".
+///
+/// Named colours, not RGB: a fixed teal or violet is chosen for one background and
+/// unreadable on the other, and this interface runs on both. ANSI names are resolved by
+/// the terminal against the palette the person actually configured.
+const MARK_INK: Color = Color::Cyan;
+/// The second voice in the drawing, for policies and the mark's frame.
+const MARK_ACCENT: Color = Color::Magenta;
+/// Whatever the terminal uses for ordinary text. Bold, so it stands out without
+/// inventing a colour that may vanish into the background.
+const MARK_TEXT: Style = Style::new().fg(Color::Reset).add_modifier(Modifier::BOLD);
 /// Where the name starts, so the two rows line up.
 const MARK_TEXT_COLUMN: usize = 36;
 /// Violet, for something that wants an answer rather than something that went wrong.
@@ -190,7 +197,7 @@ pub fn style_for(kind: LineKind) -> Style {
     match kind {
         LineKind::User => Style::default().fg(Color::Cyan),
         LineKind::Answer => Style::default(),
-        LineKind::ToolCall => Style::default().fg(Color::Rgb(86, 182, 194)),
+        LineKind::ToolCall => Style::default().fg(MARK_INK),
         LineKind::ToolOk => Style::default()
             .fg(Color::Green)
             .add_modifier(Modifier::DIM),
@@ -198,7 +205,7 @@ pub fn style_for(kind: LineKind) -> Style {
         LineKind::Approval => Style::default()
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
-        LineKind::Policy => Style::default().fg(Color::Rgb(138, 138, 214)),
+        LineKind::Policy => Style::default().fg(MARK_ACCENT),
         LineKind::Note => Style::default().fg(Color::DarkGray),
         LineKind::Problem => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         LineKind::Notice => Style::default().fg(Color::DarkGray),
@@ -413,18 +420,11 @@ impl App {
     fn draw_banner(&self, frame: &mut Frame, area: ratatui::layout::Rect) {
         use unicode_width::UnicodeWidthStr;
         let frame_ink = Style::default().fg(MARK_ACCENT);
-        let character = Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD);
+        let character = MARK_TEXT;
         let rows: [(Vec<Span>, Option<(String, Style)>); 3] = [
             (
                 vec![Span::styled(MARK_TOP, frame_ink)],
-                Some((
-                    "loongagent".to_string(),
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                )),
+                Some(("loongagent".to_string(), MARK_TEXT)),
             ),
             (
                 vec![
@@ -2485,7 +2485,7 @@ mod tests {
         );
         assert_eq!(
             color_of(&mut app, 80, 20, "write_file"),
-            Some(ratatui::style::Color::Rgb(86, 182, 194))
+            Some(ratatui::style::Color::Cyan)
         );
         assert_eq!(
             color_of(&mut app, 80, 20, "wrote it"),
@@ -2493,7 +2493,7 @@ mod tests {
         );
         assert_eq!(
             color_of(&mut app, 80, 20, "by builtin"),
-            Some(ratatui::style::Color::Rgb(138, 138, 214))
+            Some(ratatui::style::Color::Magenta)
         );
         assert_eq!(
             color_of(&mut app, 80, 20, "you:"),

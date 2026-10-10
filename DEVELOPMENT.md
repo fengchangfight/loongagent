@@ -291,9 +291,15 @@ owner specified, kept verbatim:
 ```
 
 A sealed frame around the traditional 龍, with the wordmark beside the top rule and the
-tagline beside the middle. Only the colours are ours: the frame in the policy violet, the
-character in white bold, so nothing competes with the transcript. `/logo` puts it away, and
-a terminal narrower than 48 columns never gets it.
+tagline beside the middle. `/logo` puts it away, and a terminal narrower than 48 columns
+never gets it.
+
+**Colour comes from the theme, not from us.** `龍` and the wordmark are the terminal's own
+foreground in bold; the frame is ANSI magenta; the transcript's accents are ANSI cyan and
+magenta. Nothing in the palette is an absolute RGB or a literal white — the owner runs a
+light background, where `Color::White` is invisible and a fixed pale teal is barely there.
+Named colours are resolved against the palette the person configured, which is the only
+palette that is right on both a dark and a light terminal.
 
 Three earlier versions are worth remembering as a lesson in not re-typesetting someone's
 mark: a red-and-gold seal (accurate, too loud), a snout with two horns (a small animal, not

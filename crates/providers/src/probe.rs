@@ -178,6 +178,10 @@ fn parse_models(body: &str) -> Vec<ModelInfo> {
                 context_window: entry
                     .get("context_window")
                     .or_else(|| entry.get("context_length"))
+                    // Ollama's native `/api/tags` nests it: `details.context_length`.
+                    // Reaching for it is the whole reason the catalog points that
+                    // provider's probe at the native route instead of `/v1/models`.
+                    .or_else(|| entry.get("details").and_then(|d| d.get("context_length")))
                     .and_then(Value::as_u64),
             })
         })
@@ -299,11 +303,24 @@ mod tests {
 
     #[test]
     fn an_ollama_shaped_body_is_read_by_its_own_key_name() {
-        // Ollama's native `/api/tags` says `name`, not `id`.
-        let body = r#"{"models":[{"name":"qwen2.5:3b"},{"name":"llama3:8b"}]}"#;
+        // Ollama's native `/api/tags`, trimmed to the parts that matter. `name` rather
+        // than `id`, and the context window nested one level down — the two reasons the
+        // catalog sends Ollama's probe here instead of to its OpenAI shim.
+        let body = r#"{"models":[
+            {"name":"qwen2.5:3b","model":"qwen2.5:3b","size":1929912432,
+             "details":{"format":"gguf","family":"qwen2","parameter_size":"3.1B",
+                        "context_length":32768}},
+            {"name":"llama3:8b","details":{"context_length":8192}}
+        ]}"#;
         let models = parse_models(body);
         assert_eq!(models.len(), 2);
         assert_eq!(models[0].id, "qwen2.5:3b");
+        assert_eq!(
+            models[0].context_window,
+            Some(32_768),
+            "nested under `details`, and worth reaching for — the kernel compacts against it"
+        );
+        assert_eq!(models[1].context_window, Some(8192));
     }
 
     #[test]

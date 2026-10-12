@@ -103,3 +103,33 @@ fn zhipu_is_reachable_but_has_no_models_route() {
         "the fallback exists precisely so this vendor can still be validated"
     );
 }
+
+#[test]
+#[ignore = "needs a local ollama with a model pulled"]
+fn ollama_is_reachable_with_no_key_and_reports_a_context_window() {
+    // The keyless path, and the reason the catalog points the probe at the native route:
+    // the OpenAI shim answers but reports no context window, and the kernel compacts
+    // against that number.
+    let base = base_url("ollama");
+    let result = probe::probe_models_url(
+        loong_config::catalog::provider("ollama")
+            .unwrap()
+            .models_url()
+            .as_deref()
+            .unwrap(),
+        None,
+    );
+    println!("{}", probe::render(&result));
+    match &result {
+        Probe::Ok { models } => {
+            assert!(!models.is_empty(), "a model must be pulled: {models:?}");
+            assert!(
+                models.iter().any(|m| m.context_window.is_some()),
+                "the native route reports context_length: {models:?}"
+            );
+        }
+        other => panic!("ollama is up but the probe said {other:?}"),
+    }
+    // And chat goes through the OpenAI shim, which is a different URL.
+    assert!(base.ends_with("/v1"), "{base}");
+}

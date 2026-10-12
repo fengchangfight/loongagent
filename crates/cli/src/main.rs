@@ -2945,7 +2945,9 @@ fn probe_provider(
     key: Option<&str>,
 ) -> loong_providers::probe::Probe {
     match (provider.models_url(), provider.probe_model) {
-        (Some(_), _) => loong_providers::probe::probe_models(provider.base_url, key),
+        // The URL the catalog names, not `{base}/models`: for Ollama those differ, and
+        // the one that knows the context window is the one worth asking.
+        (Some(url), _) => loong_providers::probe::probe_models_url(&url, key),
         (None, Some(model)) => {
             loong_providers::probe::probe_with_completion(provider.base_url, model, key)
         }

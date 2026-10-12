@@ -45,6 +45,13 @@ pub struct Provider {
     /// in the adapter because it is a fact about the vendor, and the catalog is where
     /// those live.
     pub probe_model: Option<&'static str>,
+    /// Where to ask "which models do you serve?", when that is not `{base_url}/models`.
+    ///
+    /// Ollama is the case: the OpenAI shim at `/v1/models` answers (and is what chat
+    /// goes through), but it reports no context window, while the native `/api/tags`
+    /// reports `context_length`. That number is what the kernel compacts against, so
+    /// asking the endpoint that knows it turns a warning at startup into a working cap.
+    pub probe_url: Option<&'static str>,
     /// Loopback: no key, no cost, and the provider is this machine.
     pub local: bool,
 }
@@ -53,6 +60,9 @@ impl Provider {
     /// The URL that answers "which models do you serve?" — the free half of a key
     /// check. `None` where the vendor publishes no such route.
     pub fn models_url(&self) -> Option<String> {
+        if let Some(explicit) = self.probe_url {
+            return Some(explicit.to_string());
+        }
         self.lists_models
             .then(|| format!("{}/models", self.base_url.trim_end_matches('/')))
     }
@@ -77,6 +87,7 @@ pub const PROVIDERS: &[Provider] = &[
         aliases: &["DEEPSEEK_API_KEY"],
         lists_models: true,
         probe_model: None,
+        probe_url: None,
         local: false,
     },
     Provider {
@@ -87,6 +98,7 @@ pub const PROVIDERS: &[Provider] = &[
         aliases: &["MOONSHOT_API_KEY", "KIMI_API_KEY"],
         lists_models: true,
         probe_model: None,
+        probe_url: None,
         local: false,
     },
     Provider {
@@ -97,6 +109,7 @@ pub const PROVIDERS: &[Provider] = &[
         aliases: &["DASHSCOPE_API_KEY", "QWEN_API_KEY"],
         lists_models: true,
         probe_model: None,
+        probe_url: None,
         local: false,
     },
     Provider {
@@ -107,6 +120,7 @@ pub const PROVIDERS: &[Provider] = &[
         aliases: &["ZHIPU_API_KEY", "GLM_API_KEY"],
         lists_models: false,
         probe_model: Some("glm-4-flash"),
+        probe_url: None,
         local: false,
     },
     Provider {
@@ -117,6 +131,7 @@ pub const PROVIDERS: &[Provider] = &[
         aliases: &["ZAI_API_KEY"],
         lists_models: false,
         probe_model: Some("glm-4-flash"),
+        probe_url: None,
         local: false,
     },
     Provider {
@@ -127,6 +142,7 @@ pub const PROVIDERS: &[Provider] = &[
         aliases: &["OPENAI_API_KEY"],
         lists_models: true,
         probe_model: None,
+        probe_url: None,
         local: false,
     },
     Provider {
@@ -137,6 +153,7 @@ pub const PROVIDERS: &[Provider] = &[
         aliases: &[],
         lists_models: true,
         probe_model: None,
+        probe_url: Some("http://127.0.0.1:11434/api/tags"),
         local: true,
     },
 ];
@@ -299,11 +316,21 @@ mod tests {
         for provider in PROVIDERS {
             match provider.models_url() {
                 Some(url) => {
-                    assert!(url.ends_with("/models"), "{url}");
-                    assert!(
-                        !url.contains("//models"),
-                        "{url} — a base_url already ending in / must not double the slash"
-                    );
+                    assert!(url.starts_with("http"), "{url}");
+                    if provider.probe_url.is_none() {
+                        assert!(url.ends_with("/models"), "{url}");
+                        assert!(
+                            !url.contains("//models"),
+                            "{url} — a base_url already ending in / must not double the slash"
+                        );
+                    } else {
+                        // An override exists to point somewhere other than `{base}/models`.
+                        assert_eq!(
+                            provider.id, "ollama",
+                            "{} overrides its list route; say why it has to",
+                            provider.id
+                        );
+                    }
                 }
                 None => assert!(
                     matches!(provider.id, "zhipu" | "zai"),
@@ -312,6 +339,11 @@ mod tests {
                 ),
             }
         }
+        assert_eq!(
+            provider("ollama").unwrap().models_url().as_deref(),
+            Some("http://127.0.0.1:11434/api/tags"),
+            "Ollama's native route, because the OpenAI shim reports no context window"
+        );
         assert_eq!(
             provider("zhipu").unwrap().models_url(),
             None,

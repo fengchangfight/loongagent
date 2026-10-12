@@ -29,6 +29,8 @@
 //! like any other file today; the signature check that makes it tamper-resistant
 //! is not implemented, so nothing should describe it as enforced.
 
+pub mod catalog;
+
 use loong_schema::generated::{ActionClass, Verdict};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -90,6 +92,9 @@ pub fn kind_of(key: &str) -> Option<Kind> {
         "model" | "base_url" | "profile" | "models" | "router.default" | "router.rules" => {
             Kind::FreeOverride
         }
+        // Which mode this install runs in. Free-override like `model`: the most local
+        // layer that says wins, so a `--local` session layer beats the user's profile.
+        "mode" => Kind::FreeOverride,
         // The one profile-related key a user owns: which named bundle to run.
         "control.profile" => Kind::FreeOverride,
         "budget_tokens"
@@ -182,6 +187,13 @@ pub struct ModelSpec {
     /// The physical ceiling, next to `budget_tokens` which is the one a person chooses.
     /// `None` means nobody said, and the kernel then has no window to compact against.
     pub max_context_size: Option<u64>,
+    /// The catalog entry this model was written as (`provider = "deepseek/…"`), when
+    /// it was written that way.
+    ///
+    /// Kept after expansion because the *provenance* outlives the shorthand: it is
+    /// what lets the CLI fall back to a key the user already exported under a
+    /// conventional name, and what a surface shows instead of an endpoint.
+    pub provider: Option<String>,
 }
 
 /// The facts a routing rule may read. Deliberately small and inspectable: a model
@@ -336,14 +348,24 @@ pub fn profiles_from_payload(payload: &str) -> Result<ProfilePack, ConfigError> 
                     &mut warnings,
                 )?;
             }
+            let (base_url, model_id, api_key, provider) = finish_model(
+                &format!("profile {:?}", entry.name),
+                &model.name,
+                model.provider,
+                model.base_url,
+                model.model,
+                model.api_key,
+            )
+            .map_err(ConfigError::Invalid)?;
             models.push(ModelSpec {
                 name: model.name,
                 kind,
-                base_url: model.base_url,
-                model: model.model,
-                api_key: model.api_key,
+                base_url,
+                model: model_id,
+                api_key,
                 budget_tokens: model.budget_tokens,
                 max_context_size: model.max_context_size,
+                provider,
             });
         }
         if models.is_empty() {
@@ -478,6 +500,15 @@ pub struct ControlProvenance {
 pub struct Profile {
     /// Which pack this configuration came from, when it came from one.
     pub control: Option<ControlProvenance>,
+    /// `local` when this install runs without a control plane; `None` means managed.
+    ///
+    /// This lives in configuration rather than in a flag because it has to *survive*:
+    /// `loongagent resume` re-enters the interface with no memory of how the session
+    /// began, and a session started with `--local` that silently rejoined a control
+    /// plane on resume would send prompts somewhere its owner never chose. A key in
+    /// the user's own profile is the durable, inspectable place for that decision —
+    /// and it is why `--local` and `mode = "local"` mean the same thing.
+    pub mode: Option<String>,
     /// The named profile this install runs (the user's one profile-related choice).
     pub control_profile: Option<String>,
     /// Every model the profile offers, in declaration order.
@@ -508,6 +539,16 @@ pub struct Profile {
 }
 
 impl Profile {
+    /// Whether this install runs without a control plane.
+    ///
+    /// One predicate, in one place, because "are we local?" decides whether a whole
+    /// class of network traffic is allowed to happen — and a second, subtly different
+    /// spelling of that question is how a `--local` session quietly reaches the
+    /// control plane anyway.
+    pub fn is_local(&self) -> bool {
+        self.mode.as_deref() == Some("local")
+    }
+
     /// The model a turn starts with: the router's default, else the first declared.
     pub fn default_model(&self) -> Option<&ModelSpec> {
         match self.router.default.as_deref() {
@@ -561,6 +602,8 @@ impl Profile {
 #[serde(deny_unknown_fields)]
 struct RawProfile {
     profile: Option<String>,
+    /// `local` or `managed`. See [`Profile::mode`].
+    mode: Option<String>,
     model: Option<String>,
     base_url: Option<String>,
     api_key: Option<String>,
@@ -596,12 +639,62 @@ struct RawControl {
 struct RawModel {
     name: String,
     kind: Option<String>,
-    base_url: String,
-    model: String,
+    /// `provider = "deepseek/deepseek-flash"` — the one-line form.
+    ///
+    /// When present it supplies `base_url`, `model` and an `api_key` reference, so a
+    /// local profile can name a model without naming an endpoint. An explicit
+    /// `base_url` or `model` still wins: the shorthand is a default, not a cage.
+    provider: Option<String>,
+    base_url: Option<String>,
+    model: Option<String>,
     api_key: Option<String>,
     budget_tokens: Option<u64>,
     /// See [`ModelSpec::max_context_size`]. A pack may declare it, and so may a profile.
     max_context_size: Option<u64>,
+}
+
+/// Resolve a `[[models]]` entry to its concrete endpoint, model id and key reference.
+///
+/// The order is deliberate: what a person *wrote* beats what the catalog *assumes*,
+/// and anything the shorthand was supposed to supply but nobody wrote is an error
+/// that names both ways of saying it — a model silently pointed at the wrong
+/// endpoint is the worst outcome available here.
+fn finish_model(
+    where_: &str,
+    name: &str,
+    provider: Option<String>,
+    base_url: Option<String>,
+    model: Option<String>,
+    api_key: Option<String>,
+) -> Result<(String, String, Option<String>, Option<String>), String> {
+    let expansion = match provider.as_deref() {
+        Some(spec) => Some(catalog::expand(spec).map_err(|e| format!("{where_}: {e}"))?),
+        None => None,
+    };
+    let base_url = match (base_url, &expansion) {
+        (Some(written), _) => written,
+        (None, Some(expanded)) => expanded.base_url.clone(),
+        (None, None) => {
+            return Err(format!(
+                "{where_}: model {name:?} needs a `base_url`, or a `provider` to supply one \
+                 (e.g. provider = \"deepseek/deepseek-flash\")"
+            ))
+        }
+    };
+    let model = match (model, &expansion) {
+        (Some(written), _) => written,
+        (None, Some(expanded)) => expanded.model.clone(),
+        (None, None) => {
+            return Err(format!(
+                "{where_}: model {name:?} needs a `model` id, or a `provider` to supply one \
+                 (e.g. provider = \"deepseek/deepseek-flash\")"
+            ))
+        }
+    };
+    // A key the user wrote always wins; otherwise the shorthand's reference stands.
+    let api_key = api_key.or_else(|| expansion.as_ref().map(|e| e.api_key.clone()));
+    let provider = expansion.map(|e| e.provider.id.to_string()).or(provider);
+    Ok((base_url, model, api_key, provider))
 }
 
 #[derive(Debug, Deserialize)]
@@ -692,6 +785,26 @@ impl LayerValues {
             check_endpoint_reference(&source, key, &value)?;
             values.push((key.to_string(), Value::Text(value)));
         }
+        if let Some(mode) = raw.mode.clone() {
+            // Same threat as `model`/`base_url`: a repository that could set
+            // `mode = "local"` would switch a managed install out of its firm's policy
+            // with a file its owner never read. The project layer may not say it.
+            if layer == Layer::Project {
+                return Err(ConfigError::Invalid(format!(
+                    "{source}: the project layer may not set `mode` — a repository must not \
+                     switch an install out of managed mode (ADR-0008)"
+                )));
+            }
+            // A mode nobody implements would silently read as "managed", which is the
+            // one direction this key must never fail in.
+            if mode != "local" && mode != "managed" {
+                return Err(ConfigError::Invalid(format!(
+                    "{source}: `mode` is {mode:?}; the modes that exist are \"local\" (no \
+                     control plane) and \"managed\" (the default)"
+                )));
+            }
+            values.push(("mode".to_string(), Value::Text(mode)));
+        }
         if let Some(profile) = raw.profile {
             values.push(("profile".to_string(), Value::Text(profile)));
         }
@@ -728,8 +841,17 @@ impl LayerValues {
                     ADAPTER_KINDS.join(", ")
                 )));
             }
-            check_endpoint_reference(&source, "base_url", &model.base_url)?;
-            if let Some(key) = &model.api_key {
+            let (base_url, model_id, api_key, provider) = finish_model(
+                &source,
+                &model.name,
+                model.provider.clone(),
+                model.base_url.clone(),
+                model.model.clone(),
+                model.api_key.clone(),
+            )
+            .map_err(ConfigError::Invalid)?;
+            check_endpoint_reference(&source, "base_url", &base_url)?;
+            if let Some(key) = &api_key {
                 check_secret_reference(&source, &format!("models.{}.api_key", model.name), key)?;
             }
             values.push((
@@ -737,11 +859,12 @@ impl LayerValues {
                 Value::Model(ModelSpec {
                     name: model.name.clone(),
                     kind,
-                    base_url: model.base_url.clone(),
-                    model: model.model.clone(),
-                    api_key: model.api_key.clone(),
+                    base_url,
+                    model: model_id,
+                    api_key,
                     budget_tokens: model.budget_tokens,
                     max_context_size: model.max_context_size,
+                    provider,
                 }),
             ));
         }
@@ -1112,6 +1235,7 @@ fn finish(profile: &mut Profile) -> Result<(), ConfigError> {
                 api_key: profile.api_key.clone(),
                 budget_tokens: profile.budget_tokens,
                 max_context_size: profile.max_context_size,
+                provider: None,
             });
         }
     }
@@ -1319,6 +1443,7 @@ fn merge(layers: &[LayerValues]) -> Result<Profile, ConfigError> {
     for (key, row) in &winners {
         match (key.as_str(), &row.value) {
             ("model", Value::Text(v)) => profile.model = Some(v.clone()),
+            ("mode", Value::Text(v)) => profile.mode = Some(v.clone()),
             ("base_url", Value::Text(v)) => profile.base_url = Some(v.clone()),
             ("api_key", Value::Text(v)) => profile.api_key = Some(v.clone()),
             ("budget_tokens", Value::Number(n)) => profile.budget_tokens = Some(*n),
@@ -1770,6 +1895,138 @@ mod tests {
         // Every model answers "why is this the value?"
         assert_eq!(profile.explain("models.fast").unwrap().layer, Layer::User);
         assert!(profile.explain("router.rules").is_some());
+    }
+
+    #[test]
+    fn a_provider_shorthand_supplies_the_endpoint_the_model_and_the_key_reference() {
+        let ws = workspace();
+        let user = write(
+            &ws,
+            "u.toml",
+            "[[models]]\n\
+             name = \"cheap\"\n\
+             provider = \"deepseek/deepseek-flash\"\n\n\
+             [[models]]\n\
+             name = \"strong\"\n\
+             provider = \"moonshot/kimi-k3\"\n\
+             base_url = \"https://example.invalid/v1\"\n",
+        );
+        let profile = resolve(&[(Layer::User, user)], &ws).unwrap();
+
+        let cheap = &profile.models[0];
+        assert_eq!(cheap.base_url, "https://api.deepseek.com");
+        assert_eq!(cheap.model, "deepseek-flash");
+        assert_eq!(
+            cheap.api_key.as_deref(),
+            Some("env:LOONG_DEEPSEEK_KEY"),
+            "the shorthand yields a reference, so ADR-0008 §5 still holds"
+        );
+        assert_eq!(cheap.provider.as_deref(), Some("deepseek"));
+        assert_eq!(
+            cheap.kind, "openai-compat",
+            "the shorthand implies the adapter"
+        );
+
+        // What a person wrote beats what the catalog assumes.
+        let strong = &profile.models[1];
+        assert_eq!(
+            strong.base_url, "https://example.invalid/v1",
+            "an explicit base_url is an override, not ignored"
+        );
+        assert_eq!(
+            strong.model, "kimi-k3",
+            "the model id still came from the shorthand"
+        );
+        assert_eq!(strong.api_key.as_deref(), Some("env:LOONG_MOONSHOT_KEY"));
+    }
+
+    #[test]
+    fn a_model_with_neither_an_endpoint_nor_a_provider_names_both_ways_to_fix_it() {
+        let ws = workspace();
+        let user = write(&ws, "u.toml", "[[models]]\nname = \"x\"\nmodel = \"m\"\n");
+        let err = resolve(&[(Layer::User, user)], &ws)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("base_url"), "{err}");
+        assert!(
+            err.contains("provider"),
+            "the error must also name the one-line form: {err}"
+        );
+
+        let ws = workspace();
+        let user = write(
+            &ws,
+            "u.toml",
+            "[[models]]\nname = \"x\"\nbase_url = \"http://h/v1\"\n",
+        );
+        let err = resolve(&[(Layer::User, user)], &ws)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("`model` id"), "{err}");
+        assert!(err.contains("provider"), "{err}");
+    }
+
+    #[test]
+    fn a_provider_nobody_knows_is_refused_rather_than_silently_endpointless() {
+        let ws = workspace();
+        let user = write(
+            &ws,
+            "u.toml",
+            "[[models]]\nname = \"x\"\nprovider = \"typo/m\"\n",
+        );
+        let err = resolve(&[(Layer::User, user)], &ws)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown provider"), "{err}");
+        assert!(
+            err.contains("deepseek"),
+            "and lists what it does know: {err}"
+        );
+    }
+
+    #[test]
+    fn local_mode_is_a_setting_that_survives_a_resume() {
+        let ws = workspace();
+        let user = write(&ws, "u.toml", "mode = \"local\"\n");
+        let profile = resolve(&[(Layer::User, user)], &ws).unwrap();
+        assert!(
+            profile.is_local(),
+            "`loongagent resume` re-enters with no flag, so the mode has to live in config"
+        );
+        assert_eq!(profile.explain("mode").unwrap().layer, Layer::User);
+
+        // Absent means managed, and saying so out loud means the same thing.
+        let ws = workspace();
+        let bare = write(&ws, "u.toml", "budget_tokens = 1000\n");
+        assert!(!resolve(&[(Layer::User, bare)], &ws).unwrap().is_local());
+        let ws = workspace();
+        let said = write(&ws, "u.toml", "mode = \"managed\"\n");
+        assert!(!resolve(&[(Layer::User, said)], &ws).unwrap().is_local());
+    }
+
+    #[test]
+    fn a_repository_may_not_switch_an_install_out_of_managed_mode() {
+        let ws = workspace();
+        let project = write(&ws, ".loongagent/profile.toml", "mode = \"local\"\n");
+        let err = resolve(&[(Layer::Project, project)], &ws)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("mode"), "{err}");
+        assert!(
+            err.contains("managed"),
+            "and says what it would have escaped: {err}"
+        );
+    }
+
+    #[test]
+    fn a_mode_nobody_implements_is_refused_rather_than_read_as_managed() {
+        let ws = workspace();
+        let user = write(&ws, "u.toml", "mode = \"offline\"\n");
+        let err = resolve(&[(Layer::User, user)], &ws)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("offline"), "{err}");
+        assert!(err.contains("\"local\""), "{err}");
     }
 
     #[test]

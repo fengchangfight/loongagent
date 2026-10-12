@@ -33,8 +33,9 @@ loongagent — a firm-internal coding agent
 USAGE:
   loongagent server --stdio [--session PATH] [--cwd DIR] [--model NAME]
   loongagent setup          [--profile PATH]                                write a profile
-  loongagent tui            [--session ID|PATH] [--cwd DIR] [--new]        full-screen
+  loongagent tui            [--session ID|PATH] [--cwd DIR] [--new] [--local]  full-screen
       with no --session it continues this project's newest session; --new starts another
+      --local runs with no control plane at all: no pack, no sync, no setup form
   loongagent resume [ID]    [--cwd DIR]                                    reopen one (default: latest)
   loongagent sessions       [--all] [--limit N] [--cwd DIR]                list them
   loongagent fork [ID]      [--at SEQ] [--cwd DIR]                         a child session
@@ -88,6 +89,11 @@ struct Args {
     model: Option<String>,
     /// A profile file used as the session layer.
     profile: Option<PathBuf>,
+    /// `--local`: run with no control plane at all — no pack, no sync, no setup form.
+    ///
+    /// A session layer like `--model`: this run's answer to a question the profile
+    /// also answers (`mode = "local"`). Either one turns it on.
+    local: bool,
     /// The web surface's bind address and port (loopback by default: a browser on
     /// this machine, not the network).
     bind: String,
@@ -121,6 +127,7 @@ impl Args {
             cwd: cwd.clone(),
             model: None,
             profile: None,
+            local: false,
             bind: "127.0.0.1".to_string(),
             control_url: None,
             control_key: None,
@@ -163,6 +170,7 @@ impl Args {
                         Some(PathBuf::from(rest.get(i).ok_or("--profile needs a path")?));
                 }
                 "--stdio" => args.stdio = true,
+                "--local" => args.local = true,
                 // `setup`: the control plane. Flags exist so a machine can be
                 // provisioned without a prompt; without them it asks.
                 "--url" => {
@@ -269,9 +277,39 @@ impl Args {
     /// Resolve the configuration with the control plane's pack in place, if there is
     /// one. The pack is the *verified* layer: nothing reaches the resolver that a user
     /// could have written by hand (ADR-0008 §6).
-    fn settings_with_pack(&self) -> Result<(loong_config::Profile, Option<PackState>), String> {
-        let pack = sync_pack(self)?;
+    /// Whether this run is local: the flag, or the profile's own answer.
+    ///
+    /// Reads the layer files and nothing else — no pack, no network — so it is safe
+    /// to ask *before* anything control-plane-shaped has happened. That ordering is
+    /// the whole point: a question asked after the sync is a question already
+    /// answered wrongly.
+    fn is_local(&self) -> Result<bool, String> {
+        if self.local {
+            return Ok(true);
+        }
         let layers = loong_config::layer_paths(&self.cwd, self.profile.as_deref());
+        let resolved = loong_config::resolve(&layers, &self.cwd).map_err(|e| e.to_string())?;
+        Ok(resolved.is_local())
+    }
+
+    fn settings_with_pack(&self) -> Result<(loong_config::Profile, Option<PackState>), String> {
+        let layers = loong_config::layer_paths(&self.cwd, self.profile.as_deref());
+        // Local mode is settled **before** anything control-plane-shaped can happen.
+        // This function is the whole severance: `full_screen` and `serve` both get
+        // their configuration through it, so nothing downstream has to remember the
+        // rule — and there is no second path that could forget it.
+        if self.is_local()? {
+            let mut resolved =
+                loong_config::resolve(&layers, &self.cwd).map_err(|e| e.to_string())?;
+            // The flag is this run's session layer, so the resolved profile says out
+            // loud what the run already decided.
+            if self.local {
+                resolved.mode = Some("local".to_string());
+            }
+            return Ok((resolved, None));
+        }
+
+        let pack = sync_pack(self)?;
         let resolved = match &pack {
             Some(state) => loong_config::resolve_with(
                 &layers,
@@ -2366,6 +2404,13 @@ impl ChildTransport {
         if let Some(profile) = &args.profile {
             command.arg("--profile").arg(profile);
         }
+        // The child resolves the same layers, so it would usually reach the same
+        // answer on its own — but only for the profile's `mode`, not for the flag. A
+        // `--local` on the command line exists in no file, so it has to be carried
+        // across, or the interface would be local and its own server would not.
+        if args.local {
+            command.arg("--local");
+        }
         if let Some(model) = &args.model {
             command.arg("--model").arg(model);
         }
@@ -2448,6 +2493,8 @@ impl Drop for ChildTransport {
 /// The full-screen surface: the client here, the screen in `loong-tui-app`.
 fn full_screen(args: Args) -> Result<(), String> {
     args.ensure_parent()?;
+    // Settled first, because it decides whether a control plane is consulted at all.
+    let local = args.is_local()?;
     let (transport, notes) = ChildTransport::spawn(&args, true)?;
     // Taken before the transport moves into the client: the interface needs the pid to
     // stop a turn, and the client is blocked on the transport while one runs.
@@ -2473,7 +2520,10 @@ fn full_screen(args: Args) -> Result<(), String> {
     // First run: ask here, in the terminal UI, rather than sending the user off to
     // discover a command. Doing it before the session starts is also why nothing has
     // to be reconfigured mid-session.
-    if load_control()?.is_none() && args.model.is_none() {
+    //
+    // Local mode never asks this. There is no control plane to name, and offering the
+    // form anyway would be the one thing `--local` promises not to do.
+    if !local && load_control()?.is_none() && args.model.is_none() {
         // In a pipe the form cannot be drawn: refuse first, in the same words the TUI
         // would use, rather than asking for three fields that cannot be seen.
         loong_tui_app::full_screen_needs_a_terminal()?;
@@ -2505,7 +2555,7 @@ fn full_screen(args: Args) -> Result<(), String> {
     // is configured at all.
     // The client resolves the same layers the server does, so it can tell the user
     // whether a model exists without asking the server about it.
-    let (_settings, pack) = args.settings_with_pack()?;
+    let (settings, pack) = args.settings_with_pack()?;
     if let Some(state) = &pack {
         eprintln!(
             "[control] {} {} — profile: {}",
@@ -2528,6 +2578,14 @@ fn full_screen(args: Args) -> Result<(), String> {
         ));
     }
     match cached_pack_state(&args) {
+        // In local mode there is no pack to consult, and consulting one anyway would
+        // be the dependency `--local` exists to remove — so `cached_pack_state` is not
+        // called at all, rather than being called and expected to return nothing.
+        _ if local => intro.push(match settings.models.len() {
+            0 => "本地模式：还没有配置模型 — 粘贴一个 API key 即可开始（loongagent models add）"
+                .to_string(),
+            n => format!("本地模式：{n} 个模型已配置（不连接控制平面）"),
+        }),
         Ok(Some(state)) => intro.push(format!("profile: {}", state.summary())),
         Ok(None) if args.model.is_none() => intro.push(
             "not connected to a control plane — run `loongagent setup` with the address your \
@@ -2797,6 +2855,15 @@ fn config_show(args: Args) -> Result<(), String> {
             row.value.render(),
             row.kind.as_str(),
             row.source
+        );
+    }
+    // `--local` is a session-layer flag that exists in no file, so it has no row to
+    // appear in. It still answers "may this run reach a control plane?", which is not
+    // a thing to leave somebody to infer from the absence of a line.
+    if settings.is_local() && settings.explain("mode").is_none() {
+        println!(
+            "{:<30} {:<16} {:<8} {}",
+            "mode", "local", "free-override", "--local (this run)"
         );
     }
     // A budget may be declared on a model rather than on the session, and the strictest one

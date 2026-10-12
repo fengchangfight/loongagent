@@ -17,6 +17,18 @@
 //! **What this is not:** a routing table. Which *tier* a model belongs to is the
 //! user's business (array order in their profile), never the catalog's.
 
+/// A model a vendor documents, for the hosts that do not enumerate their own.
+///
+/// Kimi Code implements `/chat/completions` and *answers* `/models` — without a list. The
+/// ids below are the ones its documentation publishes, so this is a reference rather than
+/// a guess, and the context windows come with them because the kernel needs a real number
+/// to compact on time instead of one it invented.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CatalogModel {
+    pub id: &'static str,
+    pub context_window: Option<u64>,
+}
+
 /// One provider the catalog knows about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Provider {
@@ -60,6 +72,8 @@ pub struct Provider {
     /// rejected" sends somebody to re-issue a working credential; this says which door
     /// they are probably standing at.
     pub wrong_door: Option<&'static str>,
+    /// Offered when the vendor names nothing. Empty for a vendor that enumerates.
+    pub curated_models: &'static [CatalogModel],
     /// Loopback: no key, no cost, and the provider is this machine.
     pub local: bool,
 }
@@ -86,6 +100,29 @@ impl Provider {
 /// also the order the wizard suggests candidates in when a key's shape is
 /// ambiguous (which, as the research showed, it usually is: three of these five
 /// `sk-` vendors do not publish their key format at all).
+/// What Kimi Code documents, in the order its docs present them.
+///
+/// `k3` reaches 1M context only on the higher tiers, but the window is a property of the
+/// plan rather than of the id, and this is the number the vendor publishes.
+const KIMI_CODE_MODELS: &[CatalogModel] = &[
+    CatalogModel {
+        id: "k3",
+        context_window: Some(1_048_576),
+    },
+    CatalogModel {
+        id: "k3-256k",
+        context_window: Some(262_144),
+    },
+    CatalogModel {
+        id: "kimi-for-coding",
+        context_window: Some(1_048_576),
+    },
+    CatalogModel {
+        id: "kimi-for-coding-highspeed",
+        context_window: Some(262_144),
+    },
+];
+
 pub const PROVIDERS: &[Provider] = &[
     Provider {
         id: "deepseek",
@@ -97,6 +134,7 @@ pub const PROVIDERS: &[Provider] = &[
         probe_model: None,
         probe_url: None,
         wrong_door: None,
+        curated_models: &[],
         local: false,
     },
     Provider {
@@ -105,7 +143,13 @@ pub const PROVIDERS: &[Provider] = &[
         // Probed: `/coding/v1/models`, `/coding/v1/chat/completions` and
         // `/coding/v1/messages` all answer; `/coding/models` is a 404, so the `/v1` is
         // part of the path. A Kimi Code key gets a 401 from the open platform below and
-        // vice versa — the two are different products on different hosts.
+        // vice versa — two products, two hosts, two key types. The vendor's own FAQ
+        // tabulates exactly this pair, which is how it was confirmed.
+        //
+        // `/coding/v1/models` authenticates and then names nothing usable, which is what
+        // `curated_models` is for. Probing with a *completion* instead would be worse than
+        // useless here: the docs say asking for a model above your plan also answers
+        // `401`, so a paying member on a lower tier would be told their key was bad.
         base_url: "https://api.kimi.com/coding/v1",
         key_env: "LOONG_KIMI_CODE_KEY",
         aliases: &["KIMI_CODE_API_KEY", "KIMI_API_KEY"],
@@ -115,6 +159,7 @@ pub const PROVIDERS: &[Provider] = &[
         wrong_door: Some(
             "如果这是 Moonshot 开放平台的 key（按量计费那种），请选「Moonshot 开放平台」",
         ),
+        curated_models: KIMI_CODE_MODELS,
         local: false,
     },
     Provider {
@@ -130,6 +175,7 @@ pub const PROVIDERS: &[Provider] = &[
             "如果这是 Kimi Code（编程套餐）的 key，请选「Kimi Code」—— 两者是不同的产品，\
              域名和 key 都不通用",
         ),
+        curated_models: &[],
         local: false,
     },
     Provider {
@@ -145,6 +191,7 @@ pub const PROVIDERS: &[Provider] = &[
             "中国区的 key 和全球区的 key 不通用（报错措辞是一样的），\
              中国的账号请选「Moonshot 开放平台（中国区）」",
         ),
+        curated_models: &[],
         local: false,
     },
     Provider {
@@ -157,6 +204,7 @@ pub const PROVIDERS: &[Provider] = &[
         probe_model: None,
         probe_url: None,
         wrong_door: Some("阿里云百炼的 key 绑定地域，换错区域的端点会报 401 invalid_api_key"),
+        curated_models: &[],
         local: false,
     },
     Provider {
@@ -169,6 +217,7 @@ pub const PROVIDERS: &[Provider] = &[
         probe_model: Some("glm-4-flash"),
         probe_url: None,
         wrong_door: Some("Z.ai Coding Plan 的 key 用另一个入口（Z.ai）"),
+        curated_models: &[],
         local: false,
     },
     Provider {
@@ -181,6 +230,7 @@ pub const PROVIDERS: &[Provider] = &[
         probe_model: Some("glm-4-flash"),
         probe_url: None,
         wrong_door: Some("智谱通用 API 的 key 用另一个入口（智谱 GLM）"),
+        curated_models: &[],
         local: false,
     },
     Provider {
@@ -193,6 +243,7 @@ pub const PROVIDERS: &[Provider] = &[
         probe_model: None,
         probe_url: None,
         wrong_door: None,
+        curated_models: &[],
         local: false,
     },
     Provider {
@@ -205,6 +256,7 @@ pub const PROVIDERS: &[Provider] = &[
         probe_model: None,
         probe_url: Some("http://127.0.0.1:11434/api/tags"),
         wrong_door: None,
+        curated_models: &[],
         local: true,
     },
 ];

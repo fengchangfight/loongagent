@@ -2963,22 +2963,19 @@ fn configure_local(
                 summary.push_str(&format!(" — {hint}"));
             }
         }
+        let (models, curated) = offerable_models(provider, &probe);
+        if curated {
+            summary = format!(
+                "连接成功（密钥有效，只是这个端点不返回模型列表）— \
+                 以下是 {} 文档里列的 {} 个",
+                provider.label,
+                provider.curated_models.len()
+            );
+        }
         loong_tui_app::Validation {
             ok: probe.is_ok(),
             summary,
-            models: loong_providers::probe::model_ids(&probe)
-                .into_iter()
-                .map(|id| {
-                    let window = match &probe {
-                        loong_providers::probe::Probe::Ok { models } => models
-                            .iter()
-                            .find(|m| m.id == id)
-                            .and_then(|m| m.context_window),
-                        _ => None,
-                    };
-                    (id, window)
-                })
-                .collect(),
+            models,
             suggest_order,
         }
     };
@@ -3108,6 +3105,47 @@ fn exported_keys() -> Vec<loong_tui_app::OfferedKey> {
         .collect()
 }
 
+/// Which models to put in front of somebody for this provider, and whether they came from
+/// the catalog rather than from the endpoint.
+///
+/// Some hosts authenticate and then name nothing: Kimi Code answers `/models` without a
+/// list. The vendor documents its ids, so those are a reference rather than a guess — and
+/// four rows somebody can tick are *far* better than the empty picker that used to leave a
+/// working key with no way to use it.
+///
+/// The context windows travel with the curated ids on purpose. They are what the kernel
+/// compacts against, and a model with no window is one it will never compact on time.
+fn offerable_models(
+    provider: &loong_config::catalog::Provider,
+    probe: &loong_providers::probe::Probe,
+) -> (Vec<(String, Option<u64>)>, bool) {
+    let named = loong_providers::probe::model_ids(probe);
+    if named.is_empty() && probe.is_ok() && !provider.curated_models.is_empty() {
+        return (
+            provider
+                .curated_models
+                .iter()
+                .map(|model| (model.id.to_string(), model.context_window))
+                .collect(),
+            true,
+        );
+    }
+    let models = named
+        .into_iter()
+        .map(|id| {
+            let window = match probe {
+                loong_providers::probe::Probe::Ok { models } => models
+                    .iter()
+                    .find(|m| m.id == id)
+                    .and_then(|m| m.context_window),
+                _ => None,
+            };
+            (id, window)
+        })
+        .collect();
+    (models, false)
+}
+
 /// What to send as the bearer token when checking this provider.
 ///
 /// `None` for a loopback server. Sending `Some("")` would put `Authorization: Bearer `
@@ -3175,11 +3213,12 @@ fn adopt_local_model(
         // point of this arm.
         None => {
             eprintln!(
-                "[local] {} 已写入；{} 没有返回可用的模型列表 — 已配置的模型保持不动，\
-                 要手工加一个就编辑 {}",
+                "[local] {} 已写入，但 {} 既没有返回模型列表、目录里也没有它的模型。\
+                 已配置的模型保持不动。手工加一个：`loongagent local edit`，写入\n\
+                 \n    [[models]]\n    name = \"<模型 id>\"\n    provider = \"{}/<模型 id>\"\n",
                 home.join("env").display(),
                 provider.label,
-                path.display()
+                provider.id
             );
             Vec::new()
         }
@@ -4127,6 +4166,71 @@ mod tests {
             max_context_size: None,
             provider: None,
         }
+    }
+
+    #[test]
+    fn a_host_that_names_no_models_falls_back_to_the_ones_its_vendor_documents() {
+        // The bug: Kimi Code authenticates, answers `/models`, and names nothing. The
+        // result was a working key with no way to use it — "没有返回可用的模型列表" and a
+        // configured-models-unchanged message, which is a dead end at the one moment
+        // everything else had gone right.
+        use loong_providers::probe::Probe;
+
+        let kimi = loong_config::catalog::provider("kimi-code").expect("in the catalog");
+        assert!(
+            !kimi.curated_models.is_empty(),
+            "the vendor documents four ids; the catalog has to carry them"
+        );
+
+        let silent = Probe::Ok { models: Vec::new() };
+        let (models, curated) = offerable_models(kimi, &silent);
+        assert!(curated, "and the fallback is what filled the list");
+        let ids: Vec<&str> = models.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "k3",
+                "k3-256k",
+                "kimi-for-coding",
+                "kimi-for-coding-highspeed"
+            ]
+        );
+        // The windows matter as much as the names: they are what the kernel compacts
+        // against, and a model with no window is one it never compacts on time.
+        assert_eq!(
+            models.iter().find(|(id, _)| id == "k3").unwrap().1,
+            Some(1_048_576)
+        );
+
+        // A host that *does* enumerate is believed, and the fallback stays out of it.
+        let named = Probe::Ok {
+            models: vec![loong_providers::probe::ModelInfo {
+                id: "whatever-they-serve".to_string(),
+                context_window: Some(4096),
+            }],
+        };
+        let (models, curated) = offerable_models(kimi, &named);
+        assert!(!curated, "a real answer is not second-guessed");
+        assert_eq!(
+            models,
+            vec![("whatever-they-serve".to_string(), Some(4096))]
+        );
+
+        // A provider with no curated list and no answer offers nothing, as before.
+        let plain = loong_config::catalog::provider("deepseek").unwrap();
+        assert!(plain.curated_models.is_empty());
+        let (models, curated) = offerable_models(plain, &silent);
+        assert!(models.is_empty() && !curated);
+
+        // And a *failed* probe never falls back: a rejected key must not be dressed up
+        // as a set of models to choose from.
+        let rejected = Probe::Rejected {
+            status: 401,
+            detail: "no".to_string(),
+            region: false,
+        };
+        let (models, curated) = offerable_models(kimi, &rejected);
+        assert!(models.is_empty() && !curated);
     }
 
     #[test]

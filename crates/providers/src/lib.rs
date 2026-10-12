@@ -9,6 +9,7 @@ use loong_schema::generated::Json;
 use serde::{Deserialize, Serialize};
 
 pub mod openai_compat;
+pub mod probe;
 
 pub use openai_compat::OpenAiCompat;
 
@@ -214,6 +215,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn scripted_model_plays_its_script_then_stops() {
         let mut m = ScriptedModel::new(vec![CompletionResponse {
             text: None,

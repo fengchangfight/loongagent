@@ -111,11 +111,14 @@ pub fn parse_http_url(url: &str) -> Result<(String, u16, String, bool), HttpErro
     Ok((host.to_string(), port, path.to_string(), tls))
 }
 
-/// POST a JSON body and read the whole response. `timeout` bounds both the
-/// connect and the read/write, so a hanging server cannot hang a tool or a hook.
-/// A GET, for reading something small and structured (the pack a control plane
-/// serves). Same framing, same TLS, no body.
-pub fn get_json(
+/// A GET that hands back the response **whatever its status**, so a caller can tell
+/// "the provider answered and said no" (`401`) from "nothing answered at all" (a
+/// transport error).
+///
+/// That distinction is not pedantry: on a first run it is the difference between
+/// "your key is wrong" and "this vendor is unreachable from your network", and a
+/// user told the first when the second is true will go and re-issue a working key.
+pub fn get_json_raw(
     url: &str,
     bearer: Option<&str>,
     timeout: Duration,
@@ -147,15 +150,31 @@ pub fn get_json(
     reader
         .read_to_string(&mut body)
         .map_err(|e| err(format!("reading the response: {e}")))?;
-    if !(200..300).contains(&status) {
-        return Err(err(format!(
-            "HTTP {status}: {}",
-            body.trim().chars().take(300).collect::<String>()
-        )));
-    }
     Ok(HttpResponse { status, body })
 }
 
+/// GET a small, structured resource, treating a non-2xx status as a failure.
+/// Same framing, same TLS, no body.
+pub fn get_json(
+    url: &str,
+    bearer: Option<&str>,
+    timeout: Duration,
+) -> Result<HttpResponse, HttpError> {
+    let response = get_json_raw(url, bearer, timeout)?;
+    if !(200..300).contains(&response.status) {
+        return Err(err(format!(
+            "HTTP {}: {}",
+            response.status,
+            response.body.trim().chars().take(300).collect::<String>()
+        )));
+    }
+    Ok(response)
+}
+
+/// POST a JSON body and read the whole response. `timeout` bounds both the
+/// connect and the read/write, so a hanging server cannot hang a tool or a hook.
+/// The status comes back to the caller rather than being an error, because an
+/// adapter reads its protocol's way of saying "no" out of the body.
 pub fn post_json(
     url: &str,
     body: &str,

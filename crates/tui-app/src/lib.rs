@@ -2931,12 +2931,15 @@ fn draw_model_picker(frame: &mut ratatui::Frame, wizard: &LocalWizard) {
         .selected()
         .map(|p| p.label.clone())
         .unwrap_or_default();
+    // One line, because the block's borders take two of the three rows this gets, and a
+    // second line here was silently clipped — the hint it duplicated is on the help line
+    // below, where there is room for it.
     frame.render_widget(
         Paragraph::new(format!(
-            "{label} 返回了 {} 个模型。\n选择要加入的（空格勾选 · a 全选/全不选 · 输入即筛选）。",
+            "{label} 返回了 {} 个模型 — 勾选要加入的",
             all.len()
         ))
-        .block(Block::bordered().title(" 挑选模型 ")),
+        .block(Block::bordered().title(" 确认要加入的模型 ")),
         chunks[0],
     );
 
@@ -3027,6 +3030,29 @@ fn draw_model_picker(frame: &mut ratatui::Frame, wizard: &LocalWizard) {
     );
 }
 
+/// What to do once a provider has answered.
+///
+/// Split out so the rule is stated once and can be tested without a terminal — it is the
+/// rule that decides whether anything gets written at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AfterValidation {
+    /// The provider named nothing, so there is nothing to tick. The caller reports that
+    /// and the person supplies an id by hand.
+    Accept,
+    /// The provider named models. **Show them**, however few: writing a model that was
+    /// never displayed is configuration nobody chose.
+    Choose,
+}
+
+/// One model is a choice too.
+pub fn after_validation(models: &[(String, Option<u64>)]) -> AfterValidation {
+    if models.is_empty() {
+        AfterValidation::Accept
+    } else {
+        AfterValidation::Choose
+    }
+}
+
 /// Ask for one API key, validate it, and say what the vendor answered.
 ///
 /// The validation is a callback because this crate must not know how to reach a
@@ -3111,10 +3137,16 @@ pub fn local_wizard(
                         continue;
                     }
                     wizard.state = WizardState::Accepted(result.summary.clone());
-                    // A short list is not worth a screen: one model is what the provider
-                    // serves, so there is nothing to choose. Anything longer is a choice
-                    // somebody should get to make.
-                    if result.models.len() <= 1 {
+                    // The list is shown whenever the provider *named* anything, even one
+                    // model. Skipping it looked like a kindness and was not: the run then
+                    // wrote a model nobody had confirmed, which is configuration the
+                    // person did not choose and only discovers by reading the file. The
+                    // one keystroke it saves is not worth that.
+                    //
+                    // Nothing at all is the one case with nothing to show: a vendor that
+                    // answered without a model list has no rows to tick, and the caller
+                    // says so and asks for an id by hand.
+                    if after_validation(&result.models) == AfterValidation::Accept {
                         break Some(KeyChoice {
                             provider: provider.id,
                             key: wizard.key.trim().to_string(),
@@ -5198,6 +5230,51 @@ mod tests {
             ticked: vec![true; names.len()],
         };
         wizard
+    }
+
+    #[test]
+    fn one_model_is_still_shown_rather_than_written_behind_somebody_s_back() {
+        // The bug this locks down: a provider answering with a single model used to skip
+        // the list and be written straight away, so `local add ollama` configured
+        // `qwen2.5:3b` the moment somebody pressed enter on the provider. That is
+        // configuration nobody confirmed — the person finds out by reading the file.
+        let one = vec![("qwen2.5:3b".to_string(), Some(32_768))];
+        assert_eq!(
+            after_validation(&one),
+            AfterValidation::Choose,
+            "one row is still a row, and the run writes what was ticked"
+        );
+
+        let many = vec![
+            ("a".to_string(), None),
+            ("b".to_string(), None),
+            ("c".to_string(), None),
+        ];
+        assert_eq!(after_validation(&many), AfterValidation::Choose);
+
+        // The one case with nothing to show: a vendor that answered without naming a
+        // model. There is no screen to draw and no row to tick, so the caller reports it
+        // and asks for an id by hand.
+        assert_eq!(after_validation(&[]), AfterValidation::Accept);
+    }
+
+    #[test]
+    fn the_confirmation_screen_says_that_nothing_is_written_yet() {
+        let wizard = choosing(&["qwen2.5:3b"]);
+        let screen = drawn_wizard(&wizard, 90, 20);
+        assert!(
+            despaced(&screen).contains(&despaced("确认要加入的模型")),
+            "the screen says what it is asking for:\n{screen}"
+        );
+        assert!(
+            despaced(&screen).contains(&despaced("enter 写入")),
+            "the key that commits is named:\n{screen}"
+        );
+        assert!(
+            despaced(&screen).contains(&despaced("esc 回上一步")),
+            "and so is the way back:\n{screen}"
+        );
+        assert!(screen.contains("[x] qwen2.5:3b"), "{screen}");
     }
 
     #[test]

@@ -3158,25 +3158,23 @@ fn adopt_local_model(
     }
 
     let path = loong_config::local_profile_path();
-    let models: Vec<LocalModel> = match probe {
-        loong_providers::probe::Probe::Ok { models } => models
-            .iter()
-            .map(|model| LocalModel {
-                name: model.id.clone(),
-                provider: format!("{}/{}", provider.id, model.id),
-                context_window: model.context_window,
-            })
-            .collect(),
-        _ => Vec::new(),
+    let changed = match replacement_models(probe, &provider.id) {
+        Some(models) => upsert_local_models(&path, &provider.id, models)?,
+        // The provider answered without naming anything. The key is worth keeping — it
+        // checked out — but the *models* are not ours to remove, and that is the whole
+        // point of this arm.
+        None => {
+            eprintln!(
+                "[local] {} 已写入；{} 没有返回可用的模型列表 — 已配置的模型保持不动，\
+                 要手工加一个就编辑 {}",
+                home.join("env").display(),
+                provider.label,
+                path.display()
+            );
+            Vec::new()
+        }
     };
-    let changed = upsert_local_models(&path, &provider.id, models)?;
-    if changed.is_empty() {
-        eprintln!(
-            "[local] {} 已写入；{} 没有可用的模型列表 — 请手工填一个模型 id",
-            home.join("env").display(),
-            provider.label
-        );
-    } else {
+    if !changed.is_empty() {
         eprintln!(
             "[local] 已写入 {}（{}）",
             path.display(),
@@ -3190,6 +3188,36 @@ fn adopt_local_model(
         );
     }
     Ok(())
+}
+
+/// What a probe's answer should replace this provider's entries with.
+///
+/// `None` for "the provider named nothing, so leave what is already there alone". That
+/// distinction is the whole reason this is a function: an empty list *is* a legitimate
+/// thing to write, and it deletes, so "nothing came back" and "nothing should remain" must
+/// not be the same value. Getting them confused means re-adding a provider whose list came
+/// back empty silently removes the models already configured for it — data loss dressed up
+/// as a refresh.
+fn replacement_models(
+    probe: &loong_providers::probe::Probe,
+    provider_id: &str,
+) -> Option<Vec<LocalModel>> {
+    let loong_providers::probe::Probe::Ok { models } = probe else {
+        return None;
+    };
+    if models.is_empty() {
+        return None;
+    }
+    Some(
+        models
+            .iter()
+            .map(|model| LocalModel {
+                name: model.id.clone(),
+                provider: format!("{provider_id}/{}", model.id),
+                context_window: model.context_window,
+            })
+            .collect(),
+    )
 }
 
 /// One model in `local.toml`, as this file understands it.
@@ -4089,6 +4117,46 @@ mod tests {
             max_context_size: None,
             provider: None,
         }
+    }
+
+    #[test]
+    fn a_probe_that_named_nothing_does_not_delete_what_is_already_there() {
+        // "Nothing came back" and "nothing should remain" are different things, and an
+        // empty list means the second. Confusing them makes `local add <provider>` silently
+        // remove that provider's models whenever its list endpoint hiccups.
+        use loong_providers::probe::{ModelInfo, Probe};
+
+        assert!(
+            replacement_models(&Probe::Ok { models: Vec::new() }, "deepseek").is_none(),
+            "an empty answer leaves the file alone"
+        );
+        for unreachable in [
+            Probe::Unreachable {
+                detail: "timeout".to_string(),
+            },
+            Probe::Rejected {
+                status: 401,
+                detail: "no".to_string(),
+                region: false,
+            },
+        ] {
+            assert!(
+                replacement_models(&unreachable, "deepseek").is_none(),
+                "and so does one that never arrived"
+            );
+        }
+
+        let answered = Probe::Ok {
+            models: vec![ModelInfo {
+                id: "deepseek-flash".to_string(),
+                context_window: Some(1_048_576),
+            }],
+        };
+        let written = replacement_models(&answered, "deepseek").expect("a named model is written");
+        assert_eq!(written.len(), 1);
+        assert_eq!(written[0].name, "deepseek-flash");
+        assert_eq!(written[0].provider, "deepseek/deepseek-flash");
+        assert_eq!(written[0].context_window, Some(1_048_576));
     }
 
     #[test]

@@ -551,20 +551,20 @@ impl App {
         // Said out loud, with the model named: a resend that silently used the same
         // model again would look like the agent had simply repeated itself.
         self.push_lines(vec![format!(
-            "↻ 用 [{}] 重发上一条（保留原有上下文）",
+            "↻ 用 {} 重发上一条（保留原有上下文）",
             self.selected_model_label()
         )]);
         self.begin_submit(text)
     }
 
-    /// What to call the current model on screen. The slot number when there is one, so
-    /// it matches the bar; the name alone otherwise.
+    /// What to call the current model on screen — **including** the brackets, so every
+    /// caller says the same thing and none of them has to remember to add them.
     fn selected_model_label(&self) -> String {
         if self.selected.is_empty() {
             return "当前模型".to_string();
         }
         match self.models.iter().position(|m| m.name == self.selected) {
-            Some(index) if index < 9 => format!("{}] {}", index + 1, self.selected),
+            Some(index) if index < 9 => format!("[{}] {}", index + 1, self.selected),
             _ => self.selected.clone(),
         }
     }
@@ -622,6 +622,24 @@ impl App {
             .contains(&slot)
             .then(|| self.models.get(slot - 1))
             .flatten()
+    }
+
+    /// The next or previous model, wrapping around the list.
+    fn switch_relative(&mut self, delta: isize) -> Action {
+        if self.models.is_empty() {
+            self.push_lines(vec![
+                "· 这个会话没有可选模型 — 配一个：loongagent local add".to_string(),
+            ]);
+            return Action::None;
+        }
+        let count = self.models.len();
+        let current = self
+            .models
+            .iter()
+            .position(|model| model.name == self.selected)
+            .unwrap_or(0);
+        let next = (current as isize + delta).rem_euclid(count as isize) as usize;
+        self.switch_to_slot(next + 1)
     }
 
     /// The shortcut, shared by `Alt+<digit>` and `/<digit>`.
@@ -764,7 +782,9 @@ impl App {
         // before it can work is a key that appears broken.
         let mut hint = String::new();
         if self.models.len() > 1 {
-            hint.push_str(&format!("  alt+1..{slots} 切换 · /1../{slots} 兜底"));
+            // `ctrl+n`/`ctrl+p` lead, because they are the ones that work everywhere. The
+            // numbered forms follow for anybody whose terminal does deliver them.
+            hint.push_str(&format!("  ctrl+n/p 切换 · alt+1..{slots} · /1../{slots}"));
         }
         if self.last_prompt.is_some() {
             hint.push_str(" · alt+r 重发");
@@ -802,7 +822,10 @@ impl App {
                 if self.health.get(&model.name) == Some(&false) {
                     Style::default().fg(Color::Red)
                 } else if current {
-                    MARK_TEXT
+                    // Reversed as well as bold. `▸` alone was too quiet to answer "did
+                    // that switch?", which is the one question the bar exists to answer
+                    // — and a whole inverted cell is hard to miss in a row of dim text.
+                    MARK_TEXT.add_modifier(Modifier::REVERSED)
                 } else {
                     MARK_QUIET
                 },
@@ -1225,9 +1248,13 @@ impl App {
                     let list = *list;
                     self.set_models(list);
                     if !before.is_empty() && before != self.selected {
+                        // Named with its slot, so the line and the bar say the same thing,
+                        // and long enough to be read rather than skimmed — this is the
+                        // only confirmation that a switch happened.
                         self.push_lines(vec![format!(
-                            "⇄ model {} → {}（下一个 turn 生效）",
-                            before, self.selected
+                            "⇄ 模型已切到 {}（此前 {}）— 下一次模型调用生效",
+                            self.selected_model_label(),
+                            before
                         )]);
                     }
                 }
@@ -1318,6 +1345,20 @@ impl App {
                 if c.eq_ignore_ascii_case(&'r') {
                     return self.resend_last_prompt();
                 }
+            }
+        }
+        // `ctrl+n` / `ctrl+p`: the next or previous model, wrapping.
+        //
+        // These are here because `Alt+<digit>` is not delivered by every terminal — tmux
+        // and some macOS setups swallow the modifier, and `screen` keeps `ctrl+a` for
+        // itself — and a shortcut that silently does nothing is worse than no shortcut,
+        // because it looks like the *program* is broken. A control character always
+        // arrives, and `ctrl+n`/`ctrl+p` are "next"/"previous" everywhere else.
+        if ctrl && self.pending.is_none() {
+            match key.code {
+                KeyCode::Char('n') => return self.switch_relative(1),
+                KeyCode::Char('p') => return self.switch_relative(-1),
+                _ => {}
             }
         }
         match key.code {
@@ -4900,6 +4941,98 @@ mod tests {
     }
 
     #[test]
+    fn alt_digit_reaches_the_server_and_comes_back_to_the_bar() {
+        // The whole chain, not just the key: key → action → worker → client → server →
+        // back → bar. The earlier test only went as far as the `Action`, which is exactly
+        // where a break would hide.
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct Recorder {
+            sent: Arc<Mutex<Vec<String>>>,
+        }
+
+        impl loong_tui::Transport for Recorder {
+            fn send(&mut self, line: &str) -> Result<(), String> {
+                self.sent.lock().unwrap().push(line.to_string());
+                Ok(())
+            }
+            fn recv_line(&mut self) -> Result<Option<String>, String> {
+                // Whatever was asked, answer with the state *after* a switch: two models,
+                // the second one current.
+                Ok(Some(
+                    serde_json::json!({
+                        "jsonrpc": "2.0", "id": 1,
+                        "result": {
+                            "models": [
+                                {"name": "a", "model": "a", "provider": null, "context_window": null},
+                                {"name": "b", "model": "b", "provider": null, "context_window": null}
+                            ],
+                            "selected": "b"
+                        }
+                    })
+                    .to_string(),
+                ))
+            }
+        }
+
+        let transport = Recorder::default();
+        let sent = Arc::clone(&transport.sent);
+        let client = Client::new(transport, "s-models");
+        let (to_worker, from_worker) = spawn_worker(client, 0);
+
+        let mut app = App::new("s-models", "v");
+        app.set_models(loong_schema::generated::ModelList {
+            models: vec![
+                loong_schema::generated::ModelOffering {
+                    name: "a".into(),
+                    model: "a".into(),
+                    provider: None,
+                    context_window: None,
+                },
+                loong_schema::generated::ModelOffering {
+                    name: "b".into(),
+                    model: "b".into(),
+                    provider: None,
+                    context_window: None,
+                },
+            ],
+            selected: "a".into(),
+        });
+
+        // The key, then the round trip.
+        let action = app.handle_key(alt('2'));
+        assert_eq!(
+            action,
+            Action::Send(ToWorker::SelectModel("b".to_string())),
+            "the key produces the command"
+        );
+        let Action::Send(command) = action else {
+            unreachable!()
+        };
+        to_worker.send(command).unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline && app.selected != "b" {
+            app.drain(&from_worker);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        assert_eq!(app.selected, "b", "the bar moved");
+        let asked = sent.lock().unwrap().join("\n");
+        assert!(
+            asked.contains("model.select"),
+            "and the server was actually asked: {asked}"
+        );
+        let said = app.lines.join("\n");
+        assert!(
+            despaced(&said).contains(&despaced("模型已切到 [2] b")),
+            "and the change is said out loud, named by slot so it matches the bar: {said:?}"
+        );
+        assert!(said.contains("此前 a"), "and names what it was: {said:?}");
+    }
+
+    #[test]
     fn the_worker_turns_commands_into_screen_lines() {
         // A transport that answers everything with one canned line: the worker's
         // contract is that a command produces lines plus a state update.
@@ -5936,6 +6069,86 @@ mod tests {
         let bar = screen.lines().next().unwrap_or_default().to_string();
         assert!(bar.contains("▸[2] strong"), "{bar:?}");
         assert!(!bar.contains("▸[1]"), "{bar:?}");
+    }
+
+    #[test]
+    fn ctrl_n_and_ctrl_p_step_through_the_models_and_wrap() {
+        // The keys that work in every terminal. `alt+<digit>` does not: tmux and some
+        // macOS setups swallow the modifier, and a shortcut that silently does nothing
+        // reads as a broken program rather than a broken terminal.
+        let mut app = app_with_models(&["a", "b", "c"]);
+        assert_eq!(
+            app.handle_key(ctrl('n')),
+            Action::Send(ToWorker::SelectModel("b".to_string()))
+        );
+        app.selected = "b".to_string();
+        assert_eq!(
+            app.handle_key(ctrl('n')),
+            Action::Send(ToWorker::SelectModel("c".to_string()))
+        );
+        app.selected = "c".to_string();
+        assert_eq!(
+            app.handle_key(ctrl('n')),
+            Action::Send(ToWorker::SelectModel("a".to_string())),
+            "and it wraps rather than dead-ending at the last model"
+        );
+
+        app.selected = "a".to_string();
+        assert_eq!(
+            app.handle_key(ctrl('p')),
+            Action::Send(ToWorker::SelectModel("c".to_string())),
+            "backwards wraps the other way"
+        );
+    }
+
+    #[test]
+    fn plain_n_and_p_still_type_letters() {
+        let mut app = app_with_models(&["a", "b"]);
+        app.handle_key(key(KeyCode::Char('n')));
+        app.handle_key(key(KeyCode::Char('p')));
+        assert_eq!(app.input, "np");
+    }
+
+    #[test]
+    fn the_bar_hint_leads_with_the_keys_that_always_arrive() {
+        let mut app = app_with_models(&["a", "b", "c"]);
+        let screen = draw(&mut app, 110, 20);
+        let bar = screen.lines().next().unwrap_or_default().to_string();
+        assert!(
+            despaced(&bar).contains(&despaced("ctrl+n/p 切换")),
+            "the reliable keys are named first: {bar:?}"
+        );
+        assert!(
+            despaced(&bar).contains(&despaced("alt+1..3")),
+            "and the numbered ones are still offered: {bar:?}"
+        );
+    }
+
+    #[test]
+    fn the_current_model_is_drawn_as_a_block_and_not_only_a_marker() {
+        // "Did that switch?" is the one question the bar exists to answer, and a `▸` in a
+        // row of dim text was too quiet to answer it.
+        use ratatui::style::Modifier;
+        let mut app = app_with_models(&["cheap", "strong"]);
+        let mut terminal = Terminal::new(TestBackend::new(90, 20)).expect("a test terminal");
+        terminal.draw(|frame| app.draw(frame)).expect("draws");
+        let buffer = terminal.backend().buffer().clone();
+
+        // Row 0 is the bar; find the cell where the current model's name starts.
+        let row: String = (0..buffer.area().width)
+            .map(|x| buffer[(x, 0)].symbol().to_string())
+            .collect();
+        let at = row.find("cheap").expect("the current model is on the bar") as u16;
+        assert!(
+            buffer[(at, 0)].modifier.contains(Modifier::REVERSED),
+            "the current model is drawn as a block: {row:?}"
+        );
+
+        let other = row.find("strong").expect("the other model is on the bar") as u16;
+        assert!(
+            !buffer[(other, 0)].modifier.contains(Modifier::REVERSED),
+            "and the one that is not running is not: {row:?}"
+        );
     }
 
     #[test]

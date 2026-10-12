@@ -52,6 +52,14 @@ pub struct Provider {
     /// reports `context_length`. That number is what the kernel compacts against, so
     /// asking the endpoint that knows it turns a warning at startup into a working cap.
     pub probe_url: Option<&'static str>,
+    /// What to say when this provider *rejects* a key, when there is a known wrong door.
+    ///
+    /// Several of these vendors sell two products with two hosts and two key types —
+    /// Kimi Code against the open platform, a GLM coding plan against a general key —
+    /// and the key from one gets a plain `401` from the other. A generic "your key was
+    /// rejected" sends somebody to re-issue a working credential; this says which door
+    /// they are probably standing at.
+    pub wrong_door: Option<&'static str>,
     /// Loopback: no key, no cost, and the provider is this machine.
     pub local: bool,
 }
@@ -88,17 +96,55 @@ pub const PROVIDERS: &[Provider] = &[
         lists_models: true,
         probe_model: None,
         probe_url: None,
+        wrong_door: None,
+        local: false,
+    },
+    Provider {
+        id: "kimi-code",
+        label: "Kimi Code（编程套餐）",
+        // Probed: `/coding/v1/models`, `/coding/v1/chat/completions` and
+        // `/coding/v1/messages` all answer; `/coding/models` is a 404, so the `/v1` is
+        // part of the path. A Kimi Code key gets a 401 from the open platform below and
+        // vice versa — the two are different products on different hosts.
+        base_url: "https://api.kimi.com/coding/v1",
+        key_env: "LOONG_KIMI_CODE_KEY",
+        aliases: &["KIMI_CODE_API_KEY", "KIMI_API_KEY"],
+        lists_models: true,
+        probe_model: None,
+        probe_url: None,
+        wrong_door: Some(
+            "如果这是 Moonshot 开放平台的 key（按量计费那种），请选「Moonshot 开放平台」",
+        ),
         local: false,
     },
     Provider {
         id: "moonshot",
-        label: "Moonshot / Kimi",
+        label: "Moonshot 开放平台（中国区）",
         base_url: "https://api.moonshot.cn/v1",
         key_env: "LOONG_MOONSHOT_KEY",
-        aliases: &["MOONSHOT_API_KEY", "KIMI_API_KEY"],
+        aliases: &["MOONSHOT_API_KEY"],
         lists_models: true,
         probe_model: None,
         probe_url: None,
+        wrong_door: Some(
+            "如果这是 Kimi Code（编程套餐）的 key，请选「Kimi Code」—— 两者是不同的产品，\
+             域名和 key 都不通用",
+        ),
+        local: false,
+    },
+    Provider {
+        id: "moonshot-intl",
+        label: "Moonshot Open Platform（全球区）",
+        base_url: "https://api.moonshot.ai/v1",
+        key_env: "LOONG_MOONSHOT_INTL_KEY",
+        aliases: &["MOONSHOT_INTL_API_KEY"],
+        lists_models: true,
+        probe_model: None,
+        probe_url: None,
+        wrong_door: Some(
+            "中国区的 key 和全球区的 key 不通用（报错措辞是一样的），\
+             中国的账号请选「Moonshot 开放平台（中国区）」",
+        ),
         local: false,
     },
     Provider {
@@ -110,6 +156,7 @@ pub const PROVIDERS: &[Provider] = &[
         lists_models: true,
         probe_model: None,
         probe_url: None,
+        wrong_door: Some("阿里云百炼的 key 绑定地域，换错区域的端点会报 401 invalid_api_key"),
         local: false,
     },
     Provider {
@@ -121,6 +168,7 @@ pub const PROVIDERS: &[Provider] = &[
         lists_models: false,
         probe_model: Some("glm-4-flash"),
         probe_url: None,
+        wrong_door: Some("Z.ai Coding Plan 的 key 用另一个入口（Z.ai）"),
         local: false,
     },
     Provider {
@@ -132,6 +180,7 @@ pub const PROVIDERS: &[Provider] = &[
         lists_models: false,
         probe_model: Some("glm-4-flash"),
         probe_url: None,
+        wrong_door: Some("智谱通用 API 的 key 用另一个入口（智谱 GLM）"),
         local: false,
     },
     Provider {
@@ -143,6 +192,7 @@ pub const PROVIDERS: &[Provider] = &[
         lists_models: true,
         probe_model: None,
         probe_url: None,
+        wrong_door: None,
         local: false,
     },
     Provider {
@@ -154,6 +204,7 @@ pub const PROVIDERS: &[Provider] = &[
         lists_models: true,
         probe_model: None,
         probe_url: Some("http://127.0.0.1:11434/api/tags"),
+        wrong_door: None,
         local: true,
     },
 ];
@@ -386,6 +437,62 @@ mod tests {
                     provider.id
                 ),
             }
+        }
+    }
+
+    #[test]
+    fn kimi_code_is_its_own_door_and_not_the_open_platform() {
+        // The bug: a Kimi Code key was sent to `api.moonshot.cn/v1` and came back
+        // `401 Invalid Authentication`, which reads as "your key is wrong" — and it was
+        // not. They are different products on different hosts. Verified by probing both:
+        // a bad key gets `Invalid Authentication` from the open platform and
+        // "The API Key appears to be invalid or may have expired" from Kimi Code, which
+        // is how the two were told apart.
+        let code = provider("kimi-code").expect("Kimi Code is a door of its own");
+        assert_eq!(code.base_url, "https://api.kimi.com/coding/v1");
+        assert_eq!(
+            code.models_url().as_deref(),
+            Some("https://api.kimi.com/coding/v1/models")
+        );
+        assert_ne!(
+            code.base_url,
+            provider("moonshot").unwrap().base_url,
+            "and it is not the open platform"
+        );
+
+        // The two Moonshot regions are different keys as well, and the error does not say
+        // so, so the entry has to.
+        assert_eq!(
+            provider("moonshot").unwrap().base_url,
+            "https://api.moonshot.cn/v1"
+        );
+        assert_eq!(
+            provider("moonshot-intl").unwrap().base_url,
+            "https://api.moonshot.ai/v1"
+        );
+    }
+
+    #[test]
+    fn every_vendor_with_two_doors_says_which_one_a_rejected_key_belongs_to() {
+        // The generic "rejected" message sends somebody to re-issue a working key. These
+        // are the vendors where the other product is a real possibility.
+        for id in [
+            "kimi-code",
+            "moonshot",
+            "moonshot-intl",
+            "zhipu",
+            "zai",
+            "dashscope",
+        ] {
+            let provider = provider(id).unwrap_or_else(|| panic!("{id} exists"));
+            assert!(
+                provider.wrong_door.is_some(),
+                "{id} has a second door its users confuse it with"
+            );
+        }
+        // And a vendor that does not gets no invented hint.
+        for id in ["deepseek", "openai", "ollama"] {
+            assert_eq!(provider(id).unwrap().wrong_door, None, "{id}");
         }
     }
 

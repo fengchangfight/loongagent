@@ -2954,9 +2954,18 @@ fn configure_local(
                 .map(str::to_string)
                 .collect(),
         };
+        // A rejected key is the moment the wrong door is worth naming. Several of these
+        // vendors sell two products on two hosts with two key types, and a generic
+        // "rejected" sends somebody to re-issue a credential that was never the problem.
+        let mut summary = loong_providers::probe::render(&probe);
+        if let loong_providers::probe::Probe::Rejected { .. } = &probe {
+            if let Some(hint) = provider.wrong_door {
+                summary.push_str(&format!(" — {hint}"));
+            }
+        }
         loong_tui_app::Validation {
             ok: probe.is_ok(),
-            summary: loong_providers::probe::render(&probe),
+            summary,
             models: loong_providers::probe::model_ids(&probe)
                 .into_iter()
                 .map(|id| {

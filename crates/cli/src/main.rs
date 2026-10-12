@@ -38,6 +38,7 @@ USAGE:
       --local runs with no control plane at all: no pack, no sync, no setup form
       in a session:  alt+1..9 choose a model (or /1../9); alt+r asks the last
                      prompt again of the model chosen now (or /r)
+                     /model configures models and returns to the same session
   loongagent resume [ID]    [--cwd DIR]                                    reopen one (default: latest)
   loongagent sessions       [--all] [--limit N] [--cwd DIR]                list them
   loongagent fork [ID]      [--at SEQ] [--cwd DIR]                         a child session
@@ -2520,6 +2521,34 @@ impl Drop for ChildTransport {
 
 /// The full-screen surface: the client here, the screen in `loong-tui-app`.
 fn full_screen(args: Args) -> Result<(), String> {
+    // `/model` inside the session asks to configure models and then come back. The loop
+    // is here because a session's server child resolves its models **once**, at startup:
+    // a model added while one is running is invisible to it, so making the change take
+    // effect means ending the session and starting it again — against the same log, so
+    // the conversation is still there when it does.
+    //
+    // `force_configure` is false on the first pass, where the wizard runs only if there
+    // is nothing to run otherwise, and true after `/model`, where the person asked.
+    loop {
+        match full_screen_once(&args)? {
+            loong_tui_app::Outcome::Quit => {
+                // Leaving the interface — by `/exit`, ctrl-c, or an error — says where
+                // the session went, so the way out is not a dead end.
+                println!("session {}", args.session_id());
+                println!("reopen:  loongagent resume {}", args.session_id());
+                return Ok(());
+            }
+            loong_tui_app::Outcome::Reconfigure => {
+                if args.is_local()? {
+                    let (settings, _) = args.settings_with_pack()?;
+                    configure_local(&settings, true)?;
+                }
+            }
+        }
+    }
+}
+
+fn full_screen_once(args: &Args) -> Result<loong_tui_app::Outcome, String> {
     args.ensure_parent()?;
     // Settled first, because it decides whether a control plane is consulted at all.
     let local = args.is_local()?;
@@ -2607,7 +2636,6 @@ fn full_screen(args: Args) -> Result<(), String> {
         );
     }
     let session_id = args.session_id();
-    let resume_hint = format!("loongagent resume {session_id}");
     let mut intro = vec![session_intro(
         args.session_source,
         &session_id,
@@ -2645,11 +2673,13 @@ fn full_screen(args: Args) -> Result<(), String> {
         intro,
         Some(Box::new(move || loong_tui::interrupt(server_pid))),
         health,
+        // Only a local install's models are the person's to configure (ADR-0016: on a
+        // managed one an engineer picks a profile, not an endpoint).
+        local,
     );
-    // Leaving the interface — by `/exit`, ctrl-c, or an error — says where the session
-    // went, so the way out is not a dead end.
-    println!("session {session_id}");
-    println!("reopen:  {resume_hint}");
+    // Where the session went is said once, by the caller, when the session is really
+    // over — not between passes of the configure-and-come-back loop, where it would read
+    // as the session having ended when it has not.
     outcome
 }
 

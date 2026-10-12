@@ -470,6 +470,12 @@ pub struct App {
     /// same question* to a different model, and a question that got edited in between
     /// would make the two answers incomparable.
     pub last_prompt: Option<String>,
+    /// Set by `/model`: leave so the models can be configured, then come back.
+    pub reconfigure: bool,
+    /// Whether *this* session's models are the person's to configure. False on a managed
+    /// install, where they come from the control plane and the honest answer to `/model`
+    /// is to say so rather than to leave and come back having changed nothing.
+    pub can_configure: bool,
     /// Which models a background check has confirmed, by name. Absent means nobody has
     /// checked yet, which is not the same as failed.
     pub health: std::collections::BTreeMap<String, bool>,
@@ -510,6 +516,8 @@ impl App {
             models: Vec::new(),
             selected: String::new(),
             last_prompt: None,
+            reconfigure: false,
+            can_configure: true,
             health: std::collections::BTreeMap::new(),
             quit: false,
         }
@@ -1071,6 +1079,28 @@ impl App {
                 self.input.clear();
                 self.cursor = 0;
                 Some(Action::Send(ToWorker::Yolo(!self.yolo)))
+            }
+            // Models are configured outside the session and then the session comes
+            // back, because the server resolves its models once at startup — see
+            // `Outcome::Reconfigure`.
+            "/model" | "/models" => {
+                self.input.clear();
+                self.cursor = 0;
+                // On a managed install the models come from the control plane, so leaving
+                // to "configure" them would end the session and come back having changed
+                // nothing. Saying so is the only honest answer (ADR-0016: an engineer
+                // picks a profile, not an endpoint).
+                if !self.can_configure {
+                    self.push_lines(vec![
+                        "· 这个会话的模型来自控制平面，不由你配置 — 换用 `loongagent use <name>`；\
+                         想自己配模型请用 `loongagent tui --local`"
+                            .to_string(),
+                    ]);
+                    return Some(Action::None);
+                }
+                self.push_lines(vec!["· 正在打开模型配置 — 配好后会回到这个会话".to_string()]);
+                self.reconfigure = true;
+                Some(Action::Quit)
             }
             // The transcript shows a summary of long tool output; this asks the log for
             // the rest.
@@ -1942,6 +1972,16 @@ impl App {
                         "/yolo" => {
                             "enter turns approval prompts off (the sandbox stays)".to_string()
                         }
+                        // Only where that is true. A completion that promises
+                        // configuration on an install whose models come from the control
+                        // plane is the kind of lie that costs somebody an evening.
+                        "/model" | "/models" if self.can_configure => {
+                            "enter opens model configuration, then returns to this session"
+                                .to_string()
+                        }
+                        "/model" | "/models" => {
+                            "this session's models come from the control plane".to_string()
+                        }
                         "/copy" => "enter copies the whole transcript".to_string(),
                         "/mouse" => "enter hands the mouse back to your terminal".to_string(),
                         // The model shortcuts, said in full only when they would work: a
@@ -1962,7 +2002,7 @@ impl App {
                                     None => format!("no model in slot {slot}"),
                                 }
                             }
-                            _ => "command — /help · /exit · /logo · /mouse · /copy · /expand"
+                            _ => "command — /help · /model · /exit · /logo · /mouse · /copy · /expand"
                                 .to_string(),
                         },
                     },
@@ -2531,6 +2571,20 @@ pub struct KeyChoice {
     pub validation: Validation,
 }
 
+/// Why the interface closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    /// The person is done with this session.
+    Quit,
+    /// The person asked to configure models and expects to come back to this session.
+    ///
+    /// A session's server resolves its models once, at startup, so a model added while
+    /// one is running is invisible to it. Saying "configure, then come back" is the
+    /// honest way to make the change take effect — and re-entering against the same log
+    /// means the conversation is still there when it does.
+    Reconfigure,
+}
+
 /// What a background check found out about one model, as the bar needs it.
 ///
 /// Reported rather than enforced: a model that failed its check is marked, not
@@ -2551,6 +2605,22 @@ pub enum WizardState {
     /// Refused, with the reason to show. The key stays typed so it can be fixed.
     Refused(String),
     Accepted(String),
+    /// The provider answered with a list. Which of them to keep.
+    ///
+    /// A picker rather than "add everything the vendor serves": a real account returns
+    /// twenty ids, a person wants one or two of them, and a bar that fills up with the
+    /// rest is not a configuration — it is a chore with a hotkey limit.
+    Choosing {
+        /// What has been typed to narrow the list. Vendors return long lists and their
+        /// names are unstructured, so substring is the only filter that can be offered
+        /// without knowing the vendor.
+        filter: String,
+        /// The row the keyboard is on, counted in *visible* rows.
+        cursor: usize,
+        /// Every model the provider offered, in its own order.
+        all: Vec<(String, Option<u64>)>,
+        ticked: Vec<bool>,
+    },
 }
 
 /// The local first run: paste a key, pick who it belongs to, find out.
@@ -2610,8 +2680,99 @@ impl LocalWizard {
         format!("{prefix}{}", "•".repeat(chars.len() - visible))
     }
 
-    /// Put a provider and a key in place without submitting anything.
+    /// The rows of the picker that match what has been typed, as indices into `all`.
     ///
+    /// Indices rather than copies, because the ticks live beside the full list: a filter
+    /// that narrowed the view must not change what is ticked outside it.
+    pub fn visible(&self) -> Vec<usize> {
+        let WizardState::Choosing { filter, all, .. } = &self.state else {
+            return Vec::new();
+        };
+        let needle = filter.trim().to_ascii_lowercase();
+        all.iter()
+            .enumerate()
+            .filter(|(_, (name, _))| {
+                needle.is_empty() || name.to_ascii_lowercase().contains(&needle)
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// The models that will be written, in the provider's own order.
+    pub fn chosen(&self) -> Vec<(String, Option<u64>)> {
+        let WizardState::Choosing { all, ticked, .. } = &self.state else {
+            return Vec::new();
+        };
+        all.iter()
+            .zip(ticked.iter())
+            .filter(|(_, ticked)| **ticked)
+            .map(|(entry, _)| entry.clone())
+            .collect()
+    }
+
+    fn handle_choosing(&mut self, key: KeyEvent) -> WizardAction {
+        // Read before borrowing the state mutably: the visible rows are a function of it,
+        // and a borrow of `self` cannot live inside a borrow of `self.state`.
+        let visible = self.visible();
+        let count = visible.len();
+        let WizardState::Choosing {
+            filter,
+            cursor,
+            ticked,
+            ..
+        } = &mut self.state
+        else {
+            return WizardAction::None;
+        };
+        match key.code {
+            // Back, not out: the key is still typed and the provider is still chosen, so
+            // escaping the list should cost a keystroke, not the whole form.
+            KeyCode::Esc => {
+                self.state = WizardState::Editing;
+            }
+            KeyCode::Enter => {
+                if ticked.iter().any(|t| *t) {
+                    return WizardAction::Submit;
+                }
+                // Refusing rather than writing nothing: "add a provider" that adds no
+                // models is not a thing anybody meant to do. The help line says so.
+                *cursor = 0;
+            }
+            KeyCode::Up | KeyCode::BackTab => {
+                *cursor = cursor.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Tab => {
+                if count > 0 {
+                    *cursor = (*cursor + 1).min(count - 1);
+                }
+            }
+            KeyCode::Char(' ') => {
+                if let Some(index) = visible.get(*cursor) {
+                    ticked[*index] = !ticked[*index];
+                }
+            }
+            // Toggle everything *on screen*: with a filter typed, "all" means the part
+            // of the list being looked at.
+            KeyCode::Char('a') => {
+                let any_off = visible.iter().any(|index| !ticked[*index]);
+                for index in visible {
+                    ticked[index] = any_off;
+                }
+            }
+            KeyCode::Backspace => {
+                filter.pop();
+                *cursor = 0;
+            }
+            KeyCode::Char(c) => {
+                filter.push(c);
+                *cursor = 0;
+            }
+            _ => {}
+        }
+        WizardAction::None
+    }
+
+    /// Put a provider and a key in place without submitting anything.    ///
     /// Used for a key the machine already had: the wizard shows it and waits, rather
     /// than validating and saving on its own. An interface that configured models
     /// nobody chose is exactly the surprise this avoids, and "one keystroke to accept"
@@ -2665,6 +2826,11 @@ impl LocalWizard {
         if self.state == WizardState::Validating {
             return WizardAction::None;
         }
+        // Choosing has its own keyboard — the list is what is on screen, so the keys
+        // that move around a form mean something else here.
+        if matches!(self.state, WizardState::Choosing { .. }) {
+            return self.handle_choosing(key);
+        }
         match key.code {
             KeyCode::Esc => return WizardAction::Cancel,
             KeyCode::Enter => {
@@ -2704,6 +2870,9 @@ impl LocalWizard {
 }
 
 fn draw_local_wizard(frame: &mut ratatui::Frame, wizard: &LocalWizard) {
+    if matches!(wizard.state, WizardState::Choosing { .. }) {
+        return draw_model_picker(frame, wizard);
+    }
     let area = frame.area();
     let chunks = Layout::vertical([
         Constraint::Length(3),
@@ -2780,8 +2949,136 @@ fn draw_local_wizard(frame: &mut ratatui::Frame, wizard: &LocalWizard) {
             format!("✓ {what}\n\nenter 继续"),
             Style::default().fg(Color::Green),
         ),
+        // Unreachable: the picker is drawn by its own function and returns before here.
+        // Spelled out rather than a wildcard so a new state cannot silently land on the
+        // wrong screen.
+        WizardState::Choosing { .. } => (String::new(), MARK_QUIET),
     };
     frame.render_widget(Paragraph::new(help).style(style), chunks[3]);
+}
+
+/// The list a provider answered with, and which of it to keep.
+///
+/// Every row is `[x] name`, so the state of the whole list is readable at a glance —
+/// which matters more here than anywhere else in this program, because what is ticked
+/// is about to become somebody's model bar.
+fn draw_model_picker(frame: &mut ratatui::Frame, wizard: &LocalWizard) {
+    let WizardState::Choosing {
+        filter,
+        cursor,
+        all,
+        ticked,
+    } = &wizard.state
+    else {
+        return;
+    };
+    let area = frame.area();
+    let chunks = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Length(3),
+        Constraint::Min(4),
+        Constraint::Length(3),
+    ])
+    .split(area);
+
+    let label = wizard
+        .selected()
+        .map(|p| p.label.clone())
+        .unwrap_or_default();
+    frame.render_widget(
+        Paragraph::new(format!(
+            "{label} 返回了 {} 个模型。\n选择要加入的（空格勾选 · a 全选/全不选 · 输入即筛选）。",
+            all.len()
+        ))
+        .block(Block::bordered().title(" 挑选模型 ")),
+        chunks[0],
+    );
+
+    frame.render_widget(
+        Paragraph::new(if filter.is_empty() {
+            "（输入关键字筛选，例如 coder、flash、kimi）".to_string()
+        } else {
+            filter.clone()
+        })
+        .style(if filter.is_empty() {
+            MARK_QUIET
+        } else {
+            Style::default().fg(Color::Cyan)
+        })
+        .block(Block::bordered().title(" 筛选 ")),
+        chunks[1],
+    );
+    if filter.is_empty() {
+        // The caret only goes in a field that is actually being edited.
+        frame.set_cursor_position((chunks[1].x + 1, chunks[1].y + 1));
+    } else {
+        let column = chunks[1].x + 1 + filter.chars().count() as u16;
+        frame.set_cursor_position((
+            column.min(chunks[1].right().saturating_sub(2)),
+            chunks[1].y + 1,
+        ));
+    }
+
+    // One row per line, scrolled so the cursor is always on screen. A vendor list can be
+    // longer than the terminal, and a picker that cannot reach row 30 is not a picker.
+    let room = chunks[2].height.saturating_sub(2) as usize;
+    let visible = wizard.visible();
+    let top = if room == 0 || visible.len() <= room {
+        0
+    } else {
+        // Keep the cursor a little below the top so the eye can see what is coming.
+        (*cursor).saturating_sub(room / 2).min(visible.len() - room)
+    };
+    let mut lines: Vec<Line> = Vec::new();
+    for (row, index) in visible.iter().enumerate().skip(top).take(room.max(1)) {
+        let (name, window) = &all[*index];
+        let on = ticked[*index];
+        let here = row == *cursor;
+        let text = format!(
+            "{} {:<34} {}",
+            if on { "[x]" } else { "[ ]" },
+            name,
+            window.map(|w| format!("ctx {w}")).unwrap_or_default()
+        );
+        lines.push(Line::from(Span::styled(
+            text,
+            if here {
+                Style::default().fg(MARK_INK).add_modifier(Modifier::BOLD)
+            } else if on {
+                MARK_TEXT
+            } else {
+                MARK_QUIET
+            },
+        )));
+    }
+    if visible.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  没有匹配的模型 — 退格清掉筛选".to_string(),
+            Style::default().fg(Color::Red),
+        )));
+    }
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::bordered().title(format!(
+            " 已选 {} / {} ",
+            ticked.iter().filter(|t| **t).count(),
+            all.len()
+        ))),
+        chunks[2],
+    );
+
+    let help = if ticked.iter().any(|t| *t) {
+        "↑↓ 移动 · 空格 勾选 · enter 写入 · esc 回上一步".to_string()
+    } else {
+        "至少选一个模型 · ↑↓ 移动 · 空格 勾选".to_string()
+    };
+    frame.render_widget(
+        Paragraph::new(help).style(if ticked.iter().any(|t| *t) {
+            MARK_QUIET
+        } else {
+            Style::default().fg(Color::Red)
+        }),
+        chunks[3],
+    );
 }
 
 /// Ask for one API key, validate it, and say what the vendor answered.
@@ -2819,6 +3116,11 @@ pub fn local_wizard(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).map_err(|e| e.to_string())?;
 
+    // What the picker is choosing from: the provider, the key, and the answered list.
+    // Held here rather than inside the state so the *choice* and the *list* stay one
+    // thing — the screen only decides which of the models come along.
+    let mut pending: Option<(String, String, Validation)> = None;
+
     let outcome = loop {
         terminal
             .draw(|frame| draw_local_wizard(frame, &wizard))
@@ -2830,6 +3132,19 @@ pub fn local_wizard(
         if let Event::Key(key) = event::read().map_err(|e| e.to_string())? {
             match wizard.handle_key(key) {
                 WizardAction::Submit => {
+                    // Finishing the picker: the models that are ticked are the ones that
+                    // get written, which is the whole point of having asked.
+                    if matches!(wizard.state, WizardState::Choosing { .. }) {
+                        if let Some((id, key, mut result)) = pending.take() {
+                            result.models = wizard.chosen();
+                            break Some(KeyChoice {
+                                provider: id,
+                                key,
+                                validation: result,
+                            });
+                        }
+                        continue;
+                    }
                     let Some(provider) = wizard.selected().cloned() else {
                         break None;
                     };
@@ -2842,21 +3157,36 @@ pub fn local_wizard(
                         .map_err(|e| e.to_string())?;
 
                     let result = validate(&provider.id, wizard.key.trim());
-                    wizard.state = if result.ok {
-                        WizardState::Accepted(result.summary.clone())
-                    } else {
-                        WizardState::Refused(result.summary.clone())
-                    };
-                    if result.ok {
+                    if !result.ok {
+                        wizard.state = WizardState::Refused(result.summary.clone());
+                        // A refusal is information about *which* vendor, so it is spent
+                        // on the list rather than thrown away.
+                        wizard.reorder(&result.suggest_order);
+                        continue;
+                    }
+                    wizard.state = WizardState::Accepted(result.summary.clone());
+                    // A short list is not worth a screen: one model is what the provider
+                    // serves, so there is nothing to choose. Anything longer is a choice
+                    // somebody should get to make.
+                    if result.models.len() <= 1 {
                         break Some(KeyChoice {
                             provider: provider.id,
                             key: wizard.key.trim().to_string(),
                             validation: result,
                         });
                     }
-                    // A refusal is information about *which* vendor, so it is spent on
-                    // the list rather than thrown away.
-                    wizard.reorder(&result.suggest_order);
+                    wizard.state = WizardState::Choosing {
+                        filter: String::new(),
+                        cursor: 0,
+                        // Everything starts ticked, so the common answer ("all of them")
+                        // is still one keystroke, and `a` clears the list for the person
+                        // who wants one id out of twenty.
+                        ticked: vec![true; result.models.len()],
+                        all: result.models.clone(),
+                    };
+                    // The key and the summary travel with the choice; this screen only
+                    // decides which of the models come along.
+                    pending = Some((provider.id.clone(), wizard.key.trim().to_string(), result));
                 }
                 WizardAction::Cancel => break None,
                 WizardAction::None => {}
@@ -2877,7 +3207,9 @@ pub fn run<T: Transport + Send + 'static>(
     intro: Vec<String>,
     interrupt: Option<Box<dyn Fn()>>,
     health: Option<Receiver<ModelHealth>>,
-) -> Result<(), String> {
+    // Whether `/model` may offer to configure anything. See `App::can_configure`.
+    can_configure: bool,
+) -> Result<Outcome, String> {
     use ratatui::backend::CrosstermBackend;
     use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture};
     use ratatui::crossterm::execute;
@@ -2906,6 +3238,7 @@ pub fn run<T: Transport + Send + 'static>(
     let (to_worker, from_worker) = spawn_worker(client, shown);
     let mut app = App::new(session, schema);
     app.interrupt = interrupt;
+    app.can_configure = can_configure;
     if let Some(list) = models {
         app.set_models(list);
     }
@@ -2931,7 +3264,7 @@ pub fn run<T: Transport + Send + 'static>(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).map_err(|e| e.to_string())?;
 
-    let outcome = (|| -> Result<(), String> {
+    let outcome = (|| -> Result<Outcome, String> {
         loop {
             app.drain(&from_worker);
             // A background check reports when it reports; the bar is redrawn either way,
@@ -2975,7 +3308,15 @@ pub fn run<T: Transport + Send + 'static>(
                             }
                             // The screen is redrawn next pass; the terminal is what changed.
                         }
-                        Action::Quit => return Ok(()),
+                        // `/exit` and `/model` both leave; they differ in what the
+                        // caller is asked to do next, and the app already recorded which.
+                        Action::Quit => {
+                            return Ok(if app.reconfigure {
+                                Outcome::Reconfigure
+                            } else {
+                                Outcome::Quit
+                            })
+                        }
                         Action::None => {}
                     },
                     event::Event::Mouse(mouse) => app.handle_mouse(mouse.kind),
@@ -2983,7 +3324,11 @@ pub fn run<T: Transport + Send + 'static>(
                 }
             }
             if app.quit {
-                return Ok(());
+                return Ok(if app.reconfigure {
+                    Outcome::Reconfigure
+                } else {
+                    Outcome::Quit
+                });
             }
         }
     })();
@@ -4908,6 +5253,169 @@ mod tests {
         assert_eq!(wizard.key, "x", "and the field works again");
     }
 
+    // ------------------------------------------------------------ the picker
+
+    fn choosing(names: &[&str]) -> LocalWizard {
+        let mut wizard = LocalWizard::new(providers());
+        wizard.state = WizardState::Choosing {
+            filter: String::new(),
+            cursor: 0,
+            all: names
+                .iter()
+                .map(|name| (name.to_string(), Some(4096)))
+                .collect(),
+            ticked: vec![true; names.len()],
+        };
+        wizard
+    }
+
+    #[test]
+    fn the_picker_starts_with_everything_ticked_so_all_of_them_is_one_keystroke() {
+        let wizard = choosing(&["a", "b", "c"]);
+        assert_eq!(wizard.chosen().len(), 3);
+        assert_eq!(wizard.visible(), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn the_picker_can_narrow_to_one_id_out_of_a_long_list() {
+        // The case this exists for: a real account returns twenty ids and a person wants
+        // one of them. Clearing and re-ticking beats unticking nineteen.
+        let mut wizard = choosing(&[
+            "qwen3.8-flash",
+            "qwen3.8-max",
+            "qwen3.7-plus",
+            "qwen-coder-plus",
+            "text-embedding-v3",
+        ]);
+        // `a` clears everything on screen, then typing narrows, then space takes one.
+        wizard.handle_key(key(KeyCode::Char('a')));
+        assert!(wizard.chosen().is_empty(), "nothing ticked after `a`");
+
+        for c in "coder".chars() {
+            wizard.handle_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(
+            wizard.visible(),
+            vec![3],
+            "the filter narrowed the list to what matches"
+        );
+
+        wizard.handle_key(key(KeyCode::Char(' ')));
+        let chosen = wizard.chosen();
+        assert_eq!(chosen.len(), 1, "{chosen:?}");
+        assert_eq!(chosen[0].0, "qwen-coder-plus");
+    }
+
+    #[test]
+    fn filtering_narrows_the_view_without_changing_what_is_ticked() {
+        // The ticks live beside the full list, so a filter that hid a row must not have
+        // unticked it — otherwise narrowing the view would quietly discard choices.
+        let mut wizard = choosing(&["alpha", "beta", "gamma"]);
+        wizard.handle_key(key(KeyCode::Char('g')));
+        assert_eq!(wizard.visible(), vec![2]);
+        assert_eq!(
+            wizard.chosen().len(),
+            3,
+            "the two rows off screen are still ticked"
+        );
+
+        wizard.handle_key(key(KeyCode::Backspace));
+        assert_eq!(wizard.visible(), vec![0, 1, 2], "and come back");
+    }
+
+    #[test]
+    fn toggle_all_means_all_of_what_is_on_screen() {
+        let mut wizard = choosing(&["qwen-flash", "qwen-max", "kimi-k3"]);
+        wizard.handle_key(key(KeyCode::Char('a')));
+        assert!(wizard.chosen().is_empty());
+
+        wizard.handle_key(key(KeyCode::Char('q')));
+        assert_eq!(wizard.visible(), vec![0, 1]);
+        wizard.handle_key(key(KeyCode::Char('a')));
+        let chosen: Vec<String> = wizard.chosen().into_iter().map(|(n, _)| n).collect();
+        assert_eq!(
+            chosen,
+            vec!["qwen-flash", "qwen-max"],
+            "only the visible rows came back"
+        );
+    }
+
+    #[test]
+    fn the_picker_will_not_finish_with_nothing_ticked() {
+        let mut wizard = choosing(&["a", "b"]);
+        wizard.handle_key(key(KeyCode::Char('a')));
+        assert_eq!(
+            wizard.handle_key(key(KeyCode::Enter)),
+            WizardAction::None,
+            "adding a provider that adds no models is not a thing anybody meant"
+        );
+        // And then it works.
+        wizard.handle_key(key(KeyCode::Char(' ')));
+        assert_eq!(wizard.handle_key(key(KeyCode::Enter)), WizardAction::Submit);
+    }
+
+    #[test]
+    fn the_picker_moves_and_stops_at_the_ends() {
+        let mut wizard = choosing(&["a", "b", "c"]);
+        wizard.handle_key(key(KeyCode::Up));
+        assert_eq!(wizard.visible()[0], 0, "the top is the top");
+        for _ in 0..5 {
+            wizard.handle_key(key(KeyCode::Down));
+        }
+        let visible = wizard.visible();
+        // The cursor is kept in range, so space still lands on the last row.
+        wizard.handle_key(key(KeyCode::Char(' ')));
+        assert_eq!(wizard.chosen().len(), 2, "the last row was toggled off");
+        assert_eq!(visible.len(), 3);
+    }
+
+    #[test]
+    fn escape_from_the_picker_goes_back_to_the_form_not_out_of_it() {
+        // The key is typed and the provider is chosen; escaping the list should cost a
+        // keystroke, not the whole form.
+        let mut wizard = choosing(&["a"]);
+        wizard.key = "sk-something-long".to_string();
+        wizard.handle_key(key(KeyCode::Esc));
+        assert_eq!(wizard.state, WizardState::Editing);
+        assert_eq!(
+            wizard.key, "sk-something-long",
+            "and the key is still there"
+        );
+        assert_eq!(wizard.handle_key(key(KeyCode::Esc)), WizardAction::Cancel);
+    }
+
+    #[test]
+    fn the_picker_says_what_is_ticked_and_what_to_press() {
+        let mut wizard = choosing(&["qwen-flash", "qwen-max", "kimi-k3"]);
+        wizard.handle_key(key(KeyCode::Char(' ')));
+        let screen = drawn_wizard(&wizard, 90, 20);
+        assert!(
+            despaced(&screen).contains(&despaced("已选 2 / 3")),
+            "the count is on screen:\n{screen}"
+        );
+        assert!(screen.contains("[x] kimi-k3"), "{screen}");
+        assert!(screen.contains("[ ] qwen-flash"), "{screen}");
+        assert!(
+            despaced(&screen).contains(&despaced("空格 勾选")),
+            "{screen}"
+        );
+        assert!(screen.contains("qwen-flash"), "{screen}");
+    }
+
+    #[test]
+    fn the_picker_says_so_when_a_filter_matches_nothing() {
+        let mut wizard = choosing(&["alpha", "beta"]);
+        for c in "zzz".chars() {
+            wizard.handle_key(key(KeyCode::Char(c)));
+        }
+        assert!(wizard.visible().is_empty());
+        let screen = drawn_wizard(&wizard, 90, 20);
+        assert!(
+            despaced(&screen).contains(&despaced("没有匹配的模型")),
+            "{screen}"
+        );
+    }
+
     #[test]
     fn the_local_wizard_never_draws_the_key_it_was_given() {
         let mut wizard = LocalWizard::new(providers());
@@ -5430,6 +5938,76 @@ mod tests {
         assert!(
             despaced(&after).contains(&despaced("alt+r 重发")),
             "and once it can work, it is on the bar: {after:?}"
+        );
+    }
+
+    #[test]
+    fn slash_model_asks_to_leave_and_configure() {
+        // Configure *outside* the session and come back, because a session's server
+        // resolves its models once at startup — a model added while one runs is invisible
+        // to it. Leaving is how the change takes effect; the same log is how the
+        // conversation survives it.
+        let mut app = app_with_models(&["cheap", "strong"]);
+        app.input = "/model".to_string();
+        app.cursor = 6;
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::Quit);
+        assert!(app.reconfigure, "and it says why it is leaving");
+        assert!(app.input.is_empty(), "the command does not reach the agent");
+        let said = app.lines.join("\n");
+        assert!(
+            despaced(&said).contains(&despaced("回到这个会话")),
+            "so leaving does not look like losing the session: {said:?}"
+        );
+    }
+
+    #[test]
+    fn slash_exit_does_not_ask_to_configure() {
+        // The two ways out differ, and only the caller can tell them apart.
+        let mut app = app_with_models(&["cheap"]);
+        app.input = "/exit".to_string();
+        app.cursor = 5;
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::Quit);
+        assert!(!app.reconfigure, "leaving is just leaving");
+    }
+
+    #[test]
+    fn the_model_command_is_not_sent_to_a_model() {
+        // `/model` is the interface's own; a session with a skill called `model` must not
+        // be what answers, or configuring would look like a prompt.
+        for typed in ["/model", "/models", "/MODEL"] {
+            let mut app = app_with_models(&["cheap"]);
+            app.input = typed.to_string();
+            app.cursor = typed.chars().count();
+            assert_eq!(
+                app.handle_key(key(KeyCode::Enter)),
+                Action::Quit,
+                "{typed} must be handled here, not submitted"
+            );
+            assert!(app.reconfigure, "{typed}");
+        }
+    }
+
+    #[test]
+    fn a_managed_session_says_so_instead_of_leaving_to_change_nothing() {
+        // On a managed install the models come from the control plane, so leaving to
+        // "configure" them would end the session and come back having changed nothing.
+        let mut app = app_with_models(&["from-the-pack"]);
+        app.can_configure = false;
+        app.input = "/model".to_string();
+        app.cursor = 6;
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            Action::None,
+            "the session stays where it is"
+        );
+        assert!(
+            !app.reconfigure,
+            "and nothing asked the caller to reconfigure"
+        );
+        let said = app.lines.join("\n");
+        assert!(
+            despaced(&said).contains(&despaced("控制平面")),
+            "and it explains why: {said:?}"
         );
     }
 

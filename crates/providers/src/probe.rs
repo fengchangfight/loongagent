@@ -103,6 +103,17 @@ pub fn probe_models_url(url: &str, api_key: Option<&str>) -> Probe {
     }
 }
 
+/// The raw answer to the list request, for when "worked / did not work" is not enough.
+///
+/// The wizard reduces every reply to one of two outcomes, which is right for a form and
+/// useless for working out why. An endpoint that authenticates and then names nothing is
+/// neither, and its body is the only thing that says which. Returns the status and the
+/// body, or the transport error — the caller prints them.
+pub fn raw_models_answer(url: &str, api_key: Option<&str>) -> Result<(u16, String), String> {
+    let response = http::get_json_raw(url, api_key, PROBE_TIMEOUT).map_err(|e| e.0)?;
+    Ok((response.status, response.body))
+}
+
 /// The fallback for a vendor with no `/models` route: ask for one token.
 ///
 /// Costs a token or two, which is the honest price of a vendor that publishes no
@@ -154,7 +165,7 @@ pub fn probe_with_completion(base_url: &str, model: &str, api_key: Option<&str>)
 /// parse is not a failed probe — the key demonstrably worked, and the caller can
 /// still write a profile and let the user name a model. Returning "no models" is
 /// strictly better than turning a working key into an error.
-fn parse_models(body: &str) -> Vec<ModelInfo> {
+pub fn parse_models(body: &str) -> Vec<ModelInfo> {
     let Ok(value) = serde_json::from_str::<Value>(body) else {
         return Vec::new();
     };

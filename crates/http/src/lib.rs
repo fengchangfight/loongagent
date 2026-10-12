@@ -365,6 +365,7 @@ fn read_head(stream: &mut Transport) -> Result<(u16, String, BodyReader<'_>), Ht
             stream,
             chunked,
             done: false,
+            remaining: 0,
         },
     ))
 }
@@ -374,11 +375,24 @@ struct BodyReader<'a> {
     stream: &'a mut Transport,
     chunked: bool,
     done: bool,
+    /// Bytes of the current chunk not yet handed to the caller.
+    ///
+    /// A `Read` may deliver less than it was asked for, so the rest of a chunk has to
+    /// survive until the next call. It used to be thrown away instead, which silently
+    /// truncated every chunked body larger than the caller's buffer — and a truncated
+    /// JSON body is not an error, it is *no models*, which reads as a vendor that lists
+    /// nothing. One chunk of Kimi Code's model list is 33 bytes; that is what arrived.
+    remaining: usize,
 }
 
 impl Read for BodyReader<'_> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         if self.done {
+            return Ok(0);
+        }
+        // Not EOF: a caller that asks for nothing is told it got nothing, and no chunk
+        // header is consumed on its behalf.
+        if buf.is_empty() {
             return Ok(0);
         }
         if !self.chunked {
@@ -389,37 +403,46 @@ impl Read for BodyReader<'_> {
             return Ok(read);
         }
         // Chunked: `<hex size>CRLF <bytes> CRLF`, terminated by a zero-size chunk.
-        let size = match read_chunk_size(self.stream)? {
-            Some(0) | None => {
-                self.done = true;
-                return Ok(0);
+        if self.remaining == 0 {
+            match read_chunk_size(self.stream)? {
+                Some(0) | None => {
+                    self.done = true;
+                    return Ok(0);
+                }
+                Some(size) => self.remaining = size,
             }
-            Some(size) => size,
-        };
-        let take = size.min(buf.len());
+        }
+        // At most `buf.len()` of what is left, and what does not fit stays `remaining`.
+        let take = self.remaining.min(buf.len());
         let mut filled = 0;
         while filled < take {
             let read = self.stream.read(&mut buf[filled..take])?;
             if read == 0 {
                 self.done = true;
-                return Ok(filled);
+                break;
             }
             filled += read;
         }
-        // Whatever did not fit is discarded, so the next call starts on a boundary.
-        let mut leftover = size - filled;
-        let mut sink = [0u8; 1024];
-        while leftover > 0 {
-            let want = leftover.min(sink.len());
-            let read = self.stream.read(&mut sink[..want])?;
-            if read == 0 {
-                self.done = true;
-                break;
+        self.remaining -= filled;
+        if self.remaining == 0 && !self.done {
+            // The CRLF that closes the chunk. Both bytes, not one `read`: a socket may
+            // hand back half of it, and a stray newline left in the stream is read as
+            // the next chunk's size line — which parses as nothing and ends the body
+            // early.
+            let mut crlf = [0u8; 2];
+            let mut got = 0;
+            while got < crlf.len() {
+                match self.stream.read(&mut crlf[got..]) {
+                    Ok(0) => {
+                        self.done = true;
+                        break;
+                    }
+                    Ok(n) => got += n,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e),
+                }
             }
-            leftover -= read;
         }
-        let mut crlf = [0u8; 2];
-        let _ = self.stream.read(&mut crlf);
         Ok(filled)
     }
 }
@@ -668,6 +691,64 @@ mod tests {
             sent.contains("Accept: text/event-stream"),
             "we ask for a stream: {sent}"
         );
+    }
+
+    #[test]
+    fn a_chunk_larger_than_the_callers_buffer_is_delivered_not_discarded() {
+        // The bug, and it was the worst shape a bug can have: silent data loss. `read`
+        // threw away whatever did not fit the caller's buffer, so any chunked body larger
+        // than that buffer arrived truncated. Truncated JSON is not an error — it parses
+        // as *no models*, which reads as a vendor whose list endpoint is empty. Kimi
+        // Code's model list arrives in one 33-byte chunk and came back as exactly those
+        // 33 bytes, which is how this was found.
+        let payload: String = (0..1000)
+            .map(|n| char::from(b'a' + (n % 26) as u8))
+            .collect();
+        let (base, handle) = fake_sse_server(vec![payload.clone()]);
+        let mut stream = open(&base, std::time::Duration::from_secs(5)).unwrap();
+        let (host, port, path, _tls) = parse_http_url(&base).unwrap();
+        stream
+            .write_all(
+                format!("GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )
+            .unwrap();
+        stream.flush().unwrap();
+
+        let (status, _content_type, mut reader) = read_head(&mut stream).unwrap();
+        assert_eq!(status, 200);
+
+        // Read with a buffer far smaller than the chunk. A `Read` may fill less than it
+        // was asked for; it may never drop the remainder.
+        let mut got = Vec::new();
+        let mut buf = [0u8; 64];
+        loop {
+            let read = reader.read(&mut buf).unwrap();
+            if read == 0 {
+                break;
+            }
+            got.extend_from_slice(&buf[..read]);
+        }
+        handle.join().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&got),
+            payload,
+            "every byte of the chunk arrives, across as many calls as it takes"
+        );
+    }
+
+    #[test]
+    fn a_crlf_split_across_two_reads_does_not_end_the_body() {
+        // A guard rather than a reproduction: the closing CRLF was taken with a single
+        // `read`, which a socket is allowed to answer with one byte, and the leftover
+        // newline would then be read as the next chunk's size line. Loopback always
+        // delivered both bytes together, so this never failed here — but nothing
+        // promises that, and the failure it would cause is another silent truncation.
+        let (base, handle) = fake_sse_server(vec!["first".to_string(), "second".to_string()]);
+        let response = get_json_raw(&base, None, std::time::Duration::from_secs(5)).unwrap();
+        handle.join().unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, "firstsecond", "both chunks, whole");
     }
 
     #[test]

@@ -2722,6 +2722,7 @@ fn local(mut args: Args) -> Result<(), String> {
             local_delete(&path, selector)
         }
         "edit" => local_edit(&path),
+        "check" => local_check(rest),
         other => Err(format!(
             "unknown local subcommand {other:?} — `loongagent local` lists what is \
              configured; `local add|delete|edit` change it"
@@ -2815,6 +2816,90 @@ fn local_delete(path: &Path, selector: &str) -> Result<(), String> {
     write_local_blocks(path, &blocks)?;
     println!("已删除：{}", removed.join("、"));
     println!("剩下 {} 个模型 — `loongagent local` 看全部", blocks.len());
+    Ok(())
+}
+
+/// `loongagent local check [provider]` — what the endpoint actually says.
+///
+/// The wizard reduces every reply to "worked" or "did not", which is right for a form and
+/// useless for finding out why. This prints the request, the status, the body and what
+/// those parsed into — which is how a truncated body was told apart from a vendor that
+/// lists nothing. Two very different problems, one identical symptom, and only the bytes
+/// say which.
+fn local_check(selector: Option<&str>) -> Result<(), String> {
+    let providers = loong_config::catalog::PROVIDERS;
+    let chosen: Vec<&loong_config::catalog::Provider> = match selector {
+        Some(name) => providers
+            .iter()
+            .filter(|provider| provider.id == name)
+            .collect(),
+        None => providers.iter().collect(),
+    };
+    if chosen.is_empty() {
+        return Err(format!(
+            "服务商目录里没有 {:?} — 有的是：{}",
+            selector.unwrap_or(""),
+            loong_config::catalog::ids().join(", ")
+        ));
+    }
+
+    for provider in chosen {
+        let url = provider
+            .models_url()
+            .unwrap_or_else(|| format!("{}/models", provider.base_url.trim_end_matches('/')));
+        println!("{}", provider.label);
+        println!("  GET {url}");
+        match provider_key(provider) {
+            None => {
+                println!(
+                    "  （环境里没有 {}，所以没发请求 —— 先 `local add {}`）",
+                    provider.key_env, provider.id
+                );
+            }
+            Some((var, key)) => {
+                println!("  key: {var}");
+                match loong_providers::probe::raw_models_answer(&url, Some(&key)) {
+                    Err(e) => println!("  连不上：{e}"),
+                    Ok((status, body)) => {
+                        let body = body.trim();
+                        let shown: String = body.chars().take(400).collect();
+                        println!("  HTTP {status}");
+                        if shown.is_empty() {
+                            println!("  （响应体是空的）");
+                        } else {
+                            println!(
+                                "  {shown}{}",
+                                if body.chars().count() > 400 {
+                                    "…"
+                                } else {
+                                    ""
+                                }
+                            );
+                        }
+                        if (200..300).contains(&status) {
+                            let models = loong_providers::probe::parse_models(body);
+                            if models.is_empty() {
+                                println!(
+                                    "  ↑ HTTP 200 但解析不出模型 —— 要么这个端点不列模型，\
+                                     要么响应体是残缺的（这本身是个 bug，值得报）"
+                                );
+                            } else {
+                                let names: Vec<String> = models
+                                    .iter()
+                                    .map(|model| match model.context_window {
+                                        Some(tokens) => format!("{} (ctx {tokens})", model.id),
+                                        None => model.id.clone(),
+                                    })
+                                    .collect();
+                                println!("  解析出 {} 个：{}", names.len(), names.join("、"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        println!();
+    }
     Ok(())
 }
 
@@ -3108,10 +3193,11 @@ fn exported_keys() -> Vec<loong_tui_app::OfferedKey> {
 /// Which models to put in front of somebody for this provider, and whether they came from
 /// the catalog rather than from the endpoint.
 ///
-/// Some hosts authenticate and then name nothing: Kimi Code answers `/models` without a
-/// list. The vendor documents its ids, so those are a reference rather than a guess — and
-/// four rows somebody can tick are *far* better than the empty picker that used to leave a
-/// working key with no way to use it.
+/// Some hosts authenticate and then name nothing. When that happens the vendor's
+/// documented ids are a reference rather than a guess, and four rows somebody can tick are
+/// far better than the empty picker that leaves a working key with no way to use it.
+///
+/// A fallback, not a substitute: if the endpoint names models, those win.
 ///
 /// The context windows travel with the curated ids on purpose. They are what the kernel
 /// compacts against, and a model with no window is one it will never compact on time.
@@ -4170,10 +4256,9 @@ mod tests {
 
     #[test]
     fn a_host_that_names_no_models_falls_back_to_the_ones_its_vendor_documents() {
-        // The bug: Kimi Code authenticates, answers `/models`, and names nothing. The
-        // result was a working key with no way to use it — "没有返回可用的模型列表" and a
-        // configured-models-unchanged message, which is a dead end at the one moment
-        // everything else had gone right.
+        // A host can authenticate and then name nothing, and the result is a working key
+        // with no way to use it: "没有返回可用的模型列表" and a configured-models-unchanged
+        // message, which is a dead end at the one moment everything else had gone right.
         use loong_providers::probe::Probe;
 
         let kimi = loong_config::catalog::provider("kimi-code").expect("in the catalog");

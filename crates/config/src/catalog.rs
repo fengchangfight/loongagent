@@ -17,12 +17,12 @@
 //! **What this is not:** a routing table. Which *tier* a model belongs to is the
 //! user's business (array order in their profile), never the catalog's.
 
-/// A model a vendor documents, for the hosts that do not enumerate their own.
+/// A model a vendor documents, for a host that stops enumerating its own.
 ///
-/// Kimi Code implements `/chat/completions` and *answers* `/models` — without a list. The
-/// ids below are the ones its documentation publishes, so this is a reference rather than
-/// a guess, and the context windows come with them because the kernel needs a real number
-/// to compact on time instead of one it invented.
+/// Not a substitute for asking: when the endpoint names models, those win. This is what a
+/// provider offers when the endpoint answers `200` and names nothing — a state that is
+/// usually a vendor quirk and occasionally our own bug, which is why the caller announces
+/// when it is being used rather than passing it off as the live list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CatalogModel {
     pub id: &'static str,
@@ -103,7 +103,8 @@ impl Provider {
 /// What Kimi Code documents, in the order its docs present them.
 ///
 /// `k3` reaches 1M context only on the higher tiers, but the window is a property of the
-/// plan rather than of the id, and this is the number the vendor publishes.
+/// plan rather than of the id, and this is the number the vendor publishes. Checked
+/// against the live `/coding/v1/models` answer, id for id and window for window.
 const KIMI_CODE_MODELS: &[CatalogModel] = &[
     CatalogModel {
         id: "k3",
@@ -146,10 +147,13 @@ pub const PROVIDERS: &[Provider] = &[
         // vice versa — two products, two hosts, two key types. The vendor's own FAQ
         // tabulates exactly this pair, which is how it was confirmed.
         //
-        // `/coding/v1/models` authenticates and then names nothing usable, which is what
-        // `curated_models` is for. Probing with a *completion* instead would be worse than
-        // useless here: the docs say asking for a model above your plan also answers
-        // `401`, so a paying member on a lower tier would be told their key was bad.
+        // `/coding/v1/models` returns all four with their `context_length`, so
+        // `curated_models` is a spare rather than the source. It is kept because it is now
+        // *verified* against that live answer rather than guessed from the docs.
+        //
+        // Probing with a *completion* instead would be worse than useless here: the docs
+        // say asking for a model above your plan also answers `401`, so a paying member on
+        // a lower tier would be told their key was bad.
         base_url: "https://api.kimi.com/coding/v1",
         key_env: "LOONG_KIMI_CODE_KEY",
         aliases: &["KIMI_CODE_API_KEY", "KIMI_API_KEY"],
@@ -157,7 +161,28 @@ pub const PROVIDERS: &[Provider] = &[
         probe_model: None,
         probe_url: None,
         wrong_door: Some(
-            "如果这是 Moonshot 开放平台的 key（按量计费那种），请选「Moonshot 开放平台」",
+            "如果这是 Moonshot 开放平台的 key（按量计费那种），请选「Moonshot 开放平台」；\
+             海外账号请选「Kimi Code（编程套餐·海外）」",
+        ),
+        curated_models: KIMI_CODE_MODELS,
+        local: false,
+    },
+    Provider {
+        id: "kimi-code-intl",
+        label: "Kimi Code（编程套餐·海外）",
+        // Probed: identical to the China host — `/coding/v1/models`,
+        // `/coding/v1/chat/completions` and `/coding/v1/messages` all answer 401 to a bad
+        // key. (The two hosts were first compared with `GET /chat/completions`, which is
+        // a 404 on both, because that route is POST-only. Worth remembering before
+        // concluding a host is missing a route.)
+        base_url: "https://api.kimi.ai/coding/v1",
+        key_env: "LOONG_KIMI_CODE_INTL_KEY",
+        aliases: &["KIMI_CODE_INTL_API_KEY"],
+        lists_models: true,
+        probe_model: None,
+        probe_url: None,
+        wrong_door: Some(
+            "国内账号请选「Kimi Code（编程套餐）」—— kimi.com 和 kimi.ai 的 key 不通用",
         ),
         curated_models: KIMI_CODE_MODELS,
         local: false,

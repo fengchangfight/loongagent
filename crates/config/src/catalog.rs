@@ -37,6 +37,14 @@ pub struct Provider {
     /// which publish no such route (verified against their `openapi.json`), so
     /// validation there has to fall back to a one-token completion.
     pub lists_models: bool,
+    /// For a provider with no list route: a cheap model to spend one token on when
+    /// checking a key.
+    ///
+    /// A guess, and a guess that will rot — so the caller must read a `400`/`404` as
+    /// "our model name was stale", never as "your key is bad". It is here rather than
+    /// in the adapter because it is a fact about the vendor, and the catalog is where
+    /// those live.
+    pub probe_model: Option<&'static str>,
     /// Loopback: no key, no cost, and the provider is this machine.
     pub local: bool,
 }
@@ -68,6 +76,7 @@ pub const PROVIDERS: &[Provider] = &[
         key_env: "LOONG_DEEPSEEK_KEY",
         aliases: &["DEEPSEEK_API_KEY"],
         lists_models: true,
+        probe_model: None,
         local: false,
     },
     Provider {
@@ -77,6 +86,7 @@ pub const PROVIDERS: &[Provider] = &[
         key_env: "LOONG_MOONSHOT_KEY",
         aliases: &["MOONSHOT_API_KEY", "KIMI_API_KEY"],
         lists_models: true,
+        probe_model: None,
         local: false,
     },
     Provider {
@@ -86,6 +96,7 @@ pub const PROVIDERS: &[Provider] = &[
         key_env: "LOONG_DASHSCOPE_KEY",
         aliases: &["DASHSCOPE_API_KEY", "QWEN_API_KEY"],
         lists_models: true,
+        probe_model: None,
         local: false,
     },
     Provider {
@@ -95,6 +106,7 @@ pub const PROVIDERS: &[Provider] = &[
         key_env: "LOONG_ZHIPU_KEY",
         aliases: &["ZHIPU_API_KEY", "GLM_API_KEY"],
         lists_models: false,
+        probe_model: Some("glm-4-flash"),
         local: false,
     },
     Provider {
@@ -104,6 +116,7 @@ pub const PROVIDERS: &[Provider] = &[
         key_env: "LOONG_ZAI_KEY",
         aliases: &["ZAI_API_KEY"],
         lists_models: false,
+        probe_model: Some("glm-4-flash"),
         local: false,
     },
     Provider {
@@ -113,6 +126,7 @@ pub const PROVIDERS: &[Provider] = &[
         key_env: "LOONG_OPENAI_KEY",
         aliases: &["OPENAI_API_KEY"],
         lists_models: true,
+        probe_model: None,
         local: false,
     },
     Provider {
@@ -122,6 +136,7 @@ pub const PROVIDERS: &[Provider] = &[
         key_env: "LOONG_OLLAMA_KEY",
         aliases: &[],
         lists_models: true,
+        probe_model: None,
         local: true,
     },
 ];
@@ -302,6 +317,27 @@ mod tests {
             None,
             "Zhipu publishes no /models route (verified against its openapi.json)"
         );
+    }
+
+    #[test]
+    fn a_provider_with_no_list_route_names_a_model_to_spend_a_token_on() {
+        // The two facts have to agree: a vendor whose key cannot be checked for free
+        // must say what to check it against, and one that can must not carry a guess
+        // that will rot.
+        for provider in PROVIDERS {
+            match provider.models_url() {
+                Some(_) => assert_eq!(
+                    provider.probe_model, None,
+                    "{} has a free route, so it needs no guess",
+                    provider.id
+                ),
+                None => assert!(
+                    provider.probe_model.is_some(),
+                    "{} publishes no /models, so checking a key there needs a model",
+                    provider.id
+                ),
+            }
+        }
     }
 
     #[test]

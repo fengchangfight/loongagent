@@ -106,9 +106,11 @@ pub fn probe_models_url(url: &str, api_key: Option<&str>) -> Probe {
 /// The fallback for a vendor with no `/models` route: ask for one token.
 ///
 /// Costs a token or two, which is the honest price of a vendor that publishes no
-/// free way to check a key. Only a `401`/`403` counts as rejection; a `400` from a
-/// model this key cannot use still proves the key was accepted, and the caller
-/// decides what to do with that.
+/// free way to check a key — and the model named here is a guess that will rot, so the
+/// reading has to survive being wrong. Only `401`/`403` mean the key was refused. A
+/// `400`/`404` means the request was *accepted far enough to complain about the model
+/// id*, which is proof that the key was fine; it comes back `Ok` with no models rather
+/// than as a rejection, so a stale model name costs a model list, never a working key.
 pub fn probe_with_completion(base_url: &str, model: &str, api_key: Option<&str>) -> Probe {
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
     let body = serde_json::json!({
@@ -128,10 +130,13 @@ pub fn probe_with_completion(base_url: &str, model: &str, api_key: Option<&str>)
                 context_window: None,
             }],
         },
+        // The key was accepted; the model name was not. That is a fact about our guess,
+        // not about the user's credential.
+        Ok(response) if response.status == 400 || response.status == 404 => {
+            Probe::Ok { models: Vec::new() }
+        }
         Ok(response) => {
             let detail = describe(&response.body);
-            // 400/404 mean the request reached something that understood it well
-            // enough to complain about the model — the key was not the problem.
             let region = looks_like_a_region_mismatch(&detail);
             Probe::Rejected {
                 status: response.status,

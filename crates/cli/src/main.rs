@@ -2495,6 +2495,13 @@ fn full_screen(args: Args) -> Result<(), String> {
     args.ensure_parent()?;
     // Settled first, because it decides whether a control plane is consulted at all.
     let local = args.is_local()?;
+    // Before the child exists, not after: the server resolves its models once, at
+    // startup, so a key written later would not take effect until the next run — and
+    // the run it was written for would look broken.
+    if local && args.model.is_none() {
+        let (settings, _) = args.settings_with_pack()?;
+        local_first_run(&settings)?;
+    }
     let (transport, notes) = ChildTransport::spawn(&args, true)?;
     // Taken before the transport moves into the client: the interface needs the pid to
     // stop a turn, and the client is blocked on the transport while one runs.
@@ -2608,6 +2615,303 @@ fn full_screen(args: Args) -> Result<(), String> {
     println!("session {session_id}");
     println!("reopen:  {resume_hint}");
     outcome
+}
+
+/// The local first run: get a key, prove it, and write the two files that make the
+/// next run uneventful.
+///
+/// It runs **before** the server child is spawned, which is the whole reason it is a
+/// separate function: the child resolves its models once, at startup, so a key written
+/// afterwards would not take effect until the next run — the first run would look
+/// broken in exactly the case it exists to fix.
+///
+/// Two ways in, and the quiet one comes first:
+///
+/// * a key **already exported** under a name the catalog knows identifies its provider
+///   exactly — the variable's name *is* the fact, so there is nothing to guess and the
+///   user is asked for nothing at all;
+/// * otherwise, one screen: paste a key, confirm the provider, watch it validate.
+fn local_first_run(settings: &loong_config::Profile) -> Result<(), String> {
+    if !settings.models.is_empty() {
+        return Ok(());
+    }
+    let home = config_dir();
+
+    // 1. A key this machine already had. `DEEPSEEK_API_KEY` is DeepSeek's because the
+    //    catalog says so — no probe is needed to find out, only to prove it works.
+    if let Some((provider, key)) = key_already_exported() {
+        eprintln!(
+            "[local] 发现环境变量里的 {} 密钥 — 正在校验 {} …",
+            provider.label, provider.base_url
+        );
+        let probe = probe_provider(provider, &key);
+        match &probe {
+            loong_providers::probe::Probe::Ok { .. } => {
+                eprintln!("[local] {} ", loong_providers::probe::render(&probe));
+                adopt_local_model(&home, provider, &key, &probe)?;
+                return Ok(());
+            }
+            other => eprintln!(
+                "[local] {} — 改为手动输入",
+                loong_providers::probe::render(other)
+            ),
+        }
+    }
+
+    // 2. Ask. The catalog is offered in its own order; the key's shape is not used to
+    //    guess, because no vendor here documents a format to guess from.
+    loong_tui_app::full_screen_needs_a_terminal()?;
+    let choices: Vec<loong_tui_app::ProviderChoice> = loong_config::catalog::PROVIDERS
+        .iter()
+        .filter(|p| !p.local)
+        .map(|p| loong_tui_app::ProviderChoice {
+            id: p.id.to_string(),
+            label: p.label.to_string(),
+        })
+        .collect();
+
+    let mut validate = |id: &str, key: &str| -> loong_tui_app::Validation {
+        let Some(provider) = loong_config::catalog::provider(id) else {
+            return loong_tui_app::Validation {
+                ok: false,
+                summary: format!("catalog has no provider {id:?}"),
+                ..Default::default()
+            };
+        };
+        let probe = probe_provider(provider, key);
+        // On a refusal the key's shape is finally worth something — not as a decision,
+        // but as an ordering hint for the next attempt that costs no extra request.
+        let suggest_order = match &probe {
+            loong_providers::probe::Probe::Ok { .. } => Vec::new(),
+            _ => loong_config::catalog::guess_from_key(key)
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        };
+        loong_tui_app::Validation {
+            ok: probe.is_ok(),
+            summary: loong_providers::probe::render(&probe),
+            models: loong_providers::probe::model_ids(&probe)
+                .into_iter()
+                .map(|id| {
+                    let window = match &probe {
+                        loong_providers::probe::Probe::Ok { models } => models
+                            .iter()
+                            .find(|m| m.id == id)
+                            .and_then(|m| m.context_window),
+                        _ => None,
+                    };
+                    (id, window)
+                })
+                .collect(),
+            suggest_order,
+        }
+    };
+
+    let Some(choice) = loong_tui_app::local_wizard(choices, &mut validate)? else {
+        eprintln!(
+            "[local] 跳过配置 — 本次会话没有模型。随时重跑 `loongagent tui --local`，\
+             或先试 `--model demo-write`。"
+        );
+        return Ok(());
+    };
+    let provider = loong_config::catalog::provider(&choice.provider)
+        .ok_or_else(|| format!("catalog has no provider {:?}", choice.provider))?;
+    let probe = loong_providers::probe::Probe::Ok {
+        models: choice
+            .validation
+            .models
+            .iter()
+            .map(|(id, window)| loong_providers::probe::ModelInfo {
+                id: id.clone(),
+                context_window: *window,
+            })
+            .collect(),
+    };
+    adopt_local_model(&home, provider, &choice.key, &probe)
+}
+
+/// A key the machine already had, and the provider its variable names.
+///
+/// The variable *name* is the whole signal, which is why this needs no heuristics:
+/// `MOONSHOT_API_KEY` is Moonshot's because the catalog lists it under Moonshot. An
+/// unfamiliar variable is not guessed at.
+fn key_already_exported() -> Option<(&'static loong_config::catalog::Provider, String)> {
+    for provider in loong_config::catalog::PROVIDERS {
+        if provider.local {
+            continue;
+        }
+        let names = std::iter::once(provider.key_env).chain(provider.aliases.iter().copied());
+        for name in names {
+            if let Ok(value) = std::env::var(name) {
+                let value = value.trim().to_string();
+                if !value.is_empty() {
+                    return Some((provider, value));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Check one provider's key, using the free route where the vendor publishes one.
+fn probe_provider(
+    provider: &loong_config::catalog::Provider,
+    key: &str,
+) -> loong_providers::probe::Probe {
+    match (provider.models_url(), provider.probe_model) {
+        (Some(_), _) => loong_providers::probe::probe_models(provider.base_url, Some(key)),
+        (None, Some(model)) => {
+            loong_providers::probe::probe_with_completion(provider.base_url, model, Some(key))
+        }
+        // A catalog entry with neither cannot be validated at all, and saying so is
+        // better than a probe against a route we know is not there.
+        (None, None) => loong_providers::probe::Probe::Unreachable {
+            detail: format!(
+                "{} 没有 /models 路由，也没有可用于校验的模型 — 无法校验这个 key",
+                provider.label
+            ),
+        },
+    }
+}
+
+/// Write the key where a secret belongs, and a profile the next run can just read.
+fn adopt_local_model(
+    home: &Path,
+    provider: &loong_config::catalog::Provider,
+    key: &str,
+    probe: &loong_providers::probe::Probe,
+) -> Result<(), String> {
+    write_env_secret(home, provider.key_env, key)?;
+    // The child inherits this process's environment, so setting it here is what makes
+    // the *first* run use the key rather than only the second one.
+    std::env::set_var(provider.key_env, key);
+
+    let profile_path = home.join("profile.toml");
+    let existing = std::fs::read_to_string(&profile_path).unwrap_or_default();
+    if existing.contains("[[models]]") {
+        eprintln!(
+            "[local] {} 已写入；{} 已有模型配置，未改动",
+            home.join("env").display(),
+            profile_path.display()
+        );
+        return Ok(());
+    }
+
+    let models = match probe {
+        loong_providers::probe::Probe::Ok { models } => models.clone(),
+        _ => Vec::new(),
+    };
+    std::fs::create_dir_all(home).map_err(|e| format!("{}: {e}", home.display()))?;
+    std::fs::write(&profile_path, render_local_profile(provider, &models))
+        .map_err(|e| format!("{}: {e}", profile_path.display()))?;
+    eprintln!(
+        "[local] 已写入 {}（{} 个模型，默认 {}）",
+        profile_path.display(),
+        models.len(),
+        models
+            .first()
+            .map(|m| m.id.as_str())
+            .unwrap_or("(未发现模型)")
+    );
+    Ok(())
+}
+
+/// The profile a first run gets, as text rather than as serialized TOML — because the
+/// comments are the user interface here, and a serializer would drop every one.
+fn render_local_profile(
+    provider: &loong_config::catalog::Provider,
+    models: &[loong_providers::probe::ModelInfo],
+) -> String {
+    let mut out = String::new();
+    out.push_str(
+        "# loongagent — 本地模式。首次运行自动生成，可以自由编辑。\n\
+         #\n\
+         # `[[models]]` 的顺序就是能力从低到高的顺序，也是状态栏里 1、2、3… 的顺序。\n\
+         # 第一个是启动默认；把它放在最便宜的那一层，升级就只按一次键。\n\
+         # 换模型只改 `provider` 这一行：`<服务商>/<模型 id>`，base_url 由服务商目录提供。\n\
+         mode = \"local\"\n\n",
+    );
+
+    if models.is_empty() {
+        out.push_str(&format!(
+            "# 校验通过，但 {} 没有返回模型列表，所以这里需要你填一个模型 id。\n\
+             # [[models]]\n\
+             # name = \"default\"\n\
+             # provider = \"{}/{}\"\n",
+            provider.label, provider.id, "<模型 id>"
+        ));
+        return out;
+    }
+
+    for model in models {
+        out.push_str("[[models]]\n");
+        out.push_str(&format!("name = \"{}\"\n", toml_escape(&model.id)));
+        out.push_str(&format!(
+            "provider = \"{}/{}\"\n",
+            provider.id,
+            toml_escape(&model.id)
+        ));
+        if let Some(tokens) = model.context_window {
+            out.push_str(&format!(
+                "max_context_size = {tokens}   # 服务商自己报的上下文窗口\n"
+            ));
+        }
+        out.push('\n');
+    }
+
+    // The router names the first model so the default is stated rather than implied by
+    // an ordering somebody has to know about.
+    out.push_str("[router]\n");
+    out.push_str("default = \"");
+    out.push_str(&toml_escape(&models[0].id));
+    out.push_str("\"\n");
+    out
+}
+
+/// Escape a value for a TOML basic string. Model ids are vendor-supplied and short,
+/// but the file is written by us and read by a parser, so the two must agree.
+fn toml_escape(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Put a secret in the `env` file, replacing any previous value for the same name.
+///
+/// `~/.loongagent/env` is read at startup (see [`read_env_files`]) and is the one place
+/// a local install keeps secrets — never in `profile.toml`, which ADR-0008 §5 will
+/// refuse to load if it finds a literal there.
+fn write_env_secret(home: &Path, name: &str, value: &str) -> Result<(), String> {
+    std::fs::create_dir_all(home).map_err(|e| format!("{}: {e}", home.display()))?;
+    let path = home.join("env");
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut lines: Vec<String> = existing
+        .lines()
+        .filter(|line| {
+            // Drop the old definition of this name, and nothing else: the file may
+            // hold keys for providers the user configured earlier.
+            let line = line.trim().trim_start_matches("export ").trim_start();
+            let name_part = line.split(['=', ':']).next().unwrap_or_default().trim();
+            name_part != name
+        })
+        .map(str::to_string)
+        .collect();
+    lines.push(format!("{name}={value}"));
+    let mut text = lines.join("\n");
+    text.push('\n');
+    std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
+    restrict_permissions(&path);
+    Ok(())
+}
+
+/// A secret file that the world can read is not a secret file.
+fn restrict_permissions(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    let _ = path;
 }
 
 /// The browser surface: the same JSON-RPC lines, carried over a WebSocket.

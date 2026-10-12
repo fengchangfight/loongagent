@@ -2148,6 +2148,328 @@ pub fn setup_form() -> Result<Option<(String, String, String)>, String> {
     Ok(outcome)
 }
 
+/// One provider the wizard may be pointed at. Passed in rather than looked up, so
+/// this crate keeps its promise of holding the screen and nothing else — the catalog
+/// lives in `loong-config` and the probe in `loong-providers`, and neither belongs in
+/// a UI module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderChoice {
+    pub id: String,
+    pub label: String,
+}
+
+/// What one validation attempt found, in shapes a screen can show and a caller can
+/// carry back out. Deliberately primitive: the wizard displays this and hands it on
+/// without needing to know what a "model" is.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Validation {
+    pub ok: bool,
+    /// One line for the status area — already rendered, already in the user's language.
+    pub summary: String,
+    /// `(model id, context window)` exactly as the vendor reported them.
+    pub models: Vec<(String, Option<u64>)>,
+    /// Provider ids to float to the top of the list after a refusal, best first.
+    ///
+    /// A **hint for the next attempt, never a second request**: the caller has already
+    /// learned something about the key from the vendor that refused it, and spending
+    /// that on reordering costs nothing and sends the key nowhere new. Empty means the
+    /// order was right and only the key was wrong.
+    pub suggest_order: Vec<String>,
+}
+
+/// A key that passed validation, and what it turned out to be.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyChoice {
+    pub provider: String,
+    pub key: String,
+    pub validation: Validation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WizardState {
+    Editing,
+    Validating,
+    /// Refused, with the reason to show. The key stays typed so it can be fixed.
+    Refused(String),
+    Accepted(String),
+}
+
+/// The local first run: paste a key, pick who it belongs to, find out.
+///
+/// One field and one list. The list exists because a key's shape cannot identify its
+/// owner — no vendor here documents a key format, and `sk-` alone matches four of
+/// them — so the user confirms and the probe decides. A guess only chooses which row
+/// starts highlighted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalWizard {
+    pub key: String,
+    pub providers: Vec<ProviderChoice>,
+    pub provider: usize,
+    pub state: WizardState,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum WizardAction {
+    None,
+    Submit,
+    Cancel,
+}
+
+impl LocalWizard {
+    pub fn new(providers: Vec<ProviderChoice>) -> Self {
+        LocalWizard {
+            key: String::new(),
+            providers,
+            provider: 0,
+            state: WizardState::Editing,
+        }
+    }
+
+    pub fn selected(&self) -> Option<&ProviderChoice> {
+        self.providers.get(self.provider)
+    }
+
+    /// Whether a key is worth sending anywhere. Not a format check — a length one:
+    /// a vendor's own key is at least this long, and an empty field is the only
+    /// mistake predictable enough to catch before spending a round trip.
+    pub fn ready(&self) -> bool {
+        self.key.trim().len() >= 8
+    }
+
+    /// What the field shows. The whole key is never drawn: the person typing it knows
+    /// what they pasted, and a screen is a thing other people can see.
+    pub fn masked_key(&self) -> String {
+        let chars: Vec<char> = self.key.chars().collect();
+        let visible = chars.len().min(3);
+        let prefix: String = chars[..visible].iter().collect();
+        format!("{prefix}{}", "•".repeat(chars.len() - visible))
+    }
+
+    /// Float the named providers to the top, keeping everything else in order.
+    ///
+    /// Ids that are not offered are ignored: a caller cannot conjure a provider into a
+    /// list the user was shown.
+    pub fn reorder(&mut self, first: &[String]) {
+        if first.is_empty() {
+            return;
+        }
+        let mut ranked: Vec<ProviderChoice> = Vec::with_capacity(self.providers.len());
+        for id in first {
+            if ranked.iter().any(|p| &p.id == id) {
+                continue;
+            }
+            if let Some(found) = self.providers.iter().find(|p| &p.id == id) {
+                ranked.push(found.clone());
+            }
+        }
+        for provider in &self.providers {
+            if !ranked.iter().any(|r| r.id == provider.id) {
+                ranked.push(provider.clone());
+            }
+        }
+        self.providers = ranked;
+        // The caret goes back to the best guess, because the previous selection is the
+        // one that was just refused.
+        self.provider = 0;
+    }
+
+    pub fn handle_key(&mut self, key: KeyEvent) -> WizardAction {
+        use ratatui::crossterm::event::KeyCode;
+        // A form that cannot be left is a form that can strand a terminal.
+        if matches!(key.code, KeyCode::Char('c') | KeyCode::Char('d'))
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            return WizardAction::Cancel;
+        }
+        // Editing during a validation would let a half-typed key be the one that got
+        // checked, so input is ignored until the answer comes back.
+        if self.state == WizardState::Validating {
+            return WizardAction::None;
+        }
+        match key.code {
+            KeyCode::Esc => return WizardAction::Cancel,
+            KeyCode::Enter => {
+                if self.ready() {
+                    return WizardAction::Submit;
+                }
+                self.state =
+                    WizardState::Refused("密钥看起来太短了，请检查是否粘贴完整".to_string());
+            }
+            KeyCode::Tab | KeyCode::Down => {
+                if !self.providers.is_empty() {
+                    self.provider = (self.provider + 1) % self.providers.len();
+                }
+            }
+            KeyCode::BackTab | KeyCode::Up => {
+                if !self.providers.is_empty() {
+                    self.provider =
+                        (self.provider + self.providers.len() - 1) % self.providers.len();
+                }
+            }
+            KeyCode::Backspace => {
+                self.key.pop();
+                self.state = WizardState::Editing;
+            }
+            KeyCode::Char(c) => {
+                self.key.push(c);
+                self.state = WizardState::Editing;
+            }
+            _ => {}
+        }
+        WizardAction::None
+    }
+}
+
+fn draw_local_wizard(frame: &mut ratatui::Frame, wizard: &LocalWizard) {
+    let area = frame.area();
+    let chunks = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Length(3),
+        Constraint::Min(4),
+        Constraint::Length(3),
+    ])
+    .split(area);
+
+    frame.render_widget(
+        Paragraph::new(
+            "本地模式 — 粘贴一个 API key 就能开始。\n\
+             不需要填 base_url，也不需要挑模型：它们由服务商自己回答。",
+        )
+        .block(Block::bordered().title(" first run ")),
+        chunks[0],
+    );
+
+    frame.render_widget(
+        Paragraph::new(wizard.masked_key()).block(
+            Block::bordered()
+                .title(" API key ")
+                .border_style(Style::default().fg(Color::Cyan)),
+        ),
+        chunks[1],
+    );
+    let column = chunks[1].x + 1 + wizard.masked_key().chars().count() as u16;
+    frame.set_cursor_position((
+        column.min(chunks[1].right().saturating_sub(2)),
+        chunks[1].y + 1,
+    ));
+
+    let mut lines: Vec<Line> = vec![Line::from(Span::styled(
+        "这个 key 属于哪个服务商？（↑↓ 或 tab 选择，回车校验）",
+        MARK_QUIET,
+    ))];
+    for (index, provider) in wizard.providers.iter().enumerate() {
+        let active = index == wizard.provider;
+        let text = format!(" {} {}", if active { "▸" } else { " " }, provider.label);
+        lines.push(Line::from(Span::styled(
+            text,
+            if active {
+                Style::default().fg(MARK_INK).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            },
+        )));
+    }
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::bordered().title(" 服务商 ")),
+        chunks[2],
+    );
+
+    let (help, style) = match &wizard.state {
+        WizardState::Editing => (
+            "enter 校验 · ↑↓ 换服务商 · esc 跳过（先用 demo 模型跑起来）".to_string(),
+            MARK_QUIET,
+        ),
+        WizardState::Validating => ("正在连接服务商校验密钥…".to_string(), MARK_QUIET),
+        WizardState::Refused(why) => (
+            format!("{why}\n\nenter 重试 · esc 跳过"),
+            Style::default().fg(Color::Red),
+        ),
+        WizardState::Accepted(what) => (
+            format!("✓ {what}\n\nenter 继续"),
+            Style::default().fg(Color::Green),
+        ),
+    };
+    frame.render_widget(Paragraph::new(help).style(style), chunks[3]);
+}
+
+/// Ask for one API key, validate it, and say what the vendor answered.
+///
+/// The validation is a callback because this crate must not know how to reach a
+/// network — and because it makes the interesting half testable without one. The
+/// callback is given `(provider id, key)` and returns what to display.
+///
+/// `Ok(None)` means the user declined, which is a legitimate state: a session with no
+/// model configured still runs, and tells them how to fix it.
+pub fn local_wizard(
+    providers: Vec<ProviderChoice>,
+    validate: &mut dyn FnMut(&str, &str) -> Validation,
+) -> Result<Option<KeyChoice>, String> {
+    full_screen_needs_a_terminal()?;
+    use ratatui::backend::CrosstermBackend;
+    use ratatui::crossterm::event::{self, Event};
+    use ratatui::crossterm::execute;
+    use ratatui::crossterm::terminal::{
+        disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    };
+    use ratatui::Terminal;
+
+    let mut wizard = LocalWizard::new(providers);
+    enable_raw_mode().map_err(|e| e.to_string())?;
+    let mut stdout = std::io::stdout();
+    execute!(stdout, EnterAlternateScreen).map_err(|e| e.to_string())?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend).map_err(|e| e.to_string())?;
+
+    let outcome = loop {
+        terminal
+            .draw(|frame| draw_local_wizard(frame, &wizard))
+            .map_err(|e| e.to_string())?;
+
+        if !event::poll(std::time::Duration::from_millis(120)).map_err(|e| e.to_string())? {
+            continue;
+        }
+        if let Event::Key(key) = event::read().map_err(|e| e.to_string())? {
+            match wizard.handle_key(key) {
+                WizardAction::Submit => {
+                    let Some(provider) = wizard.selected().cloned() else {
+                        break None;
+                    };
+                    // Draw the "validating" state *before* blocking: a probe can take
+                    // seconds, and a screen that froze with no explanation is the
+                    // difference between "slow" and "hung".
+                    wizard.state = WizardState::Validating;
+                    terminal
+                        .draw(|frame| draw_local_wizard(frame, &wizard))
+                        .map_err(|e| e.to_string())?;
+
+                    let result = validate(&provider.id, wizard.key.trim());
+                    wizard.state = if result.ok {
+                        WizardState::Accepted(result.summary.clone())
+                    } else {
+                        WizardState::Refused(result.summary.clone())
+                    };
+                    if result.ok {
+                        break Some(KeyChoice {
+                            provider: provider.id,
+                            key: wizard.key.trim().to_string(),
+                            validation: result,
+                        });
+                    }
+                    // A refusal is information about *which* vendor, so it is spent on
+                    // the list rather than thrown away.
+                    wizard.reorder(&result.suggest_order);
+                }
+                WizardAction::Cancel => break None,
+                WizardAction::None => {}
+            }
+        }
+    };
+
+    disable_raw_mode().ok();
+    execute!(terminal.backend_mut(), LeaveAlternateScreen).ok();
+    Ok(outcome)
+}
+
 pub fn run<T: Transport + Send + 'static>(
     client: Client<T>,
     session: String,
@@ -4040,5 +4362,256 @@ mod tests {
 
         // Let the turn finish so the worker is not left mid-request.
         release.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    // ---------------------------------------------------------- the local wizard
+
+    fn providers() -> Vec<ProviderChoice> {
+        vec![
+            ProviderChoice {
+                id: "deepseek".into(),
+                label: "DeepSeek".into(),
+            },
+            ProviderChoice {
+                id: "moonshot".into(),
+                label: "Moonshot / Kimi".into(),
+            },
+            ProviderChoice {
+                id: "dashscope".into(),
+                label: "阿里云百炼 / Qwen".into(),
+            },
+        ]
+    }
+
+    fn drawn_wizard(wizard: &LocalWizard, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| draw_local_wizard(frame, wizard))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let area = buffer.area();
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Screen text with whitespace removed, for matching text that contains wide
+    /// characters. `TestBackend` stores a CJK glyph in one cell and leaves the next
+    /// blank, so a drawn `阿里云百炼` reads back as `阿 里 云 百 炼`. Comparing
+    /// de-spaced strings sidesteps that without pretending the padding is not there.
+    fn despaced(text: &str) -> String {
+        text.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    #[test]
+    fn a_refusal_can_re_rank_the_list_without_asking_anyone_again() {
+        // The hint must cost nothing: reordering sends the key nowhere new, which is
+        // what keeps "try the other `sk-` vendors" from becoming a second leak.
+        let mut wizard = LocalWizard::new(providers());
+        wizard.provider = 2;
+        wizard.reorder(&["dashscope".to_string(), "moonshot".to_string()]);
+        assert_eq!(
+            wizard.selected().unwrap().id,
+            "dashscope",
+            "the best guess leads"
+        );
+        assert_eq!(wizard.providers[0].id, "dashscope");
+        assert_eq!(wizard.providers[1].id, "moonshot");
+        assert_eq!(
+            wizard.providers[2].id, "deepseek",
+            "and everything else survives, in order"
+        );
+        assert_eq!(wizard.providers.len(), 3, "nothing is conjured or lost");
+
+        // A provider nobody offered cannot appear, and a duplicate cannot either.
+        wizard.reorder(&["nonesuch".to_string(), "dashscope".to_string()]);
+        assert_eq!(wizard.providers.len(), 3);
+        assert_eq!(wizard.providers[0].id, "dashscope");
+
+        // No suggestion means no movement — and no reset of the caret.
+        let before = wizard.providers.clone();
+        wizard.provider = 2;
+        wizard.reorder(&[]);
+        assert_eq!(wizard.providers, before);
+        assert_eq!(wizard.provider, 2, "an empty hint is not a hint");
+    }
+
+    #[test]
+    fn the_local_wizard_never_draws_the_key_it_was_given() {
+        let mut wizard = LocalWizard::new(providers());
+        for c in "sk-4f06f4b88d7149ca8eeaa939d0fb08bd".chars() {
+            wizard.handle_key(key(KeyCode::Char(c)));
+        }
+        let masked = wizard.masked_key();
+        assert!(
+            masked.starts_with("sk-"),
+            "the shape is recognisable: {masked}"
+        );
+        assert!(
+            !masked.contains("4f06f4b8"),
+            "but the secret is not on a screen other people can see: {masked}"
+        );
+        assert_eq!(masked.chars().count(), 35, "the length is still legible");
+
+        let screen = drawn_wizard(&wizard, 80, 20);
+        assert!(
+            !screen.contains("4f06f4b8"),
+            "and the drawing does not leak it either:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn the_local_wizard_refuses_a_key_too_short_to_be_one() {
+        let mut wizard = LocalWizard::new(providers());
+        assert_eq!(wizard.handle_key(key(KeyCode::Enter)), WizardAction::None);
+        assert!(!wizard.ready(), "an empty field is not a key");
+
+        for c in "sk-123".chars() {
+            wizard.handle_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(wizard.handle_key(key(KeyCode::Enter)), WizardAction::None);
+        match &wizard.state {
+            WizardState::Refused(why) => assert!(why.contains("太短"), "{why}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+
+        // Long enough is enough — the vendor, not a regex, decides what is valid.
+        for c in "45678".chars() {
+            wizard.handle_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(wizard.handle_key(key(KeyCode::Enter)), WizardAction::Submit);
+    }
+
+    #[test]
+    fn the_local_wizard_moves_between_providers_in_both_directions_and_wraps() {
+        let mut wizard = LocalWizard::new(providers());
+        assert_eq!(wizard.selected().unwrap().id, "deepseek");
+
+        wizard.handle_key(key(KeyCode::Tab));
+        assert_eq!(wizard.selected().unwrap().id, "moonshot");
+        wizard.handle_key(key(KeyCode::Down));
+        assert_eq!(wizard.selected().unwrap().id, "dashscope");
+        wizard.handle_key(key(KeyCode::Down));
+        assert_eq!(
+            wizard.selected().unwrap().id,
+            "deepseek",
+            "the list wraps, so one key never dead-ends"
+        );
+
+        wizard.handle_key(key(KeyCode::BackTab));
+        assert_eq!(wizard.selected().unwrap().id, "dashscope");
+        wizard.handle_key(key(KeyCode::Up));
+        assert_eq!(wizard.selected().unwrap().id, "moonshot");
+    }
+
+    #[test]
+    fn the_local_wizard_ignores_typing_while_a_validation_is_in_flight() {
+        // Otherwise a keystroke lands in the field and the key that was checked is
+        // not the key that gets stored.
+        let mut wizard = LocalWizard::new(providers());
+        for c in "sk-abcdefghij".chars() {
+            wizard.handle_key(key(KeyCode::Char(c)));
+        }
+        wizard.state = WizardState::Validating;
+        let before = wizard.key.clone();
+        wizard.handle_key(key(KeyCode::Char('X')));
+        wizard.handle_key(key(KeyCode::Backspace));
+        assert_eq!(wizard.key, before, "input is frozen mid-flight");
+        assert_eq!(wizard.handle_key(key(KeyCode::Enter)), WizardAction::None);
+    }
+
+    #[test]
+    fn the_local_wizard_keeps_the_key_when_the_vendor_refuses_it() {
+        // A typo is the common case, and retyping 35 characters to fix one of them
+        // is the difference between a wizard and a punishment.
+        let mut wizard = LocalWizard::new(providers());
+        for c in "sk-4f06f4b88d7149ca8eeaa939d0fb08bd".chars() {
+            wizard.handle_key(key(KeyCode::Char(c)));
+        }
+        wizard.state = WizardState::Refused("密钥被拒绝（HTTP 401）".into());
+        let screen = drawn_wizard(&wizard, 80, 20);
+        assert!(
+            despaced(&screen).contains(&despaced("密钥被拒绝")),
+            "{screen}"
+        );
+        assert_eq!(
+            wizard.key, "sk-4f06f4b88d7149ca8eeaa939d0fb08bd",
+            "the key survives so it can be corrected"
+        );
+    }
+
+    #[test]
+    fn the_local_wizard_draws_the_providers_and_says_what_to_press() {
+        let mut wizard = LocalWizard::new(providers());
+        wizard.handle_key(key(KeyCode::Tab));
+        let screen = drawn_wizard(&wizard, 80, 20);
+
+        for label in ["DeepSeek", "Moonshot / Kimi"] {
+            assert!(screen.contains(label), "{label} is offered:\n{screen}");
+        }
+        assert!(
+            despaced(&screen).contains(&despaced("阿里云百炼 / Qwen")),
+            "a CJK label is offered as itself, not transliterated:\n{screen}"
+        );
+        assert!(
+            screen.contains("▸ Moonshot / Kimi"),
+            "the current choice is marked:\n{screen}"
+        );
+        assert!(
+            !screen.contains("▸ DeepSeek"),
+            "and only the current one is:\n{screen}"
+        );
+        assert!(
+            despaced(&screen).contains(&despaced("enter 校验")),
+            "{screen}"
+        );
+        assert!(
+            despaced(&screen).contains(&despaced("esc 跳过")),
+            "the way out is visible, and costs nothing: {screen}"
+        );
+        assert!(
+            !screen.contains("base_url"),
+            "the field the user must never see is not even mentioned:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn the_local_wizard_shows_the_reason_a_network_failure_is_not_a_bad_key() {
+        // The probe already refuses to conflate these; the wizard must not undo that
+        // by drawing both the same colour and the same way.
+        let mut wizard = LocalWizard::new(providers());
+        for c in "sk-abcdefghij".chars() {
+            wizard.handle_key(key(KeyCode::Char(c)));
+        }
+        wizard.state =
+            WizardState::Refused("无法连接（这不说明密钥有问题）：Connection refused".into());
+        let screen = drawn_wizard(&wizard, 80, 20);
+        assert!(
+            despaced(&screen).contains(&despaced("这不说明密钥有问题")),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn the_local_wizard_is_leavable_with_escape_or_ctrl_c() {
+        for escape in [
+            key(KeyCode::Esc),
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+        ] {
+            let mut wizard = LocalWizard::new(providers());
+            assert_eq!(
+                wizard.handle_key(escape),
+                WizardAction::Cancel,
+                "a form that cannot be left can strand a terminal"
+            );
+        }
     }
 }

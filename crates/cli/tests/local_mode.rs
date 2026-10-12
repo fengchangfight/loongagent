@@ -36,11 +36,19 @@ fn home_with_a_dead_control_plane() -> std::path::PathBuf {
 }
 
 fn run(home: &std::path::Path, args: &[&str]) -> (bool, String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_loongagent"))
-        .env("LOONGAGENT_HOME", home)
-        // The workspace of *this* repository has a `.env`; inheriting it would leak a
-        // real key into a test and make a pass look like a pass for the wrong reason.
-        .env_remove("DEEPSEEK_API_KEY")
+    let mut command = Command::new(env!("CARGO_BIN_EXE_loongagent"));
+    command.env("LOONGAGENT_HOME", home);
+    // The workspace of *this* repository has a `.env`, and a developer's shell may have
+    // any of these exported. Either would let a test pass — or fail — for a reason that
+    // has nothing to do with the code, and the names the local first run looks for are
+    // exactly the ones most likely to be set.
+    for provider in loong_config::catalog::PROVIDERS {
+        command.env_remove(provider.key_env);
+        for alias in provider.aliases {
+            command.env_remove(alias);
+        }
+    }
+    let out = command
         .args(args)
         .arg("--cwd")
         .arg(home.join("ws"))
@@ -138,6 +146,28 @@ fn a_provider_shorthand_reaches_the_command_line_without_an_endpoint() {
     assert!(
         stdout.contains("deepseek-flash") && stdout.contains("kimi-k3"),
         "the model ids came from the shorthand too: {stdout}"
+    );
+}
+
+#[test]
+fn a_local_first_run_with_no_key_refuses_cleanly_and_writes_nothing() {
+    // No key anywhere, and no terminal to ask on. The failure must be the *terminal*,
+    // said plainly — not a hang, and not half a configuration left on disk for the
+    // next run to trip over.
+    let home = workspace();
+    let (ok, _stdout, stderr) = run(&home, &["tui", "--local"]);
+    assert!(!ok, "a pipe is not a terminal to ask on");
+    assert!(
+        stderr.contains("terminal"),
+        "and the reason is the terminal: {stderr}"
+    );
+    assert!(
+        !home.join("profile.toml").exists(),
+        "nothing is written when nothing was configured"
+    );
+    assert!(
+        !home.join("env").exists(),
+        "and no secret file is created for a key that was never given"
     );
 }
 

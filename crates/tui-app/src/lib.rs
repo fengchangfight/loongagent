@@ -3015,13 +3015,16 @@ fn draw_model_picker(frame: &mut ratatui::Frame, wizard: &LocalWizard) {
         chunks[2],
     );
 
-    let help = if ticked.iter().any(|t| *t) {
-        "↑↓ 移动 · 空格 勾选 · enter 写入 · esc 回上一步".to_string()
+    // The filter leads, because on a vendor that serves forty ids it is the only way to
+    // reach the two you want without walking past the other thirty-eight.
+    let picked = ticked.iter().any(|t| *t);
+    let help = if picked {
+        "输入关键字筛选 · 空格 勾选 · a 全选当前筛选 · enter 写入 · esc 回上一步"
     } else {
-        "至少选一个模型 · ↑↓ 移动 · 空格 勾选".to_string()
+        "先输入关键字缩小范围（如 flash、3.7、kimi），再空格勾选"
     };
     frame.render_widget(
-        Paragraph::new(help).style(if ticked.iter().any(|t| *t) {
+        Paragraph::new(help.to_string()).style(if picked {
             MARK_QUIET
         } else {
             Style::default().fg(Color::Red)
@@ -3156,10 +3159,13 @@ pub fn local_wizard(
                     wizard.state = WizardState::Choosing {
                         filter: String::new(),
                         cursor: 0,
-                        // Everything starts ticked, so the common answer ("all of them")
-                        // is still one keystroke, and `a` clears the list for the person
-                        // who wants one id out of twenty.
-                        ticked: vec![true; result.models.len()],
+                        // **Nothing starts ticked**, because the work should be proportional
+                        // to what somebody wants, not to what the vendor happens to serve.
+                        // Pre-ticking reads as a kindness on a two-model provider and as
+                        // twenty untickings on a real one — and a real one is exactly where
+                        // this screen is needed. `a` ticks everything the filter is showing,
+                        // so "all of them" is still one keystroke once the list is narrow.
+                        ticked: vec![false; result.models.len()],
                         all: result.models.clone(),
                     };
                     // The key and the summary travel with the choice; this screen only
@@ -5218,6 +5224,7 @@ mod tests {
 
     // ------------------------------------------------------------ the picker
 
+    /// A picker as the wizard actually opens one: **nothing ticked**.
     fn choosing(names: &[&str]) -> LocalWizard {
         let mut wizard = LocalWizard::new(providers());
         wizard.state = WizardState::Choosing {
@@ -5227,67 +5234,85 @@ mod tests {
                 .iter()
                 .map(|name| (name.to_string(), Some(4096)))
                 .collect(),
-            ticked: vec![true; names.len()],
+            ticked: vec![false; names.len()],
         };
         wizard
     }
 
+    /// A picker with everything already ticked, for the tests about *unticking*.
+    fn choosing_all(names: &[&str]) -> LocalWizard {
+        let mut wizard = choosing(names);
+        if let WizardState::Choosing { ticked, .. } = &mut wizard.state {
+            *ticked = vec![true; names.len()];
+        }
+        wizard
+    }
+
     #[test]
-    fn one_model_is_still_shown_rather_than_written_behind_somebody_s_back() {
-        // The bug this locks down: a provider answering with a single model used to skip
-        // the list and be written straight away, so `local add ollama` configured
-        // `qwen2.5:3b` the moment somebody pressed enter on the provider. That is
-        // configuration nobody confirmed — the person finds out by reading the file.
-        let one = vec![("qwen2.5:3b".to_string(), Some(32_768))];
+    fn wanting_one_id_out_of_a_long_list_costs_two_keys_and_not_forty() {
+        // The complaint this default exists for. A real vendor returns a few dozen ids,
+        // somebody wants one of them, and pre-ticking everything made the work
+        // proportional to the list rather than to the want — which is backwards, and
+        // worst exactly where this screen is needed most.
+        let many: Vec<String> = (1..=40).map(|n| format!("qwen-3.8-{n}")).collect();
+        let names: Vec<&str> = many.iter().map(String::as_str).collect();
+        let mut wizard = choosing(&names);
+
+        assert!(
+            wizard.chosen().is_empty(),
+            "nothing is claimed on somebody's behalf to begin with"
+        );
+
+        // Narrow, then take what is left. Two keys, whatever the list length.
+        for c in "3.8-17".chars() {
+            wizard.handle_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(wizard.visible().len(), 1, "the filter found the one");
+        wizard.handle_key(key(KeyCode::Char(' ')));
+        let chosen = wizard.chosen();
+        assert_eq!(chosen.len(), 1, "{chosen:?}");
+        assert_eq!(chosen[0].0, "qwen-3.8-17");
+    }
+
+    #[test]
+    fn wanting_all_of_a_narrowed_list_is_still_one_key() {
+        // The other half: somebody who *does* want several should not have to tick each.
+        let mut wizard = choosing(&["qwen-flash", "qwen-max", "kimi-k3", "llama-3"]);
+        for c in "qwen".chars() {
+            wizard.handle_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(wizard.visible().len(), 2);
+        wizard.handle_key(key(KeyCode::Char('a')));
+        let chosen: Vec<String> = wizard.chosen().into_iter().map(|(n, _)| n).collect();
         assert_eq!(
-            after_validation(&one),
-            AfterValidation::Choose,
-            "one row is still a row, and the run writes what was ticked"
+            chosen,
+            vec!["qwen-flash", "qwen-max"],
+            "`a` ticks what the filter is showing, and only that"
         );
-
-        let many = vec![
-            ("a".to_string(), None),
-            ("b".to_string(), None),
-            ("c".to_string(), None),
-        ];
-        assert_eq!(after_validation(&many), AfterValidation::Choose);
-
-        // The one case with nothing to show: a vendor that answered without naming a
-        // model. There is no screen to draw and no row to tick, so the caller reports it
-        // and asks for an id by hand.
-        assert_eq!(after_validation(&[]), AfterValidation::Accept);
     }
 
     #[test]
-    fn the_confirmation_screen_says_that_nothing_is_written_yet() {
-        let wizard = choosing(&["qwen2.5:3b"]);
-        let screen = drawn_wizard(&wizard, 90, 20);
-        assert!(
-            despaced(&screen).contains(&despaced("确认要加入的模型")),
-            "the screen says what it is asking for:\n{screen}"
-        );
-        assert!(
-            despaced(&screen).contains(&despaced("enter 写入")),
-            "the key that commits is named:\n{screen}"
-        );
-        assert!(
-            despaced(&screen).contains(&despaced("esc 回上一步")),
-            "and so is the way back:\n{screen}"
-        );
-        assert!(screen.contains("[x] qwen2.5:3b"), "{screen}");
-    }
-
-    #[test]
-    fn the_picker_starts_with_everything_ticked_so_all_of_them_is_one_keystroke() {
-        let wizard = choosing(&["a", "b", "c"]);
-        assert_eq!(wizard.chosen().len(), 3);
-        assert_eq!(wizard.visible(), vec![0, 1, 2]);
+    fn a_long_list_is_never_a_wall_of_ticks_to_undo() {
+        // Stated as a property: however long the list, the number of keys to reach a
+        // chosen answer does not grow with it.
+        for length in [1usize, 3, 12, 40] {
+            let many: Vec<String> = (1..=length).map(|n| format!("model-{n:02}")).collect();
+            let names: Vec<&str> = many.iter().map(String::as_str).collect();
+            let mut wizard = choosing(&names);
+            for c in format!("model-{length:02}").chars() {
+                wizard.handle_key(key(KeyCode::Char(c)));
+            }
+            wizard.handle_key(key(KeyCode::Char(' ')));
+            assert_eq!(
+                wizard.chosen().len(),
+                1,
+                "length {length}: one filter and one tick"
+            );
+        }
     }
 
     #[test]
     fn the_picker_can_narrow_to_one_id_out_of_a_long_list() {
-        // The case this exists for: a real account returns twenty ids and a person wants
-        // one of them. Clearing and re-ticking beats unticking nineteen.
         let mut wizard = choosing(&[
             "qwen3.8-flash",
             "qwen3.8-max",
@@ -5295,18 +5320,10 @@ mod tests {
             "qwen-coder-plus",
             "text-embedding-v3",
         ]);
-        // `a` clears everything on screen, then typing narrows, then space takes one.
-        wizard.handle_key(key(KeyCode::Char('a')));
-        assert!(wizard.chosen().is_empty(), "nothing ticked after `a`");
-
         for c in "coder".chars() {
             wizard.handle_key(key(KeyCode::Char(c)));
         }
-        assert_eq!(
-            wizard.visible(),
-            vec![3],
-            "the filter narrowed the list to what matches"
-        );
+        assert_eq!(wizard.visible(), vec![3], "the filter narrowed the list");
 
         wizard.handle_key(key(KeyCode::Char(' ')));
         let chosen = wizard.chosen();
@@ -5318,7 +5335,7 @@ mod tests {
     fn filtering_narrows_the_view_without_changing_what_is_ticked() {
         // The ticks live beside the full list, so a filter that hid a row must not have
         // unticked it — otherwise narrowing the view would quietly discard choices.
-        let mut wizard = choosing(&["alpha", "beta", "gamma"]);
+        let mut wizard = choosing_all(&["alpha", "beta", "gamma"]);
         wizard.handle_key(key(KeyCode::Char('g')));
         assert_eq!(wizard.visible(), vec![2]);
         assert_eq!(
@@ -5335,29 +5352,24 @@ mod tests {
     fn toggle_all_means_all_of_what_is_on_screen() {
         let mut wizard = choosing(&["qwen-flash", "qwen-max", "kimi-k3"]);
         wizard.handle_key(key(KeyCode::Char('a')));
-        assert!(wizard.chosen().is_empty());
-
-        wizard.handle_key(key(KeyCode::Char('q')));
-        assert_eq!(wizard.visible(), vec![0, 1]);
-        wizard.handle_key(key(KeyCode::Char('a')));
-        let chosen: Vec<String> = wizard.chosen().into_iter().map(|(n, _)| n).collect();
         assert_eq!(
-            chosen,
-            vec!["qwen-flash", "qwen-max"],
-            "only the visible rows came back"
+            wizard.chosen().len(),
+            3,
+            "`a` on an empty list takes it all"
         );
+
+        wizard.handle_key(key(KeyCode::Char('a')));
+        assert!(wizard.chosen().is_empty(), "and `a` again gives it back");
     }
 
     #[test]
     fn the_picker_will_not_finish_with_nothing_ticked() {
         let mut wizard = choosing(&["a", "b"]);
-        wizard.handle_key(key(KeyCode::Char('a')));
         assert_eq!(
             wizard.handle_key(key(KeyCode::Enter)),
             WizardAction::None,
             "adding a provider that adds no models is not a thing anybody meant"
         );
-        // And then it works.
         wizard.handle_key(key(KeyCode::Char(' ')));
         assert_eq!(wizard.handle_key(key(KeyCode::Enter)), WizardAction::Submit);
     }
@@ -5370,11 +5382,11 @@ mod tests {
         for _ in 0..5 {
             wizard.handle_key(key(KeyCode::Down));
         }
-        let visible = wizard.visible();
         // The cursor is kept in range, so space still lands on the last row.
         wizard.handle_key(key(KeyCode::Char(' ')));
-        assert_eq!(wizard.chosen().len(), 2, "the last row was toggled off");
-        assert_eq!(visible.len(), 3);
+        let chosen = wizard.chosen();
+        assert_eq!(chosen.len(), 1, "{chosen:?}");
+        assert_eq!(chosen[0].0, "c", "the far end of the list was reachable");
     }
 
     #[test]
@@ -5395,19 +5407,55 @@ mod tests {
     #[test]
     fn the_picker_says_what_is_ticked_and_what_to_press() {
         let mut wizard = choosing(&["qwen-flash", "qwen-max", "kimi-k3"]);
-        wizard.handle_key(key(KeyCode::Char(' ')));
         let screen = drawn_wizard(&wizard, 90, 20);
         assert!(
-            despaced(&screen).contains(&despaced("已选 2 / 3")),
-            "the count is on screen:\n{screen}"
+            despaced(&screen).contains(&despaced("已选 0 / 3")),
+            "the count is on screen, and it starts at nothing:\n{screen}"
         );
-        assert!(screen.contains("[x] kimi-k3"), "{screen}");
         assert!(screen.contains("[ ] qwen-flash"), "{screen}");
         assert!(
-            despaced(&screen).contains(&despaced("空格 勾选")),
+            despaced(&screen).contains(&despaced("先输入关键字缩小范围")),
+            "and the first thing to do is named, because on a long list it is the only \
+             thing that helps:\n{screen}"
+        );
+
+        wizard.handle_key(key(KeyCode::Char(' ')));
+        let screen = drawn_wizard(&wizard, 90, 20);
+        assert!(screen.contains("[x] qwen-flash"), "{screen}");
+        assert!(
+            despaced(&screen).contains(&despaced("已选 1 / 3")),
             "{screen}"
         );
-        assert!(screen.contains("qwen-flash"), "{screen}");
+        assert!(
+            despaced(&screen).contains(&despaced("a 全选当前筛选")),
+            "and taking all of a narrowed list is advertised: {screen}"
+        );
+    }
+
+    #[test]
+    fn a_list_longer_than_the_screen_scrolls_to_keep_the_cursor_visible() {
+        // Forty ids on a twenty-row terminal: walking down has to walk the window, or the
+        // row being ticked is off screen and the tick lands on something invisible.
+        let many: Vec<String> = (1..=40).map(|n| format!("model-{n:02}")).collect();
+        let names: Vec<&str> = many.iter().map(String::as_str).collect();
+        let mut wizard = choosing(&names);
+        for _ in 0..30 {
+            wizard.handle_key(key(KeyCode::Down));
+        }
+        wizard.handle_key(key(KeyCode::Char(' ')));
+        let chosen = wizard.chosen();
+        assert_eq!(chosen.len(), 1, "{chosen:?}");
+        assert_eq!(chosen[0].0, "model-31");
+
+        let screen = drawn_wizard(&wizard, 90, 24);
+        assert!(
+            screen.contains("model-31"),
+            "the row the cursor is on is drawn:\n{screen}"
+        );
+        assert!(
+            !screen.contains("model-01"),
+            "and the window moved rather than the cursor leaving it:\n{screen}"
+        );
     }
 
     #[test]

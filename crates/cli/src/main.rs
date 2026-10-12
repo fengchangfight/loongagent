@@ -2740,14 +2740,24 @@ fn configure_local(settings: &loong_config::Profile, always: bool) -> Result<(),
     // so from a file (`<repo>/.env`) that belongs to a repository rather than to the
     // person, so what looked like "your key" could be a checkout's.
     loong_tui_app::full_screen_needs_a_terminal()?;
-    let choices: Vec<loong_tui_app::ProviderChoice> = loong_config::catalog::PROVIDERS
-        .iter()
-        .filter(|p| !p.local)
-        .map(|p| loong_tui_app::ProviderChoice {
-            id: p.id.to_string(),
-            label: p.label.to_string(),
-        })
-        .collect();
+    // A local server first: it is the cheapest tier by definition, it is the one that
+    // needs nothing pasted, and if a key *is* found in the environment the prefill
+    // moves the highlight to that provider anyway.
+    let choices: Vec<loong_tui_app::ProviderChoice> = {
+        let mut ordered: Vec<&loong_config::catalog::Provider> = loong_config::catalog::PROVIDERS
+            .iter()
+            .filter(|p| p.local)
+            .collect();
+        ordered.extend(loong_config::catalog::PROVIDERS.iter().filter(|p| !p.local));
+        ordered
+            .into_iter()
+            .map(|p| loong_tui_app::ProviderChoice {
+                id: p.id.to_string(),
+                label: p.label.to_string(),
+                needs_key: !p.local,
+            })
+            .collect()
+    };
     let prefill = key_already_exported().map(|(provider, key)| (provider.id.to_string(), key));
 
     let mut validate = |id: &str, key: &str| -> loong_tui_app::Validation {
@@ -2758,7 +2768,9 @@ fn configure_local(settings: &loong_config::Profile, always: bool) -> Result<(),
                 ..Default::default()
             };
         };
-        let probe = probe_provider(provider, key);
+        // A loopback provider gets no key, and passing an empty string as one would
+        // put an `Authorization: Bearer ` header on a request that needs none.
+        let probe = probe_provider(provider, provider_key_for_probe(provider, Some(key)));
         // On a refusal the key's shape is finally worth something — not as a decision,
         // but as an ordering hint for the next attempt that costs no extra request.
         let suggest_order = match &probe {
@@ -2859,7 +2871,7 @@ fn spawn_model_health(
                 continue;
             };
             let key = provider_key(provider);
-            let probe = probe_provider(provider, key.as_deref().unwrap_or_default());
+            let probe = probe_provider(provider, provider_key_for_probe(provider, key.as_deref()));
             let (ok, detail) = (probe.is_ok(), loong_providers::probe::render(&probe));
             for name in names {
                 if sender
@@ -2912,15 +2924,30 @@ fn key_already_exported() -> Option<(&'static loong_config::catalog::Provider, S
     None
 }
 
+/// What to send as the bearer token when checking this provider.
+///
+/// `None` for a loopback server. Sending `Some("")` would put `Authorization: Bearer `
+/// on a request that wants no header at all — some servers tolerate that and some reject
+/// it, which is not a difference worth discovering on somebody's first run.
+fn provider_key_for_probe<'a>(
+    provider: &loong_config::catalog::Provider,
+    typed: Option<&'a str>,
+) -> Option<&'a str> {
+    if provider.local {
+        return None;
+    }
+    typed.filter(|key| !key.trim().is_empty())
+}
+
 /// Check one provider's key, using the free route where the vendor publishes one.
 fn probe_provider(
     provider: &loong_config::catalog::Provider,
-    key: &str,
+    key: Option<&str>,
 ) -> loong_providers::probe::Probe {
     match (provider.models_url(), provider.probe_model) {
-        (Some(_), _) => loong_providers::probe::probe_models(provider.base_url, Some(key)),
+        (Some(_), _) => loong_providers::probe::probe_models(provider.base_url, key),
         (None, Some(model)) => {
-            loong_providers::probe::probe_with_completion(provider.base_url, model, Some(key))
+            loong_providers::probe::probe_with_completion(provider.base_url, model, key)
         }
         // A catalog entry with neither cannot be validated at all, and saying so is
         // better than a probe against a route we know is not there.
@@ -2945,10 +2972,14 @@ fn adopt_local_model(
     probe: &loong_providers::probe::Probe,
     had_models: bool,
 ) -> Result<(), String> {
-    write_env_secret(home, provider.key_env, key)?;
-    // The child inherits this process's environment, so setting it here is what makes
-    // the *first* run use the key rather than only the second one.
-    std::env::set_var(provider.key_env, key);
+    // A loopback provider has no secret, and writing an empty one would create a file
+    // that looks like a key store with a blank key in it.
+    if !key.trim().is_empty() {
+        write_env_secret(home, provider.key_env, key)?;
+        // The child inherits this process's environment, so setting it here is what
+        // makes the *first* run use the key rather than only the second one.
+        std::env::set_var(provider.key_env, key);
+    }
 
     let path = loong_config::local_profile_path();
     let models: Vec<LocalModel> = match probe {

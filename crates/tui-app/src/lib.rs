@@ -2498,6 +2498,10 @@ pub fn setup_form() -> Result<Option<(String, String, String)>, String> {
 pub struct ProviderChoice {
     pub id: String,
     pub label: String,
+    /// Whether this provider wants a secret at all. A loopback server does not: asking
+    /// somebody to paste a key for a process on their own machine is asking them to
+    /// invent one, and the form would refuse an empty field for no reason.
+    pub needs_key: bool,
 }
 
 /// What one validation attempt found, in shapes a screen can show and a caller can
@@ -2587,8 +2591,14 @@ impl LocalWizard {
     /// Whether a key is worth sending anywhere. Not a format check — a length one:
     /// a vendor's own key is at least this long, and an empty field is the only
     /// mistake predictable enough to catch before spending a round trip.
+    ///
+    /// A provider that wants no secret is always ready: its check is whether the local
+    /// server answers, which is a question the probe can ask on its own.
     pub fn ready(&self) -> bool {
-        self.key.trim().len() >= 8
+        match self.selected() {
+            Some(provider) if !provider.needs_key => true,
+            _ => self.key.trim().len() >= 8,
+        }
     }
 
     /// What the field shows. The whole key is never drawn: the person typing it knows
@@ -2676,11 +2686,15 @@ impl LocalWizard {
                 }
             }
             KeyCode::Backspace => {
-                self.key.pop();
+                if self.selected().map(|p| p.needs_key).unwrap_or(true) {
+                    self.key.pop();
+                }
                 self.state = WizardState::Editing;
             }
             KeyCode::Char(c) => {
-                self.key.push(c);
+                if self.selected().map(|p| p.needs_key).unwrap_or(true) {
+                    self.key.push(c);
+                }
                 self.state = WizardState::Editing;
             }
             _ => {}
@@ -2707,20 +2721,29 @@ fn draw_local_wizard(frame: &mut ratatui::Frame, wizard: &LocalWizard) {
         .block(Block::bordered().title(" first run ")),
         chunks[0],
     );
-
+    let wants_key = wizard.selected().map(|p| p.needs_key).unwrap_or(true);
+    let field = if wants_key {
+        wizard.masked_key()
+    } else {
+        "（本机服务，无需密钥）".to_string()
+    };
     frame.render_widget(
-        Paragraph::new(wizard.masked_key()).block(
-            Block::bordered()
-                .title(" API key ")
-                .border_style(Style::default().fg(Color::Cyan)),
-        ),
+        Paragraph::new(field.clone()).block(Block::bordered().title(" API key ").border_style(
+            if wants_key {
+                Style::default().fg(Color::Cyan)
+            } else {
+                MARK_QUIET
+            },
+        )),
         chunks[1],
     );
-    let column = chunks[1].x + 1 + wizard.masked_key().chars().count() as u16;
-    frame.set_cursor_position((
-        column.min(chunks[1].right().saturating_sub(2)),
-        chunks[1].y + 1,
-    ));
+    if wants_key {
+        let column = chunks[1].x + 1 + wizard.masked_key().chars().count() as u16;
+        frame.set_cursor_position((
+            column.min(chunks[1].right().saturating_sub(2)),
+            chunks[1].y + 1,
+        ));
+    }
 
     let mut lines: Vec<Line> = vec![Line::from(Span::styled(
         "这个 key 属于哪个服务商？（↑↓ 或 tab 选择，回车校验）",
@@ -4762,14 +4785,17 @@ mod tests {
             ProviderChoice {
                 id: "deepseek".into(),
                 label: "DeepSeek".into(),
+                needs_key: true,
             },
             ProviderChoice {
                 id: "moonshot".into(),
                 label: "Moonshot / Kimi".into(),
+                needs_key: true,
             },
             ProviderChoice {
                 id: "dashscope".into(),
                 label: "阿里云百炼 / Qwen".into(),
+                needs_key: true,
             },
         ]
     }
@@ -4832,6 +4858,54 @@ mod tests {
         wizard.reorder(&[]);
         assert_eq!(wizard.providers, before);
         assert_eq!(wizard.provider, 2, "an empty hint is not a hint");
+    }
+
+    #[test]
+    fn a_provider_that_needs_no_key_neither_asks_for_one_nor_refuses_an_empty_one() {
+        // A loopback server has no secret, and a form that demanded eight characters for
+        // it would be asking somebody to invent one.
+        let local = || {
+            vec![
+                ProviderChoice {
+                    id: "ollama".into(),
+                    label: "Ollama (本机)".into(),
+                    needs_key: false,
+                },
+                ProviderChoice {
+                    id: "deepseek".into(),
+                    label: "DeepSeek".into(),
+                    needs_key: true,
+                },
+            ]
+        };
+
+        let mut wizard = LocalWizard::new(local());
+        assert!(
+            wizard.ready(),
+            "an empty field is not a mistake when there is nothing to type"
+        );
+        assert_eq!(
+            wizard.handle_key(key(KeyCode::Enter)),
+            WizardAction::Submit,
+            "and enter is enough to start the check"
+        );
+
+        // Typing into it does nothing: there is nowhere for the characters to go.
+        wizard.handle_key(key(KeyCode::Char('x')));
+        assert_eq!(wizard.key, "", "the field is not a field for this provider");
+
+        // The screen says so, rather than showing an empty box that looks broken.
+        let screen = drawn_wizard(&wizard, 90, 20);
+        assert!(
+            despaced(&screen).contains(&despaced("本机服务，无需密钥")),
+            "{screen}"
+        );
+
+        // Switching to a provider that does want one restores the ordinary rules.
+        wizard.handle_key(key(KeyCode::Tab));
+        assert!(!wizard.ready(), "the remote provider still wants a key");
+        wizard.handle_key(key(KeyCode::Char('x')));
+        assert_eq!(wizard.key, "x", "and the field works again");
     }
 
     #[test]

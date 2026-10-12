@@ -1508,9 +1508,8 @@ fn merge(layers: &[LayerValues]) -> Result<Profile, ConfigError> {
             ("compact_at_percent", Value::Number(n)) => profile.compact_at_percent = Some(*n),
             ("max_context_size", Value::Number(n)) => profile.max_context_size = Some(*n),
             ("reserved_context_size", Value::Number(n)) => profile.reserved_context_size = Some(*n),
-            (key, Value::Model(spec)) if key.starts_with("models.") => {
-                profile.models.push(spec.clone())
-            }
+            // Models are collected after this loop, in declaration order — see below.
+            (key, Value::Model(_)) if key.starts_with("models.") => {}
             ("router.default", Value::Text(name)) => profile.router.default = Some(name.clone()),
             ("router.rules", Value::Rules(rules)) => profile.router.rules = rules.clone(),
             ("control.profile", Value::Text(name)) => profile.control_profile = Some(name.clone()),
@@ -1526,11 +1525,38 @@ fn merge(layers: &[LayerValues]) -> Result<Profile, ConfigError> {
             _ => {}
         }
     }
-    profile.models.sort_by(|a, b| a.name.cmp(&b.name));
+    // **Declaration order**, not alphabetical.
+    //
+    // The loop above iterates a map keyed by `models.<name>`, so collecting models there
+    // handed them back sorted by name — which throws away the one thing the order means.
+    // A profile's `[[models]]` is written cheapest-first, most capable-last; that order
+    // *is* the tier ladder, it is what the router's default and the status bar's digits
+    // refer to, and sorting it would silently renumber every hotkey somebody had learned.
+    //
+    // The most local layer that declares models sets the order — that is the file the
+    // person actually wrote — and a model that only a lower layer declares is appended
+    // after it, so nothing becomes unreachable by being out of order.
+    let mut order: Vec<String> = Vec::new();
+    for layer in layers.iter().rev() {
+        for (key, value) in &layer.values {
+            if let Some(name) = key.strip_prefix("models.") {
+                if matches!(value, Value::Model(_)) && !order.iter().any(|seen| seen == name) {
+                    order.push(name.to_string());
+                }
+            }
+        }
+    }
+    for name in &order {
+        if let Some(row) = winners.get(&format!("models.{name}")) {
+            if let Value::Model(spec) = &row.value {
+                profile.models.push(spec.clone());
+            }
+        }
+    }
+
     profile.provenance = winners;
     Ok(profile)
 }
-
 /// Which of two narrow-only values is stricter. Returns
 /// `(new_is_stricter, old_should_be_recorded_as_overridden)`.
 /// Which of two narrow-only values is stricter.
@@ -2119,6 +2145,61 @@ mod tests {
         assert!(
             !layers.iter().any(|(layer, _)| *layer == Layer::Org),
             "which is the same statement in terms of layers"
+        );
+    }
+
+    #[test]
+    fn models_come_back_in_the_order_they_were_declared() {
+        // The order *is* the tier ladder: cheapest first, most capable last, and the
+        // digits the status bar counts by. The merge collects through a map keyed
+        // `models.<name>`, so this is the property that a map iteration would destroy —
+        // and it was destroyed, by an alphabetical sort, until a real profile showed it.
+        //
+        // Deliberately written in an order that is *not* alphabetical in either
+        // direction, so a sort in either direction fails the test.
+        let ws = workspace();
+        let user = write(
+            &ws,
+            "u.toml",
+            "[[models]]\nname = \"zulu\"\nprovider = \"ollama/one\"\n\n\
+             [[models]]\nname = \"alpha\"\nprovider = \"deepseek/two\"\n\n\
+             [[models]]\nname = \"mike\"\nprovider = \"moonshot/three\"\n\n\
+             [router]\ndefault = \"zulu\"\n",
+        );
+        let profile = resolve(&[(Layer::User, user)], &ws).unwrap();
+        let names: Vec<&str> = profile.models.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["zulu", "alpha", "mike"],
+            "declaration order, which is the ladder"
+        );
+
+        // And the ladder is what the router's default names, so the two agree.
+        assert_eq!(profile.default_model().unwrap().name, "zulu");
+    }
+
+    #[test]
+    fn a_model_only_a_lower_layer_declares_is_appended_rather_than_lost() {
+        // The order comes from the most local layer that declares any models, but the
+        // *set* is a union: an organisation may add a model this user never mentioned,
+        // and it has to remain reachable.
+        let ws = workspace();
+        let org = write(
+            &ws,
+            "org.toml",
+            "[[models]]\nname = \"org-only\"\nprovider = \"deepseek/org\"\n",
+        );
+        let user = write(
+            &ws,
+            "u.toml",
+            "[[models]]\nname = \"mine\"\nprovider = \"ollama/mine\"\n",
+        );
+        let profile = resolve(&[(Layer::Org, org), (Layer::User, user)], &ws).unwrap();
+        let names: Vec<&str> = profile.models.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["mine", "org-only"],
+            "the person's own order leads, and the org's extra model follows"
         );
     }
 

@@ -36,6 +36,8 @@ USAGE:
   loongagent tui            [--session ID|PATH] [--cwd DIR] [--new] [--local]  full-screen
       with no --session it continues this project's newest session; --new starts another
       --local runs with no control plane at all: no pack, no sync, no setup form
+      in a session:  alt+1..9 choose a model (or /1../9); alt+r asks the last
+                     prompt again of the model chosen now (or /r)
   loongagent resume [ID]    [--cwd DIR]                                    reopen one (default: latest)
   loongagent sessions       [--all] [--limit N] [--cwd DIR]                list them
   loongagent fork [ID]      [--at SEQ] [--cwd DIR]                         a child session

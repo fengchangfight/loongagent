@@ -464,6 +464,12 @@ pub struct App {
     pub models: Vec<loong_schema::generated::ModelOffering>,
     /// Which of them the next call will use.
     pub selected: String,
+    /// The last thing the user asked for, so `Alt+R` has something to resend.
+    ///
+    /// Kept in full rather than as a reference: the point of a resend is to send *the
+    /// same question* to a different model, and a question that got edited in between
+    /// would make the two answers incomparable.
+    pub last_prompt: Option<String>,
     pub quit: bool,
 }
 
@@ -500,7 +506,62 @@ impl App {
             folded: std::collections::BTreeMap::new(),
             models: Vec::new(),
             selected: String::new(),
+            last_prompt: None,
             quit: false,
+        }
+    }
+
+    /// The bookkeeping every send does, so `enter` and `Alt+R` cannot drift apart — an
+    /// interface where the resend forgets to mark itself busy would let a second turn
+    /// start on top of a running one.
+    fn begin_submit(&mut self, text: String) -> Action {
+        self.input.clear();
+        self.cursor = 0;
+        // Sending is a return to the prompt, so the keyboard's place among the folds is
+        // given up with it.
+        self.fold = None;
+        self.push_lines(vec![format!("you: {text}")]);
+        self.busy = true;
+        self.busy_since = Some(std::time::Instant::now());
+        self.activity = None;
+        self.error = None;
+        self.last_prompt = Some(text.clone());
+        Action::Send(ToWorker::Submit(text))
+    }
+
+    /// `Alt+R`: ask the same question again, of whichever model is selected now.
+    ///
+    /// The retry **keeps the history**. That is the whole design, and it is why this is
+    /// a resend and not a rewind: the model that takes over can see what the previous
+    /// one tried, and what went wrong with it. A clean slate would throw away the most
+    /// useful thing in the session — the evidence about what does not work.
+    fn resend_last_prompt(&mut self) -> Action {
+        if self.busy {
+            self.push_lines(vec!["· 上一轮还在跑 — ctrl-c 停下之后再重发".to_string()]);
+            return Action::None;
+        }
+        let Some(text) = self.last_prompt.clone() else {
+            self.push_lines(vec!["· 还没有可以重发的 prompt".to_string()]);
+            return Action::None;
+        };
+        // Said out loud, with the model named: a resend that silently used the same
+        // model again would look like the agent had simply repeated itself.
+        self.push_lines(vec![format!(
+            "↻ 用 [{}] 重发上一条（保留原有上下文）",
+            self.selected_model_label()
+        )]);
+        self.begin_submit(text)
+    }
+
+    /// What to call the current model on screen. The slot number when there is one, so
+    /// it matches the bar; the name alone otherwise.
+    fn selected_model_label(&self) -> String {
+        if self.selected.is_empty() {
+            return "当前模型".to_string();
+        }
+        match self.models.iter().position(|m| m.name == self.selected) {
+            Some(index) if index < 9 => format!("{}] {}", index + 1, self.selected),
+            _ => self.selected.clone(),
         }
     }
 
@@ -679,12 +740,16 @@ impl App {
         use unicode_width::UnicodeWidthStr;
         let limit = area.width as usize;
         let slots = self.models.len().min(9);
-        // Only worth saying when there is something to say it about.
-        let hint = if self.models.len() > 1 {
-            format!("  alt+1..{slots} 切换 · /1../{slots} 兜底")
-        } else {
-            String::new()
-        };
+        // Only worth saying when there is something to say it about. The resend is
+        // mentioned only once there is something to resend, because a key advertised
+        // before it can work is a key that appears broken.
+        let mut hint = String::new();
+        if self.models.len() > 1 {
+            hint.push_str(&format!("  alt+1..{slots} 切换 · /1../{slots} 兜底"));
+        }
+        if self.last_prompt.is_some() {
+            hint.push_str(" · alt+r 重发");
+        }
         let hint_width = UnicodeWidthStr::width(hint.as_str());
 
         let mut spans: Vec<Span> = Vec::new();
@@ -935,6 +1000,12 @@ impl App {
                     return Some(self.switch_to_slot(slot as usize));
                 }
             }
+        }
+        // `/r`: the resend, for the same terminals that eat Alt.
+        if trimmed.eq_ignore_ascii_case("/r") {
+            self.input.clear();
+            self.cursor = 0;
+            return Some(self.resend_last_prompt());
         }
         match trimmed.to_ascii_lowercase().as_str() {
             "/exit" | "/quit" | "/q" => {
@@ -1215,6 +1286,9 @@ impl App {
                 if let Some(slot) = c.to_digit(10).filter(|d| (1..=9).contains(d)) {
                     return self.switch_to_slot(slot as usize);
                 }
+                if c.eq_ignore_ascii_case(&'r') {
+                    return self.resend_last_prompt();
+                }
             }
         }
         match key.code {
@@ -1410,17 +1484,7 @@ impl App {
                 if let Some(action) = self.surface_command(&text) {
                     return action;
                 }
-                self.input.clear();
-                self.cursor = 0;
-                // Sending is a return to the prompt, so the keyboard's place among the
-                // folds is given up with it.
-                self.fold = None;
-                self.push_lines(vec![format!("you: {text}")]);
-                self.busy = true;
-                self.busy_since = Some(std::time::Instant::now());
-                self.activity = None;
-                self.error = None;
-                Action::Send(ToWorker::Submit(text))
+                self.begin_submit(text)
             }
             KeyCode::Char(c) if !ctrl && self.pending.is_none() => {
                 self.insert(&c.to_string());
@@ -1829,24 +1893,53 @@ impl App {
                 )
             }
             // A leading `/` is a command: say where the list of them is.
-            None if self.input.starts_with('/') => (
-                match self.input.trim() {
-                    // Once it is unambiguous, say what will happen rather than where to
-                    // read about it.
-                    "/exit" | "/quit" | "/q" | "/exi" | "/qui" => {
-                        "enter leaves loongagent (ctrl-c does too)".to_string()
-                    }
-                    "/logo" => "enter shows or hides the mark".to_string(),
-                    "/expand" => {
-                        "enter shows the last tool result in full (tab walks the folds)".to_string()
-                    }
-                    "/yolo" => "enter turns approval prompts off (the sandbox stays)".to_string(),
-                    "/copy" => "enter copies the whole transcript".to_string(),
-                    "/mouse" => "enter hands the mouse back to your terminal".to_string(),
-                    _ => "command — /help · /exit · /logo · /mouse · /copy · /expand".to_string(),
-                },
-                Style::default().fg(Color::Green),
-            ),
+            None if self.input.starts_with('/') => {
+                // Lowercased once, so `/R` and `/EXIT` complete the same way `/r` and
+                // `/exit` do — the command matcher is case-insensitive, and a hint that
+                // disagreed with it would be worse than no hint.
+                let typed = self.input.trim().to_ascii_lowercase();
+                (
+                    match typed.as_str() {
+                        // Once it is unambiguous, say what will happen rather than where to
+                        // read about it.
+                        "/exit" | "/quit" | "/q" | "/exi" | "/qui" => {
+                            "enter leaves loongagent (ctrl-c does too)".to_string()
+                        }
+                        "/logo" => "enter shows or hides the mark".to_string(),
+                        "/expand" => {
+                            "enter shows the last tool result in full (tab walks the folds)"
+                                .to_string()
+                        }
+                        "/yolo" => {
+                            "enter turns approval prompts off (the sandbox stays)".to_string()
+                        }
+                        "/copy" => "enter copies the whole transcript".to_string(),
+                        "/mouse" => "enter hands the mouse back to your terminal".to_string(),
+                        // The model shortcuts, said in full only when they would work: a
+                        // completion that promises a switch in a session with one model
+                        // is a completion that lies.
+                        "/r" if self.last_prompt.is_some() => {
+                            "enter asks the last prompt again, of the current model".to_string()
+                        }
+                        _ => match typed
+                            .strip_prefix('/')
+                            .and_then(|n| n.parse::<usize>().ok())
+                        {
+                            Some(slot) if (1..=9).contains(&slot) => {
+                                match self.model_in_slot(slot) {
+                                    Some(offering) => {
+                                        format!("enter switches to [{slot}] {}", offering.name)
+                                    }
+                                    None => format!("no model in slot {slot}"),
+                                }
+                            }
+                            _ => "command — /help · /exit · /logo · /mouse · /copy · /expand"
+                                .to_string(),
+                        },
+                    },
+                    Style::default().fg(Color::Green),
+                )
+            }
             None => ("prompt".to_string(), Style::default()),
         };
         let inner_width = entry.width.saturating_sub(2);
@@ -5078,5 +5171,169 @@ mod tests {
         // And a line about something else is not mistaken for a switch.
         app.follow_model_change("· tokens 10 in / 2 out (p)");
         assert_eq!(app.selected, "cheap");
+    }
+
+    // ---------------------------------------------------------------- the resend
+
+    /// Ask something, then let the turn finish — the state a person is in when they
+    /// decide the model was not up to it.
+    fn asked_and_finished(app: &mut App, prompt: &str) {
+        type_text(app, prompt);
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Enter)),
+            Action::Send(ToWorker::Submit(_))
+        ));
+        app.busy = false;
+    }
+
+    #[test]
+    fn alt_r_asks_the_same_question_again() {
+        let mut app = app_with_models(&["cheap", "strong"]);
+        asked_and_finished(&mut app, "fix the off-by-one");
+        assert_eq!(
+            app.handle_key(alt('r')),
+            Action::Send(ToWorker::Submit("fix the off-by-one".to_string())),
+            "the same words, not a summary of them"
+        );
+    }
+
+    #[test]
+    fn the_resend_uses_the_model_selected_now_and_says_so() {
+        let mut app = app_with_models(&["cheap", "strong"]);
+        asked_and_finished(&mut app, "fix it");
+        // Escalate first, then resend: this is the whole gesture the feature exists for.
+        app.selected = "strong".to_string();
+        assert_eq!(
+            app.handle_key(alt('r')),
+            Action::Send(ToWorker::Submit("fix it".to_string()))
+        );
+        let said = app.lines.join("\n");
+        assert!(
+            said.contains("[2] strong"),
+            "the line names the model and its slot, matching the bar: {said:?}"
+        );
+    }
+
+    #[test]
+    fn the_resend_keeps_the_history_rather_than_rewinding_it() {
+        // The design, stated as a test: the model that takes over can see what the
+        // previous one tried and what went wrong. A clean slate would throw away the
+        // most useful thing in the session.
+        let mut app = app_with_models(&["cheap", "strong"]);
+        asked_and_finished(&mut app, "fix it");
+        let before = app.lines.clone();
+        assert_eq!(
+            app.handle_key(alt('r')),
+            Action::Send(ToWorker::Submit("fix it".to_string()))
+        );
+        let after = app.lines.clone();
+        assert!(
+            after.len() > before.len(),
+            "the transcript only grows: nothing was rewound"
+        );
+        for line in &before {
+            assert!(after.contains(line), "and nothing was dropped: {line:?}");
+        }
+    }
+
+    #[test]
+    fn resending_before_anything_was_asked_says_there_is_nothing_to_resend() {
+        let mut app = app_with_models(&["cheap"]);
+        assert_eq!(app.handle_key(alt('r')), Action::None);
+        let said = app.lines.join("\n");
+        assert!(said.contains("还没有可以重发"), "{said:?}");
+    }
+
+    #[test]
+    fn resending_while_a_turn_is_running_is_refused_rather_than_queued() {
+        // A second turn starting on top of a running one is the failure this prevents.
+        let mut app = app_with_models(&["cheap", "strong"]);
+        type_text(&mut app, "fix it");
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.busy, "the turn is running");
+        assert_eq!(app.handle_key(alt('r')), Action::None);
+        let said = app.lines.join("\n");
+        assert!(said.contains("还在跑"), "{said:?}");
+    }
+
+    #[test]
+    fn slash_r_is_the_fallback_for_a_terminal_that_eats_alt() {
+        let mut app = app_with_models(&["cheap", "strong"]);
+        asked_and_finished(&mut app, "fix it");
+        app.input = "/r".to_string();
+        app.cursor = 2;
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            Action::Send(ToWorker::Submit("fix it".to_string()))
+        );
+        assert!(app.input.is_empty(), "the command does not reach the agent");
+    }
+
+    #[test]
+    fn the_resend_is_advertised_only_once_there_is_something_to_resend() {
+        let mut app = app_with_models(&["cheap", "strong"]);
+        let bar = draw(&mut app, 100, 20);
+        let first = bar.lines().next().unwrap_or_default().to_string();
+        assert!(
+            !despaced(&first).contains(&despaced("alt+r")),
+            "a key advertised before it can work is a key that looks broken: {first:?}"
+        );
+
+        asked_and_finished(&mut app, "fix it");
+        let bar = draw(&mut app, 100, 20);
+        let after = bar.lines().next().unwrap_or_default().to_string();
+        assert!(
+            despaced(&after).contains(&despaced("alt+r 重发")),
+            "and once it can work, it is on the bar: {after:?}"
+        );
+    }
+
+    #[test]
+    fn a_plain_r_still_types_an_r() {
+        // Alt+R is a shortcut; `r` is a letter. An interface where the letters stopped
+        // working would be a worse trade than no shortcut at all.
+        let mut app = app_with_models(&["cheap"]);
+        app.handle_key(key(KeyCode::Char('r')));
+        assert_eq!(app.input, "r");
+    }
+
+    #[test]
+    fn the_status_line_says_what_a_model_command_will_do_before_it_is_pressed() {
+        let mut app = app_with_models(&["cheap", "strong"]);
+        for (typed, expected) in [("/2", "[2] strong"), ("/1", "[1] cheap")] {
+            app.input = typed.to_string();
+            app.cursor = typed.chars().count();
+            let screen = draw(&mut app, 100, 20);
+            assert!(
+                despaced(&screen).contains(&despaced(expected)),
+                "{typed} should describe itself as {expected:?}:\n{screen}"
+            );
+        }
+
+        // A slot with no model says so rather than promising a switch.
+        app.input = "/7".to_string();
+        app.cursor = 2;
+        let screen = draw(&mut app, 100, 20);
+        assert!(
+            despaced(&screen).contains(&despaced("no model in slot 7")),
+            "{screen}"
+        );
+
+        // And `/r` only describes itself once there is something to resend.
+        app.input = "/r".to_string();
+        app.cursor = 2;
+        let screen = draw(&mut app, 100, 20);
+        assert!(
+            !despaced(&screen).contains(&despaced("asks the last prompt again")),
+            "nothing has been asked yet:\n{screen}"
+        );
+        asked_and_finished(&mut app, "fix it");
+        app.input = "/r".to_string();
+        app.cursor = 2;
+        let screen = draw(&mut app, 100, 20);
+        assert!(
+            despaced(&screen).contains(&despaced("asks the last prompt again")),
+            "{screen}"
+        );
     }
 }

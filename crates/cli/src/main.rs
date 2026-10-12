@@ -32,13 +32,16 @@ loongagent — a firm-internal coding agent
 
 USAGE:
   loongagent server --stdio [--session PATH] [--cwd DIR] [--model NAME]
+  loongagent local          [--cwd DIR]                                    what this install runs
+  loongagent local add      [PROVIDER]                                     add models (a wizard)
+  loongagent local delete   <slot|model|provider>                          remove them
+  loongagent local edit                                                    open the file
   loongagent setup          [--profile PATH]                                write a profile
   loongagent tui            [--session ID|PATH] [--cwd DIR] [--new] [--local]  full-screen
       with no --session it continues this project's newest session; --new starts another
       --local runs with no control plane at all: no pack, no sync, no setup form
       in a session:  alt+1..9 choose a model (or /1../9); alt+r asks the last
                      prompt again of the model chosen now (or /r)
-                     /model configures models and returns to the same session
   loongagent resume [ID]    [--cwd DIR]                                    reopen one (default: latest)
   loongagent sessions       [--all] [--limit N] [--cwd DIR]                list them
   loongagent fork [ID]      [--at SEQ] [--cwd DIR]                         a child session
@@ -2521,38 +2524,12 @@ impl Drop for ChildTransport {
 
 /// The full-screen surface: the client here, the screen in `loong-tui-app`.
 fn full_screen(args: Args) -> Result<(), String> {
-    // `/model` inside the session asks to configure models and then come back. The loop
-    // is here because a session's server child resolves its models **once**, at startup:
-    // a model added while one is running is invisible to it, so making the change take
-    // effect means ending the session and starting it again — against the same log, so
-    // the conversation is still there when it does.
-    //
-    // Two places ask, and they ask different questions. `full_screen_once` runs the
-    // wizard only when there is nothing to run otherwise — a first run. After `/model`
-    // the person has asked, so it runs whether or not models already exist.
-    loop {
-        match full_screen_once(&args)? {
-            loong_tui_app::Outcome::Quit => {
-                // Leaving the interface — by `/exit`, ctrl-c, or an error — says where
-                // the session went, so the way out is not a dead end.
-                println!("session {}", args.session_id());
-                println!("reopen:  loongagent resume {}", args.session_id());
-                return Ok(());
-            }
-            loong_tui_app::Outcome::Reconfigure => {
-                if args.is_local()? {
-                    let (settings, _) = args.settings_with_pack()?;
-                    configure_local(&settings, true)?;
-                }
-            }
-        }
-    }
-}
-
-fn full_screen_once(args: &Args) -> Result<loong_tui_app::Outcome, String> {
     args.ensure_parent()?;
     // Settled first, because it decides whether a control plane is consulted at all.
     let local = args.is_local()?;
+    // Resolved once here and reused by the gate below, so the configuration is read and
+    // judged the same way twice rather than twice differently.
+    let mut resolved_settings: Option<loong_config::Profile> = None;
     // Before the child exists, not after: the server resolves its models once, at
     // startup, so a key written later would not take effect until the next run — and
     // the run it was written for would look broken.
@@ -2561,8 +2538,24 @@ fn full_screen_once(args: &Args) -> Result<loong_tui_app::Outcome, String> {
     // adding a *second* provider is `loongagent local add`, so nobody has to sit through
     // a form they did not ask for every time they open a session.
     if local && args.model.is_none() {
-        let (settings, _) = args.settings_with_pack()?;
-        configure_local(&settings, false)?;
+        let (resolved, _) = args.settings_with_pack()?;
+        configure_local(&resolved, false, None)?;
+        resolved_settings = Some(resolved);
+    }
+    // A session with no model is a session that cannot answer anything, and its first few
+    // minutes are spent discovering that. A local install is the one place the person can
+    // do something about it, so it is the one place worth refusing — and the message names
+    // the command rather than opening a screen that will fail.
+    //
+    // A *managed* install keeps the old behaviour on purpose: models arrive in a pack the
+    // user cannot edit, so refusing would strand them with no interface and no way to fix
+    // it. There the server runs an `UnconfiguredModel` that says so inside a working
+    // session, which is what that type exists for.
+    if local && args.model.is_none() && resolved_settings.is_none() {
+        resolved_settings = Some(args.settings_with_pack()?.0);
+    }
+    if let Some(profile) = &resolved_settings {
+        session_needs_a_model(&args, local, profile)?;
     }
     let (transport, notes) = ChildTransport::spawn(&args, true)?;
     // Taken before the transport moves into the client: the interface needs the pid to
@@ -2674,13 +2667,11 @@ fn full_screen_once(args: &Args) -> Result<loong_tui_app::Outcome, String> {
         intro,
         Some(Box::new(move || loong_tui::interrupt(server_pid))),
         health,
-        // Only a local install's models are the person's to configure (ADR-0016: on a
-        // managed one an engineer picks a profile, not an endpoint).
-        local,
     );
-    // Where the session went is said once, by the caller, when the session is really
-    // over — not between passes of the configure-and-come-back loop, where it would read
-    // as the session having ended when it has not.
+    // Leaving the interface — by `/exit`, ctrl-c, or an error — says where the session
+    // went, so the way out is not a dead end.
+    println!("session {session_id}");
+    println!("reopen:  loongagent resume {session_id}");
     outcome
 }
 
@@ -2709,45 +2700,178 @@ fn local(mut args: Args) -> Result<(), String> {
     // the control plane's models and `local add` would have written into a config the
     // managed mode owns — which is the whole class of mistake this file exists to end.
     args.local = true;
-    // From the parsed positionals, not from a fixed slot: `loongagent local --cwd .`
-    // has no subcommand at all, and reading `rest[1]` would take `--cwd` for one.
-    let sub = args.positional.first().map(String::as_str).unwrap_or("");
+    // From the parsed positionals, not from a fixed slot: `loongagent local --cwd .` has
+    // no subcommand at all, and reading `rest[1]` would take `--cwd` for one.
+    let words: Vec<String> = args.positional.clone();
+    let sub = words.first().map(String::as_str).unwrap_or("");
+    let rest = words.get(1).map(String::as_str);
     let path = loong_config::local_profile_path();
+
     match sub {
-        "" | "show" => {
-            let (settings, _) = args.settings_with_pack()?;
-            println!("{}", path.display());
-            if settings.models.is_empty() {
-                println!("  (no models) — add one with `loongagent local add`");
-                return Ok(());
-            }
-            println!();
-            for (index, model) in settings.models.iter().enumerate() {
-                let current = settings
-                    .default_model()
-                    .map(|first| first.name == model.name)
-                    .unwrap_or(false);
-                println!(
-                    "  {}[{}] {:<20} {}",
-                    if current { "▸" } else { " " },
-                    index + 1,
-                    model.name,
-                    model.provider.as_deref().unwrap_or(&model.base_url)
-                );
-            }
-            println!();
-            println!("第一个是默认（建议放最便宜那层）。换模型用 `loongagent tui --local`。");
-            Ok(())
-        }
+        "" | "list" | "show" => local_list(&args, &path),
         "add" => {
             let (settings, _) = args.settings_with_pack()?;
-            configure_local(&settings, true)
+            configure_local(&settings, true, rest)
         }
+        "delete" | "rm" | "remove" => {
+            let selector = rest.ok_or_else(|| {
+                "usage: loongagent local delete <slot|model|provider> \
+                 (see `loongagent local`)"
+                    .to_string()
+            })?;
+            local_delete(&path, selector)
+        }
+        "edit" => local_edit(&path),
         other => Err(format!(
-            "unknown local subcommand {other:?} — try `loongagent local` or \
-             `loongagent local add`"
+            "unknown local subcommand {other:?} — `loongagent local` lists what is \
+             configured; `local add|delete|edit` change it"
         )),
     }
+}
+
+/// Whether a session may open at all.
+///
+/// A session with no model cannot answer anything, and its first few minutes are spent
+/// discovering that. A local install is the one place the person can do something about
+/// it, so it is the one place worth refusing — and the message names the command rather
+/// than opening a screen that will fail on its first prompt.
+///
+/// A **managed** install keeps the old behaviour on purpose: its models arrive in a pack
+/// the user cannot edit, so refusing would strand them with no interface and no way to fix
+/// it. There the server runs an `UnconfiguredModel` that says so from inside a working
+/// session, which is what that type exists for.
+///
+/// `--model` names a provider double (`demo-write`, `echo`) and is its own answer: a
+/// session asked for explicitly is a session that has a model.
+fn session_needs_a_model(
+    args: &Args,
+    local: bool,
+    profile: &loong_config::Profile,
+) -> Result<(), String> {
+    if !local || args.model.is_some() || !profile.models.is_empty() {
+        return Ok(());
+    }
+    Err("还没有配置任何模型 — 先运行 `loongagent local add`\
+         （或 `loongagent local add ollama` 用本机 ollama）"
+        .to_string())
+}
+
+/// `loongagent local` — what this install will actually run, and where it says so.
+fn local_list(args: &Args, path: &Path) -> Result<(), String> {
+    let (settings, _) = args.settings_with_pack()?;
+    println!("{}", path.display());
+    if settings.models.is_empty() {
+        println!();
+        println!("  (还没配置模型)");
+        println!();
+        println!("  加一个：loongagent local add");
+        return Ok(());
+    }
+    println!();
+    for (index, model) in settings.models.iter().enumerate() {
+        let current = settings
+            .default_model()
+            .map(|first| first.name == model.name)
+            .unwrap_or(false);
+        println!(
+            "  {}[{}] {:<24} {:<12} {}",
+            if current { "▸" } else { " " },
+            index + 1,
+            model.name,
+            model.provider.as_deref().unwrap_or("-"),
+            model
+                .max_context_size
+                .map(|t| format!("ctx {t}"))
+                .unwrap_or_default()
+        );
+    }
+    println!();
+    println!("  进入会话：loongagent tui --local");
+    println!("  加 / 删 / 改：local add [服务商] · local delete <序号|名字|服务商> · local edit");
+    Ok(())
+}
+
+/// `loongagent local delete <slot|model|provider>`.
+///
+/// By three names because all three are things a person has in their head at different
+/// moments: the slot they see in the list, the model id they typed, or the provider they
+/// pasted a bad key for and want gone entirely.
+fn local_delete(path: &Path, selector: &str) -> Result<(), String> {
+    let mut blocks = read_local_blocks(path);
+    if blocks.is_empty() {
+        return Err(format!("{} 还没有配置模型", path.display()));
+    }
+    let doomed = select_local(&blocks, selector)?;
+    let removed: Vec<String> = doomed
+        .iter()
+        .map(|index| blocks[*index].model.name.clone())
+        .collect();
+    // Backwards, so the indices stay valid as the list shrinks.
+    for index in doomed.iter().rev() {
+        blocks.remove(*index);
+    }
+    // An empty `[router]` naming nothing would not load; `write_local_blocks` drops the
+    // section when the last model goes.
+    write_local_blocks(path, &blocks)?;
+    println!("已删除：{}", removed.join("、"));
+    println!("剩下 {} 个模型 — `loongagent local` 看全部", blocks.len());
+    Ok(())
+}
+
+/// Which entries a selector names. Index, then model name, then provider.
+fn select_local(blocks: &[LocalBlock], selector: &str) -> Result<Vec<usize>, String> {
+    if let Ok(slot) = selector.parse::<usize>() {
+        if slot >= 1 && slot <= blocks.len() {
+            return Ok(vec![slot - 1]);
+        }
+        return Err(format!("没有第 {slot} 个模型（共 {} 个）", blocks.len()));
+    }
+    let by_name: Vec<usize> = blocks
+        .iter()
+        .enumerate()
+        .filter(|(_, block)| block.model.name == selector)
+        .map(|(index, _)| index)
+        .collect();
+    if !by_name.is_empty() {
+        return Ok(by_name);
+    }
+    let by_provider: Vec<usize> = blocks
+        .iter()
+        .enumerate()
+        .filter(|(_, block)| block.model.provider.split('/').next() == Some(selector))
+        .map(|(index, _)| index)
+        .collect();
+    if !by_provider.is_empty() {
+        return Ok(by_provider);
+    }
+    Err(format!(
+        "{selector:?} 没匹配到任何模型 — `loongagent local` 列出已配置的"
+    ))
+}
+
+/// `loongagent local edit` — hand the file to the editor named by `$VISUAL`/`$EDITOR`.
+///
+/// The file is meant to be read and edited by a person: it is commented, and the comments
+/// are the documentation. Opening it is more honest than a form that can only express the
+/// settings somebody anticipated.
+fn local_edit(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Err(format!(
+            "{} 还不存在 — 先用 `loongagent local add` 配一个",
+            path.display()
+        ));
+    }
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .map_err(|_| format!("没有设置 $VISUAL 或 $EDITOR — 文件在 {}", path.display()))?;
+    let status = std::process::Command::new(&editor)
+        .arg(path)
+        .status()
+        .map_err(|e| format!("运行 {editor:?} 失败：{e}"))?;
+    if !status.success() {
+        return Err(format!("{editor} 退出状态 {status}"));
+    }
+    Ok(())
 }
 
 /// Ask for one API key, validate it, and write it where a local install keeps things.
@@ -2755,7 +2879,14 @@ fn local(mut args: Args) -> Result<(), String> {
 /// `always` decides whether an already-configured install is asked again. A first run
 /// asks because there is nothing to run otherwise; `local add` asks because asking is
 /// the whole point of it.
-fn configure_local(settings: &loong_config::Profile, always: bool) -> Result<(), String> {
+/// `only` names a provider to configure directly, which skips the list — the difference
+/// between `local add` and `local add dashscope`, and the reason re-configuring a provider
+/// you already have does not make you find it in a menu again.
+fn configure_local(
+    settings: &loong_config::Profile,
+    always: bool,
+    only: Option<&str>,
+) -> Result<(), String> {
     let already = !settings.models.is_empty();
     if already && !always {
         return Ok(());
@@ -2770,7 +2901,6 @@ fn configure_local(settings: &loong_config::Profile, always: bool) -> Result<(),
     // of this and it was wrong twice over: it configured models nobody chose, and it did
     // so from a file (`<repo>/.env`) that belongs to a repository rather than to the
     // person, so what looked like "your key" could be a checkout's.
-    loong_tui_app::full_screen_needs_a_terminal()?;
     // A local server first: it is the cheapest tier by definition, it is the one that
     // needs nothing pasted, and if a key *is* found in the environment the prefill
     // moves the highlight to that provider anyway.
@@ -2780,6 +2910,15 @@ fn configure_local(settings: &loong_config::Profile, always: bool) -> Result<(),
             .filter(|p| p.local)
             .collect();
         ordered.extend(loong_config::catalog::PROVIDERS.iter().filter(|p| !p.local));
+        if let Some(named) = only {
+            ordered.retain(|p| p.id == named);
+            if ordered.is_empty() {
+                return Err(format!(
+                    "服务商目录里没有 {named:?} — 有的是：{}",
+                    loong_config::catalog::ids().join(", ")
+                ));
+            }
+        }
         ordered
             .into_iter()
             .map(|p| loong_tui_app::ProviderChoice {
@@ -2789,6 +2928,10 @@ fn configure_local(settings: &loong_config::Profile, always: bool) -> Result<(),
             })
             .collect()
     };
+    // Asked for only once the arguments are known to make sense — a wrong provider name
+    // is a wrong provider name whether or not there is a terminal to draw a form on, and
+    // reporting the terminal first would send somebody to check their TTY over a typo.
+    loong_tui_app::full_screen_needs_a_terminal()?;
     let prefill = key_already_exported().map(|(provider, key)| (provider.id.to_string(), key));
 
     let mut validate = |id: &str, key: &str| -> loong_tui_app::Validation {
@@ -3057,6 +3200,35 @@ struct LocalModel {
     context_window: Option<u64>,
 }
 
+/// A model **and the text it is written as**.
+///
+/// The text is kept because this file is meant to be edited by a person: a comment inside
+/// one model's block has to survive adding a model for a different provider, and rebuilding
+/// every block from parsed fields deletes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LocalBlock {
+    text: String,
+    model: LocalModel,
+}
+
+impl LocalBlock {
+    /// Render a block for a model this program is adding.
+    fn render(model: LocalModel) -> Self {
+        let mut text = String::from("[[models]]\n");
+        text.push_str(&format!("name = \"{}\"\n", toml_escape(&model.name)));
+        text.push_str(&format!(
+            "provider = \"{}\"\n",
+            toml_escape(&model.provider)
+        ));
+        if let Some(tokens) = model.context_window {
+            text.push_str(&format!(
+                "max_context_size = {tokens}   # 服务商自己报的上下文窗口\n"
+            ));
+        }
+        LocalBlock { text, model }
+    }
+}
+
 /// Add or replace one provider's models in `local.toml`, keeping everything else.
 ///
 /// Deliberately **text surgery, not a re-serialize**: the file is meant to be read and
@@ -3071,81 +3243,134 @@ fn upsert_local_models(
     provider_id: &str,
     models: Vec<LocalModel>,
 ) -> Result<Vec<String>, String> {
-    let existing = std::fs::read_to_string(path).unwrap_or_default();
-    let (head, mut blocks, tail) = split_model_blocks(&existing);
-
-    // Drop this provider's previous blocks; they are being replaced.
-    let prefix = format!("provider = \"{provider_id}/");
-    blocks.retain(|block| !block.contains(&prefix));
-
-    for model in &models {
-        let mut block = String::from("[[models]]\n");
-        block.push_str(&format!("name = \"{}\"\n", toml_escape(&model.name)));
-        block.push_str(&format!(
-            "provider = \"{}\"\n",
-            toml_escape(&model.provider)
-        ));
-        if let Some(tokens) = model.context_window {
-            block.push_str(&format!(
-                "max_context_size = {tokens}   # 服务商自己报的上下文窗口\n"
-            ));
-        }
-        blocks.push(block);
-    }
-
+    let mut blocks = read_local_blocks(path);
+    // This provider's previous entries are being replaced, not duplicated — pasting a new
+    // key for a provider already configured should update it. Every other provider's block
+    // is left exactly as it was, comments and all.
+    let prefix = format!("{provider_id}/");
+    blocks.retain(|block| !block.model.provider.starts_with(&prefix));
     let names: Vec<String> = models.iter().map(|m| m.name.clone()).collect();
-    if blocks.is_empty() && models.is_empty() {
-        // Nothing was configured and nothing is being added: leave the file alone
-        // rather than writing a header with no models in it.
+    blocks.extend(models.into_iter().map(LocalBlock::render));
+    if blocks.is_empty() {
+        // Nothing was configured and nothing is being added: leave the file alone rather
+        // than writing a header with no models under it.
         return Ok(names);
     }
+    write_local_blocks(path, &blocks)?;
+    Ok(names)
+}
 
-    // The router's default is "the model a turn starts with", so it has to name a model
-    // that exists. Written only when there is no section, so a hand-edited one — and the
-    // comments around it — survives an added provider.
-    let mut tail = tail;
-    if !tail.contains("[router]") {
-        if let Some(first) = blocks.first().and_then(|block| block_name(block)) {
-            tail = format!("[router]\ndefault = \"{}\"\n", toml_escape(&first));
-        }
-    }
+/// Every model the local file declares, in the order it declares them.
+///
+/// Read as data and written back as text, which is the shape this file needs: the
+/// comments in it are the only documentation these settings have, so a pass through a
+/// TOML serializer would quietly delete every one of them.
+fn read_local_blocks(path: &Path) -> Vec<LocalBlock> {
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let (_, blocks, _) = split_model_blocks(&existing);
+    blocks
+        .into_iter()
+        .filter_map(|text| {
+            let model = block_model(&text)?;
+            Some(LocalBlock { text, model })
+        })
+        .collect()
+}
+
+/// Write the model section, keeping the header and everything after it.
+fn write_local_blocks(path: &Path, blocks: &[LocalBlock]) -> Result<(), String> {
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let (head, _, tail) = split_model_blocks(&existing);
 
     let mut text = if head.trim().is_empty() {
         local_header().to_string()
     } else {
         head
     };
-    for block in &blocks {
-        text.push_str(block);
+    for block in blocks {
+        text.push_str(&block.text);
         text.push('\n');
     }
-    text.push_str(&tail);
+    text.push_str(&route_tail(&tail, blocks));
 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     }
     std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(names)
+    Ok(())
 }
 
-/// The `name = "…"` a model block declares. Read back rather than remembered, so a file
-/// somebody edited by hand still gets a router default naming something that exists.
-fn block_name(block: &str) -> Option<String> {
-    for line in block.lines() {
-        // `continue`, not `?`: the first line of a block is `[[models]]`, and bailing on
-        // it would mean this never found the name in a block this program wrote itself.
-        let Some(rest) = line.trim().strip_prefix("name") else {
-            continue;
-        };
-        let Some(rest) = rest.trim_start().strip_prefix('=') else {
-            continue;
-        };
-        let Some(rest) = rest.trim().strip_prefix('"') else {
-            continue;
-        };
-        return Some(rest.split('"').next().unwrap_or_default().to_string());
+/// What follows the models, with the router's default pointed at something that exists.
+///
+/// `router.default` is "the model a turn starts with", and the resolver **refuses** a
+/// default naming a model that is not there — so removing the model it named has to move
+/// it, and removing the last model has to take the section with it. Getting this wrong
+/// leaves a file that will not load, which is a worse outcome than any of the edits.
+fn route_tail(tail: &str, blocks: &[LocalBlock]) -> String {
+    let Some(first) = blocks.first() else {
+        return String::new();
+    };
+    let default_line = format!("default = \"{}\"\n", toml_escape(&first.model.name));
+    if !tail.contains("[router]") {
+        return format!("[router]\n{default_line}");
     }
-    None
+    if !tail
+        .lines()
+        .any(|line| line.trim_start().starts_with("default"))
+    {
+        // The section is there but says nothing; the default goes directly under it, and
+        // any comment somebody left in the section stays where it was.
+        return tail.replacen("[router]", &format!("[router]\n{default_line}"), 1);
+    }
+    let mut out = String::new();
+    let mut done = false;
+    for line in tail.lines() {
+        if !done && line.trim_start().starts_with("default") {
+            out.push_str(&default_line);
+            done = true;
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// One `[[models]]` block read back as data.
+fn block_model(block: &str) -> Option<LocalModel> {
+    let (mut name, mut provider, mut window) = (None, None, None);
+    for line in block.lines() {
+        let line = line.trim();
+        if let Some(value) = quoted_value(line, "name") {
+            name = Some(value);
+        } else if let Some(value) = quoted_value(line, "provider") {
+            provider = Some(value);
+        } else if let Some(value) = number_value(line, "max_context_size") {
+            window = Some(value);
+        }
+    }
+    Some(LocalModel {
+        name: name?,
+        provider: provider?,
+        context_window: window,
+    })
+}
+
+/// `key = "value"`, ignoring anything after the closing quote (this writer leaves a
+/// trailing comment there).
+fn quoted_value(line: &str, key: &str) -> Option<String> {
+    let rest = line.strip_prefix(key)?;
+    let rest = rest.trim_start().strip_prefix('=')?.trim();
+    let rest = rest.strip_prefix('"')?;
+    Some(rest.split('"').next()?.to_string())
+}
+
+/// `key = 4096`, ignoring a trailing comment.
+fn number_value(line: &str, key: &str) -> Option<u64> {
+    let rest = line.strip_prefix(key)?;
+    let rest = rest.trim_start().strip_prefix('=')?.trim();
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
 }
 
 /// Split a `local.toml` into what comes before the models, the `[[models]]` blocks
@@ -3809,6 +4034,172 @@ mod tests {
     }
 
     #[test]
+    fn a_local_session_needs_a_model_before_the_terminal_is_taken_over() {
+        // A session with nothing to run cannot answer anything, and its first minutes are
+        // spent discovering that. Cancelling the wizard is the case this exists for.
+        let mut args = Args {
+            session: None,
+            session_spec: None,
+            new_session: false,
+            session_source: SessionSource::Created,
+            cwd: std::env::temp_dir(),
+            model: None,
+            profile: None,
+            local: true,
+            bind: "127.0.0.1".to_string(),
+            control_url: None,
+            control_key: None,
+            control_token: None,
+            control_system: false,
+            port: 0,
+            stdio: false,
+            budget: None,
+            keep_newest: None,
+            max_steps: None,
+            positional: Vec::new(),
+        };
+        let empty = loong_config::Profile::default();
+        let err = session_needs_a_model(&args, true, &empty).unwrap_err();
+        assert!(err.contains("local add"), "and names the command: {err}");
+
+        // With a model, the session opens.
+        let mut with = loong_config::Profile::default();
+        with.models.push(named("cheap"));
+        assert!(session_needs_a_model(&args, true, &with).is_ok());
+
+        // `--model demo-write` is its own answer: a session asked for explicitly has one.
+        args.model = Some("demo-write".to_string());
+        assert!(session_needs_a_model(&args, true, &empty).is_ok());
+        args.model = None;
+
+        // A managed install is left alone: its models come from a pack the user cannot
+        // edit, so refusing would strand them with no interface and no way to fix it.
+        assert!(session_needs_a_model(&args, false, &empty).is_ok());
+    }
+
+    /// A `ModelSpec` with a name and nothing else.
+    fn named(name: &str) -> loong_config::ModelSpec {
+        loong_config::ModelSpec {
+            name: name.to_string(),
+            kind: "openai-compat".to_string(),
+            base_url: "http://127.0.0.1:1/v1".to_string(),
+            model: name.to_string(),
+            api_key: None,
+            budget_tokens: None,
+            max_context_size: None,
+            provider: None,
+        }
+    }
+
+    #[test]
+    fn a_deleted_model_moves_the_router_default_rather_than_leaving_it_dangling() {
+        // `router.default` naming a model that is not there does not load, so removing the
+        // model it named has to move it. Getting this wrong leaves a file that cannot be
+        // read, which is worse than any of the edits that lead to it.
+        let path = local_temp("delete-default");
+        upsert_local_models(
+            &path,
+            "deepseek",
+            vec![model("ds-flash", "deepseek/ds-flash")],
+        )
+        .unwrap();
+        upsert_local_models(&path, "moonshot", vec![model("kimi", "moonshot/kimi")]).unwrap();
+
+        let mut blocks = read_local_blocks(&path);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].model.name, "ds-flash");
+        blocks.remove(0);
+        write_local_blocks(&path, &blocks).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("default = \"kimi\""), "{text}");
+        assert!(!text.contains("ds-flash"), "{text}");
+    }
+
+    #[test]
+    fn deleting_the_last_model_takes_the_router_section_with_it() {
+        // A `[router]` whose default names nothing is a file that will not load.
+        let path = local_temp("delete-last");
+        upsert_local_models(&path, "ollama", vec![model("qwen", "ollama/qwen")]).unwrap();
+        write_local_blocks(&path, &[]).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        // Counted as sections, not as substrings: the header comment mentions
+        // `[[models]]` to explain what the file is.
+        assert_eq!(sections(&text, "[router]"), 0, "{text}");
+        assert_eq!(sections(&text, "[[models]]"), 0, "{text}");
+        assert!(
+            text.contains("loongagent"),
+            "the header stays, so the file still explains itself: {text}"
+        );
+    }
+
+    #[test]
+    fn a_selector_names_a_slot_a_model_or_a_whole_provider() {
+        let path = local_temp("select");
+        upsert_local_models(
+            &path,
+            "deepseek",
+            vec![model("ds-flash", "deepseek/ds-flash")],
+        )
+        .unwrap();
+        upsert_local_models(
+            &path,
+            "moonshot",
+            vec![
+                model("kimi-k3", "moonshot/kimi-k3"),
+                model("kimi-k2", "moonshot/kimi-k2"),
+            ],
+        )
+        .unwrap();
+        let blocks = read_local_blocks(&path);
+        assert_eq!(blocks.len(), 3);
+
+        assert_eq!(select_local(&blocks, "1").unwrap(), vec![0]);
+        assert_eq!(select_local(&blocks, "kimi-k3").unwrap(), vec![1]);
+        assert_eq!(
+            select_local(&blocks, "moonshot").unwrap(),
+            vec![1, 2],
+            "a provider names all of its models, for a key that turned out wrong"
+        );
+        assert_eq!(
+            select_local(&blocks, "deepseek").unwrap(),
+            vec![0],
+            "and a provider with one model names that one"
+        );
+
+        let err = select_local(&blocks, "7").unwrap_err();
+        assert!(err.contains("没有第 7 个"), "{err}");
+        let err = select_local(&blocks, "nope").unwrap_err();
+        assert!(err.contains("nope"), "{err}");
+    }
+
+    #[test]
+    fn deleting_a_provider_leaves_the_other_providers_text_alone() {
+        let path = local_temp("delete-provider");
+        std::fs::write(
+            &path,
+            "# mine\n\n[[models]]\nname = \"ds\"\nprovider = \"deepseek/ds\"\n\
+             # keep this note\n\n[[models]]\nname = \"kimi\"\nprovider = \"moonshot/kimi\"\n\n\
+             [router]\ndefault = \"ds\"\n",
+        )
+        .unwrap();
+
+        let mut blocks = read_local_blocks(&path);
+        let doomed = select_local(&blocks, "deepseek").unwrap();
+        for index in doomed.iter().rev() {
+            blocks.remove(*index);
+        }
+        write_local_blocks(&path, &blocks).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("deepseek/ds"), "{text}");
+        assert!(text.contains("moonshot/kimi"), "{text}");
+        assert!(text.contains("# mine"), "{text}");
+        assert!(text.contains("default = \"kimi\""), "{text}");
+    }
+
+    #[test]
     fn a_first_provider_writes_a_header_its_models_and_a_router_default() {
         let path = local_temp("first");
         let written = upsert_local_models(
@@ -3977,15 +4368,6 @@ mod tests {
             head.contains("# header line"),
             "and the header is the header: {head:?}"
         );
-    }
-
-    #[test]
-    fn a_block_declares_its_own_name() {
-        assert_eq!(
-            block_name("[[models]]\nname = \"kimi-k3\"\nprovider = \"m/k\"\n"),
-            Some("kimi-k3".to_string())
-        );
-        assert_eq!(block_name("[[models]]\n"), None);
     }
 
     #[test]

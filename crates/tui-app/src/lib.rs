@@ -470,12 +470,6 @@ pub struct App {
     /// same question* to a different model, and a question that got edited in between
     /// would make the two answers incomparable.
     pub last_prompt: Option<String>,
-    /// Set by `/model`: leave so the models can be configured, then come back.
-    pub reconfigure: bool,
-    /// Whether *this* session's models are the person's to configure. False on a managed
-    /// install, where they come from the control plane and the honest answer to `/model`
-    /// is to say so rather than to leave and come back having changed nothing.
-    pub can_configure: bool,
     /// Which models a background check has confirmed, by name. Absent means nobody has
     /// checked yet, which is not the same as failed.
     pub health: std::collections::BTreeMap<String, bool>,
@@ -516,8 +510,6 @@ impl App {
             models: Vec::new(),
             selected: String::new(),
             last_prompt: None,
-            reconfigure: false,
-            can_configure: true,
             health: std::collections::BTreeMap::new(),
             quit: false,
         }
@@ -1079,28 +1071,6 @@ impl App {
                 self.input.clear();
                 self.cursor = 0;
                 Some(Action::Send(ToWorker::Yolo(!self.yolo)))
-            }
-            // Models are configured outside the session and then the session comes
-            // back, because the server resolves its models once at startup — see
-            // `Outcome::Reconfigure`.
-            "/model" | "/models" => {
-                self.input.clear();
-                self.cursor = 0;
-                // On a managed install the models come from the control plane, so leaving
-                // to "configure" them would end the session and come back having changed
-                // nothing. Saying so is the only honest answer (ADR-0016: an engineer
-                // picks a profile, not an endpoint).
-                if !self.can_configure {
-                    self.push_lines(vec![
-                        "· 这个会话的模型来自控制平面，不由你配置 — 换用 `loongagent use <name>`；\
-                         想自己配模型请用 `loongagent tui --local`"
-                            .to_string(),
-                    ]);
-                    return Some(Action::None);
-                }
-                self.push_lines(vec!["· 正在打开模型配置 — 配好后会回到这个会话".to_string()]);
-                self.reconfigure = true;
-                Some(Action::Quit)
             }
             // The transcript shows a summary of long tool output; this asks the log for
             // the rest.
@@ -1972,16 +1942,6 @@ impl App {
                         "/yolo" => {
                             "enter turns approval prompts off (the sandbox stays)".to_string()
                         }
-                        // Only where that is true. A completion that promises
-                        // configuration on an install whose models come from the control
-                        // plane is the kind of lie that costs somebody an evening.
-                        "/model" | "/models" if self.can_configure => {
-                            "enter opens model configuration, then returns to this session"
-                                .to_string()
-                        }
-                        "/model" | "/models" => {
-                            "this session's models come from the control plane".to_string()
-                        }
                         "/copy" => "enter copies the whole transcript".to_string(),
                         "/mouse" => "enter hands the mouse back to your terminal".to_string(),
                         // The model shortcuts, said in full only when they would work: a
@@ -2002,7 +1962,7 @@ impl App {
                                     None => format!("no model in slot {slot}"),
                                 }
                             }
-                            _ => "command — /help · /model · /exit · /logo · /mouse · /copy · /expand"
+                            _ => "command — /help · /exit · /logo · /mouse · /copy · /expand"
                                 .to_string(),
                         },
                     },
@@ -2569,20 +2529,6 @@ pub struct KeyChoice {
     pub provider: String,
     pub key: String,
     pub validation: Validation,
-}
-
-/// Why the interface closed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Outcome {
-    /// The person is done with this session.
-    Quit,
-    /// The person asked to configure models and expects to come back to this session.
-    ///
-    /// A session's server resolves its models once, at startup, so a model added while
-    /// one is running is invisible to it. Saying "configure, then come back" is the
-    /// honest way to make the change take effect — and re-entering against the same log
-    /// means the conversation is still there when it does.
-    Reconfigure,
 }
 
 /// What a background check found out about one model, as the bar needs it.
@@ -3207,9 +3153,7 @@ pub fn run<T: Transport + Send + 'static>(
     intro: Vec<String>,
     interrupt: Option<Box<dyn Fn()>>,
     health: Option<Receiver<ModelHealth>>,
-    // Whether `/model` may offer to configure anything. See `App::can_configure`.
-    can_configure: bool,
-) -> Result<Outcome, String> {
+) -> Result<(), String> {
     use ratatui::backend::CrosstermBackend;
     use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture};
     use ratatui::crossterm::execute;
@@ -3238,7 +3182,6 @@ pub fn run<T: Transport + Send + 'static>(
     let (to_worker, from_worker) = spawn_worker(client, shown);
     let mut app = App::new(session, schema);
     app.interrupt = interrupt;
-    app.can_configure = can_configure;
     if let Some(list) = models {
         app.set_models(list);
     }
@@ -3264,7 +3207,7 @@ pub fn run<T: Transport + Send + 'static>(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).map_err(|e| e.to_string())?;
 
-    let outcome = (|| -> Result<Outcome, String> {
+    let outcome = (|| -> Result<(), String> {
         loop {
             app.drain(&from_worker);
             // A background check reports when it reports; the bar is redrawn either way,
@@ -3308,15 +3251,7 @@ pub fn run<T: Transport + Send + 'static>(
                             }
                             // The screen is redrawn next pass; the terminal is what changed.
                         }
-                        // `/exit` and `/model` both leave; they differ in what the
-                        // caller is asked to do next, and the app already recorded which.
-                        Action::Quit => {
-                            return Ok(if app.reconfigure {
-                                Outcome::Reconfigure
-                            } else {
-                                Outcome::Quit
-                            })
-                        }
+                        Action::Quit => return Ok(()),
                         Action::None => {}
                     },
                     event::Event::Mouse(mouse) => app.handle_mouse(mouse.kind),
@@ -3324,11 +3259,7 @@ pub fn run<T: Transport + Send + 'static>(
                 }
             }
             if app.quit {
-                return Ok(if app.reconfigure {
-                    Outcome::Reconfigure
-                } else {
-                    Outcome::Quit
-                });
+                return Ok(());
             }
         }
     })();
@@ -5942,73 +5873,12 @@ mod tests {
     }
 
     #[test]
-    fn slash_model_asks_to_leave_and_configure() {
-        // Configure *outside* the session and come back, because a session's server
-        // resolves its models once at startup — a model added while one runs is invisible
-        // to it. Leaving is how the change takes effect; the same log is how the
-        // conversation survives it.
-        let mut app = app_with_models(&["cheap", "strong"]);
-        app.input = "/model".to_string();
-        app.cursor = 6;
-        assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::Quit);
-        assert!(app.reconfigure, "and it says why it is leaving");
-        assert!(app.input.is_empty(), "the command does not reach the agent");
-        let said = app.lines.join("\n");
-        assert!(
-            despaced(&said).contains(&despaced("回到这个会话")),
-            "so leaving does not look like losing the session: {said:?}"
-        );
-    }
-
-    #[test]
-    fn slash_exit_does_not_ask_to_configure() {
-        // The two ways out differ, and only the caller can tell them apart.
+    fn slash_exit_leaves() {
         let mut app = app_with_models(&["cheap"]);
         app.input = "/exit".to_string();
         app.cursor = 5;
         assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::Quit);
-        assert!(!app.reconfigure, "leaving is just leaving");
-    }
-
-    #[test]
-    fn the_model_command_is_not_sent_to_a_model() {
-        // `/model` is the interface's own; a session with a skill called `model` must not
-        // be what answers, or configuring would look like a prompt.
-        for typed in ["/model", "/models", "/MODEL"] {
-            let mut app = app_with_models(&["cheap"]);
-            app.input = typed.to_string();
-            app.cursor = typed.chars().count();
-            assert_eq!(
-                app.handle_key(key(KeyCode::Enter)),
-                Action::Quit,
-                "{typed} must be handled here, not submitted"
-            );
-            assert!(app.reconfigure, "{typed}");
-        }
-    }
-
-    #[test]
-    fn a_managed_session_says_so_instead_of_leaving_to_change_nothing() {
-        // On a managed install the models come from the control plane, so leaving to
-        // "configure" them would end the session and come back having changed nothing.
-        let mut app = app_with_models(&["from-the-pack"]);
-        app.can_configure = false;
-        app.input = "/model".to_string();
-        app.cursor = 6;
-        assert_eq!(
-            app.handle_key(key(KeyCode::Enter)),
-            Action::None,
-            "the session stays where it is"
-        );
-        assert!(
-            !app.reconfigure,
-            "and nothing asked the caller to reconfigure"
-        );
-        let said = app.lines.join("\n");
-        assert!(
-            despaced(&said).contains(&despaced("控制平面")),
-            "and it explains why: {said:?}"
-        );
+        assert!(app.input.is_empty(), "the command does not reach the agent");
     }
 
     #[test]

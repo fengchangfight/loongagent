@@ -215,3 +215,135 @@ fn a_repository_may_not_declare_the_install_local() {
     assert!(!ok, "the project layer must not be able to say this");
     assert!(stderr.contains("managed"), "{stderr}");
 }
+
+// ---------------------------------------------------- the `local` subcommands
+
+/// A home with three models from two providers, as `local add` would have left it.
+fn home_with_models() -> std::path::PathBuf {
+    let home = workspace();
+    std::fs::write(
+        home.join("local.toml"),
+        "[[models]]\nname = \"qwen2.5:3b\"\nprovider = \"ollama/qwen2.5:3b\"\n\
+         max_context_size = 32768\n\n\
+         [[models]]\nname = \"deepseek-flash\"\nprovider = \"deepseek/deepseek-flash\"\n\n\
+         [[models]]\nname = \"deepseek-v4-pro\"\nprovider = \"deepseek/deepseek-v4-pro\"\n\n\
+         [router]\ndefault = \"qwen2.5:3b\"\n",
+    )
+    .unwrap();
+    home
+}
+
+/// The model names a `local` listing shows, in order.
+fn listed(stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .filter(|line| line.trim_start().starts_with('[') || line.trim_start().starts_with("▸["))
+        .filter_map(|line| line.split(']').nth(1))
+        .map(|rest| rest.split_whitespace().next().unwrap_or("").to_string())
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+#[test]
+fn local_lists_what_is_configured_and_where_it_lives() {
+    let home = home_with_models();
+    let (ok, stdout, stderr) = run(&home, &["local"]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("local.toml"), "the file is named: {stdout}");
+    assert_eq!(
+        listed(&stdout),
+        vec!["qwen2.5:3b", "deepseek-flash", "deepseek-v4-pro"],
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("ctx 32768"),
+        "and what the vendor said about it: {stdout}"
+    );
+    assert!(
+        stdout.contains("local delete"),
+        "and how to change it: {stdout}"
+    );
+}
+
+#[test]
+fn local_is_empty_before_anything_is_configured() {
+    let home = workspace();
+    let (ok, stdout, stderr) = run(&home, &["local"]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("还没配置模型"), "{stdout}");
+    assert!(stdout.contains("local add"), "and says how: {stdout}");
+}
+
+#[test]
+fn local_delete_by_slot_removes_one_and_moves_the_default() {
+    let home = home_with_models();
+    let (ok, stdout, stderr) = run(&home, &["local", "delete", "1"]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("qwen2.5:3b"), "it says what went: {stdout}");
+
+    let text = std::fs::read_to_string(home.join("local.toml")).unwrap();
+    assert!(!text.contains("ollama/"), "{text}");
+    assert!(
+        text.contains("default = \"deepseek-flash\""),
+        "the default followed the deletion instead of dangling: {text}"
+    );
+
+    let (_, stdout, _) = run(&home, &["local"]);
+    assert_eq!(
+        listed(&stdout),
+        vec!["deepseek-flash", "deepseek-v4-pro"],
+        "{stdout}"
+    );
+}
+
+#[test]
+fn local_delete_by_provider_takes_all_of_that_provider() {
+    let home = home_with_models();
+    let (ok, _, stderr) = run(&home, &["local", "delete", "deepseek"]);
+    assert!(ok, "{stderr}");
+
+    let text = std::fs::read_to_string(home.join("local.toml")).unwrap();
+    assert!(!text.contains("deepseek/"), "{text}");
+    assert!(text.contains("ollama/qwen2.5:3b"), "{text}");
+    assert!(text.contains("default = \"qwen2.5:3b\""), "{text}");
+}
+
+#[test]
+fn local_delete_says_what_is_configured_when_the_selector_matches_nothing() {
+    let home = home_with_models();
+    let (ok, _stdout, stderr) = run(&home, &["local", "delete", "gpt-nothing"]);
+    assert!(!ok);
+    assert!(stderr.contains("gpt-nothing"), "{stderr}");
+    assert!(
+        stderr.contains("loongagent local"),
+        "and points at the listing: {stderr}"
+    );
+    // Nothing was written: a failed delete must not half-apply.
+    let text = std::fs::read_to_string(home.join("local.toml")).unwrap();
+    assert!(text.contains("deepseek-v4-pro"), "{text}");
+}
+
+#[test]
+fn local_add_named_provider_refuses_a_name_the_catalog_does_not_know() {
+    let home = workspace();
+    let (ok, _stdout, stderr) = run(&home, &["local", "add", "notaprovider"]);
+    assert!(!ok);
+    assert!(stderr.contains("notaprovider"), "{stderr}");
+    assert!(
+        stderr.contains("ollama"),
+        "and lists what it does know: {stderr}"
+    );
+}
+
+#[test]
+fn the_local_subcommands_say_what_there_is_instead_of_guessing() {
+    let home = workspace();
+    let (ok, _stdout, stderr) = run(&home, &["local", "delete"]);
+    assert!(!ok);
+    assert!(stderr.contains("usage"), "{stderr}");
+
+    let (ok, _stdout, stderr) = run(&home, &["local", "frobnicate"]);
+    assert!(!ok);
+    assert!(stderr.contains("frobnicate"), "{stderr}");
+    assert!(stderr.contains("local add"), "{stderr}");
+}

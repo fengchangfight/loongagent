@@ -2670,6 +2670,12 @@ impl LocalWizard {
         else {
             return WizardAction::None;
         };
+        // Every key that does something other than produce a character is a key somebody
+        // cannot type. That is the rule this screen got wrong twice: `a` toggled
+        // everything until somebody tried to filter for `flash`, and *space* toggled the
+        // row under the cursor until somebody tried to type two words. Both are ordinary
+        // characters in the field being edited, so neither may be a command.
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             // Back, not out: the key is still typed and the provider is still chosen, so
             // escaping the list should cost a keystroke, not the whole form.
@@ -2684,22 +2690,35 @@ impl LocalWizard {
                 // models is not a thing anybody meant to do. The help line says so.
                 *cursor = 0;
             }
-            KeyCode::Up | KeyCode::BackTab => {
+            KeyCode::Up => {
                 *cursor = cursor.saturating_sub(1);
             }
-            KeyCode::Down | KeyCode::Tab => {
+            KeyCode::Down => {
                 if count > 0 {
                     *cursor = (*cursor + 1).min(count - 1);
                 }
             }
-            KeyCode::Char(' ') => {
+            // `Tab` ticks the row and moves on, `shift+tab` ticks and moves back — the
+            // gesture people know from every fuzzy finder, and it means a run of models
+            // costs one key each instead of two.
+            KeyCode::Tab => {
                 if let Some(index) = visible.get(*cursor) {
                     ticked[*index] = !ticked[*index];
                 }
+                if count > 0 {
+                    *cursor = (*cursor + 1).min(count - 1);
+                }
             }
-            // Toggle everything *on screen*: with a filter typed, "all" means the part
-            // of the list being looked at.
-            KeyCode::Char('a') => {
+            KeyCode::BackTab => {
+                if let Some(index) = visible.get(*cursor) {
+                    ticked[*index] = !ticked[*index];
+                }
+                *cursor = cursor.saturating_sub(1);
+            }
+            // `ctrl+a`, the gesture every list has used for "all of them" since before
+            // terminals had lists. It is 0x01, so unlike `a` it cannot arrive as text —
+            // though `screen` uses it as its prefix, so `Tab` remains the way through.
+            KeyCode::Char('a') if ctrl => {
                 let any_off = visible.iter().any(|index| !ticked[*index]);
                 for index in visible {
                     ticked[index] = any_off;
@@ -2709,6 +2728,8 @@ impl LocalWizard {
                 filter.pop();
                 *cursor = 0;
             }
+            // Everything else is text, including a space: this is a field somebody types
+            // in, and the only characters it refuses are the ones bound above.
             KeyCode::Char(c) => {
                 filter.push(c);
                 *cursor = 0;
@@ -2803,7 +2824,12 @@ impl LocalWizard {
                 }
                 self.state = WizardState::Editing;
             }
-            KeyCode::Char(c) => {
+            // `!ctrl`, because a control chord is a command everywhere else in this program
+            // and never text — and in *this* field a stray `ctrl+a` would paste a letter
+            // into somebody's API key, which is the one string here that cannot be checked
+            // by looking at it. Alt is allowed through: on many layouts AltGr arrives as
+            // Alt plus the character it produces.
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if self.selected().map(|p| p.needs_key).unwrap_or(true) {
                     self.key.push(c);
                 }
@@ -3019,9 +3045,9 @@ fn draw_model_picker(frame: &mut ratatui::Frame, wizard: &LocalWizard) {
     // reach the two you want without walking past the other thirty-eight.
     let picked = ticked.iter().any(|t| *t);
     let help = if picked {
-        "输入关键字筛选 · 空格 勾选 · a 全选当前筛选 · enter 写入 · esc 回上一步"
+        "输入筛选 · tab 勾选 · ctrl+a 全选当前筛选 · enter 写入 · esc 回上一步"
     } else {
-        "先输入关键字缩小范围（如 flash、3.7、kimi），再空格勾选"
+        "先输入关键字缩小范围（如 flash、3.7、kimi），再按 tab 勾选"
     };
     frame.render_widget(
         Paragraph::new(help.to_string()).style(if picked {
@@ -3321,6 +3347,10 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
     }
 
     fn draw(app: &mut App, width: u16, height: u16) -> String {
@@ -5268,7 +5298,7 @@ mod tests {
             wizard.handle_key(key(KeyCode::Char(c)));
         }
         assert_eq!(wizard.visible().len(), 1, "the filter found the one");
-        wizard.handle_key(key(KeyCode::Char(' ')));
+        wizard.handle_key(key(KeyCode::Tab));
         let chosen = wizard.chosen();
         assert_eq!(chosen.len(), 1, "{chosen:?}");
         assert_eq!(chosen[0].0, "qwen-3.8-17");
@@ -5282,7 +5312,7 @@ mod tests {
             wizard.handle_key(key(KeyCode::Char(c)));
         }
         assert_eq!(wizard.visible().len(), 2);
-        wizard.handle_key(key(KeyCode::Char('a')));
+        wizard.handle_key(ctrl('a'));
         let chosen: Vec<String> = wizard.chosen().into_iter().map(|(n, _)| n).collect();
         assert_eq!(
             chosen,
@@ -5302,7 +5332,7 @@ mod tests {
             for c in format!("model-{length:02}").chars() {
                 wizard.handle_key(key(KeyCode::Char(c)));
             }
-            wizard.handle_key(key(KeyCode::Char(' ')));
+            wizard.handle_key(key(KeyCode::Tab));
             assert_eq!(
                 wizard.chosen().len(),
                 1,
@@ -5325,7 +5355,7 @@ mod tests {
         }
         assert_eq!(wizard.visible(), vec![3], "the filter narrowed the list");
 
-        wizard.handle_key(key(KeyCode::Char(' ')));
+        wizard.handle_key(key(KeyCode::Tab));
         let chosen = wizard.chosen();
         assert_eq!(chosen.len(), 1, "{chosen:?}");
         assert_eq!(chosen[0].0, "qwen-coder-plus");
@@ -5351,14 +5381,14 @@ mod tests {
     #[test]
     fn toggle_all_means_all_of_what_is_on_screen() {
         let mut wizard = choosing(&["qwen-flash", "qwen-max", "kimi-k3"]);
-        wizard.handle_key(key(KeyCode::Char('a')));
+        wizard.handle_key(ctrl('a'));
         assert_eq!(
             wizard.chosen().len(),
             3,
-            "`a` on an empty list takes it all"
+            "`ctrl+a` on an empty list takes it all"
         );
 
-        wizard.handle_key(key(KeyCode::Char('a')));
+        wizard.handle_key(ctrl('a'));
         assert!(wizard.chosen().is_empty(), "and `a` again gives it back");
     }
 
@@ -5370,7 +5400,7 @@ mod tests {
             WizardAction::None,
             "adding a provider that adds no models is not a thing anybody meant"
         );
-        wizard.handle_key(key(KeyCode::Char(' ')));
+        wizard.handle_key(key(KeyCode::Tab));
         assert_eq!(wizard.handle_key(key(KeyCode::Enter)), WizardAction::Submit);
     }
 
@@ -5383,7 +5413,7 @@ mod tests {
             wizard.handle_key(key(KeyCode::Down));
         }
         // The cursor is kept in range, so space still lands on the last row.
-        wizard.handle_key(key(KeyCode::Char(' ')));
+        wizard.handle_key(key(KeyCode::Tab));
         let chosen = wizard.chosen();
         assert_eq!(chosen.len(), 1, "{chosen:?}");
         assert_eq!(chosen[0].0, "c", "the far end of the list was reachable");
@@ -5419,7 +5449,7 @@ mod tests {
              thing that helps:\n{screen}"
         );
 
-        wizard.handle_key(key(KeyCode::Char(' ')));
+        wizard.handle_key(key(KeyCode::Tab));
         let screen = drawn_wizard(&wizard, 90, 20);
         assert!(screen.contains("[x] qwen-flash"), "{screen}");
         assert!(
@@ -5427,7 +5457,7 @@ mod tests {
             "{screen}"
         );
         assert!(
-            despaced(&screen).contains(&despaced("a 全选当前筛选")),
+            despaced(&screen).contains(&despaced("ctrl+a 全选当前筛选")),
             "and taking all of a narrowed list is advertised: {screen}"
         );
     }
@@ -5442,7 +5472,7 @@ mod tests {
         for _ in 0..30 {
             wizard.handle_key(key(KeyCode::Down));
         }
-        wizard.handle_key(key(KeyCode::Char(' ')));
+        wizard.handle_key(key(KeyCode::Tab));
         let chosen = wizard.chosen();
         assert_eq!(chosen.len(), 1, "{chosen:?}");
         assert_eq!(chosen[0].0, "model-31");
@@ -5455,6 +5485,79 @@ mod tests {
         assert!(
             !screen.contains("model-01"),
             "and the window moved rather than the cursor leaving it:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn a_control_chord_never_lands_in_the_api_key_field() {
+        // The same rule as the picker's, one screen earlier: a chord is a command, not
+        // text. `ctrl+a` in a key field would paste an `a` into a secret, and a secret is
+        // the one thing here nobody can check by looking at it.
+        let mut wizard = LocalWizard::new(providers());
+        for c in "sk-abcdefghij".chars() {
+            wizard.handle_key(key(KeyCode::Char(c)));
+        }
+        let before = wizard.key.clone();
+        for chord in ['a', 'e', 'u', 'k', 'w'] {
+            wizard.handle_key(ctrl(chord));
+        }
+        assert_eq!(wizard.key, before, "no chord reached the field");
+
+        // And ordinary typing still does.
+        wizard.handle_key(key(KeyCode::Char('z')));
+        assert_eq!(wizard.key, format!("{before}z"));
+    }
+
+    #[test]
+    fn the_filter_field_takes_every_character_a_model_id_can_have() {
+        // The bug this locks down, and it was the worst kind: `a` toggled everything and
+        // space toggled the row under the cursor, so neither could be *typed*. Filtering
+        // for `flash`, `max`, `llama`, `alpha` or `qwen 3.7` — ordinary things to want —
+        // was impossible, and the field that exists to narrow a long list was crippled by
+        // two of the most common characters in one.
+        let mut wizard = choosing(&["qwen-flash", "qwen-max", "llama-3", "alpha"]);
+        for c in "flash".chars() {
+            wizard.handle_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(
+            wizard.visible().len(),
+            1,
+            "`flash` narrowed the list, which needs the `a` to be text"
+        );
+
+        // A space is text as well.
+        let mut wizard = choosing(&["qwen-flash", "qwen-max"]);
+        for c in "qwen ".chars() {
+            wizard.handle_key(key(KeyCode::Char(c)));
+        }
+        let WizardState::Choosing { filter, .. } = &wizard.state else {
+            panic!("still choosing")
+        };
+        assert_eq!(filter, "qwen ", "the space landed in the field");
+
+        // And typing is not choosing: none of that ticked anything.
+        assert!(wizard.chosen().is_empty());
+    }
+
+    #[test]
+    fn ctrl_a_is_a_command_and_a_plain_a_is_a_letter() {
+        let mut wizard = choosing(&["qwen-flash", "qwen-max"]);
+        wizard.handle_key(key(KeyCode::Char('a')));
+        let WizardState::Choosing { filter, ticked, .. } = &wizard.state else {
+            panic!("still choosing")
+        };
+        assert_eq!(filter, "a", "a plain `a` is text");
+        assert!(ticked.iter().all(|t| !t), "and it ticked nothing");
+
+        // With ctrl it is the command, and it reaches nothing but the ticks.
+        wizard.handle_key(ctrl('a'));
+        let WizardState::Choosing { filter, ticked, .. } = &wizard.state else {
+            panic!("still choosing")
+        };
+        assert_eq!(filter, "a", "ctrl+a added no text");
+        assert!(
+            ticked.iter().all(|t| *t),
+            "it took everything the filter is showing"
         );
     }
 

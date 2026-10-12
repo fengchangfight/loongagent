@@ -103,6 +103,76 @@ pub fn probe_models_url(url: &str, api_key: Option<&str>) -> Probe {
     }
 }
 
+/// One plain completion, for asking a model a question and reading what it says.
+///
+/// Deliberately the smallest possible call: no tools, no streaming, no history. Its job is
+/// to prove that a configured model can be reached and answers — which is a different
+/// question from whether it can drive an agent, and a much cheaper one to answer first.
+/// A failure here is a path that will not work at all; a success here says nothing about
+/// whether the model can call tools.
+pub fn complete_once(
+    base_url: &str,
+    model: &str,
+    api_key: Option<&str>,
+    prompt: &str,
+    max_tokens: u32,
+    timeout: Duration,
+) -> Result<String, String> {
+    let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": max_tokens,
+        "stream": false,
+    })
+    .to_string();
+    let response = http::post_json(&url, &body, api_key, timeout).map_err(|e| e.0)?;
+    if !(200..300).contains(&response.status) {
+        return Err(format!(
+            "HTTP {}: {}",
+            response.status,
+            describe(&response.body)
+        ));
+    }
+    completion_text(&response.body)
+}
+
+/// The assistant's words out of an OpenAI-shaped reply.
+///
+/// **`reasoning_content` counts.** A reasoning model spends its token budget thinking
+/// first, and if the budget runs out before it writes anything, `content` is an empty
+/// string and the only evidence the model said anything at all is sitting in
+/// `reasoning_content`. Reporting that as "the model did not speak" is wrong — it spoke,
+/// about its own reasoning — and it sends somebody looking for a broken path when what
+/// they have is a `max_tokens` that was too small.
+pub fn completion_text(body: &str) -> Result<String, String> {
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return Err(format!(
+            "响应不是 JSON：{}",
+            body.trim().chars().take(200).collect::<String>()
+        ));
+    };
+    let message = value
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("message"))
+        .ok_or_else(|| {
+            format!(
+                "响应里没有 choices[0].message：{}",
+                body.trim().chars().take(200).collect::<String>()
+            )
+        })?;
+    for key in ["content", "reasoning_content"] {
+        if let Some(text) = message.get(key).and_then(Value::as_str) {
+            if !text.trim().is_empty() {
+                return Ok(text.trim().to_string());
+            }
+        }
+    }
+    Ok(String::new())
+}
+
 /// The raw answer to the list request, for when "worked / did not work" is not enough.
 ///
 /// The wizard reduces every reply to one of two outcomes, which is right for a form and
@@ -280,6 +350,31 @@ impl From<HttpError> for Probe {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_model_that_only_thought_still_counts_as_having_answered() {
+        // Found by pinging four real models: DeepSeek came back with an empty `content`
+        // and the whole answer in `reasoning_content`, because the token cap was spent
+        // thinking. Reported as "the model did not speak" that reads as a broken path —
+        // and the path was fine.
+        let thought_only = r#"{"choices":[{"message":{"role":"assistant",
+            "content":"","reasoning_content":"The user reversed a word; check it."}}]}"#;
+        assert_eq!(
+            completion_text(thought_only).unwrap(),
+            "The user reversed a word; check it."
+        );
+
+        // And content wins when there is any.
+        let both = r#"{"choices":[{"message":{"content":"tnegagnool",
+            "reasoning_content":"working"}}]}"#;
+        assert_eq!(completion_text(both).unwrap(), "tnegagnool");
+
+        // Truly silent stays distinguishable from malformed.
+        let silent = r#"{"choices":[{"message":{"content":""}}]}"#;
+        assert_eq!(completion_text(silent).unwrap(), "");
+        assert!(completion_text("<html>nope</html>").is_err());
+        assert!(completion_text(r#"{"choices":[]}"#).is_err());
+    }
 
     #[test]
     fn a_deepseek_style_body_yields_ids_and_context_windows() {

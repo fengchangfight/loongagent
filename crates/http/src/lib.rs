@@ -349,6 +349,14 @@ fn read_head(stream: &mut Transport) -> Result<(u16, String, BodyReader<'_>), Ht
         .ok_or_else(|| err("the response has no status line"))?;
     let lowered = head.to_ascii_lowercase();
     let chunked = lowered.contains("transfer-encoding: chunked");
+    // The declared length, when there is one. Honouring it means the body ends where the
+    // server said it ends, instead of waiting for a connection close that may never be
+    // announced properly — and it is what makes a *short* body detectable as truncation.
+    let length = head
+        .lines()
+        .find(|line| line.to_ascii_lowercase().starts_with("content-length:"))
+        .and_then(|line| line.split_once(':'))
+        .and_then(|(_, value)| value.trim().parse::<usize>().ok());
     let content_type = head
         .lines()
         .find(|line| line.to_ascii_lowercase().starts_with("content-type:"))
@@ -366,15 +374,35 @@ fn read_head(stream: &mut Transport) -> Result<(u16, String, BodyReader<'_>), Ht
             chunked,
             done: false,
             remaining: 0,
+            length,
+            seen: 0,
         },
     ))
 }
 
 /// The body of a response: plain, or chunked (which every streamed reply is).
+/// A read that treats a missing TLS `close_notify` as the end of the body.
+///
+/// Servers routinely close the TCP connection without the TLS goodbye. curl has always
+/// tolerated it; rustls reports `UnexpectedEof`, which turned a reply that had *arrived in
+/// full* into "peer closed connection without sending TLS close_notify". It is only a
+/// problem if bytes are missing, and that is precisely what a `Content-Length` is for — see
+/// `BodyReader`, where a short body against a declared length is still an error.
+fn read_body(stream: &mut Transport, buf: &mut [u8]) -> std::io::Result<usize> {
+    match stream.read(buf) {
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(0),
+        other => other,
+    }
+}
+
 struct BodyReader<'a> {
     stream: &'a mut Transport,
     chunked: bool,
     done: bool,
+    /// What the reply said its body would be, when it said anything.
+    length: Option<usize>,
+    /// How many body bytes have been handed out, to hold the writer to `length`.
+    seen: usize,
     /// Bytes of the current chunk not yet handed to the caller.
     ///
     /// A `Read` may deliver less than it was asked for, so the rest of a chunk has to
@@ -396,10 +424,20 @@ impl Read for BodyReader<'_> {
             return Ok(0);
         }
         if !self.chunked {
-            let read = self.stream.read(buf)?;
+            // Never past the declared length, even if the socket has more to give.
+            let want = match self.length {
+                Some(length) => length.saturating_sub(self.seen).min(buf.len()),
+                None => buf.len(),
+            };
+            if want == 0 {
+                self.done = true;
+                return Ok(0);
+            }
+            let read = read_body(self.stream, &mut buf[..want])?;
             if read == 0 {
                 self.done = true;
             }
+            self.seen += read;
             return Ok(read);
         }
         // Chunked: `<hex size>CRLF <bytes> CRLF`, terminated by a zero-size chunk.
@@ -416,7 +454,7 @@ impl Read for BodyReader<'_> {
         let take = self.remaining.min(buf.len());
         let mut filled = 0;
         while filled < take {
-            let read = self.stream.read(&mut buf[filled..take])?;
+            let read = read_body(self.stream, &mut buf[filled..take])?;
             if read == 0 {
                 self.done = true;
                 break;
@@ -432,7 +470,7 @@ impl Read for BodyReader<'_> {
             let mut crlf = [0u8; 2];
             let mut got = 0;
             while got < crlf.len() {
-                match self.stream.read(&mut crlf[got..]) {
+                match read_body(self.stream, &mut crlf[got..]) {
                     Ok(0) => {
                         self.done = true;
                         break;
@@ -533,7 +571,7 @@ pub mod testing {
         )
     }
 
-    fn read_request(sock: &mut std::net::TcpStream) -> String {
+    pub fn read_request(sock: &mut std::net::TcpStream) -> String {
         let mut raw = Vec::new();
         let mut buf = [0u8; 4096];
         loop {
@@ -560,8 +598,9 @@ pub mod testing {
 
 #[cfg(test)]
 mod tests {
-    use super::testing::{fake_server, fake_sse_server};
+    use super::testing::{fake_server, fake_sse_server, read_request};
     use super::*;
+    use std::net::TcpListener;
     use std::time::Duration;
 
     #[test]
@@ -690,6 +729,43 @@ mod tests {
         assert!(
             sent.contains("Accept: text/event-stream"),
             "we ask for a stream: {sent}"
+        );
+    }
+
+    #[test]
+    fn a_body_stops_at_its_declared_length_and_not_at_the_connection() {
+        // Two things at once. The body ends where `Content-Length` says, so trailing
+        // bytes are not swallowed; and the reply is complete *before* the connection
+        // closes, which is what stops a missing TLS `close_notify` from turning a body
+        // that arrived in full into an error. Servers do close without the goodbye, and
+        // rustls reports that as `UnexpectedEof` where curl has always shrugged.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let _ = read_request(&mut sock);
+            // A declared length of 2, then a body, then bytes that belong to nobody.
+            sock.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                  Content-Length: 2\r\nConnection: close\r\n\r\nok",
+            )
+            .unwrap();
+            sock.write_all(b"TRAILING GARBAGE THAT IS NOT PART OF THE BODY")
+                .unwrap();
+            sock.flush().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        });
+        let response = get_json_raw(
+            &format!("http://127.0.0.1:{}/v1", addr.port()),
+            None,
+            std::time::Duration::from_secs(5),
+        )
+        .unwrap();
+        handle.join().unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.body, "ok",
+            "exactly the declared length, no more and no less"
         );
     }
 

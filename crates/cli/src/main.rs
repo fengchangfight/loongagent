@@ -2723,6 +2723,10 @@ fn local(mut args: Args) -> Result<(), String> {
         }
         "edit" => local_edit(&path),
         "check" => local_check(rest),
+        "ping" => {
+            let (settings, _) = args.settings_with_pack()?;
+            local_ping(&settings, rest)
+        }
         other => Err(format!(
             "unknown local subcommand {other:?} — `loongagent local` lists what is \
              configured; `local add|delete|edit` change it"
@@ -2817,6 +2821,103 @@ fn local_delete(path: &Path, selector: &str) -> Result<(), String> {
     println!("已删除：{}", removed.join("、"));
     println!("剩下 {} 个模型 — `loongagent local` 看全部", blocks.len());
     Ok(())
+}
+
+/// The prompt `local ping` sends when nobody supplies one.
+///
+/// Two things in one cheap call. The self-report is the part people ask for and the part
+/// that cannot be trusted — models misname themselves routinely — so it is never the proof.
+/// The reversal is the proof: it is deterministic, so a correct answer means the request
+/// reached *that* model and came back coherent, and it is the harness that says which model
+/// that was.
+const PING_PROMPT: &str = "只输出一行，格式严格为：<你自称的模型名>/<把 loongagent 倒过来写>\n                           不要解释，不要多余标点。不确定自己叫什么就写 unknown。";
+
+/// One model's answer, or the reason there was none.
+struct Ping {
+    label: String,
+    endpoint: String,
+    result: Result<(String, u128), String>,
+}
+
+/// `loongagent local ping [prompt]` — one prompt, every configured model.
+///
+/// The question "are all four paths working?" has no answer inside a session, because a
+/// session is on one model at a time and switching loses the comparison. This asks every
+/// configured model the same thing and prints the answers side by side, so a broken path
+/// is visible as itself rather than as a bad answer three turns later.
+fn local_ping(settings: &loong_config::Profile, prompt: Option<&str>) -> Result<(), String> {
+    if settings.models.is_empty() {
+        return Err("还没有配置任何模型 — 先 `loongagent local add`".to_string());
+    }
+    let prompt = prompt.unwrap_or(PING_PROMPT);
+    let base = loong_config::local_profile_path()
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let pings: Vec<Ping> = settings
+        .models
+        .iter()
+        .map(|spec| {
+            let key = resolve_reference(spec.api_key.as_deref(), &base);
+            let started = std::time::Instant::now();
+            let result = loong_providers::probe::complete_once(
+                &spec.base_url,
+                &spec.model,
+                key.as_deref(),
+                prompt,
+                // A cap, not a target: a reasoning model spends this first and writes its
+                // answer afterwards, so a tight number is how a working model comes back
+                // looking mute.
+                1024,
+                std::time::Duration::from_secs(120),
+            )
+            .map(|answer| (answer, started.elapsed().as_millis()));
+            Ping {
+                label: match spec.provider.as_deref() {
+                    Some(provider) => format!("{}  {}", spec.name, provider),
+                    None => spec.name.clone(),
+                },
+                endpoint: format!("{} @ {}", spec.model, spec.base_url),
+                result,
+            }
+        })
+        .collect();
+
+    println!("同一个 prompt，发给 {} 个模型：", pings.len());
+    println!("  {prompt}");
+    println!();
+    let mut broken = 0;
+    for ping in &pings {
+        match &ping.result {
+            Ok((answer, millis)) => {
+                println!("  ✓ {}  ({millis}ms)", ping.label);
+                for line in answer.lines().take(4) {
+                    println!("      {line}");
+                }
+                if answer.trim().is_empty() {
+                    println!("      （回答是空的 —— 路通了，但这个模型没说话）");
+                }
+            }
+            Err(e) => {
+                broken += 1;
+                println!("  ✗ {}", ping.label);
+                println!("      {}", ping.endpoint);
+                println!("      {e}");
+            }
+        }
+    }
+    println!();
+    if broken == 0 {
+        println!("{} 条路全部有回应。", pings.len());
+        println!(
+            "注意：这验证的是「能连上、能回答、模型 id 正确」，不是「能调工具」——\
+             那是另一件事，只有真正跑一个 turn 才知道。"
+        );
+        Ok(())
+    } else {
+        Err(format!("{broken} 条路没通（见上）。"))
+    }
 }
 
 /// `loongagent local check [provider]` — what the endpoint actually says.
@@ -3451,8 +3552,12 @@ fn write_local_blocks(path: &Path, blocks: &[LocalBlock]) -> Result<(), String> 
         head
     };
     for block in blocks {
-        text.push_str(&block.text);
-        text.push('\n');
+        // Trimmed, then one separator the writer owns. The text carries whatever blank
+        // space followed it in the file, and writing that *plus* a separator added a line
+        // on every write — ten of them after three deletions, which reads as a file that
+        // has come apart even though nothing was lost.
+        text.push_str(block.text.trim());
+        text.push_str("\n\n");
     }
     text.push_str(&route_tail(&tail, blocks));
 
@@ -3590,7 +3695,45 @@ fn split_model_blocks(text: &str) -> (String, Vec<String>, String) {
     if let Some(block) = current.take() {
         blocks.push(block);
     }
+    hand_comments_forward(&mut blocks);
     (head, blocks, tail)
+}
+
+/// Give each block the comments written **above** it.
+///
+/// The splitter is a line walk, so a note between two models lands at the end of the one
+/// above. That is the wrong owner twice over: deleting the model below would leave the
+/// note orphaned, and deleting the model *above* would take a note about something else
+/// with it. A note written above a model is about that model, so it moves down.
+fn hand_comments_forward(blocks: &mut [String]) {
+    for index in 0..blocks.len().saturating_sub(1) {
+        let lines: Vec<&str> = blocks[index].lines().collect();
+        // The trailing run of blank and comment lines.
+        let mut cut = lines.len();
+        while cut > 0 {
+            let line = lines[cut - 1].trim();
+            if line.is_empty() || line.starts_with('#') {
+                cut -= 1;
+            } else {
+                break;
+            }
+        }
+        // Only a real comment is worth moving; blank lines are spacing, and the writer
+        // owns spacing.
+        if cut == lines.len() || !lines[cut..].iter().any(|l| l.trim_start().starts_with('#')) {
+            continue;
+        }
+        let moved: String = lines[cut..]
+            .iter()
+            .map(|line| format!("{line}\n"))
+            .collect();
+        let kept: String = lines[..cut]
+            .iter()
+            .map(|line| format!("{line}\n"))
+            .collect();
+        blocks[index] = kept;
+        blocks[index + 1] = format!("{moved}{}", blocks[index + 1]);
+    }
 }
 
 /// The header a freshly created `local.toml` gets. The comments are the only
@@ -4316,6 +4459,74 @@ mod tests {
         };
         let (models, curated) = offerable_models(kimi, &rejected);
         assert!(models.is_empty() && !curated);
+    }
+
+    #[test]
+    fn a_write_leaves_one_blank_line_between_models_however_often_it_runs() {
+        // The bug: each block's text carried the blank space that *followed* it, and the
+        // writer added a separator on top. Every write grew the file by a line — ten of
+        // them after three deletions, which looks like a file coming apart even though
+        // nothing was lost.
+        let path = local_temp("no-blank-growth");
+        let mut blocks = vec![
+            LocalBlock::render(model("a", "deepseek/a")),
+            LocalBlock::render(model("b", "deepseek/b")),
+        ];
+        write_local_blocks(&path, &blocks).unwrap();
+        let first = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(first.matches("\n\n\n").count(), 0, "{first:?}");
+
+        // Re-writing the same content, and deleting then adding, must not drift.
+        for _ in 0..5 {
+            write_local_blocks(&path, &blocks).unwrap();
+        }
+        let later = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(later, first, "five more writes changed nothing");
+
+        blocks.remove(0);
+        write_local_blocks(&path, &blocks).unwrap();
+        let after_delete = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            after_delete.matches("\n\n\n").count(),
+            0,
+            "a deletion does not leave the hole behind: {after_delete:?}"
+        );
+    }
+
+    #[test]
+    fn a_comment_above_a_model_belongs_to_that_model() {
+        // The splitter is a line walk, so a note written above a model ends up at the end
+        // of the one before it. That is wrong twice: deleting the model below orphans the
+        // note, and deleting the model above takes a note about something else with it.
+        let path = local_temp("comment-owner");
+        std::fs::write(
+            &path,
+            "[[models]]\nname = \"a\"\nprovider = \"deepseek/a\"\n\n\
+             [[models]]\nname = \"b\"\nprovider = \"deepseek/b\"\n\n\
+             # b 是旗舰\n[[models]]\nname = \"c\"\nprovider = \"deepseek/c\"\n\n\
+             [router]\ndefault = \"a\"\n",
+        )
+        .unwrap();
+
+        let mut blocks = read_local_blocks(&path);
+        assert_eq!(blocks.len(), 3);
+        assert!(
+            blocks[2].text.contains("# b 是旗舰"),
+            "the note moved down to the block it describes: {:?}",
+            blocks[2].text
+        );
+        assert!(
+            !blocks[1].text.contains("# b 是旗舰"),
+            "and left the one above: {:?}",
+            blocks[1].text
+        );
+
+        // Deleting what is above it leaves the note with its model.
+        blocks.remove(1);
+        write_local_blocks(&path, &blocks).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# b 是旗舰"), "{text}");
+        assert!(text.contains("name = \"c\""), "{text}");
     }
 
     #[test]

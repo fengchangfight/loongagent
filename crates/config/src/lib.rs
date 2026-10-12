@@ -692,7 +692,7 @@ fn finish_model(
         }
     };
     // A key the user wrote always wins; otherwise the shorthand's reference stands.
-    let api_key = api_key.or_else(|| expansion.as_ref().map(|e| e.api_key.clone()));
+    let api_key = api_key.or_else(|| expansion.as_ref().and_then(|e| e.api_key.clone()));
     let provider = expansion.map(|e| e.provider.id.to_string()).or(provider);
     Ok((base_url, model, api_key, provider))
 }

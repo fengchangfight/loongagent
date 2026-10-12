@@ -169,8 +169,9 @@ pub struct Expansion {
     pub provider: &'static Provider,
     pub base_url: String,
     pub model: String,
-    /// Always a reference, never a secret (ADR-0008 §5).
-    pub api_key: String,
+    /// A reference, never a secret (ADR-0008 §5) — and `None` for a provider that wants
+    /// no key at all.
+    pub api_key: Option<String>,
 }
 
 /// Expand `"<provider>/<model>"`.
@@ -204,7 +205,12 @@ pub fn expand(spec: &str) -> Result<Expansion, String> {
         provider,
         base_url: provider.base_url.to_string(),
         model: model.to_string(),
-        api_key: format!("env:{}", provider.key_env),
+        // A loopback provider gets no key reference. Naming one would make the adapter
+        // send an `Authorization` header to a server that wants none, and — worse — gives
+        // whatever happens to be in that variable a home it should not have. It did: a
+        // DeepSeek key ended up stored as `LOONG_OLLAMA_KEY` because the field was
+        // prefilled and switching provider did not clear it.
+        api_key: (!provider.local).then(|| format!("env:{}", provider.key_env)),
     })
 }
 
@@ -277,10 +283,21 @@ mod tests {
         assert_eq!(expanded.base_url, "https://api.deepseek.com");
         assert_eq!(expanded.model, "deepseek-flash");
         assert_eq!(
-            expanded.api_key, "env:LOONG_DEEPSEEK_KEY",
+            expanded.api_key.as_deref(),
+            Some("env:LOONG_DEEPSEEK_KEY"),
             "the shorthand names a variable, never a secret (ADR-0008 §5)"
         );
         assert_eq!(expanded.provider.id, "deepseek");
+    }
+
+    #[test]
+    fn a_local_provider_expands_with_no_key_at_all() {
+        // Ollama wants none, so there is nothing to name — and nothing for a secret to be
+        // filed under on the way past.
+        let expanded = expand("ollama/qwen2.5:3b").unwrap();
+        assert_eq!(expanded.api_key, None);
+        assert_eq!(expanded.provider.id, "ollama");
+        assert_eq!(expanded.base_url, "http://127.0.0.1:11434/v1");
     }
 
     #[test]

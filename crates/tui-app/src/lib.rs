@@ -2571,6 +2571,20 @@ pub enum WizardState {
 
 /// The local first run: paste a key, pick who it belongs to, find out.
 ///
+/// A key this machine already had, for one provider.
+///
+/// **Offered, never taken.** The field is left empty so that typing replaces rather than
+/// appends — a prefilled secret is one somebody cannot correct without clearing it first,
+/// and an API key is the one string here that cannot be checked by looking at it. `enter`
+/// on the empty field takes this; anything typed wins.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OfferedKey {
+    pub provider: String,
+    /// The variable it came from, so the screen can say where "already had" means.
+    pub var: String,
+    pub key: String,
+}
+
 /// One field and one list. The list exists because a key's shape cannot identify its
 /// owner — no vendor here documents a key format, and `sk-` alone matches four of
 /// them — so the user confirms and the probe decides. A guess only chooses which row
@@ -2581,6 +2595,8 @@ pub struct LocalWizard {
     pub providers: Vec<ProviderChoice>,
     pub provider: usize,
     pub state: WizardState,
+    /// One per provider that has a key in this environment.
+    pub offered: Vec<OfferedKey>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2597,6 +2613,7 @@ impl LocalWizard {
             providers,
             provider: 0,
             state: WizardState::Editing,
+            offered: Vec::new(),
         }
     }
 
@@ -2613,6 +2630,9 @@ impl LocalWizard {
     pub fn ready(&self) -> bool {
         match self.selected() {
             Some(provider) if !provider.needs_key => true,
+            // An offer counts as an answer: the key is on this machine and `enter` means
+            // use it. The length check is only for something somebody typed.
+            _ if self.offered_key().is_some() => true,
             _ => self.key.trim().len() >= 8,
         }
     }
@@ -2739,17 +2759,35 @@ impl LocalWizard {
         WizardAction::None
     }
 
-    /// Put a provider and a key in place without submitting anything.    ///
-    /// Used for a key the machine already had: the wizard shows it and waits, rather
-    /// than validating and saving on its own. An interface that configured models
-    /// nobody chose is exactly the surprise this avoids, and "one keystroke to accept"
-    /// costs nothing next to it.
-    pub fn preselect(&mut self, provider: &str, key: &str) {
+    /// Start on a particular provider, without claiming anything about its key.
+    pub fn preselect(&mut self, provider: &str) {
         if let Some(index) = self.providers.iter().position(|p| p.id == provider) {
             self.provider = index;
         }
-        self.key = key.to_string();
         self.state = WizardState::Editing;
+    }
+
+    /// Remember keys this machine already had. They are *offered* from here on: named on
+    /// the form, used when `enter` is pressed on an empty field, never typed in on
+    /// somebody's behalf.
+    pub fn offer(&mut self, offered: Vec<OfferedKey>) {
+        self.offered = offered;
+    }
+
+    /// The key already on this machine for the provider now selected, if any.
+    pub fn offered_key(&self) -> Option<&OfferedKey> {
+        let id = self.selected()?.id.as_str();
+        self.offered.iter().find(|offer| offer.provider == id)
+    }
+
+    /// The key that would be used: what was typed, else what was offered.
+    pub fn effective_key(&self) -> String {
+        if !self.key.trim().is_empty() {
+            return self.key.trim().to_string();
+        }
+        self.offered_key()
+            .map(|offer| offer.key.clone())
+            .unwrap_or_default()
     }
 
     /// Float the named providers to the top, keeping everything else in order.
@@ -2863,10 +2901,20 @@ fn draw_local_wizard(frame: &mut ratatui::Frame, wizard: &LocalWizard) {
         chunks[0],
     );
     let wants_key = wizard.selected().map(|p| p.needs_key).unwrap_or(true);
-    let field = if wants_key {
-        wizard.masked_key()
-    } else {
+    let offer = wizard.offered_key();
+    // What the field *says* when nothing has been typed: either where a key already on
+    // this machine would come from, or that there is nothing. Never a prefilled secret —
+    // a masked one looks the same whether it is right or wrong, and cannot be corrected
+    // by typing without clearing it first.
+    let field = if !wants_key {
         "（本机服务，无需密钥）".to_string()
+    } else if wizard.key.is_empty() {
+        match offer {
+            Some(offer) => format!("回车使用环境变量里的 {}（或在此粘贴你自己的）", offer.var),
+            None => String::new(),
+        }
+    } else {
+        wizard.masked_key()
     };
     frame.render_widget(
         Paragraph::new(field.clone()).block(Block::bordered().title(" API key ").border_style(
@@ -3092,7 +3140,7 @@ pub fn after_validation(models: &[(String, Option<u64>)]) -> AfterValidation {
 /// model configured still runs, and tells them how to fix it.
 pub fn local_wizard(
     providers: Vec<ProviderChoice>,
-    prefill: Option<(String, String)>,
+    offered: Vec<OfferedKey>,
     validate: &mut dyn FnMut(&str, &str) -> Validation,
 ) -> Result<Option<KeyChoice>, String> {
     full_screen_needs_a_terminal()?;
@@ -3105,12 +3153,13 @@ pub fn local_wizard(
     use ratatui::Terminal;
 
     let mut wizard = LocalWizard::new(providers);
-    // A key this machine already had is *offered*, never taken: the provider is
-    // preselected and the field is filled in, so it is one keystroke to accept — and it
-    // is on screen, so nobody ends up with models they did not choose.
-    if let Some((provider, key)) = prefill {
-        wizard.preselect(&provider, &key);
+    // A key this machine already had is *offered*, never taken. Start on the provider it
+    // belongs to and name the variable on the form; the field itself stays empty, so
+    // typing replaces rather than appends to a secret somebody cannot read.
+    if let Some(first) = offered.first() {
+        wizard.preselect(&first.provider);
     }
+    wizard.offer(offered);
     enable_raw_mode().map_err(|e| e.to_string())?;
     let mut stdout = std::io::stdout();
     execute!(stdout, EnterAlternateScreen).map_err(|e| e.to_string())?;
@@ -3157,7 +3206,8 @@ pub fn local_wizard(
                         .draw(|frame| draw_local_wizard(frame, &wizard))
                         .map_err(|e| e.to_string())?;
 
-                    let result = validate(&provider.id, wizard.key.trim());
+                    let first = wizard.effective_key();
+                    let result = validate(&provider.id, &first);
                     if !result.ok {
                         wizard.state = WizardState::Refused(result.summary.clone());
                         // A refusal is information about *which* vendor, so it is spent
@@ -3178,7 +3228,7 @@ pub fn local_wizard(
                     if after_validation(&result.models) == AfterValidation::Accept {
                         break Some(KeyChoice {
                             provider: provider.id,
-                            key: wizard.key.trim().to_string(),
+                            key: wizard.effective_key(),
                             validation: result,
                         });
                     }
@@ -3196,7 +3246,7 @@ pub fn local_wizard(
                     };
                     // The key and the summary travel with the choice; this screen only
                     // decides which of the models come along.
-                    pending = Some((provider.id.clone(), wizard.key.trim().to_string(), result));
+                    pending = Some((provider.id.clone(), wizard.effective_key(), result));
                 }
                 WizardAction::Cancel => break None,
                 WizardAction::None => {}
@@ -5486,6 +5536,77 @@ mod tests {
             !screen.contains("model-01"),
             "and the window moved rather than the cursor leaving it:\n{screen}"
         );
+    }
+
+    fn offering(provider: &str, var: &str, key: &str) -> OfferedKey {
+        OfferedKey {
+            provider: provider.to_string(),
+            var: var.to_string(),
+            key: key.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_key_this_machine_already_has_is_named_on_the_form_and_not_typed_in() {
+        // The bug: the offer used to be *written into the field*. That looks like a form
+        // that skipped a question, and worse, typing then appends to a secret nobody can
+        // read — `<env key><what you typed>`.
+        let mut wizard = LocalWizard::new(providers());
+        wizard.offer(vec![offering("deepseek", "DEEPSEEK_API_KEY", "sk-env-key")]);
+
+        assert_eq!(wizard.key, "", "the field is empty");
+        assert!(wizard.ready(), "but the offer is an answer, so enter works");
+        assert_eq!(wizard.effective_key(), "sk-env-key");
+
+        // The screen says where it would come from.
+        let screen = drawn_wizard(&wizard, 100, 20);
+        assert!(
+            despaced(&screen).contains(&despaced("DEEPSEEK_API_KEY")),
+            "the variable is named:\n{screen}"
+        );
+        assert!(
+            !screen.contains("sk-env-key"),
+            "and the secret itself is not on screen:\n{screen}"
+        );
+
+        // Typing replaces it, because there was nothing to append to.
+        for c in "sk-mine".chars() {
+            wizard.handle_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(wizard.key, "sk-mine");
+        assert_eq!(
+            wizard.effective_key(),
+            "sk-mine",
+            "what somebody typed wins over what was offered"
+        );
+    }
+
+    #[test]
+    fn the_offer_follows_the_provider_being_chosen() {
+        let mut wizard = LocalWizard::new(providers());
+        wizard.offer(vec![
+            offering("moonshot", "MOONSHOT_API_KEY", "sk-moonshot"),
+            offering("deepseek", "DEEPSEEK_API_KEY", "sk-deepseek"),
+        ]);
+
+        // Starts on the first offer's provider.
+        assert_eq!(wizard.selected().unwrap().id, "deepseek");
+        assert_eq!(wizard.effective_key(), "sk-deepseek");
+
+        wizard.handle_key(key(KeyCode::Tab));
+        assert_eq!(wizard.selected().unwrap().id, "moonshot");
+        assert_eq!(
+            wizard.effective_key(),
+            "sk-moonshot",
+            "switching providers switches which offer applies"
+        );
+
+        // A provider with no key on this machine has none to offer, and needs one typed.
+        wizard.handle_key(key(KeyCode::Tab));
+        assert_eq!(wizard.selected().unwrap().id, "dashscope");
+        assert!(wizard.offered_key().is_none());
+        assert!(!wizard.ready(), "so enter cannot go yet");
+        assert_eq!(wizard.effective_key(), "");
     }
 
     #[test]

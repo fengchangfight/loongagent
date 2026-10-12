@@ -2932,7 +2932,7 @@ fn configure_local(
     // is a wrong provider name whether or not there is a terminal to draw a form on, and
     // reporting the terminal first would send somebody to check their TTY over a typo.
     loong_tui_app::full_screen_needs_a_terminal()?;
-    let prefill = key_already_exported().map(|(provider, key)| (provider.id.to_string(), key));
+    let offered = exported_keys();
 
     let mut validate = |id: &str, key: &str| -> loong_tui_app::Validation {
         let Some(provider) = loong_config::catalog::provider(id) else {
@@ -2974,7 +2974,7 @@ fn configure_local(
         }
     };
 
-    let Some(choice) = loong_tui_app::local_wizard(choices, prefill, &mut validate)? else {
+    let Some(choice) = loong_tui_app::local_wizard(choices, offered, &mut validate)? else {
         eprintln!(
             "[local] 跳过配置 — 本次会话没有模型。随时重跑 `loongagent tui --local`，\
              或先试 `--model demo-write`。"
@@ -3045,7 +3045,10 @@ fn spawn_model_health(
                 continue;
             };
             let key = provider_key(provider);
-            let probe = probe_provider(provider, provider_key_for_probe(provider, key.as_deref()));
+            let probe = probe_provider(
+                provider,
+                provider_key_for_probe(provider, key.as_ref().map(|(_, key)| key.as_str())),
+            );
             let (ok, detail) = (probe.is_ok(), loong_providers::probe::render(&probe));
             for name in names {
                 if sender
@@ -3064,38 +3067,36 @@ fn spawn_model_health(
     Some(receiver)
 }
 
-/// The key for a provider, from wherever it lives.
-fn provider_key(provider: &loong_config::catalog::Provider) -> Option<String> {
+/// The key for a provider, from wherever it lives, with the variable it came from.
+fn provider_key(provider: &loong_config::catalog::Provider) -> Option<(String, String)> {
     let names = std::iter::once(provider.key_env).chain(provider.aliases.iter().copied());
     names.into_iter().find_map(|name| {
         std::env::var(name)
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
+            .map(|value| (name.to_string(), value))
     })
 }
 
-/// A key the machine already had, and the provider its variable names.
+/// Every provider this machine already has a key for, so the wizard can *offer* them.
 ///
 /// The variable *name* is the whole signal, which is why this needs no heuristics:
 /// `MOONSHOT_API_KEY` is Moonshot's because the catalog lists it under Moonshot. An
-/// unfamiliar variable is not guessed at.
-fn key_already_exported() -> Option<(&'static loong_config::catalog::Provider, String)> {
-    for provider in loong_config::catalog::PROVIDERS {
-        if provider.local {
-            continue;
-        }
-        let names = std::iter::once(provider.key_env).chain(provider.aliases.iter().copied());
-        for name in names {
-            if let Ok(value) = std::env::var(name) {
-                let value = value.trim().to_string();
-                if !value.is_empty() {
-                    return Some((provider, value));
-                }
-            }
-        }
-    }
-    None
+/// unfamiliar variable is not guessed at — and finding one is not permission to use it.
+/// The wizard names it on the form and the person presses enter, or types their own.
+fn exported_keys() -> Vec<loong_tui_app::OfferedKey> {
+    loong_config::catalog::PROVIDERS
+        .iter()
+        .filter(|provider| !provider.local)
+        .filter_map(|provider| {
+            provider_key(provider).map(|(var, key)| loong_tui_app::OfferedKey {
+                provider: provider.id.to_string(),
+                var,
+                key,
+            })
+        })
+        .collect()
 }
 
 /// What to send as the bearer token when checking this provider.

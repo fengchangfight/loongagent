@@ -168,6 +168,20 @@ fn render_event_with(envelope: &Value, full: bool) -> Option<String> {
                 )),
             }
         }
+        // A model change is never silent. It is the one event whose whole purpose is
+        // that a person can see which model is answering — and, when a rule did it,
+        // which rule, so "why did this suddenly cost more?" has an answer on screen
+        // rather than only in the log.
+        gen::event::MODEL_SELECTED => {
+            let model = data.get("model").and_then(|v| v.as_str()).unwrap_or("?");
+            let previous = data.get("previous").and_then(|v| v.as_str()).unwrap_or("");
+            let rule = data.get("rule").and_then(|v| v.as_str()).unwrap_or("");
+            Some(if previous.is_empty() {
+                format!("⇄ model {model} ({rule})")
+            } else {
+                format!("⇄ model {previous} → {model} ({rule})")
+            })
+        }
         gen::event::COST_RECORDED => Some(format!(
             "· tokens {} in / {} out ({})",
             data.get("tokens_in").and_then(|v| v.as_u64()).unwrap_or(0),
@@ -561,6 +575,33 @@ impl<T: Transport> Client<T> {
         serde_json::from_value(result).map_err(|e| format!("context.explain: {e}"))
     }
 
+    /// The models this session offers, in the profile's own order, and which is
+    /// current. Read-only: asking which models exist changes nothing.
+    pub fn models(&mut self) -> Result<gen::ModelList, String> {
+        let params = gen::SessionOnlyParams {
+            session_id: self.session_id.clone(),
+        };
+        let (_, result) = self.call(
+            gen::method::MODEL_LIST,
+            serde_json::to_value(params).unwrap(),
+        )?;
+        serde_json::from_value(result).map_err(|e| format!("model.list: {e}"))
+    }
+
+    /// Switch the model, and get back the new state — the same shape `models()`
+    /// returns, so a caller never has to ask twice to find out what happened.
+    pub fn select_model(&mut self, name: &str) -> Result<gen::ModelList, String> {
+        let params = gen::ModelSelectParams {
+            session_id: self.session_id.clone(),
+            name: name.to_string(),
+        };
+        let (_, result) = self.call(
+            gen::method::MODEL_SELECT,
+            serde_json::to_value(params).unwrap(),
+        )?;
+        serde_json::from_value(result).map_err(|e| format!("model.select: {e}"))
+    }
+
     /// Submit a turn; returns the lines to display (events, then the answer).
     pub fn submit(&mut self, text: &str) -> Result<Vec<String>, String> {
         self.submit_with(text, &mut |_, _| {})
@@ -789,6 +830,43 @@ mod tests {
         let sent: Value = serde_json::from_str(&client.transport.outbound[0]).unwrap();
         assert_eq!(sent["method"], "session.attach");
         assert_eq!(sent["params"]["cwd"], "/work");
+    }
+
+    #[test]
+    fn a_model_switch_is_visible_and_says_what_caused_it() {
+        // It used to render as nothing at all, so a routing rule could move a session
+        // onto a different model — and a different price — without a word on screen.
+        let switched = json!({
+            "kind": gen::event::MODEL_SELECTED,
+            "time_ms": 1000,
+            "data": {
+                "model": "strong",
+                "previous": "cheap",
+                "rule": "step > 1",
+                "context_tokens": 10,
+                "step": 2,
+            },
+        });
+        let line = render_event(&switched).expect("a switch is drawn");
+        assert!(line.contains("cheap"), "{line}");
+        assert!(line.contains("strong"), "{line}");
+        assert!(
+            line.contains("step > 1"),
+            "and the rule that did it, so 'why is this costing more?' has an answer on screen: {line}"
+        );
+
+        // A session's first call has no previous model to name.
+        let first = json!({
+            "kind": gen::event::MODEL_SELECTED,
+            "time_ms": 1000,
+            "data": {"model": "cheap", "previous": "", "rule": "the router's default"},
+        });
+        let line = render_event(&first).expect("a first choice is drawn");
+        assert!(line.contains("cheap"), "{line}");
+        assert!(
+            !line.contains("→") || !line.contains("  → "),
+            "with no arrow pointing from nothing: {line}"
+        );
     }
 
     #[test]

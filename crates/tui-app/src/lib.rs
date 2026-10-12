@@ -43,6 +43,11 @@ pub enum ToWorker {
     },
     /// Turn approval prompts off or on for this session.
     Yolo(bool),
+    /// Ask which models this session offers. The session's own configuration, so it is
+    /// a read: nothing is recorded for asking.
+    RefreshModels,
+    /// Use this model from the next call on.
+    SelectModel(String),
 }
 
 /// What the worker reports back.
@@ -61,6 +66,8 @@ pub enum FromWorker {
     Approval(Box<ApprovalInfo>),
     /// Approval prompts were turned off or on.
     Yolo(bool),
+    /// The session's models, and which one a switch landed on.
+    Models(Box<loong_schema::generated::ModelList>),
     /// What the turn is doing right now ("shell: cargo test"), so the interface can say
     /// so while it is happening rather than after.
     Working(String),
@@ -451,6 +458,12 @@ pub struct App {
     /// Bounded by [`FOLD_KEEP`]: a session can run all day, and the oldest folds can always
     /// be fetched from the log — just not until the turn lets go of the connection.
     pub folded: std::collections::BTreeMap<usize, Vec<String>>,
+    /// The models this session offers, in the order the profile declared them — which
+    /// is the order the bar numbers them, and the user's own ranking from cheapest to
+    /// most capable.
+    pub models: Vec<loong_schema::generated::ModelOffering>,
+    /// Which of them the next call will use.
+    pub selected: String,
     pub quit: bool,
 }
 
@@ -485,7 +498,72 @@ impl App {
             fold: None,
             open: None,
             folded: std::collections::BTreeMap::new(),
+            models: Vec::new(),
+            selected: String::new(),
             quit: false,
+        }
+    }
+
+    /// Take the session's model list, which is a read and arrives before the first
+    /// frame. Doing it here rather than on a worker round trip is what keeps the bar
+    /// from appearing one frame late, which on a slow link would be the whole session.
+    pub fn set_models(&mut self, list: loong_schema::generated::ModelList) {
+        self.models = list.models;
+        self.selected = list.selected;
+    }
+
+    /// Notice a `⇄ model a → b (…)` line and move the bar with it.
+    ///
+    /// The line is what the renderer already produces for a `model.selected` event, and
+    /// a *rule* can produce one mid-turn without the interface asking for anything. So
+    /// the bar reads the same text a person reads rather than opening a second channel:
+    /// one source of truth, and it cannot disagree with what is on screen.
+    fn follow_model_change(&mut self, line: &str) {
+        let Some(rest) = line.trim().strip_prefix("⇄ model ") else {
+            return;
+        };
+        // `a → b (rule)` when there was a previous model, `b (rule)` on the first call.
+        let chosen = match rest.split_once(" → ") {
+            Some((_, after)) => after,
+            None => rest,
+        };
+        let name = chosen.split(" (").next().unwrap_or_default().trim();
+        if !name.is_empty() && self.models.iter().any(|m| m.name == name) {
+            self.selected = name.to_string();
+        }
+    }
+
+    /// The model in slot `1`..`9`, or the reason there is none.
+    ///
+    /// One place decides what a digit means, so the bar, the Alt shortcut and the `/N`
+    /// fallback cannot disagree about which model is number three.
+    pub fn model_in_slot(&self, slot: usize) -> Option<&loong_schema::generated::ModelOffering> {
+        (1..=9)
+            .contains(&slot)
+            .then(|| self.models.get(slot - 1))
+            .flatten()
+    }
+
+    /// The shortcut, shared by `Alt+<digit>` and `/<digit>`.
+    fn switch_to_slot(&mut self, slot: usize) -> Action {
+        match self.model_in_slot(slot) {
+            Some(offering) => {
+                let name = offering.name.clone();
+                if name == self.selected {
+                    self.push_lines(vec![format!("· already on [{slot}] {name}")]);
+                    return Action::None;
+                }
+                Action::Send(ToWorker::SelectModel(name))
+            }
+            None => {
+                let count = self.models.len();
+                self.push_lines(vec![if count == 0 {
+                    "· 这个会话没有可选模型 — 用 `loongagent tui --local` 配置一个".to_string()
+                } else {
+                    format!("· 没有第 {slot} 个模型（共 {count} 个）")
+                }]);
+                Action::None
+            }
         }
     }
 
@@ -586,6 +664,66 @@ impl App {
                 info.args.as_str(),
             )
         })
+    }
+
+    /// The model bar: what this session can run, numbered, with the current one marked.
+    ///
+    /// Drawn from the session's own list rather than from a configuration file, because
+    /// this is a *status* bar — what matters is what the running session will accept,
+    /// not what some file says it should.
+    ///
+    /// One row, and it gives up models before it gives up the hint: a bar that pushes
+    /// the conversation off the screen has stopped being a status line. The numbers are
+    /// the keys, so `Alt+3` and `/3` mean the third thing drawn here and nowhere else.
+    fn draw_model_bar(&self, frame: &mut Frame, area: ratatui::layout::Rect) {
+        use unicode_width::UnicodeWidthStr;
+        let limit = area.width as usize;
+        let slots = self.models.len().min(9);
+        // Only worth saying when there is something to say it about.
+        let hint = if self.models.len() > 1 {
+            format!("  alt+1..{slots} 切换 · /1../{slots} 兜底")
+        } else {
+            String::new()
+        };
+        let hint_width = UnicodeWidthStr::width(hint.as_str());
+
+        let mut spans: Vec<Span> = Vec::new();
+        let mut used = 0usize;
+        let mut shown = 0usize;
+        for (index, model) in self.models.iter().enumerate().take(slots) {
+            let current = model.name == self.selected;
+            let label = format!(
+                "{}[{}] {}",
+                if current { "▸" } else { " " },
+                index + 1,
+                model.name
+            );
+            let label_width = UnicodeWidthStr::width(label.as_str());
+            let gap = usize::from(shown > 0);
+            // The first slot is always drawn even if it does not fit — a clipped name
+            // still says which model is answering, and nothing says it if we stop here.
+            if shown > 0 && used + gap + label_width + hint_width > limit {
+                break;
+            }
+            if shown > 0 {
+                spans.push(Span::raw(" "));
+                used += 1;
+            }
+            spans.push(Span::styled(
+                label,
+                if current { MARK_TEXT } else { MARK_QUIET },
+            ));
+            used += label_width;
+            shown += 1;
+        }
+        if shown < slots {
+            spans.push(Span::styled(" …".to_string(), MARK_QUIET));
+            used += 2;
+        }
+        if used + hint_width <= limit {
+            spans.push(Span::styled(hint, MARK_QUIET));
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
     /// The mark: the owner's frame and ornaments, given room to be imposing — five rows, a
@@ -782,7 +920,23 @@ impl App {
     /// to act — quitting, and nothing else so far. `/help` and the rest are skills the
     /// workspace provides, and they stay on the server where they can be audited.
     fn surface_command(&mut self, text: &str) -> Option<Action> {
-        match text.trim().to_ascii_lowercase().as_str() {
+        let trimmed = text.trim();
+        // `/1`..`/9`: the same shortcut as Alt+digit, for a terminal whose Alt never
+        // reaches the program (tmux, some macOS setups). Checked before the exact match
+        // below because it is a whole family of commands, not one.
+        if let Some(digit) = trimmed
+            .strip_prefix('/')
+            .filter(|rest| rest.chars().count() == 1)
+        {
+            if let Some(slot) = digit.chars().next().and_then(|c| c.to_digit(10)) {
+                if (1..=9).contains(&slot) {
+                    self.input.clear();
+                    self.cursor = 0;
+                    return Some(self.switch_to_slot(slot as usize));
+                }
+            }
+        }
+        match trimmed.to_ascii_lowercase().as_str() {
             "/exit" | "/quit" | "/q" => {
                 self.input.clear();
                 self.cursor = 0;
@@ -964,6 +1118,19 @@ impl App {
             match worker.try_recv() {
                 Ok(FromWorker::Delta(piece)) => self.streaming.push_str(&piece),
                 Ok(FromWorker::Context(explained)) => self.context = Some(explained),
+                Ok(FromWorker::Models(list)) => {
+                    // The switch already happened by the time this arrives; saying so is
+                    // the point, because a silent model change is one nobody can trust.
+                    let before = std::mem::take(&mut self.selected);
+                    let list = *list;
+                    self.set_models(list);
+                    if !before.is_empty() && before != self.selected {
+                        self.push_lines(vec![format!(
+                            "⇄ model {} → {}（下一个 turn 生效）",
+                            before, self.selected
+                        )]);
+                    }
+                }
                 Ok(FromWorker::Yolo(on)) => {
                     self.yolo = on;
                     self.push_lines(vec![format!(
@@ -995,6 +1162,13 @@ impl App {
                     // The finished message supersedes the fragments on screen, and it
                     // is the only one of the two that exists in the log.
                     self.streaming.clear();
+                    // A switch made *inside* a turn arrives as a rendered line like any
+                    // other event, and the bar has to follow it. Otherwise it would keep
+                    // naming the model that was answering five steps ago — and a status
+                    // bar that lies is worse than no status bar.
+                    for line in &lines {
+                        self.follow_model_change(line);
+                    }
                     self.push_lines(lines);
                 }
                 Ok(FromWorker::State { pending }) => {
@@ -1031,6 +1205,18 @@ impl App {
     /// kinder than silently swallowing it.
     pub fn handle_key(&mut self, key: KeyEvent) -> Action {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        // Alt+digit, not Ctrl+digit. In a VT terminal Ctrl+2..Ctrl+8 arrive as *control
+        // characters* — Ctrl+3 as Escape, Ctrl+8 as Delete — so those keys would silently
+        // fire other things instead of switching, and the two that alias are the two a
+        // user would press first. Alt arrives as a modifier crossterm can actually see.
+        // `/<digit>` is the fallback, for terminals that eat Alt.
+        if key.modifiers.contains(KeyModifiers::ALT) {
+            if let KeyCode::Char(c) = key.code {
+                if let Some(slot) = c.to_digit(10).filter(|d| (1..=9).contains(d)) {
+                    return self.switch_to_slot(slot as usize);
+                }
+            }
+        }
         match key.code {
             // Ctrl-C means "stop this", and only leaves when there is nothing to stop —
             // the habit people bring from every other tool.
@@ -1525,6 +1711,10 @@ impl App {
         let areas = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
+                // The models, first: which one is about to answer is the thing worth
+                // knowing before reading anything else. One row, and none at all when
+                // there is nothing to choose between.
+                Constraint::Length(if self.models.is_empty() { 0 } else { 1 }),
                 Constraint::Length(if self.show_banner(conversation) {
                     MARK_ROWS + 1
                 } else {
@@ -1556,9 +1746,13 @@ impl App {
             .split(conversation);
         // Named, because five anonymous slices is how the notes strip once ended up
         // drawn over the mark.
-        let (banner, notes, transcript, decision, entry, keys) =
-            (areas[0], areas[1], areas[2], areas[3], areas[4], areas[5]);
+        let (models, banner, notes, transcript, decision, entry, keys) = (
+            areas[0], areas[1], areas[2], areas[3], areas[4], areas[5], areas[6],
+        );
 
+        if !self.models.is_empty() {
+            self.draw_model_bar(frame, models);
+        }
         if self.show_banner(conversation) {
             self.draw_banner(frame, banner);
         }
@@ -1864,6 +2058,32 @@ pub fn spawn_worker<T: Transport + Send + 'static>(
                     match client.expand_tool_result(at) {
                         Ok(lines) => {
                             let _ = events.send(FromWorker::Expanded { at, lines });
+                        }
+                        Err(e) => {
+                            let _ = events.send(FromWorker::Failed(e));
+                        }
+                    }
+                    refreshed = true;
+                    Ok(Vec::new())
+                }
+                ToWorker::RefreshModels => {
+                    match client.models() {
+                        Ok(list) => {
+                            let _ = events.send(FromWorker::Models(Box::new(list)));
+                        }
+                        Err(e) => {
+                            let _ = events.send(FromWorker::Failed(e));
+                        }
+                    }
+                    refreshed = true;
+                    Ok(Vec::new())
+                }
+                ToWorker::SelectModel(name) => {
+                    // The switch is recorded by the kernel, so the log says who chose
+                    // it; the reply is the state afterwards, which is what the bar draws.
+                    match client.select_model(&name) {
+                        Ok(list) => {
+                            let _ = events.send(FromWorker::Models(Box::new(list)));
                         }
                         Err(e) => {
                             let _ = events.send(FromWorker::Failed(e));
@@ -2495,6 +2715,10 @@ pub fn run<T: Transport + Send + 'static>(
     // first key press: a turn that is already running owns the connection, and the view
     // should not have to wait for it to read its own transcript.
     let folded = client.folded_results().unwrap_or_default();
+    // Which models this session offers, read before the worker takes the connection —
+    // one more read on a client that is already reading twice, and it means the bar is
+    // there on the first frame instead of appearing after it.
+    let models = client.models().ok();
     let shown = history
         .iter()
         .filter(|line| loong_tui::is_fold_marker(line))
@@ -2502,6 +2726,9 @@ pub fn run<T: Transport + Send + 'static>(
     let (to_worker, from_worker) = spawn_worker(client, shown);
     let mut app = App::new(session, schema);
     app.interrupt = interrupt;
+    if let Some(list) = models {
+        app.set_models(list);
+    }
     for (at, text) in folded.into_iter().enumerate().take(shown) {
         app.remember_fold(at, text.split('\n').map(|line| line.to_string()).collect());
     }
@@ -4613,5 +4840,243 @@ mod tests {
                 "a form that cannot be left can strand a terminal"
             );
         }
+    }
+
+    // ------------------------------------------------------------ the model bar
+
+    fn model_list(names: &[&str]) -> loong_schema::generated::ModelList {
+        loong_schema::generated::ModelList {
+            models: names
+                .iter()
+                .map(|name| loong_schema::generated::ModelOffering {
+                    name: name.to_string(),
+                    model: name.to_string(),
+                    provider: None,
+                    context_window: None,
+                })
+                .collect(),
+            selected: names.first().copied().unwrap_or_default().to_string(),
+        }
+    }
+
+    fn app_with_models(names: &[&str]) -> App {
+        let mut app = App::new("s", "v");
+        app.set_models(model_list(names));
+        app
+    }
+
+    fn alt(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT)
+    }
+
+    #[test]
+    fn the_model_bar_numbers_the_models_in_the_order_the_profile_declared_them() {
+        // Not alphabetically, and not by the map's order: that order is the user's own
+        // ranking from cheapest to most capable, and it is what the digits mean.
+        let mut app = app_with_models(&["local-small", "qwen-lite", "deepseek", "kimi"]);
+        let screen = draw(&mut app, 90, 20);
+
+        let bar = screen.lines().next().unwrap_or_default().to_string();
+        let at: Vec<usize> = ["[1]", "[2]", "[3]", "[4]"]
+            .iter()
+            .map(|mark| {
+                bar.find(mark)
+                    .unwrap_or_else(|| panic!("{mark} is missing from the bar: {bar:?}"))
+            })
+            .collect();
+        assert!(
+            at.windows(2).all(|pair| pair[0] < pair[1]),
+            "the slots are numbered left to right in declaration order: {bar:?}"
+        );
+        for name in ["local-small", "qwen-lite", "deepseek", "kimi"] {
+            assert!(bar.contains(name), "{name} is on the bar: {bar:?}");
+        }
+    }
+
+    #[test]
+    fn the_model_bar_marks_the_current_model_and_only_that_one() {
+        let mut app = app_with_models(&["cheap", "strong"]);
+        let screen = draw(&mut app, 90, 20);
+        let bar = screen.lines().next().unwrap_or_default().to_string();
+        assert!(bar.contains("▸[1] cheap"), "{bar:?}");
+        assert!(
+            !bar.contains("▸[2]"),
+            "the model that is not running is not marked: {bar:?}"
+        );
+
+        // And the mark follows a switch, so the bar never lies about what is answering.
+        app.selected = "strong".to_string();
+        let screen = draw(&mut app, 90, 20);
+        let bar = screen.lines().next().unwrap_or_default().to_string();
+        assert!(bar.contains("▸[2] strong"), "{bar:?}");
+        assert!(!bar.contains("▸[1]"), "{bar:?}");
+    }
+
+    #[test]
+    fn the_model_bar_shows_how_to_switch_without_being_asked() {
+        // The bar is the whole discoverability story: a shortcut nobody is told about is
+        // a shortcut nobody uses.
+        let mut app = app_with_models(&["cheap", "mid", "strong"]);
+        let screen = draw(&mut app, 100, 20);
+        let bar = screen.lines().next().unwrap_or_default().to_string();
+        assert!(
+            despaced(&bar).contains(&despaced("alt+1..3")),
+            "the key is on the bar: {bar:?}"
+        );
+        assert!(
+            despaced(&bar).contains(&despaced("/1../3")),
+            "and so is the fallback, for a terminal that eats Alt: {bar:?}"
+        );
+    }
+
+    #[test]
+    fn a_single_model_needs_no_shortcut_advertised() {
+        let mut app = app_with_models(&["only"]);
+        let screen = draw(&mut app, 90, 20);
+        let bar = screen.lines().next().unwrap_or_default().to_string();
+        assert!(bar.contains("only"), "{bar:?}");
+        assert!(
+            !despaced(&bar).contains(&despaced("alt+1")),
+            "there is nothing to switch to, so nothing is promised: {bar:?}"
+        );
+    }
+
+    #[test]
+    fn a_session_with_no_models_draws_no_bar_at_all() {
+        let mut app = App::new("s", "v");
+        let without = draw(&mut app, 80, 20);
+        assert!(
+            !without.contains("[1]"),
+            "nothing is drawn when there is nothing to draw: {without}"
+        );
+    }
+
+    #[test]
+    fn alt_digit_switches_to_that_slot() {
+        let mut app = app_with_models(&["cheap", "mid", "strong"]);
+        assert_eq!(
+            app.handle_key(alt('3')),
+            Action::Send(ToWorker::SelectModel("strong".to_string()))
+        );
+        assert_eq!(
+            app.handle_key(alt('2')),
+            Action::Send(ToWorker::SelectModel("mid".to_string()))
+        );
+    }
+
+    #[test]
+    fn slash_digit_is_the_same_shortcut_for_a_terminal_that_eats_alt() {
+        // tmux and some macOS setups never deliver Alt to the program. The fallback has
+        // to do exactly the same thing, or "the key does nothing" becomes a support
+        // question with two different answers.
+        let mut app = app_with_models(&["cheap", "strong"]);
+        app.input = "/2".to_string();
+        app.cursor = 2;
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            Action::Send(ToWorker::SelectModel("strong".to_string()))
+        );
+        assert!(app.input.is_empty(), "the command does not reach the agent");
+    }
+
+    #[test]
+    fn a_slot_with_no_model_says_so_instead_of_doing_nothing() {
+        let mut app = app_with_models(&["cheap", "strong"]);
+        let action = app.handle_key(alt('7'));
+        assert_eq!(action, Action::None, "there is no seventh model");
+        let said = app.lines.join("\n");
+        assert!(
+            said.contains("没有第 7 个模型"),
+            "a key that appears to do nothing is worse than one that explains: {said:?}"
+        );
+    }
+
+    #[test]
+    fn switching_to_the_model_already_running_does_not_ask_the_server() {
+        // A round trip to be told nothing changed would put a line in the log for a
+        // non-event, and the log is the record.
+        let mut app = app_with_models(&["cheap", "strong"]);
+        assert_eq!(app.handle_key(alt('1')), Action::None);
+        let said = app.lines.join("\n");
+        assert!(said.contains("already on [1] cheap"), "{said:?}");
+    }
+
+    #[test]
+    fn ctrl_digit_is_deliberately_not_a_shortcut() {
+        // In a VT terminal Ctrl+2..Ctrl+8 arrive as control *characters* — Ctrl+3 as
+        // Escape, Ctrl+8 as Delete — so those combinations never reach this program as
+        // digits at all. They are not bound, and this test is what stops somebody
+        // "fixing" that by adding them back.
+        for digit in ['1', '3', '8'] {
+            let mut app = app_with_models(&["cheap", "strong"]);
+            let action = app.handle_key(KeyEvent::new(KeyCode::Char(digit), KeyModifiers::CONTROL));
+            assert_ne!(
+                action,
+                Action::Send(ToWorker::SelectModel("cheap".to_string())),
+                "ctrl+{digit} must not switch"
+            );
+            assert_ne!(
+                action,
+                Action::Send(ToWorker::SelectModel("strong".to_string())),
+                "ctrl+{digit} must not switch"
+            );
+        }
+    }
+
+    #[test]
+    fn a_narrow_terminal_gives_up_models_before_it_gives_up_the_mark() {
+        // A bar that pushes the conversation off the screen has stopped being a status
+        // line. Whatever fits, fits.
+        let mut app = app_with_models(&[
+            "a-very-long-model-name",
+            "another-very-long-model-name",
+            "a-third-long-model-name",
+        ]);
+        let screen = draw(&mut app, 30, 20);
+        let bar = screen.lines().next().unwrap_or_default().to_string();
+        assert!(
+            unicode_width::UnicodeWidthStr::width(bar.as_str()) <= 30,
+            "the bar never overflows its row: {bar:?}"
+        );
+        assert!(
+            bar.contains("[1]"),
+            "the current model is the last to go: {bar:?}"
+        );
+        assert!(
+            bar.contains('…'),
+            "and it says that it dropped something: {bar:?}"
+        );
+    }
+
+    #[test]
+    fn the_bar_follows_a_switch_a_rule_made_mid_turn() {
+        // A rule can change the model without the interface asking for anything, and it
+        // arrives as an ordinary rendered line. If the bar did not read that line it
+        // would keep naming the model that answered five steps ago.
+        let mut app = app_with_models(&["cheap", "strong"]);
+        app.follow_model_change("⇄ model cheap → strong (step > 1)");
+        assert_eq!(app.selected, "strong");
+        let screen = draw(&mut app, 90, 20);
+        assert!(
+            screen
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .contains("▸[2] strong"),
+            "{screen}"
+        );
+
+        // A session's first call has no previous model.
+        app.follow_model_change("⇄ model cheap (the router's default)");
+        assert_eq!(app.selected, "cheap");
+
+        // A name this session does not offer cannot be marked on a bar that lists what
+        // it does offer.
+        app.follow_model_change("⇄ model cheap → ghost (step > 9)");
+        assert_eq!(app.selected, "cheap", "an unknown name is not adopted");
+
+        // And a line about something else is not mistaken for a switch.
+        app.follow_model_change("· tokens 10 in / 2 out (p)");
+        assert_eq!(app.selected, "cheap");
     }
 }

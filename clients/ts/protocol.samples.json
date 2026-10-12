@@ -138,6 +138,27 @@
       "category": "<string>",
       "tokens": 1
     },
+    "ModelOffering": {
+      "name": "<string>",
+      "model": "<string>",
+      "provider": "<string>",
+      "context_window": 1
+    },
+    "ModelList": {
+      "models": [
+        {
+          "name": "<string>",
+          "model": "<string>",
+          "provider": "<string>",
+          "context_window": 1
+        }
+      ],
+      "selected": "<string>"
+    },
+    "ModelSelectParams": {
+      "session_id": "<string>",
+      "name": "<string>"
+    },
     "PermissionsSetParams": {
       "session_id": "<string>",
       "auto_approve": true
@@ -195,6 +216,16 @@
     }
   },
   "methods": [
+    {
+      "name": "model.list",
+      "params": "SessionOnlyParams",
+      "result": "ModelList"
+    },
+    {
+      "name": "model.select",
+      "params": "ModelSelectParams",
+      "result": "ModelList"
+    },
     {
       "name": "context.explain",
       "params": "SessionOnlyParams",

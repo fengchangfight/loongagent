@@ -195,6 +195,31 @@ export interface ContextCategory {
   tokens: number;
 }
 
+/** One model a session can switch to, as a status bar needs it. No endpoint: a surface shows a name, and never learns where prompts go. */
+export interface ModelOffering {
+  /** the name the profile declared, which is what a switch names */
+  name: string;
+  /** the vendor's own model id */
+  model: string;
+  /** the catalog entry it came from, when it came from one */
+  provider?: string;
+  /** what the vendor reported, if anyone knows */
+  context_window?: number;
+}
+
+/** The models this session offers, in the order the configuration declared them, and which one is current. */
+export interface ModelList {
+  models: ModelOffering[];
+  selected: string;
+}
+
+/** Switch the model a session uses. A person's choice, so it is recorded exactly as a routing rule's choice is. */
+export interface ModelSelectParams {
+  session_id: string;
+  /** the name from model.list; an unknown name is refused, not stored */
+  name: string;
+}
+
 /** Turn this session's approval prompts off or on. The sandbox is a different axis and is untouched (ADR-0007 §5). */
 export interface PermissionsSetParams {
   session_id: string;
@@ -287,6 +312,8 @@ export interface ProfileSelected {
 }
 
 export const METHODS = {
+  modelList: "model.list",
+  modelSelect: "model.select",
   contextExplain: "context.explain",
   sessionAttach: "session.attach",
   permissionsSet: "permissions.set",

@@ -227,6 +227,33 @@ impl Server {
                     Err(e) => self.fail(id, e),
                 }
             }
+            gen::method::MODEL_LIST => {
+                let params: gen::SessionOnlyParams = match request.params_as() {
+                    Ok(p) => p,
+                    Err(e) => return vec![e.to_line()],
+                };
+                if let Some(bad) = self.wrong_session(&params.session_id) {
+                    return vec![bad];
+                }
+                // A read of the session's own configuration: asking which models exist
+                // is not a fact about the session, so nothing is recorded.
+                self.respond(id, self.model_list(), "model.list")
+            }
+            gen::method::MODEL_SELECT => {
+                let params: gen::ModelSelectParams = match request.params_as() {
+                    Ok(p) => p,
+                    Err(e) => return vec![e.to_line()],
+                };
+                if let Some(bad) = self.wrong_session(&params.session_id) {
+                    return vec![bad];
+                }
+                // The switch records its own event (a person's choice is as
+                // explicable as a rule's), so the reply is just the new state.
+                match self.kernel.select_model(&params.name) {
+                    Ok(()) => self.respond(id, self.model_list(), "model.select"),
+                    Err(e) => self.fail(id, e),
+                }
+            }
             gen::method::SESSION_REPLAY => {
                 let params: gen::SessionOnlyParams = match request.params_as() {
                     Ok(p) => p,
@@ -361,6 +388,16 @@ impl Server {
         };
         lines.push(Response::err(id, code, error.to_string()).to_line());
         lines
+    }
+
+    /// The models this session offers and which one is current — the one shape both
+    /// `model.list` and `model.select` answer with, so a client that switches does not
+    /// have to ask again to find out what happened.
+    fn model_list(&self) -> gen::ModelList {
+        gen::ModelList {
+            models: self.kernel.model_list(),
+            selected: self.kernel.selected_model().to_string(),
+        }
     }
 
     fn wrong_session(&self, session_id: &str) -> Option<String> {
@@ -1062,5 +1099,144 @@ mod tests {
             .to_line(),
         );
         assert_eq!(wrong[0]["error"]["code"], codes::INVALID_PARAMS as i64);
+    }
+
+    /// The one response line in a batch that may also carry streamed events.
+    fn reply(lines: &[String]) -> Value {
+        lines
+            .iter()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .find(|value| value.get("result").is_some() || value.get("error").is_some())
+            .unwrap_or(Value::Null)
+    }
+
+    #[test]
+    fn the_model_surface_lists_what_a_session_has_and_switches_on_request() {
+        let t = Temp::new();
+        let kernel = Kernel::create_with_models(
+            t.0.join("models.jsonl"),
+            KernelConfig::new(&t.0),
+            vec![
+                (
+                    "cheap".to_string(),
+                    Box::new(ScriptedModel::saying("cheap")),
+                ),
+                (
+                    "strong".to_string(),
+                    Box::new(ScriptedModel::saying("strong")),
+                ),
+            ],
+        )
+        .unwrap();
+        let mut server = Server::new(kernel, "s-models");
+        let (out, _written) = Out::memory();
+
+        // Listing is a read of the session's own configuration, so only the response
+        // comes back — nothing is recorded by asking.
+        let listed = server.handle_line_streaming(
+            &Request::new(
+                1,
+                gen::method::MODEL_LIST,
+                json!({"session_id": "s-models"}),
+            )
+            .to_line(),
+            &out,
+        );
+        let value = reply(&listed);
+        assert_eq!(value["result"]["selected"], "cheap");
+        let names: Vec<&str> = value["result"]["models"]
+            .as_array()
+            .expect("a model list")
+            .iter()
+            .filter_map(|model| model["name"].as_str())
+            .collect();
+        assert_eq!(names, vec!["cheap", "strong"]);
+
+        // A switch answers with the state *afterwards*, so a client never has to ask
+        // again to find out whether it worked.
+        let switched = server.handle_line_streaming(
+            &Request::new(
+                2,
+                gen::method::MODEL_SELECT,
+                json!({"session_id": "s-models", "name": "strong"}),
+            )
+            .to_line(),
+            &out,
+        );
+        let value = reply(&switched);
+        assert_eq!(value["result"]["selected"], "strong");
+        // The choice is an event like any other model change. It is not in *these* lines
+        // because the live sink is installed while a turn runs, and a switch between
+        // turns is a read-then-write rather than something happening under a reader — so
+        // the record is what this checks. The live case is the kernel's own test.
+        let logged = loong_eventlog::replay(&t.0.join("models.jsonl"))
+            .unwrap()
+            .events;
+        let recorded = logged
+            .iter()
+            .find(|event| event.kind == gen::event::MODEL_SELECTED)
+            .expect("the switch is in the log");
+        assert_eq!(recorded.data["model"], "strong");
+        assert_eq!(recorded.data["previous"], "cheap");
+
+        // A name nobody offers is refused rather than stored.
+        let refused = server.handle_line_streaming(
+            &Request::new(
+                3,
+                gen::method::MODEL_SELECT,
+                json!({"session_id": "s-models", "name": "nope"}),
+            )
+            .to_line(),
+            &out,
+        );
+        let value = reply(&refused);
+        assert!(
+            value["error"].is_object(),
+            "a bad name is an error: {value}"
+        );
+        assert_eq!(value["error"]["code"], codes::INVALID_PARAMS as i64);
+
+        // And the session still runs the model it actually has.
+        let after = server.handle_line_streaming(
+            &Request::new(
+                4,
+                gen::method::MODEL_LIST,
+                json!({"session_id": "s-models"}),
+            )
+            .to_line(),
+            &out,
+        );
+        assert_eq!(reply(&after)["result"]["selected"], "strong");
+    }
+
+    #[test]
+    fn the_model_surface_refuses_a_session_that_is_not_this_one() {
+        let t = Temp::new();
+        let kernel = Kernel::create(
+            t.0.join("models.jsonl"),
+            KernelConfig::new(&t.0),
+            Box::new(ScriptedModel::saying("hi")),
+        )
+        .unwrap();
+        let mut server = Server::new(kernel, "s-models");
+        let (out, _written) = Out::memory();
+
+        for method in [gen::method::MODEL_LIST, gen::method::MODEL_SELECT] {
+            let lines = server.handle_line_streaming(
+                &Request::new(
+                    1,
+                    method,
+                    json!({"session_id": "someone-else", "name": "default"}),
+                )
+                .to_line(),
+                &out,
+            );
+            let value = reply(&lines);
+            assert_eq!(
+                value["error"]["code"],
+                codes::INVALID_PARAMS as i64,
+                "{method} must not answer for another session: {value}"
+            );
+        }
     }
 }

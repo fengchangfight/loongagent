@@ -1212,6 +1212,101 @@ impl Kernel {
 
     /// What the next request will actually carry, and why — the debug view behind a
     /// "context" panel. It changes nothing: no event, no ledger movement.
+    /// The models this session can switch to, in the order the configuration declared
+    /// them.
+    ///
+    /// Declaration order, **not** the map's: that order is the profile's, which is the
+    /// user's own ranking from least to most capable, and it is what a status bar
+    /// counts when it labels a model `1`, `2`, `3`. Sorting these alphabetically
+    /// would silently renumber everybody's keyboard.
+    pub fn model_names(&self) -> Vec<String> {
+        let declared: Vec<String> = self
+            .config
+            .settings
+            .models
+            .iter()
+            .map(|spec| spec.name.clone())
+            .filter(|name| self.models.contains_key(name))
+            .collect();
+        if declared.is_empty() {
+            // No declaration to go on (a bare `--model`, or a session opened without a
+            // profile): fall back to whatever exists, so the list is never empty when
+            // models are.
+            return self.models.keys().cloned().collect();
+        }
+        // A model built but not declared (nothing does this today) would otherwise be
+        // unreachable; appending keeps it switchable rather than invisible.
+        let mut names = declared;
+        for name in self.models.keys() {
+            if !names.contains(name) {
+                names.push(name.clone());
+            }
+        }
+        names
+    }
+
+    /// What the session is running, which is what a switch changes.
+    pub fn selected_model(&self) -> &str {
+        &self.selected_model
+    }
+
+    /// Everything a status bar needs about the models on offer.
+    pub fn model_list(&self) -> Vec<gen::ModelOffering> {
+        let declared: std::collections::BTreeMap<&str, &loong_config::ModelSpec> = self
+            .config
+            .settings
+            .models
+            .iter()
+            .map(|spec| (spec.name.as_str(), spec))
+            .collect();
+        self.model_names()
+            .into_iter()
+            .map(|name| {
+                let spec = declared.get(name.as_str());
+                gen::ModelOffering {
+                    model: spec
+                        .map(|s| s.model.clone())
+                        .unwrap_or_else(|| name.clone()),
+                    provider: spec.and_then(|s| s.provider.clone()),
+                    context_window: spec.and_then(|s| s.max_context_size),
+                    name,
+                }
+            })
+            .collect()
+    }
+
+    /// Switch the model this session uses, from now on.
+    ///
+    /// Recorded as a `model.selected` event with the same shape a routing rule writes,
+    /// so "why this model?" is answered the same way whether a rule chose it or a
+    /// person did. An unknown name is refused rather than stored — a session that
+    /// silently kept its old model while reporting a new one would be worse than an
+    /// error.
+    pub fn select_model(&mut self, name: &str) -> Result<(), KernelError> {
+        if !self.models.contains_key(name) {
+            return Err(KernelError::OutOfOrder(format!(
+                "no model named {name:?} in this session (it has: {})",
+                self.model_names().join(", ")
+            )));
+        }
+        if name == self.selected_model {
+            return Ok(());
+        }
+        let facts = loong_config::Facts {
+            context_tokens: self.ledger.total_tokens(),
+            step: 0,
+        };
+        self.record_model_selected(name, Some("chosen by the user".to_string()), &facts)?;
+        // The router's `default` **is** "the model a turn starts with" — that is what
+        // `Profile::default_model` says, and what routing reads on every call. So a
+        // person's choice has to become it. Without this the next call would route
+        // straight back to whatever the profile declared and the switch would appear to
+        // have done nothing, which is the worst possible outcome for a control somebody
+        // has just used. Rules still outrank it, so an escalation still fires.
+        self.router.default = Some(name.to_string());
+        Ok(())
+    }
+
     pub fn context_explain(&self) -> gen::ContextExplain {
         let by_category = self.ledger.tokens_by_category();
         let mut categories: Vec<gen::ContextCategory> = by_category
@@ -2094,18 +2189,21 @@ impl Kernel {
         facts: &loong_config::Facts,
     ) -> Result<u64, KernelError> {
         let previous = std::mem::replace(&mut self.selected_model, model.to_string());
-        Ok(self
-            .log
-            .append(
-                gen::event::MODEL_SELECTED,
-                json!({
-                    "model": model,
-                    "previous": previous,
-                    "rule": rule.unwrap_or_else(|| "the router's default".to_string()),
-                    "context_tokens": facts.context_tokens,
-                }),
-            )?
-            .seq)
+        // `self.append`, not `self.log.append`: a switch is news, and news arrives when
+        // it happens. Writing straight to the log skipped both the live sink and the
+        // derived index, so a routing rule could change the model mid-turn and nothing
+        // watching would hear about it until the turn was over — which made every
+        // switch invisible in exactly the moment it mattered.
+        self.append(
+            gen::event::MODEL_SELECTED,
+            &json!({
+                "model": model,
+                "previous": previous,
+                "rule": rule.unwrap_or_else(|| "the router's default".to_string()),
+                "context_tokens": facts.context_tokens,
+                "step": facts.step,
+            }),
+        )
     }
 
     fn record_cost(&mut self, usage: &Usage) -> Result<u64, KernelError> {
@@ -3967,6 +4065,184 @@ Step one: breathe.
         assert!(
             switch.data["context_tokens"].as_u64().is_some(),
             "with the fact it used"
+        );
+    }
+
+    #[test]
+    fn a_rule_driven_switch_reaches_a_watcher_while_the_turn_is_still_running() {
+        // A model change is news, and news arrives when it happens. Writing it straight
+        // to the log skipped the live sink, so a routing rule could change the model
+        // mid-turn and nothing watching heard about it until the turn was over — which
+        // is exactly the moment the change stopped mattering.
+        let t = Temp::new();
+        std::fs::write(t.dir.join("note.txt"), "hi\n").unwrap();
+        let (first, _seen_first) = RecordingModel::new(vec![
+            response(
+                vec![call("c1", "read_file", json!({"path": "note.txt"}))],
+                None,
+            ),
+            response(vec![], Some("the first model finished it")),
+        ]);
+        let (second, _seen_second) = RecordingModel::new(vec![response(vec![], Some("second"))]);
+
+        let mut config = KernelConfig::new(&t.dir);
+        config.settings.router = loong_config::Router {
+            default: Some("first".to_string()),
+            rules: vec![loong_config::RouterRule {
+                condition: loong_config::parse_condition("step > 1").unwrap(),
+                model: "second".to_string(),
+            }],
+        };
+        let mut k = Kernel::create_with_models(
+            &t.log,
+            config,
+            vec![
+                ("first".to_string(), Box::new(first)),
+                ("second".to_string(), Box::new(second)),
+            ],
+        )
+        .unwrap();
+
+        let watched: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = std::sync::Arc::clone(&watched);
+        k.set_event_sink(Some(Box::new(move |event: &gen::EventEnvelope| {
+            sink.lock().unwrap().push(event.kind.clone());
+        })));
+
+        k.submit("read the note").unwrap();
+        let kinds = watched.lock().unwrap().clone();
+        assert!(
+            kinds.iter().any(|kind| kind == ev::MODEL_SELECTED),
+            "the switch was announced while the turn ran, not after it: {kinds:?}"
+        );
+    }
+
+    /// A `ModelSpec` with nothing but a name, for tests about ordering and switching
+    /// rather than about endpoints.
+    fn named(name: &str) -> loong_config::ModelSpec {
+        loong_config::ModelSpec {
+            name: name.to_string(),
+            kind: "openai-compat".to_string(),
+            base_url: "http://127.0.0.1:1/v1".to_string(),
+            model: name.to_string(),
+            api_key: None,
+            budget_tokens: None,
+            max_context_size: None,
+            provider: None,
+        }
+    }
+
+    #[test]
+    fn the_model_list_is_the_profile_order_and_a_person_can_choose_from_it() {
+        let t = Temp::new();
+        // Declared cheapest-last-capable-first, which is the user's ranking. The map
+        // holds them alphabetically, so this is also the test that the list does *not*
+        // come from the map: `zeta` is declared first and must be slot one.
+        let (zeta, seen_zeta) = RecordingModel::new(vec![response(vec![], Some("zeta"))]);
+        let (alpha, seen_alpha) = RecordingModel::new(vec![response(vec![], Some("alpha"))]);
+
+        let mut config = KernelConfig::new(&t.dir);
+        config.settings.models = vec![named("zeta"), named("alpha")];
+        config.settings.router = loong_config::Router {
+            default: Some("zeta".to_string()),
+            rules: Vec::new(),
+        };
+        let mut k = Kernel::create_with_models(
+            &t.log,
+            config,
+            vec![
+                ("zeta".to_string(), Box::new(zeta)),
+                ("alpha".to_string(), Box::new(alpha)),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            k.model_names(),
+            vec!["zeta".to_string(), "alpha".to_string()],
+            "declaration order, not alphabetical order"
+        );
+        assert_eq!(k.selected_model(), "zeta");
+        let listed = k.model_list();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].name, "zeta");
+        assert_eq!(listed[1].name, "alpha");
+
+        k.select_model("alpha").unwrap();
+        assert_eq!(k.selected_model(), "alpha");
+
+        // The switch has to survive the next turn — the fear being that the router's
+        // default quietly puts it back and the key appears to have done nothing.
+        let outcome = k.submit("go").unwrap();
+        assert_eq!(outcome.final_text.as_deref(), Some("alpha"));
+        assert_eq!(seen_alpha.lock().unwrap().len(), 1);
+        assert_eq!(
+            seen_zeta.lock().unwrap().len(),
+            0,
+            "the model nobody chose was never called"
+        );
+
+        // And it is a fact in the log, with the same shape a rule's choice has.
+        let events = loong_eventlog::replay(&t.log).unwrap().events;
+        let switch = events
+            .iter()
+            .find(|e| e.kind == ev::MODEL_SELECTED)
+            .expect("a person's switch is recorded like a rule's");
+        assert_eq!(switch.data["model"], "alpha");
+        assert_eq!(switch.data["previous"], "zeta");
+        assert_eq!(
+            switch.data["rule"], "chosen by the user",
+            "'why this model?' must have an answer for a hand-picked one too"
+        );
+    }
+
+    #[test]
+    fn a_model_nobody_offers_is_refused_rather_than_stored() {
+        let t = Temp::new();
+        let model = ScriptedModel::new(vec![response(vec![], Some("hi"))]);
+        let mut config = KernelConfig::new(&t.dir);
+        config.settings.models = vec![named("only")];
+        config.settings.router = loong_config::Router {
+            default: Some("only".to_string()),
+            rules: Vec::new(),
+        };
+        let mut k =
+            Kernel::create_with_models(&t.log, config, vec![("only".to_string(), Box::new(model))])
+                .unwrap();
+
+        let err = k.select_model("typo").unwrap_err().to_string();
+        assert!(err.contains("typo"), "{err}");
+        assert!(
+            err.contains("only"),
+            "the error names what is available: {err}"
+        );
+        assert_eq!(
+            k.selected_model(),
+            "only",
+            "and nothing was stored — a session reporting a model it does not have would be worse than an error"
+        );
+    }
+
+    #[test]
+    fn choosing_the_model_already_running_records_nothing() {
+        let t = Temp::new();
+        let model = ScriptedModel::new(vec![response(vec![], Some("hi"))]);
+        let mut config = KernelConfig::new(&t.dir);
+        config.settings.models = vec![named("only")];
+        config.settings.router = loong_config::Router {
+            default: Some("only".to_string()),
+            rules: Vec::new(),
+        };
+        let mut k =
+            Kernel::create_with_models(&t.log, config, vec![("only".to_string(), Box::new(model))])
+                .unwrap();
+
+        k.select_model("only").unwrap();
+        let events = loong_eventlog::replay(&t.log).unwrap().events;
+        assert!(
+            !events.iter().any(|e| e.kind == ev::MODEL_SELECTED),
+            "re-choosing what is already running is not a change, and the log is the record"
         );
     }
 

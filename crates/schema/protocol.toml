@@ -297,6 +297,47 @@ fields = [
   { name = "tokens", type = "u64" },
 ]
 
+[[types]]
+name = "ModelOffering"
+kind = "struct"
+doc = "One model a session can switch to, as a status bar needs it. No endpoint: a surface shows a name, and never learns where prompts go."
+fields = [
+  { name = "name", type = "string", doc = "the name the profile declared, which is what a switch names" },
+  { name = "model", type = "string", doc = "the vendor's own model id" },
+  { name = "provider", type = "string", optional = true, doc = "the catalog entry it came from, when it came from one" },
+  { name = "context_window", type = "u64", optional = true, doc = "what the vendor reported, if anyone knows" },
+]
+
+[[types]]
+name = "ModelList"
+kind = "struct"
+doc = "The models this session offers, in the order the configuration declared them, and which one is current."
+fields = [
+  { name = "models", type = "ModelOffering", list = true },
+  { name = "selected", type = "string" },
+]
+
+[[types]]
+name = "ModelSelectParams"
+kind = "struct"
+doc = "Switch the model a session uses. A person's choice, so it is recorded exactly as a routing rule's choice is."
+fields = [
+  { name = "session_id", type = "string" },
+  { name = "name", type = "string", doc = "the name from model.list; an unknown name is refused, not stored" },
+]
+
+[[methods]]
+name = "model.list"
+doc = "The models this session can use and which is current. A read: it records nothing."
+params = "SessionOnlyParams"
+result = "ModelList"
+
+[[methods]]
+name = "model.select"
+doc = "Choose the model for this session's next call. Recorded as a model.selected event, because a choice nobody can explain is a choice nobody can debug."
+params = "ModelSelectParams"
+result = "ModelList"
+
 [[methods]]
 name = "context.explain"
 doc = "Explain the context the next request will carry: every entry, its category, its tokens, and what has been cleared."

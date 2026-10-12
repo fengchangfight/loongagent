@@ -253,6 +253,34 @@ pub struct ContextCategory {
     pub tokens: u64,
 }
 
+/// One model a session can switch to, as a status bar needs it. No endpoint: a surface shows a name, and never learns where prompts go.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelOffering {
+    /// the name the profile declared, which is what a switch names
+    pub name: String,
+    /// the vendor's own model id
+    pub model: String,
+    /// the catalog entry it came from, when it came from one
+    pub provider: Option<String>,
+    /// what the vendor reported, if anyone knows
+    pub context_window: Option<u64>,
+}
+
+/// The models this session offers, in the order the configuration declared them, and which one is current.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelList {
+    pub models: Vec<ModelOffering>,
+    pub selected: String,
+}
+
+/// Switch the model a session uses. A person's choice, so it is recorded exactly as a routing rule's choice is.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelSelectParams {
+    pub session_id: String,
+    /// the name from model.list; an unknown name is refused, not stored
+    pub name: String,
+}
+
 /// Turn this session's approval prompts off or on. The sandbox is a different axis and is untouched (ADR-0007 §5).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PermissionsSetParams {
@@ -357,6 +385,10 @@ pub struct ProfileSelected {
 
 /// JSON-RPC method names (ADR-0002).
 pub mod method {
+    /// The models this session can use and which is current. A read: it records nothing.
+    pub const MODEL_LIST: &str = "model.list";
+    /// Choose the model for this session's next call. Recorded as a model.selected event, because a choice nobody can explain is a choice nobody can debug.
+    pub const MODEL_SELECT: &str = "model.select";
     /// Explain the context the next request will carry: every entry, its category, its tokens, and what has been cleared.
     pub const CONTEXT_EXPLAIN: &str = "context.explain";
     /// Attach a thin client to the local agent server (ADR-0009).

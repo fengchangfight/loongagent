@@ -146,6 +146,25 @@ fn roundtrip_context_category() {
 }
 
 #[test]
+fn roundtrip_model_offering() {
+    roundtrip::<g::ModelOffering>(
+        r#"{"name": "<string>","model": "<string>","provider": "<string>","context_window": 1}"#,
+    );
+}
+
+#[test]
+fn roundtrip_model_list() {
+    roundtrip::<g::ModelList>(
+        r#"{"models": [{"name": "<string>","model": "<string>","provider": "<string>","context_window": 1}],"selected": "<string>"}"#,
+    );
+}
+
+#[test]
+fn roundtrip_model_select_params() {
+    roundtrip::<g::ModelSelectParams>(r#"{"session_id": "<string>","name": "<string>"}"#);
+}
+
+#[test]
 fn roundtrip_permissions_set_params() {
     roundtrip::<g::PermissionsSetParams>(r#"{"session_id": "<string>","auto_approve": true}"#);
 }

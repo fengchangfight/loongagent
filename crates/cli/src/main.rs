@@ -2527,8 +2527,9 @@ fn full_screen(args: Args) -> Result<(), String> {
     // effect means ending the session and starting it again — against the same log, so
     // the conversation is still there when it does.
     //
-    // `force_configure` is false on the first pass, where the wizard runs only if there
-    // is nothing to run otherwise, and true after `/model`, where the person asked.
+    // Two places ask, and they ask different questions. `full_screen_once` runs the
+    // wizard only when there is nothing to run otherwise — a first run. After `/model`
+    // the person has asked, so it runs whether or not models already exist.
     loop {
         match full_screen_once(&args)? {
             loong_tui_app::Outcome::Quit => {

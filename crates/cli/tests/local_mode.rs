@@ -103,22 +103,50 @@ fn local_mode_never_touches_the_control_plane() {
 }
 
 #[test]
-fn local_mode_may_be_declared_in_the_profile_so_a_resume_keeps_it() {
-    // `loongagent resume` re-enters with no memory of the original flag, so the
-    // setting has to be able to live in a file.
+fn local_mode_may_be_declared_in_the_local_file_so_a_resume_keeps_it() {
+    // `loongagent resume` re-enters with no memory of the original flag, so the setting
+    // has to be able to live in a file — in `local.toml`, the file a local install owns.
     let home = home_with_a_dead_control_plane();
     std::fs::write(
-        home.join("profile.toml"),
+        home.join("local.toml"),
         "mode = \"local\"\n\n[[models]]\nname = \"cheap\"\n\
          provider = \"deepseek/deepseek-flash\"\n[router]\ndefault = \"cheap\"\n",
     )
     .unwrap();
 
     let (ok, stdout, stderr) = run(&home, &["config", "show"]);
-    assert!(ok, "the profile alone is enough: {stderr}");
+    assert!(ok, "the local file alone is enough: {stderr}");
     assert!(
         stdout.contains("local"),
         "and the table attributes it to the file that said so: {stdout}"
+    );
+    assert!(
+        stdout.contains("local.toml"),
+        "the local file, not the managed one: {stdout}"
+    );
+}
+
+#[test]
+fn the_managed_profile_cannot_declare_local_mode() {
+    // The bug this rule exists for, as a test that runs the real binary: `mode = "local"`
+    // in the *managed* profile made a plain `loongagent tui` resolve as a local install
+    // and stop consulting the control plane. It is a way to switch an install out of its
+    // firm's policy by editing a file about something else, so it is refused.
+    let home = home_with_a_dead_control_plane();
+    std::fs::write(home.join("profile.toml"), "mode = \"local\"\n").unwrap();
+
+    let (ok, _stdout, stderr) = run(&home, &["config", "show"]);
+    assert!(
+        !ok,
+        "a managed profile must not be able to say this: {stderr}"
+    );
+    assert!(
+        stderr.contains("local.toml"),
+        "and says where it goes: {stderr}"
+    );
+    assert!(
+        !stderr.contains("unreachable"),
+        "and the failure is the key, not a sync attempt: {stderr}"
     );
 }
 
@@ -126,7 +154,7 @@ fn local_mode_may_be_declared_in_the_profile_so_a_resume_keeps_it() {
 fn a_provider_shorthand_reaches_the_command_line_without_an_endpoint() {
     let home = workspace();
     std::fs::write(
-        home.join("profile.toml"),
+        home.join("local.toml"),
         "mode = \"local\"\n\n[[models]]\nname = \"cheap\"\n\
          provider = \"deepseek/deepseek-flash\"\n\n[[models]]\nname = \"strong\"\n\
          provider = \"moonshot/kimi-k3\"\n\n[router]\ndefault = \"cheap\"\n",

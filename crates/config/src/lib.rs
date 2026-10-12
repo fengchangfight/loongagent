@@ -1163,6 +1163,34 @@ pub fn layer_paths(workspace: &Path, session: Option<&Path>) -> Vec<(Layer, Path
     layers
 }
 
+/// Where a **local** install keeps its own configuration.
+///
+/// A separate file, not a section of [`layer_paths`]' user file. Local mode is a
+/// different way of deciding where prompts go, and the two must not be able to reach
+/// each other: a local run that read the managed profile would inherit models nobody
+/// chose, and — far worse — a managed run that read a local file could be switched out
+/// of its firm's policy by a file that has nothing to do with managed mode.
+pub fn local_profile_path() -> PathBuf {
+    loongagent_home().join("local.toml")
+}
+
+/// The layers a **local** run resolves.
+///
+/// Deliberately not [`layer_paths`]: no org file, and the user's own `local.toml`
+/// instead of the managed `profile.toml`. The workspace layer stays, because a
+/// repository may still *narrow* what is allowed (ADR-0008 §2) — it cannot name a
+/// model, an endpoint or a key, so it cannot put anything into this list that a person
+/// did not choose.
+pub fn local_layer_paths(workspace: &Path, session: Option<&Path>) -> Vec<(Layer, PathBuf)> {
+    let mut layers = Vec::new();
+    layers.push((Layer::Project, workspace.join(".loongagent/profile.toml")));
+    layers.push((Layer::User, local_profile_path()));
+    if let Some(session) = session {
+        layers.push((Layer::Session, session.to_path_buf()));
+    }
+    layers
+}
+
 /// Where the local client keeps its files: `$LOONGAGENT_HOME`, else `~/.loongagent`.
 ///
 /// Files directly in it are **configuration** (`profile.toml`, `control.toml`, the
@@ -1217,7 +1245,35 @@ pub fn resolve_with(
     present.sort_by_key(|l| l.layer);
     let mut profile = merge(&present)?;
     finish(&mut profile)?;
+    // `mode` decides whether the control plane is consulted at all, so where it is
+    // written matters more than what it says. It belongs in `local.toml` — the file a
+    // local install owns — or in a session layer somebody named on the command line.
+    // Honoured from the *managed* user file it becomes a way to switch a whole install
+    // out of its firm's policy by editing a file that has nothing to do with local
+    // mode, which is exactly what happened the first time this key existed.
+    if let Some(row) = profile.explain("mode") {
+        if !mode_is_legitimate(row.layer, &row.source) {
+            return Err(ConfigError::Invalid(format!(
+                "{}: `mode` belongs in {} — the managed profile must not be able to \
+                 switch an install into local mode (run `loongagent tui --local` \
+                 instead, which reads that file and nothing else)",
+                row.source,
+                local_profile_path().display()
+            )));
+        }
+    }
     Ok(profile)
+}
+
+/// Whether a `mode` value from this layer and file is allowed to mean anything.
+///
+/// Split out so the rule can be stated — and tested — without a test having to write to
+/// the real user's home directory.
+fn mode_is_legitimate(layer: Layer, source: &str) -> bool {
+    // A session layer is a file somebody named on the command line, which is as
+    // deliberate as it gets. Everything else is a file that was read because of where
+    // it sits, and `mode` is too consequential to be decided by geography.
+    layer == Layer::Session || Path::new(source) == local_profile_path()
 }
 
 /// Rules that only make sense once every layer has been merged: the shorthand form,
@@ -1985,23 +2041,85 @@ mod tests {
     }
 
     #[test]
-    fn local_mode_is_a_setting_that_survives_a_resume() {
-        let ws = workspace();
-        let user = write(&ws, "u.toml", "mode = \"local\"\n");
-        let profile = resolve(&[(Layer::User, user)], &ws).unwrap();
+    fn local_mode_is_a_setting_that_lives_in_the_local_file() {
+        // The rule, stated directly rather than by writing to somebody's home directory:
+        // `mode` means something in the local file and in a file named on the command
+        // line, and nowhere else.
         assert!(
-            profile.is_local(),
-            "`loongagent resume` re-enters with no flag, so the mode has to live in config"
+            mode_is_legitimate(Layer::User, &local_profile_path().display().to_string()),
+            "the local file is where this key belongs"
         );
-        assert_eq!(profile.explain("mode").unwrap().layer, Layer::User);
+        assert!(
+            mode_is_legitimate(Layer::Session, "/tmp/whatever-the-user-typed.toml"),
+            "a session layer is a file somebody pointed at on purpose"
+        );
+        for forbidden in [
+            "/home/me/.loongagent/profile.toml",
+            "/etc/loongagent/profile.toml",
+        ] {
+            assert!(
+                !mode_is_legitimate(Layer::User, forbidden),
+                "{forbidden} is read because of where it sits, not because it was chosen"
+            );
+        }
 
-        // Absent means managed, and saying so out loud means the same thing.
+        // Absent means managed, and that is the whole of it — `mode` in a file that is
+        // read because of where it sits is refused whatever it says, because the
+        // location is the problem, not the value.
         let ws = workspace();
         let bare = write(&ws, "u.toml", "budget_tokens = 1000\n");
         assert!(!resolve(&[(Layer::User, bare)], &ws).unwrap().is_local());
+    }
+
+    #[test]
+    fn the_managed_profile_may_not_declare_local_mode() {
+        // The bug this rule exists for: `mode = "local"` written into the *managed* user
+        // file made `loongagent tui` — with no flag at all — resolve as a local install
+        // and stop consulting the control plane. A key that can switch an install out of
+        // its firm's policy does not belong in a file that is about something else.
         let ws = workspace();
-        let said = write(&ws, "u.toml", "mode = \"managed\"\n");
-        assert!(!resolve(&[(Layer::User, said)], &ws).unwrap().is_local());
+        let managed = write(&ws, "profile.toml", "mode = \"local\"\n");
+        let err = resolve(&[(Layer::User, managed)], &ws)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("mode"), "{err}");
+        assert!(
+            err.contains("local.toml"),
+            "and says where it does belong: {err}"
+        );
+        assert!(
+            err.contains("--local"),
+            "and how to get what they wanted: {err}"
+        );
+    }
+
+    #[test]
+    fn a_local_run_never_reads_the_managed_profile_or_the_org_file() {
+        // The isolation, asserted on the layer list itself: if these paths are not in
+        // it, no amount of configuration in them can reach a local run.
+        let ws = workspace();
+        let layers = local_layer_paths(&ws, None);
+        let paths: Vec<String> = layers
+            .iter()
+            .map(|(_, path)| path.display().to_string())
+            .collect();
+
+        assert!(
+            paths.iter().any(|p| p.ends_with("local.toml")),
+            "it reads its own file: {paths:?}"
+        );
+        assert!(
+            !paths.contains(&loongagent_home().join("profile.toml").display().to_string()),
+            "and not the managed one: {paths:?}"
+        );
+        assert!(
+            !paths.iter().any(|p| p.starts_with("/etc/")),
+            "and not the machine-wide org file: {paths:?}"
+        );
+        assert!(
+            !layers.iter().any(|(layer, _)| *layer == Layer::Org),
+            "which is the same statement in terms of layers"
+        );
     }
 
     #[test]

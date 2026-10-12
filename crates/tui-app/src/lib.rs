@@ -2600,6 +2600,20 @@ impl LocalWizard {
         format!("{prefix}{}", "•".repeat(chars.len() - visible))
     }
 
+    /// Put a provider and a key in place without submitting anything.
+    ///
+    /// Used for a key the machine already had: the wizard shows it and waits, rather
+    /// than validating and saving on its own. An interface that configured models
+    /// nobody chose is exactly the surprise this avoids, and "one keystroke to accept"
+    /// costs nothing next to it.
+    pub fn preselect(&mut self, provider: &str, key: &str) {
+        if let Some(index) = self.providers.iter().position(|p| p.id == provider) {
+            self.provider = index;
+        }
+        self.key = key.to_string();
+        self.state = WizardState::Editing;
+    }
+
     /// Float the named providers to the top, keeping everything else in order.
     ///
     /// Ids that are not offered are ignored: a caller cannot conjure a provider into a
@@ -2757,6 +2771,7 @@ fn draw_local_wizard(frame: &mut ratatui::Frame, wizard: &LocalWizard) {
 /// model configured still runs, and tells them how to fix it.
 pub fn local_wizard(
     providers: Vec<ProviderChoice>,
+    prefill: Option<(String, String)>,
     validate: &mut dyn FnMut(&str, &str) -> Validation,
 ) -> Result<Option<KeyChoice>, String> {
     full_screen_needs_a_terminal()?;
@@ -2769,6 +2784,12 @@ pub fn local_wizard(
     use ratatui::Terminal;
 
     let mut wizard = LocalWizard::new(providers);
+    // A key this machine already had is *offered*, never taken: the provider is
+    // preselected and the field is filled in, so it is one keystroke to accept — and it
+    // is on screen, so nobody ends up with models they did not choose.
+    if let Some((provider, key)) = prefill {
+        wizard.preselect(&provider, &key);
+    }
     enable_raw_mode().map_err(|e| e.to_string())?;
     let mut stdout = std::io::stdout();
     execute!(stdout, EnterAlternateScreen).map_err(|e| e.to_string())?;

@@ -24,6 +24,10 @@ fn run(dir: &std::path::Path, args: &[&str]) -> (bool, String, String) {
 
 fn run_env(dir: &std::path::Path, args: &[&str], envs: &[(&str, &str)]) -> (bool, String, String) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_loongagent"));
+    // Hermetic: `~/.loongagent` is the developer's own install, and a test that reads it
+    // passes or fails according to what they happen to have configured. Set first so a
+    // test that means to move the home still can.
+    command.env("LOONGAGENT_HOME", dir);
     for (key, value) in envs {
         command.env(key, value);
     }

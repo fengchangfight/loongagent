@@ -279,7 +279,21 @@ impl Args {
     /// Resolve the configuration with the control plane's pack in place, if there is
     /// one. The pack is the *verified* layer: nothing reaches the resolver that a user
     /// could have written by hand (ADR-0008 §6).
-    /// Whether this run is local: the flag, or the profile's own answer.
+    /// Which layer list a run reads. **The one place the two modes diverge**, because
+    /// everything downstream is resolution: a local run reads `local.toml` and never the
+    /// managed profile or the org file, and a managed run reads the other set.
+    ///
+    /// Keeping this as one function is what makes "local mode is independent" checkable
+    /// rather than a property that has to hold in several places at once.
+    fn layers(&self, local: bool) -> Vec<(loong_config::Layer, PathBuf)> {
+        if local {
+            loong_config::local_layer_paths(&self.cwd, self.profile.as_deref())
+        } else {
+            loong_config::layer_paths(&self.cwd, self.profile.as_deref())
+        }
+    }
+
+    /// Whether this run is local: the flag, or `local.toml`'s own answer.
     ///
     /// Reads the layer files and nothing else — no pack, no network — so it is safe
     /// to ask *before* anything control-plane-shaped has happened. That ordering is
@@ -289,28 +303,39 @@ impl Args {
         if self.local {
             return Ok(true);
         }
-        let layers = loong_config::layer_paths(&self.cwd, self.profile.as_deref());
-        let resolved = loong_config::resolve(&layers, &self.cwd).map_err(|e| e.to_string())?;
+        // The *local* layers, because only they can say "local" — asking the managed
+        // profile would be asking a document that is not allowed to answer.
+        let resolved =
+            loong_config::resolve(&self.layers(true), &self.cwd).map_err(|e| e.to_string())?;
         Ok(resolved.is_local())
     }
 
     fn settings_with_pack(&self) -> Result<(loong_config::Profile, Option<PackState>), String> {
-        let layers = loong_config::layer_paths(&self.cwd, self.profile.as_deref());
-        // Local mode is settled **before** anything control-plane-shaped can happen.
-        // This function is the whole severance: `full_screen` and `serve` both get
-        // their configuration through it, so nothing downstream has to remember the
-        // rule — and there is no second path that could forget it.
+        // Settled **before** anything control-plane-shaped can happen. This function is
+        // the whole severance: `full_screen` and `serve` both get their configuration
+        // through it, so nothing downstream has to remember the rule — and there is no
+        // second path that could forget it.
         if self.is_local()? {
             let mut resolved =
-                loong_config::resolve(&layers, &self.cwd).map_err(|e| e.to_string())?;
+                loong_config::resolve(&self.layers(true), &self.cwd).map_err(|e| e.to_string())?;
             // The flag is this run's session layer, so the resolved profile says out
-            // loud what the run already decided.
+            // loud what the run already decided. Set after resolution on purpose: it is
+            // a fact about *this run*, not a line in anybody's file — which is exactly
+            // the mistake the `mode` guard now prevents.
             if self.local {
                 resolved.mode = Some("local".to_string());
             }
             return Ok((resolved, None));
         }
 
+        let layers = self.layers(false);
+        // Resolve once **without** the pack before reaching for the network. Two
+        // reasons, and the second is the one that bit: it is a handful of file reads, so
+        // a broken profile is reported as a broken profile — and a profile that is going
+        // to be refused is refused before a request is made about it. Sync-first meant a
+        // poisoned `profile.toml` surfaced as "the control plane is unreachable", which
+        // sent the reader to the wrong machine entirely.
+        loong_config::resolve(&layers, &self.cwd).map_err(|e| e.to_string())?;
         let pack = sync_pack(self)?;
         let resolved = match &pack {
             Some(state) => loong_config::resolve_with(
@@ -1849,6 +1874,7 @@ fn run() -> Result<(), String> {
             _ => Err(format!("mcp list | mcp trust\n\n{USAGE}")),
         },
         "setup" => setup(Args::parse(rest)?),
+        "local" => local(Args::parse(rest)?),
         "control" => control(rest),
         "profiles" => profiles(Args::parse(rest)?),
         "use" => use_profile(Args::parse(rest)?, rest),
@@ -2500,9 +2526,13 @@ fn full_screen(args: Args) -> Result<(), String> {
     // Before the child exists, not after: the server resolves its models once, at
     // startup, so a key written later would not take effect until the next run — and
     // the run it was written for would look broken.
+    //
+    // Only when there is nothing to run. A configured install starts straight away;
+    // adding a *second* provider is `loongagent local add`, so nobody has to sit through
+    // a form they did not ask for every time they open a session.
     if local && args.model.is_none() {
         let (settings, _) = args.settings_with_pack()?;
-        local_first_run(&settings)?;
+        configure_local(&settings, false)?;
     }
     let (transport, notes) = ChildTransport::spawn(&args, true)?;
     // Taken before the transport moves into the client: the interface needs the pid to
@@ -2637,35 +2667,78 @@ fn full_screen(args: Args) -> Result<(), String> {
 ///   exactly — the variable's name *is* the fact, so there is nothing to guess and the
 ///   user is asked for nothing at all;
 /// * otherwise, one screen: paste a key, confirm the provider, watch it validate.
-fn local_first_run(settings: &loong_config::Profile) -> Result<(), String> {
-    if !settings.models.is_empty() {
+/// `loongagent local` — the local install's own configuration, and the way to add a
+/// provider without starting a session for it.
+///
+/// Local mode's file is separate from the managed profile on purpose, so these
+/// subcommands only ever touch `local.toml`.
+fn local(mut args: Args) -> Result<(), String> {
+    // Every `local` subcommand is about the local file, so this run resolves the local
+    // layers whether or not `--local` was typed. Without this, `loongagent local` showed
+    // the control plane's models and `local add` would have written into a config the
+    // managed mode owns — which is the whole class of mistake this file exists to end.
+    args.local = true;
+    // From the parsed positionals, not from a fixed slot: `loongagent local --cwd .`
+    // has no subcommand at all, and reading `rest[1]` would take `--cwd` for one.
+    let sub = args.positional.first().map(String::as_str).unwrap_or("");
+    let path = loong_config::local_profile_path();
+    match sub {
+        "" | "show" => {
+            let (settings, _) = args.settings_with_pack()?;
+            println!("{}", path.display());
+            if settings.models.is_empty() {
+                println!("  (no models) — add one with `loongagent local add`");
+                return Ok(());
+            }
+            println!();
+            for (index, model) in settings.models.iter().enumerate() {
+                let current = settings
+                    .default_model()
+                    .map(|first| first.name == model.name)
+                    .unwrap_or(false);
+                println!(
+                    "  {}[{}] {:<20} {}",
+                    if current { "▸" } else { " " },
+                    index + 1,
+                    model.name,
+                    model.provider.as_deref().unwrap_or(&model.base_url)
+                );
+            }
+            println!();
+            println!("第一个是默认（建议放最便宜那层）。换模型用 `loongagent tui --local`。");
+            Ok(())
+        }
+        "add" => {
+            let (settings, _) = args.settings_with_pack()?;
+            configure_local(&settings, true)
+        }
+        other => Err(format!(
+            "unknown local subcommand {other:?} — try `loongagent local` or \
+             `loongagent local add`"
+        )),
+    }
+}
+
+/// Ask for one API key, validate it, and write it where a local install keeps things.
+///
+/// `always` decides whether an already-configured install is asked again. A first run
+/// asks because there is nothing to run otherwise; `local add` asks because asking is
+/// the whole point of it.
+fn configure_local(settings: &loong_config::Profile, always: bool) -> Result<(), String> {
+    let already = !settings.models.is_empty();
+    if already && !always {
         return Ok(());
     }
     let home = config_dir();
 
-    // 1. A key this machine already had. `DEEPSEEK_API_KEY` is DeepSeek's because the
-    //    catalog says so — no probe is needed to find out, only to prove it works.
-    if let Some((provider, key)) = key_already_exported() {
-        eprintln!(
-            "[local] 发现环境变量里的 {} 密钥 — 正在校验 {} …",
-            provider.label, provider.base_url
-        );
-        let probe = probe_provider(provider, &key);
-        match &probe {
-            loong_providers::probe::Probe::Ok { .. } => {
-                eprintln!("[local] {} ", loong_providers::probe::render(&probe));
-                adopt_local_model(&home, provider, &key, &probe)?;
-                return Ok(());
-            }
-            other => eprintln!(
-                "[local] {} — 改为手动输入",
-                loong_providers::probe::render(other)
-            ),
-        }
-    }
-
-    // 2. Ask. The catalog is offered in its own order; the key's shape is not used to
-    //    guess, because no vendor here documents a format to guess from.
+    // Ask. The catalog is offered in its own order; the key's shape is not used to
+    // guess, because no vendor here documents a format to guess from.
+    //
+    // A key this machine already exported — from the shell, or from the workspace's
+    // `.env` — is **offered**, never taken. Adopting it silently was the first version
+    // of this and it was wrong twice over: it configured models nobody chose, and it did
+    // so from a file (`<repo>/.env`) that belongs to a repository rather than to the
+    // person, so what looked like "your key" could be a checkout's.
     loong_tui_app::full_screen_needs_a_terminal()?;
     let choices: Vec<loong_tui_app::ProviderChoice> = loong_config::catalog::PROVIDERS
         .iter()
@@ -2675,6 +2748,7 @@ fn local_first_run(settings: &loong_config::Profile) -> Result<(), String> {
             label: p.label.to_string(),
         })
         .collect();
+    let prefill = key_already_exported().map(|(provider, key)| (provider.id.to_string(), key));
 
     let mut validate = |id: &str, key: &str| -> loong_tui_app::Validation {
         let Some(provider) = loong_config::catalog::provider(id) else {
@@ -2714,7 +2788,7 @@ fn local_first_run(settings: &loong_config::Profile) -> Result<(), String> {
         }
     };
 
-    let Some(choice) = loong_tui_app::local_wizard(choices, &mut validate)? else {
+    let Some(choice) = loong_tui_app::local_wizard(choices, prefill, &mut validate)? else {
         eprintln!(
             "[local] 跳过配置 — 本次会话没有模型。随时重跑 `loongagent tui --local`，\
              或先试 `--model demo-write`。"
@@ -2734,7 +2808,8 @@ fn local_first_run(settings: &loong_config::Profile) -> Result<(), String> {
             })
             .collect(),
     };
-    adopt_local_model(&home, provider, &choice.key, &probe)
+    adopt_local_model(&home, provider, &choice.key, &probe, already)?;
+    Ok(())
 }
 
 /// Check every model this session offers, **without holding up the session**.
@@ -2858,98 +2933,225 @@ fn probe_provider(
     }
 }
 
-/// Write the key where a secret belongs, and a profile the next run can just read.
+/// Write the key where a secret belongs, and the models into the **local** file.
+///
+/// Appending, not replacing: a second run is how somebody adds their *second* provider,
+/// and the models they configured last time must survive it. Re-adding a provider
+/// replaces that provider's own models and leaves every other provider alone.
 fn adopt_local_model(
     home: &Path,
     provider: &loong_config::catalog::Provider,
     key: &str,
     probe: &loong_providers::probe::Probe,
+    had_models: bool,
 ) -> Result<(), String> {
     write_env_secret(home, provider.key_env, key)?;
     // The child inherits this process's environment, so setting it here is what makes
     // the *first* run use the key rather than only the second one.
     std::env::set_var(provider.key_env, key);
 
-    let profile_path = home.join("profile.toml");
-    let existing = std::fs::read_to_string(&profile_path).unwrap_or_default();
-    if existing.contains("[[models]]") {
-        eprintln!(
-            "[local] {} 已写入；{} 已有模型配置，未改动",
-            home.join("env").display(),
-            profile_path.display()
-        );
-        return Ok(());
-    }
-
-    let models = match probe {
-        loong_providers::probe::Probe::Ok { models } => models.clone(),
+    let path = loong_config::local_profile_path();
+    let models: Vec<LocalModel> = match probe {
+        loong_providers::probe::Probe::Ok { models } => models
+            .iter()
+            .map(|model| LocalModel {
+                name: model.id.clone(),
+                provider: format!("{}/{}", provider.id, model.id),
+                context_window: model.context_window,
+            })
+            .collect(),
         _ => Vec::new(),
     };
-    std::fs::create_dir_all(home).map_err(|e| format!("{}: {e}", home.display()))?;
-    std::fs::write(&profile_path, render_local_profile(provider, &models))
-        .map_err(|e| format!("{}: {e}", profile_path.display()))?;
-    eprintln!(
-        "[local] 已写入 {}（{} 个模型，默认 {}）",
-        profile_path.display(),
-        models.len(),
-        models
-            .first()
-            .map(|m| m.id.as_str())
-            .unwrap_or("(未发现模型)")
-    );
+    let changed = upsert_local_models(&path, &provider.id, models)?;
+    if changed.is_empty() {
+        eprintln!(
+            "[local] {} 已写入；{} 没有可用的模型列表 — 请手工填一个模型 id",
+            home.join("env").display(),
+            provider.label
+        );
+    } else {
+        eprintln!(
+            "[local] 已写入 {}（{}）",
+            path.display(),
+            changed.join("、")
+        );
+    }
+    if !had_models {
+        eprintln!(
+            "[local] 默认走第一个（最便宜那层）。换模型改 `provider` 那一行，\
+             或用 `loongagent tui --local` 再配一个服务商。"
+        );
+    }
     Ok(())
 }
 
-/// The profile a first run gets, as text rather than as serialized TOML — because the
-/// comments are the user interface here, and a serializer would drop every one.
-fn render_local_profile(
-    provider: &loong_config::catalog::Provider,
-    models: &[loong_providers::probe::ModelInfo],
-) -> String {
-    let mut out = String::new();
-    out.push_str(
-        "# loongagent — 本地模式。首次运行自动生成，可以自由编辑。\n\
-         #\n\
-         # `[[models]]` 的顺序就是能力从低到高的顺序，也是状态栏里 1、2、3… 的顺序。\n\
-         # 第一个是启动默认；把它放在最便宜的那一层，升级就只按一次键。\n\
-         # 换模型只改 `provider` 这一行：`<服务商>/<模型 id>`，base_url 由服务商目录提供。\n\
-         mode = \"local\"\n\n",
-    );
+/// One model in `local.toml`, as this file understands it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LocalModel {
+    name: String,
+    provider: String,
+    context_window: Option<u64>,
+}
 
-    if models.is_empty() {
-        out.push_str(&format!(
-            "# 校验通过，但 {} 没有返回模型列表，所以这里需要你填一个模型 id。\n\
-             # [[models]]\n\
-             # name = \"default\"\n\
-             # provider = \"{}/{}\"\n",
-            provider.label, provider.id, "<模型 id>"
-        ));
-        return out;
-    }
+/// Add or replace one provider's models in `local.toml`, keeping everything else.
+///
+/// Deliberately **text surgery, not a re-serialize**: the file is meant to be read and
+/// edited by a person, and the comments in it are the only documentation the models
+/// have. Round-tripping through a TOML serializer would quietly delete every one of
+/// them, so the blocks for this provider are swapped out in place and the rest of the
+/// file is preserved byte for byte.
+///
+/// Returns the names it wrote, which is empty when the provider offered no models.
+fn upsert_local_models(
+    path: &Path,
+    provider_id: &str,
+    models: Vec<LocalModel>,
+) -> Result<Vec<String>, String> {
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let (head, mut blocks, tail) = split_model_blocks(&existing);
 
-    for model in models {
-        out.push_str("[[models]]\n");
-        out.push_str(&format!("name = \"{}\"\n", toml_escape(&model.id)));
-        out.push_str(&format!(
-            "provider = \"{}/{}\"\n",
-            provider.id,
-            toml_escape(&model.id)
+    // Drop this provider's previous blocks; they are being replaced.
+    let prefix = format!("provider = \"{provider_id}/");
+    blocks.retain(|block| !block.contains(&prefix));
+
+    for model in &models {
+        let mut block = String::from("[[models]]\n");
+        block.push_str(&format!("name = \"{}\"\n", toml_escape(&model.name)));
+        block.push_str(&format!(
+            "provider = \"{}\"\n",
+            toml_escape(&model.provider)
         ));
         if let Some(tokens) = model.context_window {
-            out.push_str(&format!(
+            block.push_str(&format!(
                 "max_context_size = {tokens}   # 服务商自己报的上下文窗口\n"
             ));
         }
-        out.push('\n');
+        blocks.push(block);
     }
 
-    // The router names the first model so the default is stated rather than implied by
-    // an ordering somebody has to know about.
-    out.push_str("[router]\n");
-    out.push_str("default = \"");
-    out.push_str(&toml_escape(&models[0].id));
-    out.push_str("\"\n");
-    out
+    let names: Vec<String> = models.iter().map(|m| m.name.clone()).collect();
+    if blocks.is_empty() && models.is_empty() {
+        // Nothing was configured and nothing is being added: leave the file alone
+        // rather than writing a header with no models in it.
+        return Ok(names);
+    }
+
+    // The router's default is "the model a turn starts with", so it has to name a model
+    // that exists. Written only when there is no section, so a hand-edited one — and the
+    // comments around it — survives an added provider.
+    let mut tail = tail;
+    if !tail.contains("[router]") {
+        if let Some(first) = blocks.first().and_then(|block| block_name(block)) {
+            tail = format!("[router]\ndefault = \"{}\"\n", toml_escape(&first));
+        }
+    }
+
+    let mut text = if head.trim().is_empty() {
+        local_header().to_string()
+    } else {
+        head
+    };
+    for block in &blocks {
+        text.push_str(block);
+        text.push('\n');
+    }
+    text.push_str(&tail);
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(names)
+}
+
+/// The `name = "…"` a model block declares. Read back rather than remembered, so a file
+/// somebody edited by hand still gets a router default naming something that exists.
+fn block_name(block: &str) -> Option<String> {
+    for line in block.lines() {
+        // `continue`, not `?`: the first line of a block is `[[models]]`, and bailing on
+        // it would mean this never found the name in a block this program wrote itself.
+        let Some(rest) = line.trim().strip_prefix("name") else {
+            continue;
+        };
+        let Some(rest) = rest.trim_start().strip_prefix('=') else {
+            continue;
+        };
+        let Some(rest) = rest.trim().strip_prefix('"') else {
+            continue;
+        };
+        return Some(rest.split('"').next().unwrap_or_default().to_string());
+    }
+    None
+}
+
+/// Split a `local.toml` into what comes before the models, the `[[models]]` blocks
+/// themselves, and whatever follows them (`[router]`, and anything hand-written).
+///
+/// The first model is the cheapest, and the router's `default` names it, so the tail is
+/// left exactly where it was rather than being regenerated.
+fn split_model_blocks(text: &str) -> (String, Vec<String>, String) {
+    let mut head = String::new();
+    let mut blocks: Vec<String> = Vec::new();
+    let mut tail = String::new();
+    let mut current: Option<String> = None;
+
+    for line in text.lines() {
+        if line.trim_start().starts_with("[[models]]") {
+            match current.take() {
+                Some(block) => blocks.push(block),
+                None => {
+                    // Everything before the first model block is the header, minus the
+                    // blank line the writer leaves between them.
+                    head = head.trim_end().to_string();
+                    head.push('\n');
+                    if !head.trim().is_empty() {
+                        head.push('\n');
+                    }
+                }
+            }
+            current = Some(format!("{line}\n"));
+            continue;
+        }
+        // A new top-level section ends the model blocks.
+        if current.is_some() && line.trim_start().starts_with('[') {
+            blocks.push(current.take().unwrap());
+            tail.push_str(line);
+            tail.push('\n');
+            continue;
+        }
+        match &mut current {
+            Some(block) => {
+                block.push_str(line);
+                block.push('\n');
+            }
+            None => {
+                if tail.is_empty() {
+                    head.push_str(line);
+                    head.push('\n');
+                } else {
+                    tail.push_str(line);
+                    tail.push('\n');
+                }
+            }
+        }
+    }
+    if let Some(block) = current.take() {
+        blocks.push(block);
+    }
+    (head, blocks, tail)
+}
+
+/// The header a freshly created `local.toml` gets. The comments are the only
+/// documentation these settings have.
+fn local_header() -> &'static str {
+    "# loongagent — 本地模式专用。与 `profile.toml`（受管模式）完全独立，互不影响。\n\
+     #\n\
+     # `[[models]]` 的顺序就是能力从低到高的顺序，也是状态栏里 1、2、3… 的顺序。\n\
+     # 第一个是启动默认；把它放在最便宜的那一层，升级就只按一次键。\n\
+     # 换模型只改 `provider` 这一行：`<服务商>/<模型 id>`，base_url 由服务商目录提供，\n\
+     # 密钥按约定名（如 LOONG_DEEPSEEK_KEY）从 `~/.loongagent/env` 或环境变量读取。\n\
+     #\n\
+     # 这个文件只在 `loongagent tui --local` 时被读取。\n\n"
 }
 
 /// Escape a value for a TOML basic string. Model ids are vendor-supplied and short,
@@ -3514,11 +3716,212 @@ fn headless(args: Args, prompt: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    fn answers(list: &[&str]) -> std::vec::IntoIter<String> {
-        list.iter()
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>()
-            .into_iter()
+    // ------------------------------------------------ the local model file
+
+    fn local_temp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "loongagent-localfile-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("local.toml")
+    }
+
+    fn model(name: &str, provider: &str) -> LocalModel {
+        LocalModel {
+            name: name.to_string(),
+            provider: provider.to_string(),
+            context_window: Some(4096),
+        }
+    }
+
+    /// How many real sections a file has. Counting occurrences of the text would also
+    /// count the header comments that *mention* `[[models]]`.
+    fn sections(text: &str, header: &str) -> usize {
+        text.lines()
+            .filter(|line| line.trim_start().starts_with(header))
+            .count()
+    }
+
+    #[test]
+    fn a_first_provider_writes_a_header_its_models_and_a_router_default() {
+        let path = local_temp("first");
+        let written = upsert_local_models(
+            &path,
+            "deepseek",
+            vec![model("deepseek-flash", "deepseek/deepseek-flash")],
+        )
+        .unwrap();
+        assert_eq!(written, vec!["deepseek-flash".to_string()]);
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("[[models]]"), "{text}");
+        assert!(
+            text.contains("provider = \"deepseek/deepseek-flash\""),
+            "{text}"
+        );
+        assert!(text.contains("max_context_size = 4096"), "{text}");
+        assert!(
+            text.contains("[router]") && text.contains("default = \"deepseek-flash\""),
+            "the default is written, not implied by an ordering somebody has to know: {text}"
+        );
+    }
+
+    #[test]
+    fn the_local_file_never_declares_a_mode() {
+        // The bug that poisoned a managed install: writing `mode = "local"` here — or
+        // anywhere a managed run reads — switched the whole install out of its firm's
+        // policy. `--local` is a fact about one run, and this file must not record it.
+        let path = local_temp("no-mode");
+        upsert_local_models(&path, "deepseek", vec![model("m", "deepseek/m")]).unwrap();
+        upsert_local_models(&path, "moonshot", vec![model("k", "moonshot/k")]).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        // A real assignment, not the substring: `[[models]]` contains "mode" too.
+        assert!(
+            !text
+                .lines()
+                .any(|line| line.trim_start().starts_with("mode")),
+            "the local file must not say what mode we are in: {text}"
+        );
+    }
+
+    #[test]
+    fn adding_a_second_provider_keeps_the_first_one_s_models() {
+        // A second run is how somebody adds their second provider. Losing the first
+        // would make the wizard something to be afraid of.
+        let path = local_temp("second");
+        upsert_local_models(
+            &path,
+            "deepseek",
+            vec![model("ds-flash", "deepseek/ds-flash")],
+        )
+        .unwrap();
+        upsert_local_models(
+            &path,
+            "moonshot",
+            vec![model("kimi-k3", "moonshot/kimi-k3")],
+        )
+        .unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("deepseek/ds-flash"), "{text}");
+        assert!(text.contains("moonshot/kimi-k3"), "{text}");
+        assert_eq!(sections(&text, "[[models]]"), 2, "{text}");
+        assert_eq!(
+            sections(&text, "[router]"),
+            1,
+            "and there is still exactly one router section: {text}"
+        );
+        assert!(
+            text.contains("default = \"ds-flash\""),
+            "the original default is not silently moved to whatever was added last: {text}"
+        );
+    }
+
+    #[test]
+    fn re_adding_a_provider_replaces_only_that_provider_s_models() {
+        // Pasting a new key for a provider you already configured should update it, not
+        // duplicate it — and not disturb the others.
+        let path = local_temp("replace");
+        upsert_local_models(&path, "deepseek", vec![model("ds-old", "deepseek/ds-old")]).unwrap();
+        upsert_local_models(&path, "moonshot", vec![model("kimi", "moonshot/kimi")]).unwrap();
+        upsert_local_models(&path, "deepseek", vec![model("ds-new", "deepseek/ds-new")]).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("deepseek/ds-new"), "{text}");
+        assert!(
+            !text.contains("deepseek/ds-old"),
+            "the replaced model is gone: {text}"
+        );
+        assert!(
+            text.contains("moonshot/kimi"),
+            "the other provider is untouched: {text}"
+        );
+        assert_eq!(sections(&text, "[[models]]"), 2, "{text}");
+    }
+
+    #[test]
+    fn what_a_person_wrote_around_the_models_survives_a_new_provider() {
+        // The file is meant to be read and edited by a person, and its comments are the
+        // only documentation these settings have. Round-tripping through a TOML
+        // serializer would delete every one of them.
+        let path = local_temp("comments");
+        std::fs::write(
+            &path,
+            "# my own note about this machine\n\
+             [[models]]\n\
+             name = \"ds\"\n\
+             provider = \"deepseek/ds\"\n\
+             # hand-written: this one is cheap at night\n\n\
+             [router]\n\
+             default = \"ds\"\n\
+             # I raised this on purpose\n",
+        )
+        .unwrap();
+
+        upsert_local_models(&path, "moonshot", vec![model("kimi", "moonshot/kimi")]).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# my own note about this machine"), "{text}");
+        assert!(
+            text.contains("# hand-written: this one is cheap at night"),
+            "{text}"
+        );
+        assert!(text.contains("# I raised this on purpose"), "{text}");
+        assert!(
+            text.contains("moonshot/kimi"),
+            "and the new provider arrived: {text}"
+        );
+        assert!(
+            !text.contains("[router]\n[router]"),
+            "and no second router section was bolted on: {text}"
+        );
+    }
+
+    #[test]
+    fn a_provider_that_offered_no_models_leaves_the_file_alone() {
+        // Somebody whose `/models` came back empty should get told, not given a header
+        // with nothing under it.
+        let path = local_temp("empty");
+        let written = upsert_local_models(&path, "deepseek", Vec::new()).unwrap();
+        assert!(written.is_empty());
+        assert!(!path.exists(), "no file is created for no models");
+    }
+
+    #[test]
+    fn splitting_a_written_file_finds_its_header_blocks_and_router() {
+        // The exact shape the writer produces, fed back in. The router is what a second
+        // provider must not lose.
+        let written = "# header line\n\n\
+                       [[models]]\nname = \"a\"\nprovider = \"p/a\"\n\n\
+                       [router]\ndefault = \"a\"\n";
+        let (head, blocks, tail) = split_model_blocks(written);
+        assert_eq!(blocks.len(), 1, "one model block: {blocks:?}");
+        assert!(
+            blocks[0].contains("name = \"a\""),
+            "and it is the model: {blocks:?}"
+        );
+        assert!(
+            !blocks[0].contains("[router]"),
+            "the router section is not part of a model block: {blocks:?}"
+        );
+        assert!(
+            tail.contains("[router]") && tail.contains("default = \"a\""),
+            "the router is in the tail: {tail:?}"
+        );
+        assert!(
+            head.contains("# header line"),
+            "and the header is the header: {head:?}"
+        );
+    }
+
+    #[test]
+    fn a_block_declares_its_own_name() {
+        assert_eq!(
+            block_name("[[models]]\nname = \"kimi-k3\"\nprovider = \"m/k\"\n"),
+            Some("kimi-k3".to_string())
+        );
+        assert_eq!(block_name("[[models]]\n"), None);
     }
 
     #[test]

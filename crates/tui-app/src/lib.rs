@@ -470,6 +470,9 @@ pub struct App {
     /// same question* to a different model, and a question that got edited in between
     /// would make the two answers incomparable.
     pub last_prompt: Option<String>,
+    /// Which models a background check has confirmed, by name. Absent means nobody has
+    /// checked yet, which is not the same as failed.
+    pub health: std::collections::BTreeMap<String, bool>,
     pub quit: bool,
 }
 
@@ -507,6 +510,7 @@ impl App {
             models: Vec::new(),
             selected: String::new(),
             last_prompt: None,
+            health: std::collections::BTreeMap::new(),
             quit: false,
         }
     }
@@ -571,6 +575,21 @@ impl App {
     pub fn set_models(&mut self, list: loong_schema::generated::ModelList) {
         self.models = list.models;
         self.selected = list.selected;
+    }
+
+    /// Record what a background check found, and say so when it is bad news.
+    ///
+    /// The model keeps its slot either way. What a failure means is "the last check did
+    /// not get through", which is worth seeing and not worth acting on — the switch
+    /// still works, and it may well work by the time it is pressed.
+    pub fn note_health(&mut self, found: ModelHealth) {
+        self.health.insert(found.name.clone(), found.ok);
+        if !found.ok {
+            self.push_lines(vec![format!(
+                "✗ [{}] 校验未通过 — {}",
+                found.name, found.detail
+            )]);
+        }
     }
 
     /// Notice a `⇄ model a → b (…)` line and move the bar with it.
@@ -757,12 +776,16 @@ impl App {
         let mut shown = 0usize;
         for (index, model) in self.models.iter().enumerate().take(slots) {
             let current = model.name == self.selected;
-            let label = format!(
-                "{}[{}] {}",
-                if current { "▸" } else { " " },
-                index + 1,
-                model.name
-            );
+            // A model whose check failed is marked, not hidden: the digits stay where
+            // they were, so a network blip does not renumber somebody's keyboard.
+            let mark = if self.health.get(&model.name) == Some(&false) {
+                "✗"
+            } else if current {
+                "▸"
+            } else {
+                " "
+            };
+            let label = format!("{mark}[{}] {}", index + 1, model.name);
             let label_width = UnicodeWidthStr::width(label.as_str());
             let gap = usize::from(shown > 0);
             // The first slot is always drawn even if it does not fit — a clipped name
@@ -776,7 +799,13 @@ impl App {
             }
             spans.push(Span::styled(
                 label,
-                if current { MARK_TEXT } else { MARK_QUIET },
+                if self.health.get(&model.name) == Some(&false) {
+                    Style::default().fg(Color::Red)
+                } else if current {
+                    MARK_TEXT
+                } else {
+                    MARK_QUIET
+                },
             ));
             used += label_width;
             shown += 1;
@@ -2498,6 +2527,19 @@ pub struct KeyChoice {
     pub validation: Validation,
 }
 
+/// What a background check found out about one model, as the bar needs it.
+///
+/// Reported rather than enforced: a model that failed its check is marked, not
+/// removed. A key revoked at midnight and a network hiccup on the train look identical
+/// from here, and an interface that silently deleted somebody's model because the wifi
+/// dropped would be worse than one that admitted it was unsure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelHealth {
+    pub name: String,
+    pub ok: bool,
+    pub detail: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WizardState {
     Editing,
@@ -2790,6 +2832,7 @@ pub fn run<T: Transport + Send + 'static>(
     notes: Option<Receiver<String>>,
     intro: Vec<String>,
     interrupt: Option<Box<dyn Fn()>>,
+    health: Option<Receiver<ModelHealth>>,
 ) -> Result<(), String> {
     use ratatui::backend::CrosstermBackend;
     use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture};
@@ -2847,6 +2890,13 @@ pub fn run<T: Transport + Send + 'static>(
     let outcome = (|| -> Result<(), String> {
         loop {
             app.drain(&from_worker);
+            // A background check reports when it reports; the bar is redrawn either way,
+            // so a slow provider never holds up the first frame.
+            if let Some(health) = &health {
+                while let Ok(found) = health.try_recv() {
+                    app.note_health(found);
+                }
+            }
             if let Some(notes) = &notes {
                 while let Ok(note) = notes.try_recv() {
                     app.push_note(note);
@@ -5295,6 +5345,62 @@ mod tests {
         let mut app = app_with_models(&["cheap"]);
         app.handle_key(key(KeyCode::Char('r')));
         assert_eq!(app.input, "r");
+    }
+
+    #[test]
+    fn a_model_that_failed_its_check_is_marked_and_keeps_its_slot() {
+        // Marked, not removed. A key revoked at midnight and a network hiccup look
+        // identical from here, and a bar that renumbered itself because the wifi dropped
+        // would be worse than one that admitted it was unsure.
+        let mut app = app_with_models(&["cheap", "strong", "third"]);
+        assert!(!app.health.contains_key("strong"), "nothing checked yet");
+
+        app.note_health(ModelHealth {
+            name: "strong".to_string(),
+            ok: false,
+            detail: "无法连接（这不说明密钥有问题）：timeout".to_string(),
+        });
+        let screen = draw(&mut app, 100, 20);
+        let bar = screen.lines().next().unwrap_or_default().to_string();
+        assert!(bar.contains("✗[2] strong"), "{bar:?}");
+        assert!(
+            bar.contains("[3] third"),
+            "and the slots either side did not move: {bar:?}"
+        );
+        assert!(
+            despaced(&screen).contains(&despaced("校验未通过")),
+            "with the reason in the transcript, because a red glyph is not an explanation:\n{screen}"
+        );
+
+        // A model that passes is not marked at all — a tick on everything is noise.
+        app.note_health(ModelHealth {
+            name: "third".to_string(),
+            ok: true,
+            detail: "连接成功".to_string(),
+        });
+        let screen = draw(&mut app, 100, 20);
+        let bar = screen.lines().next().unwrap_or_default().to_string();
+        assert!(!bar.contains("✗[3]"), "{bar:?}");
+        assert!(
+            bar.contains("✓") == false,
+            "no tick for the good news: {bar:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_check_still_lets_the_model_be_chosen() {
+        // The check is advice. Refusing the key press would mean a transient probe
+        // failure locked somebody out of a model that works perfectly well.
+        let mut app = app_with_models(&["cheap", "strong"]);
+        app.note_health(ModelHealth {
+            name: "strong".to_string(),
+            ok: false,
+            detail: "timeout".to_string(),
+        });
+        assert_eq!(
+            app.handle_key(alt('2')),
+            Action::Send(ToWorker::SelectModel("strong".to_string()))
+        );
     }
 
     #[test]

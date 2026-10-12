@@ -2565,6 +2565,9 @@ fn full_screen(args: Args) -> Result<(), String> {
     // The client resolves the same layers the server does, so it can tell the user
     // whether a model exists without asking the server about it.
     let (settings, pack) = args.settings_with_pack()?;
+    // Started before the interface opens and finishing whenever it finishes: every model
+    // is usable from the first frame, and the check marks fill in behind them.
+    let health = spawn_model_health(&settings);
     if let Some(state) = &pack {
         eprintln!(
             "[control] {} {} — profile: {}",
@@ -2611,6 +2614,7 @@ fn full_screen(args: Args) -> Result<(), String> {
         notes,
         intro,
         Some(Box::new(move || loong_tui::interrupt(server_pid))),
+        health,
     );
     // Leaving the interface — by `/exit`, ctrl-c, or an error — says where the session
     // went, so the way out is not a dead end.
@@ -2731,6 +2735,83 @@ fn local_first_run(settings: &loong_config::Profile) -> Result<(), String> {
             .collect(),
     };
     adopt_local_model(&home, provider, &choice.key, &probe)
+}
+
+/// Check every model this session offers, **without holding up the session**.
+///
+/// One probe per distinct provider, on a thread, because the alternative is worse in
+/// both directions: checking before the interface opens would add a network round trip
+/// to every start including the ones that work, and not checking at all would leave a
+/// revoked key to be discovered by a failed turn.
+///
+/// Models are reported, never removed. A key revoked at midnight and a network hiccup
+/// on the train look identical from here, and quietly deleting somebody's model over
+/// the second would be worse than saying the check did not get through.
+fn spawn_model_health(
+    settings: &loong_config::Profile,
+) -> Option<std::sync::mpsc::Receiver<loong_tui_app::ModelHealth>> {
+    use std::sync::mpsc::channel;
+
+    // Group by provider: two DeepSeek models share one key and one endpoint, and
+    // probing twice would be paying twice for the same answer.
+    let mut by_provider: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for spec in &settings.models {
+        if let Some(provider) = &spec.provider {
+            by_provider
+                .entry(provider.clone())
+                .or_default()
+                .push(spec.name.clone());
+        }
+    }
+    if by_provider.is_empty() {
+        // Hand-written endpoints have no provider to probe, and inventing one from a
+        // `base_url` would be guessing at somebody's gateway.
+        return None;
+    }
+
+    let (sender, receiver) = channel();
+    std::thread::spawn(move || {
+        for (id, names) in by_provider {
+            let Some(provider) = loong_config::catalog::provider(&id) else {
+                for name in names {
+                    let _ = sender.send(loong_tui_app::ModelHealth {
+                        name,
+                        ok: false,
+                        detail: format!("服务商目录里没有 {id:?}"),
+                    });
+                }
+                continue;
+            };
+            let key = provider_key(provider);
+            let probe = probe_provider(provider, key.as_deref().unwrap_or_default());
+            let (ok, detail) = (probe.is_ok(), loong_providers::probe::render(&probe));
+            for name in names {
+                if sender
+                    .send(loong_tui_app::ModelHealth {
+                        name,
+                        ok,
+                        detail: detail.clone(),
+                    })
+                    .is_err()
+                {
+                    return; // the interface went away; nothing left to tell
+                }
+            }
+        }
+    });
+    Some(receiver)
+}
+
+/// The key for a provider, from wherever it lives.
+fn provider_key(provider: &loong_config::catalog::Provider) -> Option<String> {
+    let names = std::iter::once(provider.key_env).chain(provider.aliases.iter().copied());
+    names.into_iter().find_map(|name| {
+        std::env::var(name)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
 }
 
 /// A key the machine already had, and the provider its variable names.

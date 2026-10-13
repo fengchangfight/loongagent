@@ -2078,8 +2078,13 @@ impl App {
                                     None => format!("no model in slot {slot}"),
                                 }
                             }
-                            _ => "command — /help · /exit · /logo · /mouse · /copy · /expand"
-                                .to_string(),
+                            // `/help` stays in front: it is the answer to "where is the
+                            // rest", and a hint that dropped it to make room for a
+                            // newcomer would be trading one dead end for another.
+                            _ => {
+                                "command — /help · /new · /exit · /logo · /mouse · /copy · /expand"
+                                    .to_string()
+                            }
                         },
                     },
                     Style::default().fg(Color::Green),

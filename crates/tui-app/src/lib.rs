@@ -439,6 +439,14 @@ pub struct App {
     pub session: String,
     pub schema: String,
     pub busy: bool,
+    /// How the last turn ended, kept until the next prompt starts.
+    ///
+    /// The transcript says so as well, in a line that scrolls away — and "did that
+    /// finish?" is a question asked while looking at the prompt, not while scrolling.
+    pub finished: Option<Finished>,
+    /// Set when the person asked for the turn to stop, so its end can be labelled
+    /// honestly instead of as a completion.
+    stopping: bool,
     pub error: Option<String>,
     /// The answer so far, while it is being written.
     pub streaming: String,
@@ -491,6 +499,8 @@ impl App {
             session: session.into(),
             schema: schema.into(),
             busy: false,
+            finished: None,
+            stopping: false,
             error: None,
             yolo: false,
             approval: None,
@@ -519,6 +529,9 @@ impl App {
     /// interface where the resend forgets to mark itself busy would let a second turn
     /// start on top of a running one.
     fn begin_submit(&mut self, text: String) -> Action {
+        // A new task makes the last tick stale, and a tick that outlives its turn is a
+        // tick that lies about the work on screen.
+        self.finished = None;
         self.input.clear();
         self.cursor = 0;
         // Sending is a return to the prompt, so the keyboard's place among the folds is
@@ -1117,6 +1130,7 @@ impl App {
     /// tool that is already running finishes — so the line says "interrupting", not
     /// "stopped".
     fn stop_turn(&mut self) {
+        self.stopping = true;
         match &self.interrupt {
             Some(interrupt) => {
                 interrupt();
@@ -1305,20 +1319,32 @@ impl App {
                     self.streaming.clear();
                     // How long the turn took, once, as bookkeeping: the per-step timings
                     // are on the tool results, and this is the total they add up to.
-                    if let Some(since) = self.busy_since.take() {
-                        let secs = since.elapsed().as_secs_f64();
-                        let took = if secs < 60.0 {
-                            format!("{secs:.1}s")
-                        } else {
-                            format!("{}m{:02}s", (secs / 60.0) as u64, (secs % 60.0) as u64)
-                        };
-                        self.push_lines(vec![format!("· turn took {took}")]);
-                    }
+                    let outcome = if self.stopping {
+                        Outcome::Stopped
+                    } else {
+                        Outcome::Done
+                    };
+                    self.stopping = false;
+                    let seconds = self
+                        .busy_since
+                        .take()
+                        .map(|since| since.elapsed().as_secs_f64());
+                    let finished = Finished { seconds, outcome };
+                    self.push_lines(vec![finished.line()]);
+                    self.finished = Some(finished);
                 }
                 Ok(FromWorker::Failed(message)) => {
+                    let seconds = self
+                        .busy_since
+                        .take()
+                        .map(|since| since.elapsed().as_secs_f64());
                     self.busy = false;
-                    self.busy_since = None;
                     self.activity = None;
+                    self.stopping = false;
+                    self.finished = Some(Finished {
+                        seconds,
+                        outcome: Outcome::Failed,
+                    });
                     self.error = Some(message.clone());
                     self.push_lines(vec![format!("! {message}")]);
                 }
@@ -1961,6 +1987,18 @@ impl App {
                     format!("{} working {secs}s{doing}", spinner_frame(self.busy_since)),
                     Style::default().fg(Color::Cyan),
                 )
+            }
+            // The last turn's ending, held on screen until the next prompt starts.
+            //
+            // Placed after the command hint so a half-typed `/new` still completes, and
+            // before the bare "prompt" label, which says nothing anybody needs.
+            //
+            // This is the answer to "did that finish?", and it is the one that gets asked
+            // while the cursor is sitting in the box — a closing line in the transcript
+            // answers it only for somebody who is already scrolling.
+            None if self.finished.is_some() && !self.input.starts_with('/') => {
+                let finished = self.finished.expect("just checked");
+                (finished.line(), finished.style())
             }
             // A leading `/` is a command: say where the list of them is.
             None if self.input.starts_with('/') => {
@@ -2638,6 +2676,65 @@ pub struct LocalWizard {
     pub state: WizardState,
     /// One per provider that has a key in this environment.
     pub offered: Vec<OfferedKey>,
+}
+
+/// How a turn ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    /// It ran to a stop on its own.
+    Done,
+    /// The person asked it to stop.
+    Stopped,
+    /// It ended in an error.
+    Failed,
+}
+
+/// The last turn's ending, held on screen until the next prompt.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Finished {
+    /// Absent when the turn never got far enough to be timed.
+    pub seconds: Option<f64>,
+    pub outcome: Outcome,
+}
+
+impl Finished {
+    /// The one line that says it, used both as the closing transcript line and as the
+    /// prompt's title, so the two can never disagree.
+    pub fn line(&self) -> String {
+        let took = self
+            .seconds
+            .map(|seconds| format!(" · {}", took_words(seconds)))
+            .unwrap_or_default();
+        match self.outcome {
+            Outcome::Done => format!("✓ 完成{took}"),
+            Outcome::Stopped => format!("⏹ 已停止{took}"),
+            Outcome::Failed => format!("✗ 失败{took}"),
+        }
+    }
+
+    /// Its colour, which is half of what makes it readable at a glance.
+    pub fn style(&self) -> Style {
+        match self.outcome {
+            Outcome::Done => Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+            Outcome::Stopped => Style::default().fg(Color::Yellow),
+            Outcome::Failed => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        }
+    }
+}
+
+/// Seconds the way a person says them.
+fn took_words(seconds: f64) -> String {
+    if seconds < 60.0 {
+        format!("{seconds:.1}s")
+    } else {
+        format!(
+            "{}m{:02}s",
+            (seconds / 60.0) as u64,
+            (seconds % 60.0) as u64
+        )
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -3435,6 +3532,27 @@ mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+
+    /// Every drawn box's title line.
+    ///
+    /// The tick lives in two places — the transcript line, which is history, and the
+    /// prompt box's title, which is state — so a test about state has to name the second
+    /// one. Asserting on the whole screen would pass before the fix and after it.
+    fn box_titles(screen: &str) -> String {
+        screen
+            .lines()
+            .filter(|line| line.trim_start().starts_with('┌'))
+            .map(despaced)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Feed one message to the app as though the worker had sent it.
+    fn fed(app: &mut App, message: FromWorker) {
+        let (says, worker) = channel();
+        says.send(message).unwrap();
+        app.drain(&worker);
+    }
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -6069,6 +6187,148 @@ mod tests {
         let bar = screen.lines().next().unwrap_or_default().to_string();
         assert!(bar.contains("▸[2] strong"), "{bar:?}");
         assert!(!bar.contains("▸[1]"), "{bar:?}");
+    }
+
+    #[test]
+    fn the_tick_says_how_the_turn_ended_and_which_way() {
+        let done = Finished {
+            seconds: Some(3.2),
+            outcome: Outcome::Done,
+        };
+        assert_eq!(done.line(), "✓ 完成 · 3.2s");
+        assert_eq!(done.style().fg, Some(Color::Green));
+        assert!(
+            done.style().add_modifier.contains(Modifier::BOLD),
+            "the tick that means finished is the loudest thing on the line"
+        );
+
+        let stopped = Finished {
+            seconds: Some(61.0),
+            outcome: Outcome::Stopped,
+        };
+        assert_eq!(stopped.line(), "⏹ 已停止 · 1m01s");
+        assert_eq!(stopped.style().fg, Some(Color::Yellow));
+
+        let failed = Finished {
+            seconds: None,
+            outcome: Outcome::Failed,
+        };
+        assert_eq!(failed.line(), "✗ 失败");
+        assert_eq!(failed.style().fg, Some(Color::Red));
+
+        // Three endings, three different marks. Two states sharing an icon would be
+        // worse than no icon, because it would be believed.
+        let marks: Vec<char> = [done, stopped, failed]
+            .iter()
+            .filter_map(|f| f.line().chars().next())
+            .collect();
+        assert_eq!(marks.len(), 3);
+        assert!(
+            marks[0] != marks[1] && marks[1] != marks[2] && marks[0] != marks[2],
+            "{marks:?}"
+        );
+    }
+
+    #[test]
+    fn the_prompt_title_shows_the_tick_until_the_next_task_starts() {
+        // The complaint this answers: "我常常不知道任务是否完成了". The closing line in the
+        // transcript says it, but it scrolls, and the question is asked while the cursor
+        // is sitting in the box.
+        let mut app = App::new("s-tick", "v");
+        app.busy = true;
+        app.busy_since = Some(std::time::Instant::now());
+
+        fed(&mut app, FromWorker::State { pending: None });
+        let screen = draw(&mut app, 110, 20);
+        assert!(
+            box_titles(&screen).contains(&despaced("✓ 完成")),
+            "the tick is on the prompt box:\n{screen}"
+        );
+        assert!(
+            despaced(&screen).contains(&despaced("✓ 完成")),
+            "and the transcript keeps the line too:\n{screen}"
+        );
+
+        // Still there while the next prompt is being typed...
+        type_text(&mut app, "next thing");
+        let screen = draw(&mut app, 110, 20);
+        assert!(
+            box_titles(&screen).contains(&despaced("✓ 完成")),
+            "and stays while the next prompt is written:\n{screen}"
+        );
+
+        // ...and gone once that task actually starts.
+        app.input = "next thing".to_string();
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.finished.is_none(), "a new task drops the old tick");
+        let screen = draw(&mut app, 110, 20);
+        assert!(
+            !box_titles(&screen).contains(&despaced("✓ 完成")),
+            "a tick that outlives its turn lies about the work on screen:\n{screen}"
+        );
+        assert!(
+            box_titles(&screen).contains("working"),
+            "and the box says what is happening instead:\n{screen}"
+        );
+
+        // A slash command still completes rather than being hidden behind the tick.
+        // Not while busy, though: "working" outranks a completion hint, because a turn
+        // that is running is the more urgent fact.
+        app.busy = false;
+        app.finished = Some(Finished {
+            seconds: None,
+            outcome: Outcome::Done,
+        });
+        app.input = "/exi".to_string();
+        let screen = draw(&mut app, 110, 20);
+        assert!(
+            box_titles(&screen).contains(&despaced("leaves loongagent")),
+            "{screen}"
+        );
+
+        // And with no command typed, the tick is back in front of it.
+        app.input.clear();
+        let screen = draw(&mut app, 110, 20);
+        assert!(
+            box_titles(&screen).contains(&despaced("✓ 完成")),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn a_turn_that_ends_badly_does_not_get_a_tick() {
+        let mut app = App::new("s-tick-bad", "v");
+        app.busy = true;
+        app.busy_since = Some(std::time::Instant::now());
+        fed(
+            &mut app,
+            FromWorker::Failed("the provider refused".to_string()),
+        );
+        let screen = draw(&mut app, 110, 20);
+        assert!(despaced(&screen).contains(&despaced("✗ 失败")), "{screen}");
+        assert!(
+            !despaced(&screen).contains(&despaced("✓ 完成")),
+            "a failure must never be able to pass for a completion:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn a_turn_the_person_stopped_says_so_rather_than_showing_a_tick() {
+        let mut app = App::new("s-tick-stop", "v");
+        app.interrupt = Some(Box::new(|| {}));
+        app.busy = true;
+        app.busy_since = Some(std::time::Instant::now());
+        app.stop_turn();
+        fed(&mut app, FromWorker::State { pending: None });
+        let screen = draw(&mut app, 110, 20);
+        assert!(
+            box_titles(&screen).contains(&despaced("⏹ 已停止")),
+            "{screen}"
+        );
+        assert!(
+            !despaced(&screen).contains(&despaced("✓ 完成")),
+            "stopping is not finishing, and the two must not look alike:\n{screen}"
+        );
     }
 
     #[test]

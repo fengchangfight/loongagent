@@ -220,6 +220,11 @@ export interface ModelSelectParams {
   name: string;
 }
 
+/** The session this server is now on, after `session.new`. */
+export interface SessionNewResult {
+  session_id: string;
+}
+
 /** Turn this session's approval prompts off or on. The sandbox is a different axis and is untouched (ADR-0007 §5). */
 export interface PermissionsSetParams {
   session_id: string;
@@ -315,6 +320,7 @@ export const METHODS = {
   modelList: "model.list",
   modelSelect: "model.select",
   contextExplain: "context.explain",
+  sessionNew: "session.new",
   sessionAttach: "session.attach",
   permissionsSet: "permissions.set",
   sessionReplay: "session.replay",

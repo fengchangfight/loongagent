@@ -48,6 +48,8 @@ pub enum ToWorker {
     RefreshModels,
     /// Use this model from the next call on.
     SelectModel(String),
+    /// Close this session and start an empty one.
+    NewSession,
 }
 
 /// What the worker reports back.
@@ -68,6 +70,8 @@ pub enum FromWorker {
     Yolo(bool),
     /// The session's models, and which one a switch landed on.
     Models(Box<loong_schema::generated::ModelList>),
+    /// A new session is running, under this id. The old one is closed and kept.
+    SessionStarted(String),
     /// What the turn is doing right now ("shell: cargo test"), so the interface can say
     /// so while it is happening rather than after.
     Working(String),
@@ -1108,6 +1112,14 @@ impl App {
                 self.cursor = 0;
                 Some(Action::Send(ToWorker::Yolo(!self.yolo)))
             }
+            // A fresh session. `/clear` is the same thing and not a screen wipe: the
+            // context is what people mean when they ask for a clean start, and clearing
+            // only the view would leave the model still reading everything above.
+            "/new" | "/clear" | "/reset" => {
+                self.input.clear();
+                self.cursor = 0;
+                Some(Action::Send(ToWorker::NewSession))
+            }
             // The transcript shows a summary of long tool output; this asks the log for
             // the rest.
             "/expand" => {
@@ -1271,6 +1283,27 @@ impl App {
                             before
                         )]);
                     }
+                }
+                Ok(FromWorker::SessionStarted(id)) => {
+                    // A new session means the screen is showing a log that is no longer
+                    // the one being written to. Everything tied to the old one goes: the
+                    // transcript, the folds, a pending question, the tick.
+                    self.lines.clear();
+                    self.folded.clear();
+                    self.open = None;
+                    self.fold = None;
+                    self.pending = None;
+                    self.approval = None;
+                    self.context = None;
+                    self.error = None;
+                    self.streaming.clear();
+                    self.scroll = 0;
+                    self.finished = None;
+                    self.busy_since = None;
+                    self.session = id.clone();
+                    self.push_lines(vec![format!(
+                        "· 新会话 {id} —— 上一条已存盘，用 `loongagent --session <id>` 可以回去"
+                    )]);
                 }
                 Ok(FromWorker::Yolo(on)) => {
                     self.yolo = on;
@@ -2022,6 +2055,10 @@ impl App {
                             "enter turns approval prompts off (the sandbox stays)".to_string()
                         }
                         "/copy" => "enter copies the whole transcript".to_string(),
+                        "/new" | "/clear" | "/reset" => {
+                            "enter starts a new session — this one is kept, its context is not"
+                                .to_string()
+                        }
                         "/mouse" => "enter hands the mouse back to your terminal".to_string(),
                         // The model shortcuts, said in full only when they would work: a
                         // completion that promises a switch in a session with one model
@@ -2285,6 +2322,24 @@ pub fn spawn_worker<T: Transport + Send + 'static>(
                     match client.select_model(&name) {
                         Ok(list) => {
                             let _ = events.send(FromWorker::Models(Box::new(list)));
+                        }
+                        Err(e) => {
+                            let _ = events.send(FromWorker::Failed(e));
+                        }
+                    }
+                    refreshed = true;
+                    Ok(Vec::new())
+                }
+                ToWorker::NewSession => {
+                    match client.new_session() {
+                        Ok(id) => {
+                            let _ = events.send(FromWorker::SessionStarted(id));
+                            // The model list belongs to the session too — a new one may
+                            // have been configured in between, and the bar should say what
+                            // is true now rather than what was true of the old log.
+                            if let Ok(list) = client.models() {
+                                let _ = events.send(FromWorker::Models(Box::new(list)));
+                            }
                         }
                         Err(e) => {
                             let _ = events.send(FromWorker::Failed(e));
@@ -6329,6 +6384,73 @@ mod tests {
             !despaced(&screen).contains(&despaced("✓ 完成")),
             "stopping is not finishing, and the two must not look alike:\n{screen}"
         );
+    }
+
+    #[test]
+    fn new_and_clear_both_ask_for_a_fresh_session() {
+        // `/clear` is not a screen wipe. When people ask for a clean start they mean the
+        // context, and clearing only the view would leave the model still reading
+        // everything above it — the worst of both, because the screen would say otherwise.
+        for command in ["/new", "/clear", "/reset", "/NEW"] {
+            let mut app = App::new("s-new", "v");
+            let action = app.handle_key(key(KeyCode::Enter)).clone();
+            assert_eq!(action, Action::None, "nothing typed yet");
+            app.input = command.to_string();
+            assert_eq!(
+                app.handle_key(key(KeyCode::Enter)),
+                Action::Send(ToWorker::NewSession),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_new_session_clears_the_screen_because_that_log_is_no_longer_the_live_one() {
+        let mut app = App::new("s-old", "v");
+        app.push_lines(vec!["you: something long".to_string()]);
+        app.busy = true;
+        app.busy_since = Some(std::time::Instant::now());
+        app.finished = Some(Finished {
+            seconds: Some(1.0),
+            outcome: Outcome::Done,
+        });
+        app.pending = Some("r1".to_string());
+        app.approval = Some(Box::new(ApprovalInfo {
+            request_id: "r1".to_string(),
+            class: "write".to_string(),
+            reason: "because".to_string(),
+            tool: "write_file".to_string(),
+            args: "{}".to_string(),
+        }));
+        app.error = Some("old failure".to_string());
+        app.scroll = 4;
+
+        fed(&mut app, FromWorker::SessionStarted("s-new1".to_string()));
+
+        assert_eq!(app.session, "s-new1");
+        assert!(
+            !app.lines.iter().any(|line| line.contains("something long")),
+            "the old transcript is gone: {:?}",
+            app.lines
+        );
+        assert!(
+            app.pending.is_none(),
+            "and so is a question from the old log"
+        );
+        assert!(app.approval.is_none());
+        assert!(app.error.is_none());
+        assert!(app.finished.is_none(), "and the old turn's tick");
+        assert!(app.busy_since.is_none());
+        assert_eq!(app.scroll, 0);
+        assert!(
+            app.lines
+                .iter()
+                .any(|line| line.contains("s-new1") && line.contains("存盘")),
+            "and it says where the old session went: {:?}",
+            app.lines
+        );
+        let screen = draw(&mut app, 110, 20);
+        assert!(!screen.contains("something long"), "{screen}");
     }
 
     #[test]

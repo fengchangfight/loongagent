@@ -96,9 +96,20 @@ impl From<std::io::Error> for ServerError {
     }
 }
 
+/// Builds a kernel for a session this server has not been given one for.
+///
+/// A closure rather than a config struct because building a kernel is the caller's
+/// business: it knows about layers, hooks, models and where the log goes. The server only
+/// needs to be able to ask for another one.
+pub type KernelFactory = Box<dyn FnMut() -> Result<(String, Kernel), String>>;
+
 pub struct Server {
     kernel: Kernel,
     session_id: String,
+    /// How to get a kernel for a session that does not exist yet. Absent when the server
+    /// was handed one kernel and nothing else — it then simply cannot start new sessions,
+    /// and says so rather than pretending.
+    factory: Option<KernelFactory>,
     /// Highest sequence already streamed to the client.
     last_sent: u64,
     /// The connection this call is writing to, so a response can stream the events it
@@ -115,11 +126,18 @@ impl Server {
         Self {
             kernel,
             session_id: session_id.into(),
+            factory: None,
             last_sent: 0,
             connection: None,
             pending_lines: Vec::new(),
             turns: 0,
         }
+    }
+
+    /// Teach this server how to start a session of its own.
+    pub fn with_factory(mut self, factory: KernelFactory) -> Self {
+        self.factory = Some(factory);
+        self
     }
 
     pub fn session_id(&self) -> &str {
@@ -166,6 +184,36 @@ impl Server {
     fn dispatch(&mut self, request: Request) -> Vec<String> {
         let id = request.id.clone().unwrap_or(Value::Null);
         match request.method.as_str() {
+            gen::method::SESSION_NEW => {
+                let params: gen::SessionOnlyParams = match request.params_as() {
+                    Ok(p) => p,
+                    Err(e) => return vec![e.to_line()],
+                };
+                // The client has to name the session it thinks it is in. Starting a new
+                // one is not destructive — the old log is kept — but a client that has
+                // lost track of where it is should find that out here rather than later.
+                if let Some(bad) = self.wrong_session(&id, &params.session_id) {
+                    return vec![bad];
+                }
+                let Some(factory) = self.factory.as_mut() else {
+                    return self.refuse(
+                        id,
+                        "this server was started on one session and cannot begin another",
+                    );
+                };
+                let (session_id, kernel) = match factory() {
+                    Ok(made) => made,
+                    Err(e) => return self.refuse(id, &e),
+                };
+                self.kernel = kernel;
+                self.session_id = session_id.clone();
+                // The new session has its own log, so every counter about the old one is
+                // now wrong. Forgetting to reset `last_sent` would stream the new
+                // session's first events as if they were the old session's past.
+                self.last_sent = 0;
+                self.turns = 0;
+                self.respond(id, gen::SessionNewResult { session_id }, "session.new")
+            }
             gen::method::SESSION_ATTACH => {
                 let params: gen::SessionAttachParams = match request.params_as() {
                     Ok(p) => p,
@@ -184,7 +232,7 @@ impl Server {
                     Ok(p) => p,
                     Err(e) => return vec![e.to_line()],
                 };
-                if let Some(bad) = self.wrong_session(&params.session_id) {
+                if let Some(bad) = self.wrong_session(&id, &params.session_id) {
                     return vec![bad];
                 }
                 // A read of the kernel's own state: nothing is recorded, because
@@ -201,7 +249,7 @@ impl Server {
                     Ok(p) => p,
                     Err(e) => return vec![e.to_line()],
                 };
-                if let Some(bad) = self.wrong_session(&params.session_id) {
+                if let Some(bad) = self.wrong_session(&id, &params.session_id) {
                     return vec![bad];
                 }
                 match self.kernel.set_auto_approve(params.auto_approve) {
@@ -232,7 +280,7 @@ impl Server {
                     Ok(p) => p,
                     Err(e) => return vec![e.to_line()],
                 };
-                if let Some(bad) = self.wrong_session(&params.session_id) {
+                if let Some(bad) = self.wrong_session(&id, &params.session_id) {
                     return vec![bad];
                 }
                 // A read of the session's own configuration: asking which models exist
@@ -244,7 +292,7 @@ impl Server {
                     Ok(p) => p,
                     Err(e) => return vec![e.to_line()],
                 };
-                if let Some(bad) = self.wrong_session(&params.session_id) {
+                if let Some(bad) = self.wrong_session(&id, &params.session_id) {
                     return vec![bad];
                 }
                 // The switch records its own event (a person's choice is as
@@ -259,7 +307,7 @@ impl Server {
                     Ok(p) => p,
                     Err(e) => return vec![e.to_line()],
                 };
-                if let Some(bad) = self.wrong_session(&params.session_id) {
+                if let Some(bad) = self.wrong_session(&id, &params.session_id) {
                     return vec![bad];
                 }
                 // The log is the record, so replaying it is a read: nothing is written,
@@ -281,7 +329,7 @@ impl Server {
                     Ok(p) => p,
                     Err(e) => return vec![e.to_line()],
                 };
-                if let Some(bad) = self.wrong_session(&params.session_id) {
+                if let Some(bad) = self.wrong_session(&id, &params.session_id) {
                     return vec![bad];
                 }
                 self.turns += 1;
@@ -332,7 +380,7 @@ impl Server {
                     Ok(p) => p,
                     Err(e) => return vec![e.to_line()],
                 };
-                if let Some(bad) = self.wrong_session(&params.session_id) {
+                if let Some(bad) = self.wrong_session(&id, &params.session_id) {
                     return vec![bad];
                 }
                 let result = gen::PromptSubmitResult {
@@ -379,6 +427,18 @@ impl Server {
         }
     }
 
+    /// Say no in words, for the failures that are not the kernel's.
+    ///
+    /// A kernel error has a shape and a code; "this server was built with one kernel and
+    /// nothing to build another from" does not, and inventing a `KernelError` for it would
+    /// put a lie in the type that the rest of the program reasons about.
+    fn refuse(&mut self, id: Value, message: &str) -> Vec<String> {
+        self.stream_drained();
+        let mut lines: Vec<String> = std::mem::take(&mut self.pending_lines);
+        lines.push(Response::err(id, codes::INTERNAL_ERROR, message.to_string()).to_line());
+        lines
+    }
+
     fn fail(&mut self, id: Value, error: KernelError) -> Vec<String> {
         self.stream_drained();
         let mut lines: Vec<String> = std::mem::take(&mut self.pending_lines);
@@ -400,10 +460,16 @@ impl Server {
         }
     }
 
-    fn wrong_session(&self, session_id: &str) -> Option<String> {
+    /// A refusal that is still *this request's* answer.
+    ///
+    /// It used to be built with a null id, which a JSON-RPC client cannot match to
+    /// anything — the caller waited for a reply that had already been sent, and the
+    /// connection simply went quiet. A refusal nobody can attribute is worse than a slow
+    /// one, because it looks like a hang.
+    fn wrong_session(&self, id: &Value, session_id: &str) -> Option<String> {
         (session_id != self.session_id).then(|| {
             Response::err(
-                Value::Null,
+                id.clone(),
                 codes::INVALID_PARAMS,
                 format!(
                     "unknown session {session_id:?} (this server owns {:?})",
@@ -542,6 +608,127 @@ mod tests {
             .into_iter()
             .map(|l| serde_json::from_str(&l).expect("every outbound line is JSON"))
             .collect()
+    }
+
+    #[test]
+    fn a_refusal_carries_the_id_of_the_request_it_refuses() {
+        // Found while wiring `session.new`: `wrong_session` built its error with a null
+        // id, so a JSON-RPC client could not match it to anything. The reply had been
+        // sent and the caller was still waiting — a hang, from the only side that can
+        // see it. Every method that names a session goes through here.
+        let t = Temp::new();
+        let kernel = Kernel::create(
+            t.0.join("s.jsonl"),
+            KernelConfig::new(&t.0),
+            Box::new(scripted(vec![], Some("hi"))),
+        )
+        .unwrap();
+        let mut server = Server::new(kernel, "mine");
+        for method in [
+            gen::method::CONTEXT_EXPLAIN,
+            gen::method::MODEL_LIST,
+            gen::method::SESSION_REPLAY,
+            gen::method::SESSION_NEW,
+        ] {
+            let out = lines_of(
+                &mut server,
+                &Request::new(7, method, json!({"session_id": "not-mine"})).to_line(),
+            );
+            let refusal = out
+                .iter()
+                .find(|v| v.get("error").is_some())
+                .unwrap_or_else(|| panic!("{method} refused silently: {out:?}"));
+            assert_eq!(
+                refusal["id"], 7,
+                "{method}: a refusal nobody can attribute looks like a hang"
+            );
+        }
+    }
+
+    #[test]
+    fn a_new_session_moves_the_server_onto_a_fresh_log_and_keeps_the_old_one() {
+        let t = Temp::new();
+        let kernel = Kernel::create(
+            t.0.join("first.jsonl"),
+            KernelConfig::new(&t.0),
+            Box::new(scripted(vec![], Some("hi"))),
+        )
+        .unwrap();
+        // The factory is what `serve` hands over: same settings, a fresh id and a fresh
+        // log beside the current one.
+        let root = t.0.clone();
+        let builds = Rc::new(RefCell::new(0usize));
+        let counted = Rc::clone(&builds);
+        let factory: KernelFactory = Box::new(move || {
+            *counted.borrow_mut() += 1;
+            let id = format!("second{}", *counted.borrow());
+            let kernel = Kernel::create(
+                root.join(format!("{id}.jsonl")),
+                KernelConfig::new(&root),
+                Box::new(scripted(vec![], Some("hi"))),
+            )
+            .map_err(|e| e.to_string())?;
+            Ok((id, kernel))
+        });
+        let mut server = Server::new(kernel, "first").with_factory(factory);
+
+        let out = lines_of(
+            &mut server,
+            &Request::new(2, gen::method::SESSION_NEW, json!({"session_id": "first"})).to_line(),
+        );
+        let responses: Vec<&Value> = out.iter().filter(|v| v.get("result").is_some()).collect();
+        assert_eq!(responses.len(), 1, "{out:?}");
+        assert_eq!(responses[0]["result"]["session_id"], "second1");
+        assert_eq!(server.session_id(), "second1");
+
+        // The old log is still there. A new session is not a way to lose an old one.
+        assert!(t.0.join("first.jsonl").exists());
+        assert!(t.0.join("second1.jsonl").exists());
+
+        // And the server is really on the new one: a request naming the old id is refused.
+        let out = lines_of(
+            &mut server,
+            &Request::new(
+                3,
+                gen::method::CONTEXT_EXPLAIN,
+                json!({"session_id": "first"}),
+            )
+            .to_line(),
+        );
+        assert!(
+            out.iter().any(|v| v.get("error").is_some()),
+            "the closed session is not the current one: {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_server_given_one_kernel_says_it_cannot_start_another() {
+        // Not pretending: a server built around a single kernel has no way to make a
+        // second, and saying so is better than half a session.
+        let t = Temp::new();
+        let kernel = Kernel::create(
+            t.0.join("only.jsonl"),
+            KernelConfig::new(&t.0),
+            Box::new(scripted(vec![], Some("hi"))),
+        )
+        .unwrap();
+        let mut server = Server::new(kernel, "only");
+        let out = lines_of(
+            &mut server,
+            &Request::new(1, gen::method::SESSION_NEW, json!({"session_id": "only"})).to_line(),
+        );
+        let error = out
+            .iter()
+            .find_map(|v| v.get("error"))
+            .expect("an error, not a silent success");
+        assert!(
+            error["message"]
+                .as_str()
+                .unwrap()
+                .contains("cannot begin another"),
+            "{error:?}"
+        );
+        assert_eq!(server.session_id(), "only", "and nothing changed");
     }
 
     #[test]

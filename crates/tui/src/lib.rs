@@ -602,6 +602,30 @@ impl<T: Transport> Client<T> {
         serde_json::from_value(result).map_err(|e| format!("model.select: {e}"))
     }
 
+    /// Start a fresh session on the server and move onto it.
+    ///
+    /// The session id is the client's, and it changes here: every request that carries one
+    /// would otherwise keep naming the session that was just closed. The previous session's
+    /// log stays on disk — starting a new one is not a way to lose an old one.
+    pub fn new_session(&mut self) -> Result<String, String> {
+        let params = gen::SessionOnlyParams {
+            session_id: self.session_id.clone(),
+        };
+        let (_, result) = self.call(
+            gen::method::SESSION_NEW,
+            serde_json::to_value(params).unwrap(),
+        )?;
+        let started: gen::SessionNewResult =
+            serde_json::from_value(result).map_err(|e| format!("session.new: {e}"))?;
+        self.session_id = started.session_id.clone();
+        // Whatever was in flight belonged to the session that just closed. A stale
+        // `last_tool_call` would let an approval name a call from a different log.
+        self.pending = None;
+        self.last_tool_call = None;
+        self.last_accepted = false;
+        Ok(started.session_id)
+    }
+
     /// Submit a turn; returns the lines to display (events, then the answer).
     pub fn submit(&mut self, text: &str) -> Result<Vec<String>, String> {
         self.submit_with(text, &mut |_, _| {})

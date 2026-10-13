@@ -165,6 +165,11 @@ fn roundtrip_model_select_params() {
 }
 
 #[test]
+fn roundtrip_session_new_result() {
+    roundtrip::<g::SessionNewResult>(r#"{"session_id": "<string>"}"#);
+}
+
+#[test]
 fn roundtrip_permissions_set_params() {
     roundtrip::<g::PermissionsSetParams>(r#"{"session_id": "<string>","auto_approve": true}"#);
 }

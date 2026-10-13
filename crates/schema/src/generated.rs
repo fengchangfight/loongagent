@@ -281,6 +281,12 @@ pub struct ModelSelectParams {
     pub name: String,
 }
 
+/// The session this server is now on, after `session.new`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionNewResult {
+    pub session_id: String,
+}
+
 /// Turn this session's approval prompts off or on. The sandbox is a different axis and is untouched (ADR-0007 §5).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PermissionsSetParams {
@@ -391,6 +397,8 @@ pub mod method {
     pub const MODEL_SELECT: &str = "model.select";
     /// Explain the context the next request will carry: every entry, its category, its tokens, and what has been cleared.
     pub const CONTEXT_EXPLAIN: &str = "context.explain";
+    /// Start a fresh session and move this server onto it. Context starts empty; the previous session's log is closed and kept, never deleted — starting a new session must not be a way to lose an old one.
+    pub const SESSION_NEW: &str = "session.new";
     /// Attach a thin client to the local agent server (ADR-0009).
     pub const SESSION_ATTACH: &str = "session.attach";
     /// Opt out of approval prompts for this session. Opting out is itself an event, and the interface must show it (ADR-0007 §5).

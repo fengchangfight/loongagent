@@ -344,6 +344,20 @@ doc = "Explain the context the next request will carry: every entry, its categor
 params = "SessionOnlyParams"
 result = "ContextExplain"
 
+[[types]]
+name = "SessionNewResult"
+kind = "struct"
+doc = "The session this server is now on, after `session.new`."
+fields = [
+  { name = "session_id", type = "string" },
+]
+
+[[methods]]
+name = "session.new"
+doc = "Start a fresh session and move this server onto it. Context starts empty; the previous session's log is closed and kept, never deleted — starting a new session must not be a way to lose an old one."
+params = "SessionOnlyParams"
+result = "SessionNewResult"
+
 [[methods]]
 name = "session.attach"
 doc = "Attach a thin client to the local agent server (ADR-0009)."

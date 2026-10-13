@@ -1987,6 +1987,40 @@ fn serve(args: Args) -> Result<(), String> {
              them (or --budget N) to have context cleared instead."
         );
     }
+    let session_path = args.session_path();
+    let mut kernel = build_kernel(&args, &settings, &session_path)?;
+    // Provenance first, then what it means: a session should be able to answer "what
+    // policy was in force, and which profile did I run?" long after the fact.
+    if let Some(state) = &pack {
+        kernel
+            .record_control_synced(&state.provenance, state.from_cache, state.note.as_deref())
+            .map_err(|e| e.to_string())?;
+        kernel
+            .record_profile_selected(&state.profile)
+            .map_err(|e| e.to_string())?;
+    }
+    // `session.new` needs a kernel for a session that does not exist yet, and only this
+    // function knows how to make one: the same args, the same resolved layers, a fresh id
+    // and a fresh log beside the current one.
+    let factory_args = args.clone();
+    let factory_settings = settings.clone();
+    let factory: loong_server::KernelFactory = Box::new(move || {
+        let id = new_session_id(&factory_args.cwd);
+        let path = session_dir(&factory_args.cwd).join(format!("{id}.jsonl"));
+        build_kernel(&factory_args, &factory_settings, &path).map(|kernel| (id, kernel))
+    });
+    Server::new(kernel, args.session_id())
+        .with_factory(factory)
+        .run_stdio()
+        .map_err(|e| e.to_string())
+}
+
+/// The kernel settings this command line and configuration describe.
+///
+/// Out here rather than inline so that a *second* session built later gets the same ones.
+/// A new session that quietly ran under a different policy from the one on screen would be
+/// a worse bug than having no new session at all.
+fn kernel_config(args: &Args, settings: &loong_config::Profile) -> KernelConfig {
     let mut config = KernelConfig::new(&args.cwd);
     // `--budget 0` means "unbounded", which is the widest: the kernel takes the
     // strictest of this and the configuration, so a ceiling still holds.
@@ -2011,27 +2045,32 @@ fn serve(args: Args) -> Result<(), String> {
         .explain("profile")
         .map(|row| row.value.render())
         .unwrap_or_else(|| "default".to_string());
-    config.settings = settings;
-    let session_path = args.session_path();
-    let mut kernel = if session_path.exists() {
-        Kernel::open_with_models(&session_path, config, models)
+    config.settings = settings.clone();
+    config
+}
+
+/// Open the log at `path` if it is there, and start one if it is not.
+///
+/// A session **is** its file, so this is also how a session comes into being.
+fn build_kernel(
+    args: &Args,
+    settings: &loong_config::Profile,
+    path: &Path,
+) -> Result<Kernel, String> {
+    // The directory is the session's too. `serve` makes its own, but a session started
+    // later gets a path nobody has created yet, and creating the log before its folder is
+    // how `session.new` failed the first time it was tried.
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    let models = build_models(args, settings)?;
+    let config = kernel_config(args, settings);
+    if path.exists() {
+        Kernel::open_with_models(path, config, models)
     } else {
-        Kernel::create_with_models(&session_path, config, models)
+        Kernel::create_with_models(path, config, models)
     }
-    .map_err(|e| e.to_string())?;
-    // Provenance first, then what it means: a session should be able to answer "what
-    // policy was in force, and which profile did I run?" long after the fact.
-    if let Some(state) = &pack {
-        kernel
-            .record_control_synced(&state.provenance, state.from_cache, state.note.as_deref())
-            .map_err(|e| e.to_string())?;
-        kernel
-            .record_profile_selected(&state.profile)
-            .map_err(|e| e.to_string())?;
-    }
-    Server::new(kernel, args.session_id())
-        .run_stdio()
-        .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())
 }
 
 /// Which provider to build: the session's choice if it made one, else the

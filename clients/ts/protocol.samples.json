@@ -159,6 +159,9 @@
       "session_id": "<string>",
       "name": "<string>"
     },
+    "SessionNewResult": {
+      "session_id": "<string>"
+    },
     "PermissionsSetParams": {
       "session_id": "<string>",
       "auto_approve": true
@@ -230,6 +233,11 @@
       "name": "context.explain",
       "params": "SessionOnlyParams",
       "result": "ContextExplain"
+    },
+    {
+      "name": "session.new",
+      "params": "SessionOnlyParams",
+      "result": "SessionNewResult"
     },
     {
       "name": "session.attach",

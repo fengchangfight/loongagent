@@ -575,7 +575,8 @@ mod tests {
 
     #[test]
     fn a_key_of_ambiguous_shape_leads_with_the_two_vendors_it_could_be() {
-        let hex = guess_from_key("sk-4f06f4b88d7149ca8eeaa939d0fb08bd");
+        // A made-up key: this test is about the shape it presents, never the value.
+        let hex = guess_from_key("sk-0123456789abcdef0123456789abcdef");
         assert_eq!(hex[0], "deepseek");
         assert_eq!(hex[1], "dashscope");
         assert_eq!(

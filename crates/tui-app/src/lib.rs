@@ -6617,7 +6617,8 @@ mod tests {
     #[test]
     fn the_local_wizard_never_draws_the_key_it_was_given() {
         let mut wizard = LocalWizard::new(providers());
-        for c in "sk-4f06f4b88d7149ca8eeaa939d0fb08bd".chars() {
+        // A made-up key, typed the way somebody would type a real one.
+        for c in "sk-0123456789abcdef0123456789abcdef".chars() {
             wizard.handle_key(key(KeyCode::Char(c)));
         }
         let masked = wizard.masked_key();
@@ -6626,14 +6627,14 @@ mod tests {
             "the shape is recognisable: {masked}"
         );
         assert!(
-            !masked.contains("4f06f4b8"),
+            !masked.contains("01234567"),
             "but the secret is not on a screen other people can see: {masked}"
         );
         assert_eq!(masked.chars().count(), 35, "the length is still legible");
 
         let screen = drawn_wizard(&wizard, 80, 20);
         assert!(
-            !screen.contains("4f06f4b8"),
+            !screen.contains("01234567"),
             "and the drawing does not leak it either:\n{screen}"
         );
     }
@@ -6703,7 +6704,7 @@ mod tests {
         // A typo is the common case, and retyping 35 characters to fix one of them
         // is the difference between a wizard and a punishment.
         let mut wizard = LocalWizard::new(providers());
-        for c in "sk-4f06f4b88d7149ca8eeaa939d0fb08bd".chars() {
+        for c in "sk-0123456789abcdef0123456789abcdef".chars() {
             wizard.handle_key(key(KeyCode::Char(c)));
         }
         wizard.state = WizardState::Refused("密钥被拒绝（HTTP 401）".into());
@@ -6713,7 +6714,7 @@ mod tests {
             "{screen}"
         );
         assert_eq!(
-            wizard.key, "sk-4f06f4b88d7149ca8eeaa939d0fb08bd",
+            wizard.key, "sk-0123456789abcdef0123456789abcdef",
             "the key survives so it can be corrected"
         );
     }

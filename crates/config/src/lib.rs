@@ -2923,14 +2923,15 @@ description = \"Air-gapped: nothing leaves the machine.\"\n\
     fn a_secret_pasted_after_the_prefix_is_refused() {
         // The mistake this exists for: `env:` followed by the key itself passes a
         // prefix check, and then the key is inside the signed pack — and inside a
-        // committed draft.
+        // committed draft. Every value below is made up — no real key is written
+        // into a test, because a test is a file that gets committed.
         for (value, why) in [
             (
-                "env:sk-4f06f4b88d7149ca8eeaa939d0fb08bd",
+                "env:sk-0123456789abcdef0123456789abcdef",
                 "a pasted key after env:",
             ),
             (
-                "env:sk4f06f4b88d7149ca8eeaa939d0fb08bd",
+                "env:sk0123456789abcdef0123456789abcdef",
                 "alphanumeric but lowercase",
             ),
             ("env:deepseekApiKey", "not the upper-case convention"),

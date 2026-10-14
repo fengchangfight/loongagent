@@ -97,3 +97,10 @@ vendor/
 # Patch leftovers
 *.orig
 *.rej
+
+# Scratch research: raw vendor pages, papers and experiment output, kept beside the
+# notes they feed. The curated write-ups live in docs/research/ and *are* tracked —
+# this is the working pile, not the record. If one file in here turns out to be worth
+# keeping (`REPORT.md`, say), commit it explicitly: git add -f .emb-research/REPORT.md
+.research/
+.emb-research/

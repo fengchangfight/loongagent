@@ -64,19 +64,100 @@ impl Out {
 #[derive(Debug)]
 pub enum ServerError {
     Io(std::io::Error),
-    /// A signal handler that cannot be installed, or was installed twice.
+    /// The platform's interrupt handler could not be installed.
     Signal(String),
 }
 
-/// The turn to stop when SIGINT arrives. A signal handler cannot hold a `Kernel`, so it
-/// holds the one flag the kernel reads.
+/// The turn to stop when the platform says the person asked. A handler cannot hold a
+/// `Kernel`, so it holds the one flag the kernel reads.
+///
+/// The flag is created **once per process** and every kernel this server builds is
+/// pointed at it (`use_interruptor`), including the one `/new` swaps in. A second
+/// `OnceLock::set` would fail and a fresh kernel would otherwise get an orphaned flag:
+/// the interrupt would look like it worked and silently stop nothing.
 static INTERRUPT: std::sync::OnceLock<std::sync::Arc<std::sync::atomic::AtomicBool>> =
     std::sync::OnceLock::new();
 
-extern "C" fn handle_sigint(_signal: libc::c_int) {
+/// The one thing a handler is allowed to do: store into an atomic that lives for the
+/// process. Called from a signal handler on Unix and from a console control thread on
+/// Windows, so it allocates nothing and locks nothing.
+fn raise_interrupt() {
     if let Some(flag) = INTERRUPT.get() {
         flag.store(true, std::sync::atomic::Ordering::SeqCst);
     }
+}
+
+#[cfg(unix)]
+extern "C" fn handle_interrupt(_signal: libc::c_int) {
+    raise_interrupt();
+}
+
+/// Windows: the console control handler. The launcher sends `CTRL_BREAK_EVENT` to the
+/// server's process group (`crates/tui/src/lib.rs::interrupt`), not `CTRL_C_EVENT` —
+/// Microsoft documents that a `CTRL_C_EVENT` cannot be aimed at one process group, so it
+/// would also hit the TUI. `CTRL+BREAK` is always treated as a signal (it cannot be
+/// turned into keyboard input by the console mode), which is what makes this reliable.
+///
+/// Returning `1` (TRUE) claims the event: without that, the default handler would run and
+/// `ExitProcess` would take the server and its session down.
+#[cfg(windows)]
+unsafe extern "system" fn handle_interrupt(event: u32) -> i32 {
+    // `CTRL_BREAK_EVENT`, wincon.h.
+    const CTRL_BREAK_EVENT: u32 = 1;
+    if event == CTRL_BREAK_EVENT {
+        raise_interrupt();
+    }
+    1
+}
+
+#[cfg(windows)]
+extern "system" {
+    /// `kernel32` — register the console control routine above.
+    fn SetConsoleCtrlHandler(
+        handler: Option<unsafe extern "system" fn(u32) -> i32>,
+        add: i32,
+    ) -> i32;
+    fn GetLastError() -> u32;
+}
+
+/// Install the handler exactly once per process. Registering it twice would be harmless
+/// on Unix (the second call replaces the first) but on Windows it would run the routine
+/// twice, so the result of the first attempt is what every later caller sees.
+fn install_interrupt_handler() -> Result<(), ServerError> {
+    static INSTALLED: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+    INSTALLED
+        .get_or_init(install_interrupt_handler_once)
+        .clone()
+        .map_err(ServerError::Signal)
+}
+
+#[cfg(unix)]
+fn install_interrupt_handler_once() -> Result<(), String> {
+    // Safety: the handler only stores into an atomic that lives for the process.
+    unsafe {
+        libc::signal(
+            libc::SIGINT,
+            handle_interrupt as extern "C" fn(libc::c_int) as libc::sighandler_t,
+        );
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn install_interrupt_handler_once() -> Result<(), String> {
+    // Safety: a pointer to a routine whose whole body is one atomic store.
+    let added = unsafe { SetConsoleCtrlHandler(Some(handle_interrupt), 1) };
+    if added == 0 {
+        // Safety: reading the thread's last error, immediately after the call.
+        let code = unsafe { GetLastError() };
+        return Err(format!("SetConsoleCtrlHandler failed (win32 error {code})"));
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn install_interrupt_handler_once() -> Result<(), String> {
+    Err("this platform has no interrupt mechanism wired up".to_string())
 }
 
 impl std::fmt::Display for ServerError {
@@ -206,6 +287,12 @@ impl Server {
                     Err(e) => return self.refuse(id, &e),
                 };
                 self.kernel = kernel;
+                // The interrupt flag belongs to the process, not to a log. Without this
+                // the kernel `/new` installs would hold a fresh, unreachable flag and the
+                // next Ctrl-C would stop nothing while still saying "interrupting…".
+                if let Some(flag) = INTERRUPT.get() {
+                    self.kernel.use_interruptor(std::sync::Arc::clone(flag));
+                }
                 self.session_id = session_id.clone();
                 // The new session has its own log, so every counter about the old one is
                 // now wrong. Forgetting to reset `last_sent` would stream the new
@@ -496,25 +583,26 @@ impl Server {
         out
     }
 
-    /// Let this process's SIGINT stop the running turn instead of killing the server.
+    /// Let the platform's interrupt stop the running turn instead of killing the server.
     ///
     /// The TUI spawns this process and signals it when someone presses Ctrl-C, which is
     /// why the flag is handed out rather than the message being sent over the protocol:
     /// the client is blocked reading the turn's own stream, and a process it owns already
     /// has a way to say "stop".
-    pub fn catch_interrupts(&self) -> Result<(), ServerError> {
-        let flag = self.kernel.interruptor();
-        INTERRUPT.set(flag).map_err(|_| {
-            ServerError::Signal("a SIGINT handler is already installed".to_string())
-        })?;
-        // Safety: the handler only stores into an atomic that lives for the process.
-        unsafe {
-            libc::signal(
-                libc::SIGINT,
-                handle_sigint as extern "C" fn(libc::c_int) as libc::sighandler_t,
-            );
-        }
-        Ok(())
+    ///
+    /// The kernel is (re-)pointed at the process-wide flag every time, so the kernel a
+    /// later `/new` installs is interruptible too.
+    pub fn catch_interrupts(&mut self) -> Result<(), ServerError> {
+        let flag = match INTERRUPT.get() {
+            Some(flag) => std::sync::Arc::clone(flag),
+            None => {
+                let flag = self.kernel.interruptor();
+                let _ = INTERRUPT.set(std::sync::Arc::clone(&flag));
+                flag
+            }
+        };
+        self.kernel.use_interruptor(flag);
+        install_interrupt_handler()
     }
 
     /// Serve stdio until EOF (the transport the TUI spawns).
@@ -941,7 +1029,8 @@ mod tests {
         .unwrap();
         let mut server = Server::new(kernel, "s-live");
 
-        let (out, written) = Out::memory();
+        // The attach's stream is not what this test is about; the prompt's is.
+        let (out, _written) = Out::memory();
         let responses = server.handle_line_streaming(&attach_line(), &out);
         assert_eq!(
             responses.len(),

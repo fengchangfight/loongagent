@@ -12,6 +12,7 @@
 //! responsive: the worker owns the client, the UI owns the screen, and they talk
 //! over two channels.
 
+pub mod mention;
 use loong_tui::{Client, Transport};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout};
@@ -453,6 +454,17 @@ pub struct App {
     stopping: bool,
     pub error: Option<String>,
     /// The answer so far, while it is being written.
+    /// The `@` file picker, when the caret is inside a reference.
+    picker: Option<mention::Picker>,
+    /// The workspace's files, read once on first use. `None` means "not read yet",
+    /// which is different from "read and empty" — a picker that read the tree on
+    /// every keystroke would stall the interface on a large repository.
+    mention_files: Option<mention::FileIndex>,
+    /// Set when esc dismissed the picker. The picker is derived from the text, so
+    /// without this the next keystroke would derive it straight back and escape
+    /// would do nothing — which is what the test caught. Cleared as soon as the text
+    /// or the caret changes, so the next `@` opens normally.
+    mention_dismissed: bool,
     pub streaming: String,
     /// Lines scrolled up from the bottom.
     pub scroll: usize,
@@ -517,6 +529,9 @@ impl App {
             debug: false,
             context: None,
             streaming: String::new(),
+            picker: None,
+            mention_files: None,
+            mention_dismissed: false,
             scroll: 0,
             fold: None,
             open: None,
@@ -987,6 +1002,8 @@ impl App {
                     .style(MARK_QUIET),
                 );
                 lines.push(Line::from(""));
+                lines.extend(memory_lines(explained));
+                lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
                     "category            tokens",
                     MARK_QUIET,
@@ -1166,6 +1183,110 @@ impl App {
         let at = self.byte_at(self.cursor);
         self.input.insert_str(at, text);
         self.cursor += text.chars().count();
+        self.refresh_picker();
+    }
+
+    /// Keep the `@` picker in step with the text and the caret.
+    ///
+    /// `None` when the caret is not inside a reference, which is also how the picker
+    /// closes — there is no separate open/closed flag to fall out of step with what
+    /// is actually typed. Called from every path that moves the caret or edits the
+    /// line, because a picker that lags one keystroke behind lists the wrong files.
+    fn refresh_picker(&mut self) {
+        // Any edit or caret move re-arms the picker; the dismissal only covers the
+        // text it was given for.
+        self.mention_dismissed = false;
+        if self.pending.is_some() {
+            // A decision is on screen; the prompt underneath is not being typed into.
+            self.picker = None;
+            return;
+        }
+        if self.mention_dismissed {
+            self.picker = None;
+            return;
+        }
+        if !self.input.contains(mention::TRIGGER) {
+            // The common case: no reference anywhere in the line, so the index is not
+            // even read. A picker that walked the tree on every keystroke would make
+            // typing itself slow.
+            self.picker = None;
+            return;
+        }
+        if self.mention_files.is_none() {
+            let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            self.mention_files = Some(mention::FileIndex::read(root));
+        }
+        let files = self.mention_files.as_ref().expect("just read");
+        self.picker =
+            mention::Picker::refresh(&self.input, self.cursor, files, self.picker.as_ref());
+    }
+
+    /// How many rows the picker needs: its matches, or one line saying there are
+    /// none — a picker that vanished when a query matched nothing would look like a
+    /// crash rather than an empty answer.
+    fn picker_rows(&self) -> u16 {
+        match &self.picker {
+            None => 0,
+            Some(picker) => picker.matches.len().max(1) as u16,
+        }
+    }
+
+    fn draw_picker(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+        let Some(picker) = &self.picker else {
+            return;
+        };
+        let title = if picker.query.is_empty() {
+            "files — ↑/↓ choose · enter insert · esc cancel".to_string()
+        } else {
+            format!(
+                "files matching {} — ↑/↓ choose · enter insert · esc cancel",
+                picker.query
+            )
+        };
+        let body = if picker.matches.is_empty() {
+            vec![ratatui::text::Line::from(
+                "  no file matches — keep typing, or esc",
+            )]
+        } else {
+            picker
+                .matches
+                .iter()
+                .enumerate()
+                .map(|(index, file)| {
+                    let marker = if index == picker.selected {
+                        "▸ "
+                    } else {
+                        "  "
+                    };
+                    let line = format!("{marker}{file}");
+                    if index == picker.selected {
+                        ratatui::text::Line::from(line).style(MARK_ACCENT_STYLE)
+                    } else {
+                        ratatui::text::Line::from(line)
+                    }
+                })
+                .collect()
+        };
+        let widget = ratatui::widgets::Paragraph::new(body)
+            .block(Block::default().borders(Borders::ALL).title(title));
+        frame.render_widget(widget, area);
+    }
+
+    /// Insert the highlighted path and close the picker.
+    fn accept_picker(&mut self) -> Action {
+        let Some(picker) = self.picker.as_ref() else {
+            return Action::None;
+        };
+        let Some(path) = picker.selected_path().map(str::to_string) else {
+            return Action::None;
+        };
+        let range = picker.range.clone();
+        mention::apply(&mut self.input, range, &path);
+        // The caret goes to the end of the line — `apply` adds a trailing space, and
+        // leaving the caret inside the token would re-open the picker on it.
+        self.cursor = self.input.chars().count();
+        self.picker = None;
+        Action::None
     }
 
     fn delete_before_cursor(&mut self) {
@@ -1176,6 +1297,7 @@ impl App {
         let to = self.byte_at(self.cursor);
         self.input.replace_range(from..to, "");
         self.cursor -= 1;
+        self.refresh_picker();
     }
 
     fn delete_at_cursor(&mut self) {
@@ -1185,6 +1307,7 @@ impl App {
         let from = self.byte_at(self.cursor);
         let to = self.byte_at(self.cursor + 1);
         self.input.replace_range(from..to, "");
+        self.refresh_picker();
     }
 
     /// The input line as it should be drawn at this width, plus the caret's column
@@ -1391,6 +1514,12 @@ impl App {
     /// kinder than silently swallowing it.
     pub fn handle_key(&mut self, key: KeyEvent) -> Action {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        // One refresh per key, before the match: the picker is derived from the text
+        // and the caret, so keeping it in step belongs in one place rather than in
+        // every branch that happens to move either. Escape re-arms nothing because it
+        // sets the dismissal flag *after* this runs, and every other key clears it by
+        // running here — which is exactly the intended reading of "not now".
+        self.refresh_picker();
         // Alt+digit, not Ctrl+digit. In a VT terminal Ctrl+2..Ctrl+8 arrive as *control
         // characters* — Ctrl+3 as Escape, Ctrl+8 as Delete — so those keys would silently
         // fire other things instead of switching, and the two that alias are the two a
@@ -1438,6 +1567,42 @@ impl App {
             // A question waiting for an answer outranks everything below it, and a fold
             // that is open is next in line: esc puts the output away rather than
             // interrupting or leaving. Ctrl-C still stops the turn, as always.
+            // The `@` picker owns these keys while it is open: while a list is on
+            // screen, up/down mean "move in the list" and enter means "take this
+            // file". It sits above the fold keys for exactly that reason — otherwise
+            // tab would walk the transcript while a picker was asking to be finished.
+            KeyCode::Esc if self.picker.is_some() => {
+                self.picker = None;
+                // Remembered, because the picker is derived from the text: clearing it
+                // alone would let the next keystroke bring it straight back.
+                self.mention_dismissed = true;
+                Action::None
+            }
+            KeyCode::Up if self.picker.is_some() => {
+                if let Some(picker) = self.picker.as_mut() {
+                    picker.move_by(-1);
+                }
+                Action::None
+            }
+            KeyCode::Down if self.picker.is_some() => {
+                if let Some(picker) = self.picker.as_mut() {
+                    picker.move_by(1);
+                }
+                Action::None
+            }
+            KeyCode::Tab if self.picker.is_some() => {
+                if let Some(picker) = self.picker.as_mut() {
+                    picker.move_by(1);
+                }
+                Action::None
+            }
+            KeyCode::BackTab if self.picker.is_some() => {
+                if let Some(picker) = self.picker.as_mut() {
+                    picker.move_by(-1);
+                }
+                Action::None
+            }
+            KeyCode::Enter if self.picker.is_some() => self.accept_picker(),
             KeyCode::Esc if self.open.is_some() && self.pending.is_none() => {
                 self.open = None;
                 Action::None
@@ -1933,14 +2098,22 @@ impl App {
                 } else {
                     0
                 }),
+                // The `@` picker sits directly above the input box it is filling in,
+                // so the eye does not travel between the list and the token it will
+                // replace. Nothing is taken from the transcript when it is closed.
+                Constraint::Length(if self.picker_rows() == 0 {
+                    0
+                } else {
+                    self.picker_rows() + 2
+                }),
                 Constraint::Length(input_rows + 2),
                 Constraint::Length(1),
             ])
             .split(conversation);
         // Named, because five anonymous slices is how the notes strip once ended up
         // drawn over the mark.
-        let (models, banner, notes, transcript, decision, entry, keys) = (
-            areas[0], areas[1], areas[2], areas[3], areas[4], areas[5], areas[6],
+        let (models, banner, notes, transcript, decision, picker, entry, keys) = (
+            areas[0], areas[1], areas[2], areas[3], areas[4], areas[5], areas[6], areas[7],
         );
 
         if !self.models.is_empty() {
@@ -1951,6 +2124,9 @@ impl App {
         }
         if self.pending.is_some() {
             self.draw_approval(frame, decision);
+        }
+        if self.picker_rows() > 0 {
+            self.draw_picker(frame, picker);
         }
 
         if !self.notes.is_empty() {
@@ -2104,9 +2280,17 @@ impl App {
             .take(window)
             .map(Line::from)
             .collect();
-        let input = Paragraph::new(visible)
-            .block(Block::default().borders(Borders::ALL).title(title))
-            .style(style);
+        let input = Paragraph::new(visible).block(
+            Block::default()
+                .borders(Borders::ALL)
+                // The colour belongs to the *status title*, never to the paragraph.
+                // `Paragraph::style(style)` painted the text the person was typing
+                // too, so the prompt turned green after a successful turn (red under
+                // YOLO, cyan while busy) — status read as a drawing leak, and the
+                // one place that should be the person's own was the one being
+                // recoloured.
+                .title(Span::styled(title, style)),
+        );
         frame.render_widget(input, entry);
         // Show where typing goes. Without this the prompt is a guess, and the
         // terminal's own cursor stays hidden.
@@ -2182,8 +2366,140 @@ impl App {
                 Style::default().fg(Color::Red),
             ));
         }
+        // The memory's state belongs on the bar as well as in the panel: "this
+        // session's memory is degraded" is worth seeing without opening a debug
+        // view, and a silent fallback is the one thing the design forbids.
+        if let Some(context) = &self.context {
+            if !context.memory_mode.is_empty() {
+                hints.push(Span::raw("  "));
+                if context.memory_degraded.is_empty() {
+                    hints.push(Span::styled(
+                        format!("mem {}", context.memory_mode),
+                        MARK_QUIET,
+                    ));
+                } else {
+                    hints.push(Span::styled(
+                        "mem ⚠ degraded",
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ));
+                }
+            }
+        }
         frame.render_widget(Paragraph::new(Line::from(hints)), keys);
     }
+}
+
+/// The layered memory's own state, as the debug panel draws it (ADR-0017 §10, §11.1).
+///
+/// The honest part is what it does **not** do: it reads `memory_mode` rather than
+/// looking for a `cognitive_map` entry in the ledger. A semantic session's first
+/// turns have no map yet, and a panel that read "no map" as "engine off" would be
+/// unable to tell a feature that is off from one that has simply not produced
+/// anything — which is the dishonest display this design exists to avoid.
+///
+/// Degradation is always shown: a memory that quietly fell back to its digests is
+/// a memory whose answers are thinner than they look.
+fn memory_lines(explained: &loong_schema::generated::ContextExplain) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if explained.memory_mode.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("memory  ", MARK_QUIET),
+            Span::styled(
+                "off",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "  no layered memory; compaction drops old exchanges",
+                MARK_QUIET,
+            ),
+        ]));
+        return lines;
+    }
+
+    let summarizer = if explained.memory_summarizer.is_empty() {
+        "none (record mode)".to_string()
+    } else {
+        explained.memory_summarizer.clone()
+    };
+    lines.push(Line::from(vec![
+        Span::styled("memory  ", MARK_QUIET),
+        Span::styled(
+            explained.memory_mode.clone(),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!("  summarizer {summarizer}"), MARK_QUIET),
+    ]));
+
+    // Counts first, because "how much memory is there" is the question; tokens are
+    // the cost of carrying it and ride along where they are not zero.
+    let mut layers: Vec<String> = Vec::new();
+    for layer in &explained.memory_layers {
+        let label = match layer.level {
+            1 => "L1",
+            2 => "L2",
+            3 => "L3",
+            4 => "L4",
+            _ => "L?",
+        };
+        if layer.tokens > 0 {
+            layers.push(format!("{label} {} ({} tok)", layer.count, layer.tokens));
+        } else {
+            layers.push(format!("{label} {}", layer.count));
+        }
+    }
+    let map_missing = explained
+        .memory_layers
+        .iter()
+        .any(|layer| layer.level == 4 && layer.count == 0);
+    let mut spans = vec![Span::styled("        ", MARK_QUIET)];
+    spans.push(Span::raw(layers.join("  ")));
+    if map_missing {
+        // The distinction the whole field exists for: on, and nothing produced yet.
+        spans.push(Span::styled("  · no L4 map yet", MARK_QUIET));
+    }
+    lines.push(Line::from(spans));
+
+    let worker = &explained.memory_worker;
+    lines.push(
+        Line::from(format!(
+            "        worker {} · {} calls · {} enriched · {} pending · {} deferred",
+            worker.state, worker.model_calls, worker.enriched, worker.pending, worker.deferrals
+        ))
+        .style(MARK_QUIET),
+    );
+
+    // Degradation is never optional. The engine-level reason and the worker's last
+    // error are both shown when they are different facts.
+    if !explained.memory_degraded.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("        degraded: ", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                explained.memory_degraded.clone(),
+                Style::default().fg(Color::Yellow),
+            ),
+        ]));
+    }
+    if !worker.last_error.is_empty() && !explained.memory_degraded.contains(&worker.last_error) {
+        lines.push(Line::from(vec![
+            Span::styled("        last error: ", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                worker.last_error.clone(),
+                Style::default().fg(Color::Yellow),
+            ),
+        ]));
+    } else if worker.failed > 0 && explained.memory_degraded.is_empty() {
+        lines.push(Line::from(vec![Span::styled(
+            format!("        {} enrichment failure(s)", worker.failed),
+            Style::default().fg(Color::Yellow),
+        )]));
+    }
+    lines
 }
 
 /// Own the client on a worker thread so a blocking turn never blocks the screen.
@@ -3510,6 +3826,27 @@ pub fn run<T: Transport + Send + 'static>(
             .collect::<Vec<_>>(),
     );
 
+    // Windows: the whole interface is UTF-8 — box drawing, the spinner, and Chinese in
+    // both the messages and the model names — but a console starts on a legacy code page
+    // (437, 936, …) and renders those bytes as mojibake. Rust writes UTF-8 to the console
+    // handle, so telling the console that its code page *is* UTF-8 is the whole fix.
+    // Best-effort: a console-less stdout simply fails here, and the "no terminal on
+    // stdout" guard is what reports that.
+    #[cfg(windows)]
+    {
+        // `kernel32` — the console input/output code pages.
+        extern "system" {
+            fn SetConsoleOutputCP(code_page: u32) -> i32;
+            fn SetConsoleCP(code_page: u32) -> i32;
+        }
+        const CP_UTF8: u32 = 65_001;
+        // Safety: two integer arguments, no memory contract.
+        unsafe {
+            SetConsoleOutputCP(CP_UTF8);
+            SetConsoleCP(CP_UTF8);
+        }
+    }
+
     enable_raw_mode().map_err(|e| e.to_string())?;
     let mut stdout = std::io::stdout();
     // Mouse capture so the wheel scrolls the conversation. Text selection then needs
@@ -3643,6 +3980,90 @@ mod tests {
         for c in text.chars() {
             app.handle_key(key(KeyCode::Char(c)));
         }
+    }
+
+    #[test]
+    fn an_at_sign_opens_a_picker_and_enter_inserts_the_file() {
+        let mut app = App::new("s-1", "0.1.0");
+        // A fixed file list: the test must not depend on this repository's contents,
+        // and it must not walk the tree on every keystroke either.
+        app.mention_files = Some(mention::FileIndex::from_files(vec![
+            "src/main.rs".to_string(),
+            "src/kernel/view.rs".to_string(),
+            "README.md".to_string(),
+        ]));
+
+        app.handle_key(key(KeyCode::Char('@')));
+        assert!(app.picker.is_some(), "typing @ opens the picker");
+
+        for c in "src/".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        let picker = app.picker.as_ref().expect("still open");
+        assert_eq!(picker.query, "src/");
+        assert_eq!(picker.matches.len(), 2);
+
+        // Down then enter takes the second match, so the selection is real rather
+        // than a coincidence of always choosing the first.
+        app.handle_key(key(KeyCode::Down));
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.picker.is_none(), "enter closes it");
+        assert_eq!(app.input, "@src/kernel/view.rs ");
+    }
+
+    #[test]
+    fn escape_closes_the_picker_without_touching_the_line() {
+        let mut app = App::new("s-1", "0.1.0");
+        app.mention_files = Some(mention::FileIndex::from_files(vec![
+            "src/main.rs".to_string()
+        ]));
+        app.handle_key(key(KeyCode::Char('@')));
+        app.handle_key(key(KeyCode::Char('s')));
+        let before = app.input.clone();
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.picker.is_none());
+        assert_eq!(app.input, before, "esc cancels the picker, not the draft");
+    }
+
+    #[test]
+    fn deleting_the_at_sign_closes_the_picker() {
+        let mut app = App::new("s-1", "0.1.0");
+        app.mention_files = Some(mention::FileIndex::from_files(vec![
+            "src/main.rs".to_string()
+        ]));
+        app.handle_key(key(KeyCode::Char('@')));
+        assert!(app.picker.is_some());
+        // Backspace removes the trigger, and the picker goes with it: there is no
+        // separate open flag that could disagree with what is typed.
+        app.handle_key(key(KeyCode::Backspace));
+        assert!(app.picker.is_none());
+        assert_eq!(app.input, "");
+    }
+
+    #[test]
+    fn an_at_sign_inside_a_word_is_not_a_reference() {
+        let mut app = App::new("s-1", "0.1.0");
+        app.mention_files = Some(mention::FileIndex::from_files(vec![
+            "example.com".to_string()
+        ]));
+        // An email address must not open a picker — this is the case a naive
+        // "find the last @" gets wrong.
+        for c in "mail me@exa".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        assert!(app.picker.is_none(), "an address is not a reference");
+    }
+
+    #[test]
+    fn the_picker_takes_only_the_rows_it_needs() {
+        let mut app = App::new("s-1", "0.1.0");
+        assert_eq!(app.picker_rows(), 0, "nothing is taken from the transcript");
+        app.mention_files = Some(mention::FileIndex::from_files(vec![
+            "src/a.rs".to_string(),
+            "src/b.rs".to_string(),
+        ]));
+        app.handle_key(key(KeyCode::Char('@')));
+        assert_eq!(app.picker_rows(), 2);
     }
 
     #[test]
@@ -4332,7 +4753,9 @@ mod tests {
     }
 
     fn explained() -> Box<loong_schema::generated::ContextExplain> {
-        use loong_schema::generated::{ContextCategory, ContextEntry, ContextExplain};
+        use loong_schema::generated::{
+            ContextCategory, ContextEntry, ContextExplain, ContextLayer, ContextWorker,
+        };
         Box::new(ContextExplain {
             context_tokens: 1700,
             budget_tokens: 128000,
@@ -4369,7 +4792,81 @@ mod tests {
                     tokens: 400,
                 },
             ],
+            memory_mode: "semantic".to_string(),
+            memory_summarizer: "ollama:qwen2.5:7b-instruct".to_string(),
+            memory_degraded: String::new(),
+            memory_layers: vec![
+                ContextLayer {
+                    level: 1,
+                    scope: "atom".to_string(),
+                    count: 120,
+                    tokens: 0,
+                },
+                ContextLayer {
+                    level: 2,
+                    scope: "episode".to_string(),
+                    count: 8,
+                    tokens: 900,
+                },
+                ContextLayer {
+                    level: 3,
+                    scope: "domain".to_string(),
+                    count: 2,
+                    tokens: 120,
+                },
+                ContextLayer {
+                    level: 4,
+                    scope: "global".to_string(),
+                    count: 1,
+                    tokens: 200,
+                },
+            ],
+            memory_worker: ContextWorker {
+                state: "idle".to_string(),
+                windows: 5,
+                model_calls: 9,
+                enriched: 8,
+                failed: 0,
+                pending: 1,
+                deferrals: 3,
+                last_error: String::new(),
+            },
         })
+    }
+
+    /// A semantic engine that has not produced a map yet — the state that must not
+    /// be drawn as "off".
+    fn explained_fresh() -> Box<loong_schema::generated::ContextExplain> {
+        let mut explained = explained();
+        explained.memory_layers.iter_mut().for_each(|layer| {
+            if layer.level >= 2 {
+                layer.count = 0;
+                layer.tokens = 0;
+            }
+        });
+        explained.memory_worker.pending = 1;
+        explained.memory_worker.enriched = 0;
+        explained.memory_worker.model_calls = 0;
+        explained
+    }
+
+    /// An engine that is off: `memory_mode` empty, whatever the ledger holds.
+    fn explained_off() -> Box<loong_schema::generated::ContextExplain> {
+        let mut explained = explained();
+        explained.memory_mode = String::new();
+        explained.memory_summarizer = String::new();
+        explained.memory_layers.clear();
+        explained.memory_worker = loong_schema::generated::ContextWorker {
+            state: "off".to_string(),
+            windows: 0,
+            model_calls: 0,
+            enriched: 0,
+            failed: 0,
+            pending: 0,
+            deferrals: 0,
+            last_error: String::new(),
+        };
+        explained
     }
 
     #[test]
@@ -4466,6 +4963,116 @@ mod tests {
         let screen = draw(&mut app, 110, 20);
         assert!(!screen.contains("context (f2)"), "{screen}");
         assert!(screen.contains("f2"), "the hint advertises it: {screen}");
+    }
+
+    /// Draw the F2 panel over one canned context view.
+    fn panel(context: Box<loong_schema::generated::ContextExplain>) -> String {
+        let (to_app, from_worker) = channel::<FromWorker>();
+        let mut app = App::new("s", "v");
+        app.handle_key(key(KeyCode::F(2)));
+        to_app.send(FromWorker::Context(context)).unwrap();
+        app.drain(&from_worker);
+        draw(&mut app, 200, 40)
+    }
+
+    #[test]
+    fn the_panel_shows_the_layers_the_worker_and_the_mode() {
+        let screen = panel(explained());
+        assert!(screen.contains("memory"), "{screen}");
+        assert!(screen.contains("semantic"), "the mode: {screen}");
+        assert!(
+            screen.contains("summarizer ollama:qwen2.5:7b-instruct"),
+            "which model: {screen}"
+        );
+        // Layer counts, which is what the design asks the panel to expose.
+        assert!(screen.contains("L1 120"), "{screen}");
+        assert!(screen.contains("L2 8"), "{screen}");
+        assert!(screen.contains("L3 2"), "{screen}");
+        assert!(screen.contains("L4 1"), "{screen}");
+        // And what the background has cost.
+        assert!(screen.contains("worker idle"), "{screen}");
+        assert!(screen.contains("9 calls"), "{screen}");
+        assert!(screen.contains("8 enriched"), "{screen}");
+        assert!(screen.contains("3 deferred"), "{screen}");
+    }
+
+    #[test]
+    fn a_degraded_memory_says_why_in_the_panel_and_on_the_bar() {
+        let mut context = explained();
+        context.memory_degraded =
+            "3 episode(s) fell back to the digest: connection refused".to_string();
+        context.memory_worker.failed = 3;
+        context.memory_worker.last_error = "connection refused".to_string();
+        let screen = panel(context);
+        assert!(screen.contains("degraded:"), "{screen}");
+        assert!(
+            screen.contains("fell back to the digest"),
+            "the reason, not just the fact: {screen}"
+        );
+        assert!(screen.contains("connection refused"), "{screen}");
+
+        // The bar carries the warning too, so a silent fallback is impossible even
+        // with the panel closed.
+        let (to_app, from_worker) = channel::<FromWorker>();
+        let mut app = App::new("s", "v");
+        let mut context = explained();
+        context.memory_degraded = "the summariser is unreachable".to_string();
+        to_app.send(FromWorker::Context(context)).unwrap();
+        app.drain(&from_worker);
+        let screen = draw(&mut app, 200, 24);
+        assert!(screen.contains("mem ⚠ degraded"), "{screen}");
+    }
+
+    #[test]
+    fn an_engine_that_is_off_is_not_shown_as_a_memory_that_has_produced_nothing() {
+        // The whole reason `memory_mode` exists. "Off" and "on, but the first turns
+        // have not produced an L4 map yet" both have no `cognitive_map` entry; they
+        // must not render the same.
+        let off = panel(explained_off());
+        let fresh = panel(explained_fresh());
+        assert!(off.contains("memory"), "{off}");
+        assert!(off.contains("off"), "{off}");
+        assert!(
+            !off.contains("semantic") && !off.contains("no L4 map yet"),
+            "an engine that is off must not claim a mode or a pending map: {off}"
+        );
+        assert!(fresh.contains("semantic"), "{fresh}");
+        assert!(
+            fresh.contains("no L4 map yet"),
+            "an engine that is on and has produced nothing says exactly that: {fresh}"
+        );
+        assert_ne!(
+            off, fresh,
+            "the two states must be distinguishable on screen"
+        );
+    }
+
+    #[test]
+    fn record_mode_says_it_has_no_model() {
+        let mut context = explained();
+        context.memory_mode = "record".to_string();
+        context.memory_summarizer = String::new();
+        let screen = panel(context);
+        assert!(screen.contains("record"), "{screen}");
+        assert!(screen.contains("none (record mode)"), "{screen}");
+    }
+
+    #[test]
+    fn the_bar_names_the_mode_while_the_panel_is_closed() {
+        let (to_app, from_worker) = channel::<FromWorker>();
+        let mut app = App::new("s", "v");
+        to_app.send(FromWorker::Context(explained())).unwrap();
+        app.drain(&from_worker);
+        let screen = draw(&mut app, 200, 24);
+        assert!(screen.contains("mem semantic"), "{screen}");
+        // With the engine off there is nothing to say, and saying it anyway would be
+        // noise on every screen.
+        let (to_app, from_worker) = channel::<FromWorker>();
+        let mut app = App::new("s", "v");
+        to_app.send(FromWorker::Context(explained_off())).unwrap();
+        app.drain(&from_worker);
+        let screen = draw(&mut app, 200, 24);
+        assert!(!screen.contains("mem "), "{screen}");
     }
 
     #[test]
@@ -6353,6 +6960,122 @@ mod tests {
             box_titles(&screen).contains(&despaced("✓ 完成")),
             "{screen}"
         );
+    }
+
+    /// The foreground colour of each cell under `needle`, on whichever row it appears.
+    /// `draw()` drops styles (it keeps symbols), and this bug was a *style* leak: the
+    /// status colour belonged on the box title and was landing on the typed text.
+    ///
+    /// Matching ignores spaces: a CJK character occupies two cells and the terminal
+    /// puts a space in the second one, so `✓ 完成` is stored as `✓ 完 成`. Comparing
+    /// non-space characters is what makes the title findable without a width table.
+    fn colours_of(app: &mut App, needle: &str) -> Vec<Color> {
+        colours_of_where(app, needle, false)
+    }
+
+    /// The same, restricted to the box's title row — the transcript carries the same
+    /// closing line, so an unrestricted search would find that one instead.
+    fn title_colours_of(app: &mut App, needle: &str) -> Vec<Color> {
+        colours_of_where(app, needle, true)
+    }
+
+    fn colours_of_where(app: &mut App, needle: &str, border_only: bool) -> Vec<Color> {
+        let mut terminal = Terminal::new(TestBackend::new(140, 24)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let area = *buffer.area();
+        let target: Vec<char> = needle.chars().filter(|c| *c != ' ').collect();
+        if target.is_empty() {
+            return Vec::new();
+        }
+        for y in 0..area.height {
+            let cells: Vec<(String, Color)> = (0..area.width)
+                .map(|x| (buffer[(x, y)].symbol().to_string(), buffer[(x, y)].fg))
+                .collect();
+            if border_only
+                && !cells
+                    .iter()
+                    .filter_map(|(symbol, _)| symbol.chars().next())
+                    .next()
+                    .map(|first| first == '┌')
+                    .unwrap_or(false)
+            {
+                continue;
+            }
+            // Visible characters with the cell each one lives in.
+            let chars: Vec<(char, usize)> = cells
+                .iter()
+                .enumerate()
+                .filter_map(|(index, (symbol, _))| {
+                    symbol
+                        .chars()
+                        .next()
+                        .filter(|c| *c != ' ')
+                        .map(|c| (c, index))
+                })
+                .collect();
+            if chars.len() < target.len() {
+                continue;
+            }
+            for start in 0..=chars.len() - target.len() {
+                if (0..target.len()).all(|k| chars[start + k].0 == target[k]) {
+                    return (0..target.len())
+                        .map(|k| cells[chars[start + k].1].1)
+                        .collect();
+                }
+            }
+        }
+        Vec::new()
+    }
+
+    #[test]
+    fn the_prompt_box_does_not_wear_the_last_turn_outcome() {
+        // Reported from a real session: after a task succeeded the *textarea* turned
+        // green. The style was applied to the whole `Paragraph`, so every status colour
+        // (green done, red YOLO, cyan busy) bled into whatever the person was typing.
+        let mut app = App::new("s-colour", "v");
+        app.busy = true;
+        app.busy_since = Some(std::time::Instant::now());
+        fed(&mut app, FromWorker::State { pending: None });
+        assert_eq!(
+            app.finished.as_ref().map(|f| f.outcome),
+            Some(Outcome::Done),
+            "the turn is recorded as done, which is the green state"
+        );
+
+        type_text(&mut app, "next prompt");
+        let typed = colours_of(&mut app, "next prompt");
+        assert!(!typed.is_empty(), "the typed text is on screen");
+        assert!(
+            typed.iter().all(|colour| *colour != Color::Green),
+            "the input area keeps its own colour, not the turn's: {typed:?}"
+        );
+
+        // The status is not lost: the title still carries the colour and the mark.
+        let title = title_colours_of(&mut app, "完成");
+        assert!(!title.is_empty(), "the tick is still on the box title");
+        assert!(
+            title.contains(&Color::Green),
+            "and it is the coloured thing: {title:?}"
+        );
+    }
+
+    #[test]
+    fn a_working_prompt_box_does_not_tint_what_is_typed_either() {
+        // Same leak, different status: cyan while a turn runs is the state a person
+        // types into most often.
+        let mut app = App::new("s-colour-busy", "v");
+        app.busy = true;
+        app.busy_since = Some(std::time::Instant::now());
+        type_text(&mut app, "typed while busy");
+        let typed = colours_of(&mut app, "typed while busy");
+        assert!(!typed.is_empty());
+        assert!(
+            typed.iter().all(|colour| *colour != Color::Cyan),
+            "busy is a state of the *turn*, not a colour for the person's text: {typed:?}"
+        );
+        let title = title_colours_of(&mut app, "working");
+        assert!(title.contains(&Color::Cyan), "{title:?}");
     }
 
     #[test]

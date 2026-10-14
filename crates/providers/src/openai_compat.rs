@@ -6,11 +6,17 @@
 //! interface the kernel knows. Nothing about the kernel changes when a provider
 //! does (that is the whole point of the edge).
 //!
-//! **Transport scope, stated honestly:** HTTP only, so it targets a local or
-//! intranet endpoint. An `https://` base URL fails with a clear message rather
-//! than pretending — wiring a TLS client is a deliberate follow-up (it is a
-//! dependency decision, not an architecture one), and self-hosted endpoints are
-//! exactly the firm-internal case.
+//! **Transport scope:** HTTP and HTTPS (the TLS client lives in `loong-http`), so this
+//! reaches both a local endpoint and a hosted vendor — the local case is what the
+//! kernel's compaction defaults were measured against, the hosted case is what a
+//! managed profile usually names.
+//!
+//! **Debugging what actually came back.** Model trouble is often a *wire* question —
+//! did the server send `tool_calls`, or did the model print JSON into `content` and
+//! finish with `reason: "stop"`? Set `LOONGAGENT_DEBUG_MODEL` to a file and every
+//! exchange is appended there as one JSON object (request, `finish_reason`, content,
+//! tool calls). The CLI's `--debug-model` points it at `<session>.models.jsonl`. It is
+//! never written to the event log: that is the record, this is diagnosis.
 
 use crate::{
     ChatMessage, CompletionRequest, CompletionResponse, Model, ModelError, ToolCallRequest, Usage,
@@ -217,6 +223,77 @@ impl OpenAiCompat {
             usage,
         })
     }
+
+    /// One exchange as the debug file records it. Separate from writing so the shape is
+    /// testable without a process-wide environment variable — the first version set
+    /// `LOONGAGENT_DEBUG_MODEL` in a test, and a concurrently running test that also
+    /// made a model call appended its own line to the same file.
+    fn debug_entry(
+        &self,
+        endpoint: &str,
+        stream: bool,
+        request: &CompletionRequest,
+        response: &CompletionResponse,
+        finish_reason: Option<&str>,
+    ) -> Value {
+        json!({
+            "at_ms": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0),
+            "adapter": "openai-compat",
+            "model": self.model,
+            "endpoint": endpoint,
+            "stream": stream,
+            "finish_reason": finish_reason,
+            // The tool *schemas* are noise here; the names are what a reader checks.
+            "request_tools": request.tools.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>(),
+            "request": request,
+            "response": response,
+        })
+    }
+
+    /// Append one exchange to `$LOONGAGENT_DEBUG_MODEL`, when it names a file.
+    ///
+    /// Off by default and deliberately **not** part of the event log: the log is the
+    /// record (ADR-0003), while a provider body is diagnostic data — bigger,
+    /// provider-shaped, and not something a session should carry forever. One JSON
+    /// object per line, so `grep`/`jq` can answer the question this exists for:
+    /// *did the server send `tool_calls`, or did the model print JSON into `content`
+    /// and end with `finish_reason: "stop"`?* No credential is written: the API key
+    /// travels in a header this never sees.
+    fn debug_exchange(
+        &self,
+        endpoint: &str,
+        stream: bool,
+        request: &CompletionRequest,
+        response: &CompletionResponse,
+        finish_reason: Option<&str>,
+    ) {
+        let Ok(path) = std::env::var("LOONGAGENT_DEBUG_MODEL") else {
+            return;
+        };
+        if path.trim().is_empty() {
+            return;
+        }
+        append_debug_line(
+            path.trim(),
+            &self.debug_entry(endpoint, stream, request, response, finish_reason),
+        );
+    }
+}
+
+/// Append one JSON object as a line. A file that cannot be opened is a debug facility
+/// that did not work, not a reason for a model call to fail: the error is dropped.
+fn append_debug_line(path: &str, entry: &Value) {
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "{entry}");
+    }
 }
 
 impl Model for OpenAiCompat {
@@ -238,6 +315,11 @@ impl Model for OpenAiCompat {
         let mut text = String::new();
         // Tool calls arrive in fragments: index → (id, name, arguments so far).
         let mut calls: Vec<(String, String, String)> = Vec::new();
+        // The server's own verdict on what it just sent: `stop` for prose, `tool_calls`
+        // when it believes it emitted a call. Worth keeping: it is the difference
+        // between "the provider said this was a tool call" and "the model printed JSON
+        // and the provider passed it through as prose".
+        let mut finish_reason: Option<String> = None;
         let mut usage = Usage {
             tokens_in: 0,
             tokens_out: 0,
@@ -267,6 +349,9 @@ impl Model for OpenAiCompat {
                 let Some(choice) = chunk.get("choices").and_then(|c| c.get(0)) else {
                     return;
                 };
+                if let Some(reason) = choice.get("finish_reason").and_then(|r| r.as_str()) {
+                    finish_reason = Some(reason.to_string());
+                }
                 // A server that ignored `stream` sends a whole `message` instead of a
                 // `delta`; treat it as one large fragment.
                 if let Some(message) = choice.get("message") {
@@ -361,11 +446,19 @@ impl Model for OpenAiCompat {
             });
         }
 
-        Ok(CompletionResponse {
+        let response = CompletionResponse {
             text: if text.is_empty() { None } else { Some(text) },
             tool_calls,
             usage,
-        })
+        };
+        self.debug_exchange(
+            &endpoint,
+            true,
+            request,
+            &response,
+            finish_reason.as_deref(),
+        );
+        Ok(response)
     }
 
     fn complete(&mut self, request: &CompletionRequest) -> Result<CompletionResponse, ModelError> {
@@ -380,7 +473,19 @@ impl Model for OpenAiCompat {
                 response.status
             )));
         }
-        Self::parse_response(&response.body)
+        let finish_reason = serde_json::from_str::<Value>(&response.body)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("choices")
+                    .and_then(|c| c.get(0))
+                    .and_then(|c| c.get("finish_reason"))
+                    .and_then(|r| r.as_str())
+                    .map(str::to_string)
+            });
+        let parsed = Self::parse_response(&response.body)?;
+        self.debug_exchange(&endpoint, false, request, &parsed, finish_reason.as_deref());
+        Ok(parsed)
     }
 }
 
@@ -691,5 +796,65 @@ mod tests {
     fn a_response_without_choices_is_rejected() {
         let err = OpenAiCompat::parse_response("{\"error\":\"nope\"}").unwrap_err();
         assert!(err.to_string().contains("no choices[0].message"), "{err}");
+    }
+
+    #[test]
+    fn the_debug_dump_records_what_the_server_sent() {
+        // The question this exists for: was this a `tool_calls` response or prose that
+        // merely *contains* JSON? `finish_reason` is what separates them, and it is not
+        // in the event log.
+        let model = OpenAiCompat::new("http://127.0.0.1:1/v1", "small", None);
+        let request = CompletionRequest {
+            messages: vec![ChatMessage::User {
+                text: "写文件".into(),
+            }],
+            tools: vec![ToolSpec {
+                name: "write_file".into(),
+                description: "d".into(),
+                parameters: json!({"type": "object"}),
+            }],
+        };
+        let response = CompletionResponse {
+            text: Some("{\"name\": \"write_file\"}".into()),
+            tool_calls: Vec::new(),
+            usage: Usage::default(),
+        };
+        let entry = model.debug_entry(
+            "http://127.0.0.1:11434/v1",
+            true,
+            &request,
+            &response,
+            Some("stop"),
+        );
+        assert_eq!(entry["finish_reason"], json!("stop"));
+        assert_eq!(entry["model"], json!("small"));
+        assert_eq!(entry["stream"], json!(true));
+        assert_eq!(
+            entry["response"]["text"],
+            json!("{\"name\": \"write_file\"}")
+        );
+        assert_eq!(entry["response"]["tool_calls"], json!([]));
+        assert_eq!(entry["request_tools"], json!(["write_file"]));
+        assert_eq!(entry["request"]["messages"][0]["text"], json!("写文件"));
+
+        // And it is written as exactly one line, which is what makes the file greppable.
+        let path = std::env::temp_dir().join(format!(
+            "loong-debug-model-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&path);
+        append_debug_line(path.to_str().unwrap(), &entry);
+        append_debug_line(path.to_str().unwrap(), &entry);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.lines().count(), 2, "{text}");
+        for line in text.lines() {
+            let value: Value = serde_json::from_str(line).unwrap();
+            assert_eq!(value["finish_reason"], json!("stop"));
+        }
+        let _ = std::fs::remove_file(&path);
     }
 }

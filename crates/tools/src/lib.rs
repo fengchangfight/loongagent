@@ -497,10 +497,15 @@ pub fn classify_command(command: &str, cwd: &Path) -> ActionClass {
     let mutating = MUTATING.iter().any(|p| lower.contains(p));
     if mutating {
         // A mutating verb aimed at an absolute path outside the workspace.
+        //
+        // `is_absolute()` rather than `starts_with('/')`: on Windows `C:\…` and
+        // `\\server\share` are absolute too, and missing them would classify a write
+        // outside the workspace as an ordinary one — the exact mistake this check exists
+        // to prevent.
         let touches_outside = trimmed
             .split_whitespace()
             .map(|t| t.trim_matches(|c: char| "\"'`;()".contains(c)))
-            .filter(|t| t.starts_with('/'))
+            .filter(|t| std::path::Path::new(t).is_absolute())
             .any(|t| classify_path(cwd, t) == ActionClass::OutOfBounds);
         return if touches_outside {
             ActionClass::OutOfBounds
@@ -584,11 +589,14 @@ impl Tool for Shell {
     }
     fn execute(&self, args: &Json, ctx: &ExecContext<'_>) -> Result<String, ToolError> {
         let command = arg_str(args, "command")?;
-        let sh_args = vec!["-c".to_string(), command.clone()];
+        // The shell the classifier assumes and the shell that runs it have to be the
+        // same one: `sh -c <command>` wherever a POSIX shell exists (including Windows
+        // with Git for Windows on PATH), `cmd.exe /C` only where there is none.
+        let (program, sh_args) = loong_proc::Shell::detect().command(&command);
         // The PEP is applied to the child, never to us: the restriction is
         // irreversible and must not leak into the server.
         let confine = |cmd: &mut Command| ctx.confinement.confine(cmd);
-        let spec = loong_proc::RunSpec::new("sh", &sh_args, ctx.cwd, self.timeout)
+        let spec = loong_proc::RunSpec::new(&program, &sh_args, ctx.cwd, self.timeout)
             .output_limit(self.output_limit)
             .confine(&confine);
 

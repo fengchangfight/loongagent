@@ -5,9 +5,11 @@
 //! Everything here is deliberately *not* pluggable: behavior cannot hide in a
 //! replaced core, which is what makes the event stream trustworthy.
 
+pub mod context_engine;
 pub mod ledger;
 pub mod turn;
 
+pub use context_engine::{ContextEngine, ContextEngineConfig};
 pub use ledger::{estimate_tokens, Category, Entry, EvictionReport, ExplainRow, Ledger, Lifetime};
 pub use turn::{
     effective_budget, steps_or_unlimited, Kernel, KernelConfig, KernelError, PendingCall,

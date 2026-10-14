@@ -136,7 +136,19 @@ fn roundtrip_context_entry() {
 #[test]
 fn roundtrip_context_explain() {
     roundtrip::<g::ContextExplain>(
-        r#"{"context_tokens": 1,"budget_tokens": 1,"messages": 1,"tools": 1,"compactions": 1,"entries": [{"id": 1,"category": "<string>","source": "<string>","tokens": 1,"lifetime": "<string>","pinned": true,"cleared": true}],"categories": [{"category": "<string>","tokens": 1}]}"#,
+        r#"{"context_tokens": 1,"budget_tokens": 1,"messages": 1,"tools": 1,"compactions": 1,"entries": [{"id": 1,"category": "<string>","source": "<string>","tokens": 1,"lifetime": "<string>","pinned": true,"cleared": true}],"categories": [{"category": "<string>","tokens": 1}],"memory_mode": "<string>","memory_summarizer": "<string>","memory_degraded": "<string>","memory_layers": [{"level": 1,"scope": "<string>","count": 1,"tokens": 1}],"memory_worker": {"state": "<string>","windows": 1,"model_calls": 1,"enriched": 1,"failed": 1,"pending": 1,"deferrals": 1,"last_error": "<string>"}}"#,
+    );
+}
+
+#[test]
+fn roundtrip_context_layer() {
+    roundtrip::<g::ContextLayer>(r#"{"level": 1,"scope": "<string>","count": 1,"tokens": 1}"#);
+}
+
+#[test]
+fn roundtrip_context_worker() {
+    roundtrip::<g::ContextWorker>(
+        r#"{"state": "<string>","windows": 1,"model_calls": 1,"enriched": 1,"failed": 1,"pending": 1,"deferrals": 1,"last_error": "<string>"}"#,
     );
 }
 

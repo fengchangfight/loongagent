@@ -12,6 +12,15 @@
 
 use loong_schema::generated::{ActionClass, Verdict};
 
+// The enforcement layer is chosen by the platform, not by the caller: landlock is
+// the Linux PEP, everywhere else gets an honest "no mechanism" that fails closed
+// upward (the kernel reports `unconfined:` and the startup log says so out loud).
+// Nothing above this line may assume landlock exists — that is what made the
+// workspace Linux-only.
+#[cfg(target_os = "linux")]
+pub mod landlock;
+#[cfg(not(target_os = "linux"))]
+#[path = "landlock_unsupported.rs"]
 pub mod landlock;
 pub mod sandbox;
 

@@ -139,8 +139,12 @@ impl HookRunner {
     fn run_shell(&self, spec: &HookSpec, script: &Path, payload: &Value) -> HookOutcome {
         let started = Instant::now();
         let body = payload.to_string();
-        let args = vec![script.to_string_lossy().to_string()];
-        let run = RunSpec::new("sh", &args, &self.workspace, spec.timeout)
+        // A hook script is a file, so the shell *reads* it (`sh hook.sh`), which is why
+        // it need not be executable. A POSIX shell is used wherever one exists — on
+        // Windows that means Git for Windows/MSYS/WSL on PATH; without one the fallback
+        // is `cmd.exe /C`, and a `.sh` hook then fails closed into `on_error`.
+        let (program, args) = loong_proc::Shell::detect().script(script);
+        let run = RunSpec::new(&program, &args, &self.workspace, spec.timeout)
             .stdin(body.as_bytes())
             .output_limit(8 * 1024);
 

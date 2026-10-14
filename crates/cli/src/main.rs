@@ -36,6 +36,10 @@ USAGE:
   loongagent local add      [PROVIDER]                                     add models (a wizard)
   loongagent local delete   <slot|model|provider>                          remove them
   loongagent local edit                                                    open the file
+  loongagent local semantic [status]                                       the layered memory (ADR-0017)
+  loongagent local semantic on [ollama/MODEL] [--base-url URL]             turn it on, pick the summariser
+  loongagent local semantic on --record                                    deterministic layers only
+  loongagent local semantic off                                            turn it off
   loongagent setup          [--profile PATH]                                write a profile
   loongagent tui            [--session ID|PATH] [--cwd DIR] [--new] [--local]  full-screen
       with no --session it continues this project's newest session; --new starts another
@@ -50,6 +54,9 @@ USAGE:
   loongagent web            [--session PATH] [--cwd DIR] [--model NAME] [--port N] [--bind IP]
   loongagent run \"PROMPT\"   [--session PATH] [--cwd DIR] [--model NAME] [--budget N] [--keep-newest N]
                             [--max-steps N]   a step is one model call; 0 means no limit
+  --debug-model             append every raw model exchange to <session>.models.jsonl:
+                            request, finish_reason, content, tool_calls (why a call did
+                            not run is then a grep, not a guess)
   loongagent --version
 
 MODELS (provider doubles, for a first run without keys):
@@ -119,6 +126,15 @@ struct Args {
     keep_newest: Option<u64>,
     /// Model calls one turn may take; 0 means no limit.
     max_steps: Option<usize>,
+    /// `local semantic --base-url URL`: where the *summariser* lives. Separate from a
+    /// model's `base_url` because it is a different endpoint and a different protocol
+    /// (Ollama's native `/api/chat`, not the OpenAI shim).
+    summarizer_base_url: Option<String>,
+    /// `local semantic on --record`: deterministic layers only, no model at all.
+    record: bool,
+    /// `--debug-model`: append every raw model exchange to a sidecar next to the
+    /// session log, so "did the server send `tool_calls` or prose?" is checkable.
+    debug_model: bool,
     positional: Vec<String>,
 }
 
@@ -144,6 +160,9 @@ impl Args {
             budget: None,
             keep_newest: None,
             max_steps: None,
+            summarizer_base_url: None,
+            record: false,
+            debug_model: false,
             positional: Vec::new(),
         };
         // Before anything resolves a reference: a pack says `env:NAME`, and this is
@@ -234,6 +253,16 @@ impl Args {
                             .map_err(|_| "--max-steps must be a number".to_string())?,
                     );
                 }
+                // `local semantic`: the summariser's own endpoint and the
+                // deterministic-only switch. `--base-url` is not the model's: the
+                // summariser speaks Ollama's native API, which has no `/v1`.
+                "--base-url" => {
+                    i += 1;
+                    args.summarizer_base_url =
+                        Some(rest.get(i).ok_or("--base-url needs an address")?.clone());
+                }
+                "--record" => args.record = true,
+                "--debug-model" => args.debug_model = true,
                 other if other.starts_with("--") => {
                     return Err(format!("unknown flag {other:?}\n\n{USAGE}"))
                 }
@@ -425,8 +454,12 @@ struct ControlFile {
 /// The machine's control-plane configuration: who this installation talks to, and
 /// the key it pinned. Root-owned and delivered with the binary (image, MDM) — the
 /// one value a user must not be able to change is the pin (ADR-0016 §3).
+///
+/// `/etc/loongagent/control.toml` on Unix; `%PROGRAMDATA%\loongagent\control.toml`
+/// on Windows, because the Unix path would be read as drive-relative there and could
+/// never be the image/MDM location it is meant to be.
 fn system_control_path() -> PathBuf {
-    PathBuf::from("/etc/loongagent/control.toml")
+    loong_config::system_config_dir().join("control.toml")
 }
 
 /// The user's own file. On an unmanaged install it is the whole configuration; on a
@@ -1084,6 +1117,271 @@ fn session_id_of(path: &Path) -> String {
         Some(stem) if stem != "session" && !stem.is_empty() => stem,
         _ => "default".to_string(),
     }
+}
+
+/// The three `context` commands, exercised end to end.
+#[cfg(test)]
+mod context_command_tests {
+    use super::*;
+
+    fn session_with_a_fix(dir: &Path) -> PathBuf {
+        let log = dir.join("s.jsonl");
+        let events = [
+            (
+                1,
+                "message.appended",
+                r#"{"role":"user","text":"配置层叠失效了"}"#,
+            ),
+            (
+                2,
+                "tool.call",
+                r#"{"call_id":"c1","tool":"edit_file","args":{"path":"src/config/merge.rs","new_string":"深拷贝后再合并"},"action_class":"write_workspace"}"#,
+            ),
+            (
+                3,
+                "tool.call",
+                r#"{"call_id":"t1","tool":"run_command","args":{"command":"cargo test layer_merge"},"action_class":"investigate"}"#,
+            ),
+            (
+                4,
+                "tool.result",
+                r#"{"call_id":"t1","ok":false,"output":"test layer_merge ... FAILED"}"#,
+            ),
+            (
+                5,
+                "tool.call",
+                r#"{"call_id":"c2","tool":"edit_file","args":{"path":"src/config/merge.rs","new_string":"改为按层号排序后合并"},"action_class":"write_workspace"}"#,
+            ),
+            (
+                6,
+                "tool.call",
+                r#"{"call_id":"t2","tool":"run_command","args":{"command":"cargo test layer_merge"},"action_class":"investigate"}"#,
+            ),
+            (
+                7,
+                "tool.result",
+                r#"{"call_id":"t2","ok":true,"output":"test layer_merge ... ok"}"#,
+            ),
+        ];
+        let body: String = events
+            .iter()
+            .map(|(seq, kind, data)| {
+                format!(
+                    r#"{{"seq":{seq},"id":"e{seq}","kind":"{kind}","ignorable":false,"time_ms":{},"data":{data}}}"#,
+                    1000 + seq * 100
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&log, format!("{body}\n")).unwrap();
+        log
+    }
+
+    fn args_for(session: &Path) -> Args {
+        Args::parse(&["--session".to_string(), session.display().to_string()]).expect("args parse")
+    }
+
+    #[test]
+    fn status_names_the_store_and_says_the_memory_is_off_rather_than_empty() {
+        // The distinction that matters most: "the engine is off" and "the memory is
+        // empty" look identical in a count, and only one of them is a problem.
+        let dir = std::env::temp_dir().join(format!("loong-ctx-cli-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = session_with_a_fix(&dir);
+        let missing = context_status(args_for(&session));
+        assert!(missing.is_err(), "no store yet");
+        let message = missing.unwrap_err();
+        assert!(message.contains("no context store"), "{message}");
+        assert!(
+            message.contains("off unless a profile turns it on"),
+            "the message must say *why* it is missing, not just that it is: {message}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rebuild_then_verify_round_trips_and_the_digest_holds_the_attempt_sequence() {
+        let dir = std::env::temp_dir().join(format!("loong-ctx-cli2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = session_with_a_fix(&dir);
+
+        context_rebuild(args_for(&session)).expect("rebuild works");
+        assert!(context_store_path(&session).exists());
+        context_verify(args_for(&session)).expect("a rebuilt store verifies");
+
+        // And the computed abandonment survives the round trip: this is the field
+        // that used to be a model's job and is now derived.
+        let store = open_context_store(&session, false).unwrap();
+        let episode = store.summaries_at(2, 10).unwrap().remove(0);
+        assert!(
+            episode.content.contains("被否决"),
+            "the abandoned attempt must be in the digest: {}",
+            episode.content
+        );
+        assert!(
+            episode.content.contains("深拷贝"),
+            "and it names what was tried: {}",
+            episode.content
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// The sidecar store beside a session's log.
+fn context_store_path(session: &Path) -> PathBuf {
+    session.with_extension("context.db")
+}
+
+/// Open the derived store for a session, creating it if the session has one.
+///
+/// Reading commands do **not** build it if it is missing: a status command that
+/// quietly ran a full derivation would be a diagnostic that changes what it is
+/// diagnosing. `rebuild` is the one that writes, and it says so.
+fn open_context_store(session: &Path, create: bool) -> Result<loong_context::Store, String> {
+    let store_path = context_store_path(session);
+    if !session.exists() {
+        return Err(format!(
+            "no session at {} — nothing to report on",
+            session.display()
+        ));
+    }
+    if !create && !store_path.exists() {
+        return Err(format!(
+            "no context store for this session yet ({} is absent).\n\
+             The layered memory is off unless a profile turns it on, and the store is \
+             built the first time a session runs with it enabled.\n\
+             `loongagent context rebuild` builds it from the log now.",
+            store_path.display()
+        ));
+    }
+    let mut store = loong_context::Store::open(&store_path).map_err(|e| e.to_string())?;
+    store.ingest(session).map_err(|e| e.to_string())?;
+    Ok(store)
+}
+
+/// What the layered memory currently holds, and what it has spent getting there.
+fn context_status(args: Args) -> Result<(), String> {
+    let session = args.session_path();
+    let store = open_context_store(&session, false)?;
+    let report = store.verify().map_err(|e| e.to_string())?;
+    println!("session   {}", session.display());
+    println!("store     {}", context_store_path(&session).display());
+    println!(
+        "atoms     {}  (watermark {})",
+        report.atoms, report.watermark
+    );
+    println!(
+        "entities  {}  links {}{}",
+        report.entities,
+        report.links,
+        if report.skipped > 0 {
+            format!("  skipped {}", report.skipped)
+        } else {
+            String::new()
+        }
+    );
+    for (level, label) in [(2, "L2 episodes"), (3, "L3 domains")] {
+        let count = store.summary_count(level).map_err(|e| e.to_string())?;
+        println!("{label:<10} {count}");
+    }
+    // L4 is **not** a stored row: the global map is re-derived from the L2 episodes on
+    // demand, so its "count" is 1 (there is a map) or 0 (there is not). Printing
+    // `summary_count(4)` here reported a permanent 0, which reads as "no map" even on
+    // a session that has one — the same mistake the TUI's `memory_layers` avoids.
+    let l4 = match store.global_map().map_err(|e| e.to_string())? {
+        Some(map) if !map.content.is_empty() => format!("1 ({} tok)", map.tokens),
+        _ => "0".to_string(),
+    };
+    println!("{:<10} {l4}", "L4 map");
+    println!(
+        "enrich     {} pending, {} degraded",
+        store.pending_synthesis().map_err(|e| e.to_string())?,
+        store.degraded_synthesis().map_err(|e| e.to_string())?,
+    );
+    // Which model wrote which part, so "the memory is thin" can be told apart from
+    // "the memory was never enriched". A failure also starts with `digest+model:` —
+    // counting it as "enriched" made one degraded episode print as both enriched and
+    // failed, which is exactly the kind of number a person would read the wrong way.
+    let summaries = store.summaries_at(2, 10_000).map_err(|e| e.to_string())?;
+    let deterministic = summaries
+        .iter()
+        .filter(|s| s.producer == "deterministic")
+        .count();
+    let failed = summaries
+        .iter()
+        .filter(|s| s.producer.contains("(failed:"))
+        .count();
+    let enriched = summaries
+        .iter()
+        .filter(|s| s.producer.starts_with("digest+model:") && !s.producer.contains("(failed:"))
+        .count();
+    println!("producers  {deterministic} deterministic, {enriched} enriched, {failed} failed");
+    if !report.is_healthy() {
+        println!(
+            "\n⚠ derived state is not healthy: {} missing atom(s), {} orphan link(s). \
+             Run `loongagent context rebuild`.",
+            report.missing_atoms, report.orphan_links
+        );
+    }
+    Ok(())
+}
+
+/// Check the derived state against its own records, and say what is wrong.
+fn context_verify(args: Args) -> Result<(), String> {
+    let session = args.session_path();
+    let store = open_context_store(&session, false)?;
+    let report = store.verify().map_err(|e| e.to_string())?;
+    let episodes = store.summaries_at(2, 10_000).map_err(|e| e.to_string())?;
+    // Every citation must land on events that exist. A summary whose evidence is
+    // gone is a summary nothing can check, which is the one thing this design says
+    // must never happen.
+    let mut dangling = 0usize;
+    for summary in &episodes {
+        for (from, to) in &summary.citations {
+            for seq in *from..=*to {
+                if store.atom(seq).map_err(|e| e.to_string())?.is_none() {
+                    dangling += 1;
+                    break;
+                }
+            }
+        }
+    }
+    if report.is_healthy() && dangling == 0 {
+        println!(
+            "ok — {} atoms, {} episodes, every citation resolves",
+            report.atoms,
+            episodes.len()
+        );
+        return Ok(());
+    }
+    if !report.is_healthy() {
+        println!(
+            "unhealthy: missing_atoms={} orphan_links={} dangling_entity_links={}",
+            report.missing_atoms, report.orphan_links, report.dangling_entity_links
+        );
+    }
+    if dangling > 0 {
+        println!("{dangling} cited range(s) point at events that are not there");
+    }
+    Err(
+        "the derived store disagrees with itself; `loongagent context rebuild` is safe to run"
+            .to_string(),
+    )
+}
+
+/// Throw the derived store away and rebuild it from the log. The log is untouched.
+fn context_rebuild(args: Args) -> Result<(), String> {
+    let session = args.session_path();
+    let store_path = context_store_path(&session);
+    let mut store = open_context_store(&session, true)?;
+    let atoms = store.rebuild(&session).map_err(|e| e.to_string())?;
+    let episodes = store.digest().map_err(|e| e.to_string())?;
+    let domains = store.digest_domains().map_err(|e| e.to_string())?;
+    println!(
+        "rebuilt {} from the log: {atoms} atoms, {episodes} episodes, {domains} domain maps",
+        store_path.display()
+    );
+    Ok(())
 }
 
 fn session_path_for(id: &str, cwd: &Path) -> PathBuf {
@@ -1877,6 +2175,14 @@ fn run() -> Result<(), String> {
             Some("trust") => mcp_trust(Args::parse(&rest[1..])?),
             _ => Err(format!("mcp list | mcp trust\n\n{USAGE}")),
         },
+        "context" => match rest.first().map(String::as_str) {
+            Some("status") => context_status(Args::parse(&rest[1..])?),
+            Some("verify") => context_verify(Args::parse(&rest[1..])?),
+            Some("rebuild") => context_rebuild(Args::parse(&rest[1..])?),
+            _ => Err(format!(
+                "context status | context verify | context rebuild\n\n{USAGE}"
+            )),
+        },
         "setup" => setup(Args::parse(rest)?),
         "local" => local(Args::parse(rest)?),
         "control" => control(rest),
@@ -1918,6 +2224,15 @@ fn run() -> Result<(), String> {
 
 fn serve(args: Args) -> Result<(), String> {
     args.ensure_parent()?;
+    // `--debug-model`: point the provider's raw-exchange dump at a sidecar beside this
+    // session's log. Set before any model is built, and only when the environment does
+    // not already name a file — an explicit `LOONGAGENT_DEBUG_MODEL` wins, so a person
+    // can send several sessions to one place without a flag.
+    if args.debug_model && std::env::var_os("LOONGAGENT_DEBUG_MODEL").is_none() {
+        let path = args.session_path().with_extension("models.jsonl");
+        eprintln!("[debug] raw model exchanges → {}", path.display());
+        std::env::set_var("LOONGAGENT_DEBUG_MODEL", path);
+    }
     // ADR-0007: the boundary is proven before the first tool call. A mechanism
     // that fails to deny is fatal; a platform without one is a loud degradation.
     let (settings, pack) = args.settings_with_pack()?;
@@ -2020,7 +2335,7 @@ fn serve(args: Args) -> Result<(), String> {
 /// Out here rather than inline so that a *second* session built later gets the same ones.
 /// A new session that quietly ran under a different policy from the one on screen would be
 /// a worse bug than having no new session at all.
-fn kernel_config(args: &Args, settings: &loong_config::Profile) -> KernelConfig {
+fn kernel_config(args: &Args, settings: &loong_config::Profile, log: &Path) -> KernelConfig {
     let mut config = KernelConfig::new(&args.cwd);
     // `--budget 0` means "unbounded", which is the widest: the kernel takes the
     // strictest of this and the configuration, so a ceiling still holds.
@@ -2046,8 +2361,97 @@ fn kernel_config(args: &Args, settings: &loong_config::Profile) -> KernelConfig 
         .map(|row| row.value.render())
         .unwrap_or_else(|| "default".to_string());
     config.settings = settings.clone();
+    config.context_engine = context_engine_config(settings, log);
     config
 }
+
+/// The layered memory, when the resolved configuration asks for it (ADR-0017).
+///
+/// `None` is the default and the rollback path: no key was set, so the session
+/// behaves exactly as it did before the feature existed. The sidecar database lives
+/// next to the session's own log, so deleting a session deletes its derived memory
+/// with it and nothing else has to be cleaned up.
+fn context_engine_config(
+    settings: &loong_config::Profile,
+    log: &Path,
+) -> Option<loong_kernel::ContextEngineConfig> {
+    let engine = settings.context_engine()?;
+    let mut config =
+        loong_kernel::ContextEngineConfig::new(log.with_extension("context.db"), log.to_path_buf());
+    config.worker.max_events = 256;
+    // `record` mode is deterministic-only: a complete memory with no model and no
+    // network. `semantic` adds the local summariser if policy allowed one.
+    if engine.mode == "semantic" && engine.summarizer != "off" {
+        let base_url = engine
+            .summarizer_base_url
+            .clone()
+            .unwrap_or_else(|| DEFAULT_SUMMARIZER_URL.to_string());
+        let model = engine
+            .summarizer_model
+            .clone()
+            .unwrap_or_else(|| DEFAULT_SUMMARIZER_MODEL.to_string());
+        config.summarizer = Some(loong_kernel::context_engine::SummarizerChoice {
+            kind: engine.summarizer.clone(),
+            base_url,
+            model,
+            // The idle window's budget (ADR-0017 §4.6). This used to be the number
+            // of calls a step boundary made, which put the model on the foreground's
+            // critical path; now it is what one background window may spend before
+            // sleeping. The resolved configuration wins, and its default is the
+            // design note's.
+            window_calls: engine
+                .summarizer_window_calls
+                .unwrap_or(loong_kernel::context_engine::DEFAULT_WINDOW_CALLS),
+            window_tokens: engine
+                .summarizer_window_tokens
+                .unwrap_or(loong_kernel::context_engine::DEFAULT_WINDOW_TOKENS),
+        });
+    }
+    Some(config)
+}
+
+/// Whether an endpoint needs a credential.
+///
+/// A loopback address does not: the server is on this machine and has nobody to
+/// authenticate against. Asking for a key there is a false alarm, and a warning
+/// that fires on a correct configuration trains people to ignore warnings.
+fn endpoint_authenticates(base_url: &str) -> bool {
+    // Enough of a URL parse for this question: the host is what follows the scheme
+    // and precedes the first `/`, `:` or `?`. Deliberately not a dependency on the
+    // HTTP crate just for a warning.
+    let rest = base_url
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(base_url);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        // An IPv6 literal: `[::1]:11434`.
+        rest.split(']').next().unwrap_or(rest).to_string()
+    } else {
+        authority.split(':').next().unwrap_or(authority).to_string()
+    };
+    let host = host.to_ascii_lowercase();
+    !(host == "localhost" || host == "::1" || host.starts_with("127.") || host == "0.0.0.0")
+    // `host.docker.internal` and friends are remote from the agent's point of view,
+    // so only genuine loopback is exempt.
+}
+
+/// Where the local summariser lives when nothing says otherwise. The owner's
+/// machine runs Ollama here.
+const DEFAULT_SUMMARIZER_URL: &str = "http://127.0.0.1:11434";
+
+/// The model the acceptance gate picked.
+///
+/// Measured on 2026-10-14 (`cargo test -p loong-context --test faithfulness --
+/// --ignored`), on the ten-case gate: `qwen2.5:7b-instruct` explained the adopted
+/// approach correctly on 7/7 cases with a cause, invented nothing and missed
+/// nothing. `qwen2.5:3b` invented rejected approaches; `qwen3:0.6b` invented
+/// nothing but could not explain either.
+///
+/// `rejected` is *not* part of what this model is asked for — it is computed from
+/// the attempt sequence (`Store::digest`), because asking a model to copy a list it
+/// can read was measured to fail both ways.
+const DEFAULT_SUMMARIZER_MODEL: &str = "qwen2.5:7b-instruct";
 
 /// Open the log at `path` if it is there, and start one if it is not.
 ///
@@ -2064,7 +2468,7 @@ fn build_kernel(
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
     let models = build_models(args, settings)?;
-    let config = kernel_config(args, settings);
+    let config = kernel_config(args, settings, path);
     if path.exists() {
         Kernel::open_with_models(path, config, models)
     } else {
@@ -2104,7 +2508,12 @@ fn build_models(
                     })?;
                 let key = resolve_reference(spec.api_key.as_deref(), &base)
                     .or_else(|| std::env::var("LOONGAGENT_API_KEY").ok());
-                if key.is_none() {
+                // Only warn when a key is actually needed. A loopback endpoint does
+                // not authenticate — an Ollama or llama.cpp server on this machine
+                // answers a keyless request with 200, measured — so the old
+                // unconditional warning cried wolf on every local setup and sent
+                // people looking for a key that does not exist.
+                if key.is_none() && endpoint_authenticates(&base_url) {
                     eprintln!(
                         "[config] model {:?} has no usable api_key — the provider will answer 401",
                         spec.name
@@ -2191,28 +2600,35 @@ fn build_model(
                 },
             },
         ]))),
-        "demo-escape" => Ok(Box::new(ScriptedModel::new(vec![
-            CompletionResponse {
-                text: None,
-                tool_calls: vec![ToolCallRequest {
-                    call_id: "c1".to_string(),
-                    tool: "write_file".to_string(),
-                    args: json!({"path": "/tmp/loongagent-demo-escape.txt", "content": "should never be written\n"}),
-                }],
-                usage: Usage {
-                    tokens_in: 20,
-                    tokens_out: 8,
+        "demo-escape" => {
+            // The demo has to name something genuinely *outside* the workspace on every
+            // platform. A hard-coded `/tmp/...` is not absolute on Windows — it resolves
+            // against the current drive and lands inside the workspace — so the demo would
+            // demonstrate nothing there.
+            let outside = std::env::temp_dir().join("loongagent-demo-escape.txt");
+            Ok(Box::new(ScriptedModel::new(vec![
+                CompletionResponse {
+                    text: None,
+                    tool_calls: vec![ToolCallRequest {
+                        call_id: "c1".to_string(),
+                        tool: "write_file".to_string(),
+                        args: json!({"path": outside, "content": "should never be written\n"}),
+                    }],
+                    usage: Usage {
+                        tokens_in: 20,
+                        tokens_out: 8,
+                    },
                 },
-            },
-            CompletionResponse {
-                text: Some("understood".to_string()),
-                tool_calls: Vec::new(),
-                usage: Usage {
-                    tokens_in: 10,
-                    tokens_out: 2,
+                CompletionResponse {
+                    text: Some("understood".to_string()),
+                    tool_calls: Vec::new(),
+                    usage: Usage {
+                        tokens_in: 10,
+                        tokens_out: 2,
+                    },
                 },
-            },
-        ]))),
+            ])))
+        }
         other => Err(format!(
             "unknown --model {other:?} (echo | demo-write | demo-escape | openai-compat)"
         )),
@@ -2225,9 +2641,7 @@ fn build_model(
 /// use, so a profile and its credentials file move together.
 fn credential_path(path: &str, base: &Path) -> Option<PathBuf> {
     if let Some(relative) = path.strip_prefix("~/") {
-        return std::env::var("HOME")
-            .ok()
-            .map(|home| PathBuf::from(home).join(relative));
+        return loong_config::home_dir().map(|home| home.join(relative));
     }
     if Path::new(path).is_absolute() {
         return Some(PathBuf::from(path));
@@ -2467,6 +2881,16 @@ impl ChildTransport {
             None => std::env::current_exe().map_err(|e| e.to_string())?,
         };
         let mut command = Command::new(exe);
+        // Windows: the server leads its own process group, which is how `interrupt()`
+        // aims a console control event at it alone (`GenerateConsoleCtrlEvent` takes a
+        // group id, and a `CTRL_C_EVENT` could not be limited to one group). Unix needs
+        // nothing here — `kill` addresses a single pid directly.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+            command.creation_flags(CREATE_NEW_PROCESS_GROUP);
+        }
         // The subcommand comes first: flags before it would be read as the command.
         command.arg("server");
         // The session layer travels with the child: a profile file the caller named,
@@ -2484,6 +2908,9 @@ impl ChildTransport {
         }
         if let Some(model) = &args.model {
             command.arg("--model").arg(model);
+        }
+        if args.debug_model {
+            command.arg("--debug-model");
         }
         if let Some(budget) = args.budget {
             command.arg("--budget").arg(budget.to_string());
@@ -2744,6 +3171,9 @@ fn local(mut args: Args) -> Result<(), String> {
     let words: Vec<String> = args.positional.clone();
     let sub = words.first().map(String::as_str).unwrap_or("");
     let rest = words.get(1).map(String::as_str);
+    // Everything after the subcommand, for the one whose arguments are not a single
+    // word (`local semantic on <model>`).
+    let tail: Vec<String> = words.iter().skip(1).cloned().collect();
     let path = loong_config::local_profile_path();
 
     match sub {
@@ -2766,9 +3196,14 @@ fn local(mut args: Args) -> Result<(), String> {
             let (settings, _) = args.settings_with_pack()?;
             local_ping(&settings, rest)
         }
+        // The layered memory's switch (ADR-0017). Here rather than at top level
+        // because it writes `local.toml` — the same file `local add/edit` own, and
+        // the only place a *summariser endpoint* may be chosen (a repository is
+        // refused it, ADR-0008).
+        "semantic" | "memory" => local_semantic(&args, &path, &tail),
         other => Err(format!(
             "unknown local subcommand {other:?} — `loongagent local` lists what is \
-             configured; `local add|delete|edit` change it"
+             configured; `local add|delete|edit|semantic` change it"
         )),
     }
 }
@@ -2804,6 +3239,19 @@ fn session_needs_a_model(
 fn local_list(args: &Args, path: &Path) -> Result<(), String> {
     let (settings, _) = args.settings_with_pack()?;
     println!("{}", path.display());
+    // Say whether the layered memory is on before anything else about models: it is a
+    // setting nobody should have to learn by editing this file, and it is independent
+    // of how many chat models are configured.
+    match settings.context_engine() {
+        Some(engine) if engine.mode == "semantic" && engine.summarizer != "off" => println!(
+            "分层记忆：on（摘要模型 {}）— `local semantic` 看详情",
+            engine
+                .summarizer_model
+                .as_deref()
+                .unwrap_or(DEFAULT_SUMMARIZER_MODEL)
+        ),
+        _ => println!("分层记忆：off — `local semantic on` 打开"),
+    }
     if settings.models.is_empty() {
         println!();
         println!("  (还没配置模型)");
@@ -2832,7 +3280,373 @@ fn local_list(args: &Args, path: &Path) -> Result<(), String> {
     println!();
     println!("  进入会话：loongagent tui --local");
     println!("  加 / 删 / 改：local add [服务商] · local delete <序号|名字|服务商> · local edit");
+    println!("  分层记忆：local semantic [on [模型] | off]");
     Ok(())
+}
+
+/// The layered memory's local switch: `loongagent local semantic [status|on|off]`.
+///
+/// One command, because the two questions a person actually has are "is it on?" and
+/// "which model does it use?" — and ADR-0017 makes both settings, not code. It writes
+/// the same file `local add` writes, with the same text-surgery rule: the comments in
+/// `local.toml` are that file's only documentation, so nothing is re-serialized.
+fn local_semantic(args: &Args, path: &Path, words: &[String]) -> Result<(), String> {
+    let sub = words.first().map(String::as_str).unwrap_or("");
+    let model = words.get(1).map(String::as_str);
+    match sub {
+        "" | "status" | "show" => semantic_status(args, path),
+        "on" | "enable" => semantic_on(args, path, model),
+        "off" | "disable" => {
+            write_semantic_config(path, &SemanticWrite::Off)?;
+            println!("semantic   off — 只剩确定性检索层（原文仍然可检索、可 rebuild）");
+            println!("  {}", path.display());
+            Ok(())
+        }
+        other => Err(format!(
+            "unknown `local semantic` subcommand {other:?}\n\
+             usage:\n\
+             \x20 loongagent local semantic                      看当前状态\n\
+             \x20 loongagent local semantic on [provider/]<model>  打开，选摘要模型\n\
+             \x20 loongagent local semantic on --record           只做确定性派生\n\
+             \x20 loongagent local semantic off                  关闭"
+        )),
+    }
+}
+
+/// What `local semantic` writes. `Off` and `Record` are different states: one is the
+/// old compaction path, the other is the full retrieval layer with no model.
+enum SemanticWrite {
+    Off,
+    Record,
+    Semantic {
+        base_url: String,
+        model: String,
+        window_calls: usize,
+        window_tokens: u64,
+    },
+}
+
+/// `loongagent local semantic` — what is configured, and whether the model is actually
+/// installed. "Configured" and "working" are different facts and the gap between them
+/// is exactly what a person is asking about.
+fn semantic_status(args: &Args, path: &Path) -> Result<(), String> {
+    let (settings, _) = args.settings_with_pack()?;
+    println!("{}", path.display());
+    println!();
+    let engine = settings.context_engine();
+    match &engine {
+        Some(engine) if engine.mode == "semantic" && engine.summarizer != "off" => {
+            let model = engine
+                .summarizer_model
+                .as_deref()
+                .unwrap_or(DEFAULT_SUMMARIZER_MODEL);
+            let base = engine
+                .summarizer_base_url
+                .as_deref()
+                .unwrap_or(DEFAULT_SUMMARIZER_URL);
+            println!("  semantic   on");
+            println!("  mode       semantic");
+            println!("  provider   {}", engine.summarizer);
+            println!("  model      {model}");
+            println!("  base_url   {base}");
+            println!(
+                "  window     {} calls / {} tokens",
+                engine
+                    .summarizer_window_calls
+                    .unwrap_or(loong_kernel::context_engine::DEFAULT_WINDOW_CALLS),
+                engine
+                    .summarizer_window_tokens
+                    .unwrap_or(loong_kernel::context_engine::DEFAULT_WINDOW_TOKENS),
+            );
+            match ollama_models(base) {
+                Ok(models) if models.iter().any(|m| m == model) => {
+                    println!("  installed  yes")
+                }
+                Ok(models) if models.is_empty() => {
+                    println!("  installed  no — {base} 上一个模型都没有；先 `ollama pull {model}`")
+                }
+                Ok(_) => println!("  installed  no — 先 `ollama pull {model}`"),
+                Err(e) => println!("  installed  unknown — {e}"),
+            }
+        }
+        Some(engine) => {
+            println!("  semantic   record — 确定性派生，不调用模型");
+            println!("  mode       {}", engine.mode);
+        }
+        None => {
+            println!("  semantic   off");
+            println!();
+            println!("  打开：loongagent local semantic on");
+        }
+    }
+    println!("  生效范围：loongagent tui --local");
+    Ok(())
+}
+
+/// `loongagent local semantic on [provider/]<model>`.
+fn semantic_on(args: &Args, path: &Path, model_arg: Option<&str>) -> Result<(), String> {
+    if args.record {
+        write_semantic_config(path, &SemanticWrite::Record)?;
+        println!("semantic   record — 只做确定性派生，不调用模型");
+        println!("  {}", path.display());
+        return Ok(());
+    }
+    // The provider is checked before anything is written: a name the summariser cannot
+    // speak must fail here, not at the first episode.
+    let (provider, wanted) = parse_summarizer_selector(model_arg)?;
+    let base_url = summarizer_base_url(args.summarizer_base_url.as_deref());
+    let installed = ollama_models(&base_url).unwrap_or_default();
+    let existing = existing_summarizer_model(path);
+    let model = match wanted {
+        Some(model) => model,
+        None => choose_model(&installed, existing.as_deref())?,
+    };
+    if !installed.is_empty() && !installed.iter().any(|m| m == &model) {
+        eprintln!(
+            "[semantic] 注意：{base_url} 上没有 {model}；先 `ollama pull {model}`，\
+             否则每一段都会退回 digest（会在 F2 与 context status 里显示为 degraded）"
+        );
+    }
+    write_semantic_config(
+        path,
+        &SemanticWrite::Semantic {
+            base_url: base_url.clone(),
+            model: model.clone(),
+            window_calls: loong_kernel::context_engine::DEFAULT_WINDOW_CALLS,
+            window_tokens: loong_kernel::context_engine::DEFAULT_WINDOW_TOKENS,
+        },
+    )?;
+    println!("semantic   on");
+    println!("  provider   {provider}");
+    println!("  model      {model}");
+    println!("  base_url   {base_url}");
+    println!("  {}", path.display());
+    // Read back through the same resolver a session uses: a file that does not load,
+    // or that a higher layer overrules, must be reported now rather than discovered as
+    // an engine that silently stayed off.
+    let (resolved, _) = args.settings_with_pack()?;
+    match resolved.context_engine() {
+        Some(engine) if engine.mode == "semantic" && engine.summarizer != "off" => {}
+        _ => {
+            return Err(format!(
+                "{} 已写入，但用同一套分层解析出来语义引擎仍然是关的 — \
+                 检查更高优先级的一层是否把它强制关掉了",
+                path.display()
+            ))
+        }
+    }
+    println!();
+    println!("  生效范围：loongagent tui --local（local.toml 只被 local 模式读取）");
+    Ok(())
+}
+
+/// `[provider/]model` -> `("ollama", Some(model))`.
+///
+/// Only one provider exists, and that is a fact about the design rather than a stage
+/// of implementation: the summariser speaks Ollama's native `/api/chat` because the
+/// OpenAI-compatible shim was **measured** to ignore `think:false` and spend the whole
+/// budget on a reasoning trace. Saying so beats accepting `deepseek/…` and quietly
+/// doing nothing.
+fn parse_summarizer_selector(
+    selector: Option<&str>,
+) -> Result<(&'static str, Option<String>), String> {
+    let Some(selector) = selector.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(("ollama", None));
+    };
+    match selector.split_once('/') {
+        Some((provider, _)) if provider != "ollama" => Err(format!(
+            "摘要后端目前只有 ollama（本机），不能选 {provider:?}：它走 Ollama 原生 /api/chat，\
+             而 OpenAI 兼容的 /v1 实测会忽略 think:false、把预算花在推理链上。\
+             用 `loongagent local semantic on ollama/<模型>`，或直接写模型名"
+        )),
+        Some((_, model)) if model.trim().is_empty() => {
+            Err("`ollama/` 后面要跟模型名，例如 ollama/qwen2.5:7b-instruct".to_string())
+        }
+        Some((_, model)) => Ok(("ollama", Some(model.trim().to_string()))),
+        None => Ok(("ollama", Some(selector.to_string()))),
+    }
+}
+
+/// Which model to use when nobody named one: the one already configured, else the
+/// measured default, else the only installed one. With several installed and none of
+/// those, it **refuses and lists them** — guessing between 0.6B and 7B is a quality
+/// decision, and the faithfulness measurements in the design note are the reason it is
+/// not the tool's to make.
+fn choose_model(installed: &[String], existing: Option<&str>) -> Result<String, String> {
+    if let Some(existing) = existing {
+        if installed.is_empty() || installed.iter().any(|m| m == existing) {
+            return Ok(existing.to_string());
+        }
+    }
+    if installed.iter().any(|m| m == DEFAULT_SUMMARIZER_MODEL) {
+        return Ok(DEFAULT_SUMMARIZER_MODEL.to_string());
+    }
+    match installed {
+        [] => Err(format!(
+            "连接不到本机 ollama，或它一个模型都没有。先 `ollama serve` 和 \
+             `ollama pull {}`，或者指名一个已经有的：\
+             `loongagent local semantic on <模型>`",
+            DEFAULT_SUMMARIZER_MODEL
+        )),
+        [only] => Ok(only.clone()),
+        many => Err(format!(
+            "ollama 里有 {} 个模型，这里不替你猜用哪个：\n  {}\n用 \
+             `loongagent local semantic on <模型>` 选一个",
+            many.len(),
+            many.join("\n  ")
+        )),
+    }
+}
+
+/// The summariser endpoint. Ollama's native API has no `/v1`; a person who types one
+/// (because that is the shim's address) is corrected here rather than at the first
+/// request.
+fn summarizer_base_url(input: Option<&str>) -> String {
+    let raw = input
+        .unwrap_or(DEFAULT_SUMMARIZER_URL)
+        .trim()
+        .trim_end_matches('/');
+    raw.strip_suffix("/v1").unwrap_or(raw).to_string()
+}
+
+/// The model names this Ollama can serve, or why it could not be asked.
+fn ollama_models(base: &str) -> Result<Vec<String>, String> {
+    let url = format!("{}/api/tags", base.trim_end_matches('/'));
+    match loong_providers::probe::probe_models_url(&url, None) {
+        loong_providers::probe::Probe::Ok { models } => {
+            Ok(models.into_iter().map(|model| model.id).collect())
+        }
+        other => Err(loong_providers::probe::render(&other)),
+    }
+}
+
+/// The `model = "…"` already in this file's `[summarizer]`, so switching the engine on
+/// again keeps the model the person chose last time.
+fn existing_summarizer_model(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let (_, lines) = take_section(&text, "summarizer", &[]);
+    lines
+        .iter()
+        .find_map(|line| quoted_value(line.trim(), "model"))
+}
+
+/// Write (or remove) the `[context_engine]` and `[summarizer]` tables in `local.toml`,
+/// leaving every other byte of the file alone.
+fn write_semantic_config(path: &Path, write: &SemanticWrite) -> Result<(), String> {
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let (rest, ctx_extra) = take_section(&existing, "context_engine", &["enabled", "mode"]);
+    let (rest, sum_extra) = take_section(
+        &rest,
+        "summarizer",
+        &[
+            "enabled",
+            "kind",
+            "base_url",
+            "model",
+            "window_calls",
+            "window_tokens",
+        ],
+    );
+
+    let mut text = rest.trim_end().to_string();
+    if !text.is_empty() {
+        text.push_str("\n\n");
+    }
+    // No banner comment above the table: every write appends at the end, so a comment
+    // written *outside* the section is kept by the next `take_section` and copied
+    // again — one more line per switch. The tables are the documentation, and
+    // `local semantic` is the way to read them.
+    text.push_str("[context_engine]\n");
+    match write {
+        SemanticWrite::Off => text.push_str("enabled = false\n"),
+        SemanticWrite::Record => text.push_str("enabled = true\nmode = \"record\"\n"),
+        SemanticWrite::Semantic { .. } => text.push_str("enabled = true\nmode = \"semantic\"\n"),
+    }
+    for line in &ctx_extra {
+        text.push_str(line);
+        text.push('\n');
+    }
+    match write {
+        SemanticWrite::Semantic {
+            base_url,
+            model,
+            window_calls,
+            window_tokens,
+        } => {
+            text.push('\n');
+            text.push_str("[summarizer]\n");
+            text.push_str("enabled = true\n");
+            text.push_str("kind = \"ollama\"\n");
+            text.push_str(&format!("base_url = \"{}\"\n", toml_escape(base_url)));
+            text.push_str(&format!("model = \"{}\"\n", toml_escape(model)));
+            text.push_str(&format!("window_calls = {window_calls}\n"));
+            text.push_str(&format!("window_tokens = {window_tokens}\n"));
+            for line in &sum_extra {
+                text.push_str(line);
+                text.push('\n');
+            }
+        }
+        // Off/record need no model, but a hand-written key in the old section is not
+        // this command's to delete.
+        _ if !sum_extra.is_empty() => {
+            text.push('\n');
+            text.push_str("[summarizer]\n");
+            for line in &sum_extra {
+                text.push_str(line);
+                text.push('\n');
+            }
+        }
+        _ => {}
+    }
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Remove one `[header]` table, returning the rest of the text and the section's body
+/// lines that are **not** keys this command owns. Comments, blank lines and unknown
+/// keys come back so a hand-written note in the section is not a casualty of a switch.
+fn take_section(text: &str, header: &str, managed: &[&str]) -> (String, Vec<String>) {
+    let marker = format!("[{header}]");
+    let mut rest = String::new();
+    let mut kept: Vec<String> = Vec::new();
+    let mut inside = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed == marker {
+            inside = true;
+            continue;
+        }
+        if inside && trimmed.starts_with('[') {
+            inside = false;
+        }
+        if inside {
+            let key = trimmed.split('=').next().unwrap_or("").trim();
+            if !managed.contains(&key) {
+                kept.push(line.to_string());
+            }
+            continue;
+        }
+        rest.push_str(line);
+        rest.push('\n');
+    }
+    while kept
+        .first()
+        .map(|line| line.trim().is_empty())
+        .unwrap_or(false)
+    {
+        kept.remove(0);
+    }
+    while kept
+        .last()
+        .map(|line| line.trim().is_empty())
+        .unwrap_or(false)
+    {
+        kept.pop();
+    }
+    (rest, kept)
 }
 
 /// `loongagent local delete <slot|model|provider>`.
@@ -3086,9 +3900,20 @@ fn local_edit(path: &Path) -> Result<(), String> {
             path.display()
         ));
     }
-    let editor = std::env::var("VISUAL")
-        .or_else(|_| std::env::var("EDITOR"))
-        .map_err(|_| format!("没有设置 $VISUAL 或 $EDITOR — 文件在 {}", path.display()))?;
+    // `$VISUAL`, then `$EDITOR`. Windows has neither convention set by default and every
+    // install has Notepad, so it falls back rather than telling someone to set a variable
+    // their shell never sets. The value is a *program*, not a command line (`code --wait`
+    // would be one argument here) — the same rule as on Unix.
+    let editor = match std::env::var("VISUAL").or_else(|_| std::env::var("EDITOR")) {
+        Ok(editor) => editor,
+        Err(_) if cfg!(windows) => "notepad".to_string(),
+        Err(_) => {
+            return Err(format!(
+                "没有设置 $VISUAL 或 $EDITOR — 文件在 {}",
+                path.display()
+            ))
+        }
+    };
     let status = std::process::Command::new(&editor)
         .arg(path)
         .status()
@@ -4378,6 +5203,188 @@ mod tests {
             .count()
     }
 
+    // ------------------------------------------------ the semantic switch
+
+    fn semantic(model: &str) -> SemanticWrite {
+        SemanticWrite::Semantic {
+            base_url: DEFAULT_SUMMARIZER_URL.to_string(),
+            model: model.to_string(),
+            window_calls: 4,
+            window_tokens: 6000,
+        }
+    }
+
+    fn resolved(path: &Path) -> loong_config::Profile {
+        loong_config::resolve(
+            &[(loong_config::Layer::User, path.to_path_buf())],
+            path.parent().unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn semantic_on_writes_a_file_that_resolves_and_keeps_the_models() {
+        let path = local_temp("semantic-on");
+        std::fs::write(
+            &path,
+            "# a comment somebody wrote\n[[models]]\nname = \"cheap\"\n\
+             provider = \"ollama/cheap\"\n\n[router]\ndefault = \"cheap\"\n",
+        )
+        .unwrap();
+
+        write_semantic_config(&path, &semantic("qwen2.5:7b-instruct")).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# a comment somebody wrote"), "{text}");
+        assert!(text.contains("name = \"cheap\""), "{text}");
+        assert!(text.contains("default = \"cheap\""), "{text}");
+
+        let profile = resolved(&path);
+        assert_eq!(profile.models.len(), 1, "the models survived");
+        let engine = profile.context_engine().expect("semantic is on");
+        assert_eq!(engine.mode, "semantic");
+        assert_eq!(engine.summarizer, "ollama");
+        assert_eq!(
+            engine.summarizer_model.as_deref(),
+            Some("qwen2.5:7b-instruct")
+        );
+        assert_eq!(
+            engine.summarizer_base_url.as_deref(),
+            Some(DEFAULT_SUMMARIZER_URL)
+        );
+        assert_eq!(engine.summarizer_window_calls, Some(4));
+    }
+
+    #[test]
+    fn switching_semantic_on_twice_does_not_duplicate_its_tables() {
+        // A duplicate `[context_engine]` is a file that will not load, so the second
+        // `on` has to replace rather than append. Repeating it must also be *byte*
+        // idempotent: anything written outside the section would be copied forward on
+        // every switch, which is how a file comes apart without anything being lost.
+        let path = local_temp("semantic-twice");
+        write_semantic_config(&path, &semantic("qwen2.5:3b")).unwrap();
+        write_semantic_config(&path, &semantic("qwen2.5:7b-instruct")).unwrap();
+        let once = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(sections(&once, "[context_engine]"), 1, "{once}");
+        assert_eq!(sections(&once, "[summarizer]"), 1, "{once}");
+        assert!(
+            !once.contains("qwen2.5:3b"),
+            "the old model is gone: {once}"
+        );
+        write_semantic_config(&path, &semantic("qwen2.5:7b-instruct")).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            once,
+            "writing the same setting twice is a no-op"
+        );
+    }
+
+    #[test]
+    fn semantic_off_is_a_real_off_and_keeps_the_models() {
+        let path = local_temp("semantic-off");
+        std::fs::write(
+            &path,
+            "[[models]]\nname = \"cheap\"\nprovider = \"ollama/cheap\"\n\n[router]\ndefault = \"cheap\"\n",
+        )
+        .unwrap();
+        write_semantic_config(&path, &semantic("qwen2.5:7b-instruct")).unwrap();
+        write_semantic_config(&path, &SemanticWrite::Off).unwrap();
+
+        let profile = resolved(&path);
+        assert_eq!(profile.context_engine(), None, "off means off");
+        assert_eq!(profile.context_engine_enabled, Some(false));
+        assert_eq!(profile.models.len(), 1);
+    }
+
+    #[test]
+    fn record_mode_turns_the_model_off_and_keeps_the_retrieval_layer() {
+        let path = local_temp("semantic-record");
+        write_semantic_config(&path, &SemanticWrite::Record).unwrap();
+        let engine = resolved(&path).context_engine().expect("record is on");
+        assert_eq!(engine.mode, "record");
+        assert_eq!(engine.summarizer, "off", "record needs no model");
+    }
+
+    #[test]
+    fn a_remote_summariser_provider_is_refused_with_the_reason() {
+        // The provider list is short on purpose. Accepting `deepseek/…` here and
+        // silently doing nothing is the failure this check exists to prevent.
+        let error = parse_summarizer_selector(Some("deepseek/deepseek-flash")).unwrap_err();
+        assert!(error.contains("ollama"), "{error}");
+        assert!(error.contains("think"), "and says why: {error}");
+        assert_eq!(
+            parse_summarizer_selector(Some("ollama/qwen2.5:3b"))
+                .unwrap()
+                .1
+                .as_deref(),
+            Some("qwen2.5:3b")
+        );
+        assert_eq!(
+            parse_summarizer_selector(Some("qwen2.5:3b"))
+                .unwrap()
+                .1
+                .as_deref(),
+            Some("qwen2.5:3b")
+        );
+        assert_eq!(parse_summarizer_selector(None).unwrap(), ("ollama", None));
+    }
+
+    #[test]
+    fn choosing_a_model_refuses_to_guess_among_several() {
+        let several = vec!["qwen3:0.6b".to_string(), "qwen2.5:3b".to_string()];
+        assert!(
+            choose_model(&several, None).is_err(),
+            "picking between 0.6B and 3B is a quality decision, not a coin toss"
+        );
+        // What the person configured last stays theirs while it is still installed.
+        assert_eq!(
+            choose_model(&several, Some("qwen2.5:3b")).unwrap(),
+            "qwen2.5:3b"
+        );
+        // The measured default wins over an arbitrary first entry.
+        let with_default = vec!["qwen3:0.6b".to_string(), "qwen2.5:7b-instruct".to_string()];
+        assert_eq!(
+            choose_model(&with_default, None).unwrap(),
+            "qwen2.5:7b-instruct"
+        );
+        assert_eq!(
+            choose_model(&["llama3:8b".to_string()], None).unwrap(),
+            "llama3:8b"
+        );
+        assert!(choose_model(&[], None).unwrap_err().contains("ollama"));
+    }
+
+    #[test]
+    fn the_summariser_endpoint_drops_the_openai_shim_suffix() {
+        assert_eq!(
+            summarizer_base_url(Some("http://127.0.0.1:11434/v1/")),
+            "http://127.0.0.1:11434"
+        );
+        assert_eq!(summarizer_base_url(None), DEFAULT_SUMMARIZER_URL);
+        assert_eq!(
+            summarizer_base_url(Some("http://box:11434/")),
+            "http://box:11434"
+        );
+    }
+
+    #[test]
+    fn a_hand_written_key_survives_a_switch() {
+        // The command owns `enabled`/`mode`/the endpoint keys. A key it does not own —
+        // or a comment — is not its to delete.
+        let path = local_temp("semantic-extra");
+        std::fs::write(
+            &path,
+            "[context_engine]\n# my note\nenabled = true\nmode = \"semantic\"\nepisode_events = 32\n",
+        )
+        .unwrap();
+        write_semantic_config(&path, &SemanticWrite::Off).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# my note"), "{text}");
+        assert!(text.contains("episode_events = 32"), "{text}");
+        assert!(text.contains("enabled = false"), "{text}");
+        assert_eq!(sections(&text, "[context_engine]"), 1, "{text}");
+    }
+
     #[test]
     fn a_local_session_needs_a_model_before_the_terminal_is_taken_over() {
         // A session with nothing to run cannot answer anything, and its first minutes are
@@ -4401,6 +5408,9 @@ mod tests {
             budget: None,
             keep_newest: None,
             max_steps: None,
+            summarizer_base_url: None,
+            record: false,
+            debug_model: false,
             positional: Vec::new(),
         };
         let empty = loong_config::Profile::default();
@@ -5474,5 +6484,50 @@ mod session_tests {
             age_text(now - std::time::Duration::from_secs(172800)),
             "2 d ago"
         );
+    }
+}
+
+#[cfg(test)]
+mod endpoint_key_tests {
+    use super::endpoint_authenticates;
+
+    #[test]
+    fn a_loopback_endpoint_does_not_need_a_key() {
+        // The bug this exists for: the warning fired for `ollama/qwen2.5:7b-instruct`
+        // and sent the owner looking for a key that does not exist. A local server
+        // answers a keyless request with 200 — measured against Ollama 0.40.3.
+        for url in [
+            "http://127.0.0.1:11434/v1",
+            "http://localhost:11434/v1",
+            "http://127.0.0.1:8000",
+            "http://[::1]:11434/v1",
+            "http://0.0.0.0:11434/v1",
+            // No scheme, a port, and a path: still the same host.
+            "127.0.0.1:8080/v1",
+        ] {
+            assert!(
+                !endpoint_authenticates(url),
+                "{url} is on this machine and needs no key"
+            );
+        }
+    }
+
+    #[test]
+    fn a_remote_endpoint_still_wants_a_key() {
+        // The warning has to keep working where it is true, or it has been deleted
+        // rather than fixed. If the URL cannot be read at all, assume it is remote:
+        // a real 401 is worth one line of noise.
+        for url in [
+            "https://api.openai.com/v1",
+            "https://gateway.internal.corp/v1",
+            "http://10.0.0.5:8080/v1",
+            "http://host.docker.internal:11434/v1",
+            "not a url",
+        ] {
+            assert!(
+                endpoint_authenticates(url),
+                "{url} is not loopback, so a keyless request may 401"
+            );
+        }
     }
 }

@@ -1,6 +1,7 @@
 # OS
 .DS_Store
 Thumbs.db
+Desktop.ini
 *~
 
 # Editors
@@ -10,30 +11,69 @@ Thumbs.db
 *.swo
 
 # Env / secrets
+#
+# These names are the ones `looks_like_a_secret` in crates/control calls secrets — the
+# list the control plane warns about when a draft is published next to them — plus the
+# two reference targets a profile may point at (`file:credentials.toml#KEY`,
+# `$LOONGAGENT_HOME/env`). A secret that is merely untracked is one `git add -A` away
+# from being committed, which is exactly the mistake that check exists to catch.
 .env
 .env.*
 !.env.example
 !.env.template
 *.pem
 *.key
+# control-key.pkcs8: a signing key in a repository is an off-site ability to mint packs
+# that every install accepts.
+*.pkcs8
+# client.token / admin.token, and the copy `loongagent setup` may keep under the home.
+*.token
+# A `file:` reference target sitting next to the profile that points at it.
+credentials.toml
+# $LOONGAGENT_HOME/env — the local install's secrets file, when the home is inside the
+# repository. `looks_like_a_secret` in crates/control names this one too.
+env
 
 # Logs
 *.log
 logs/
 
 # loongagent: the *configuration* under .loongagent/ is meant to be committed
-# (profile.toml, hooks.toml, mcp.toml, skills/, commands/) — these are the
+# (profile.toml, control.toml, hooks.toml, mcp.toml, skills/, commands/) — these are the
 # artifacts of *running* it, and they are not:
 #
-#   session.jsonl / *.sqlite  the session itself: prompts, file contents, tool
-#                            output, approvals. Committing one leaks the context.
-#   *.trusted                "a human trusted these exact bytes". Committing one
-#                            would let a repository ship a pre-trusted hook or MCP
-#                            server, which is precisely what the gate exists to
-#                            prevent.
-.loongagent/session.jsonl
+#   *.jsonl           the session itself: `session.jsonl` for the first one, `<id>.jsonl`
+#                    for every session after it. Prompts, file contents, tool output,
+#                    approvals. Committing one leaks the context.
+#   *.models.jsonl    what `--debug-model` appends beside the session: every raw model
+#                    exchange, the same leak with the request bodies included.
+#   *.sqlite / *.db   the derived event index and the layered-memory store — plus the
+#                    `-wal` / `-shm` / `-journal` sidecars SQLite leaves beside them.
+#   *.trusted         "a human trusted these exact bytes". Committing one
+#                    would let a repository ship a pre-trusted hook or MCP
+#                    server, which is precisely what the gate exists to
+#                    prevent.
+#   env               the secrets file, when the home points into the repository.
+#
+# Its **subdirectories** are state (`projects/`, `control/`), never configuration.
+.loongagent/*.jsonl
 .loongagent/*.sqlite
+.loongagent/*.sqlite-*
+.loongagent/*.db
+.loongagent/*.db-*
 .loongagent/*.trusted
+.loongagent/env
+.loongagent/projects/
+.loongagent/control/
+
+# The same artifacts when a session is deliberately put somewhere else in the repository
+# (`--session ./tmp/s.jsonl`). Both extensions are produced only by this tool, so unlike
+# a bare `*.jsonl` these cannot collide with a fixture somebody wants to commit. The
+# session log itself is deliberately *not* matched by a global pattern: if you chose to
+# write one into the repository, `git status` saying so is the right outcome.
+*.models.jsonl
+*.context.db
+*.context.db-*
 
 # Language toolchains (harmless until used)
 node_modules/
@@ -49,3 +89,11 @@ vendor/
 # Caches
 .cache/
 *.cache
+# Python: the MCP test server is Python, so these appear the moment anyone pokes it.
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Patch leftovers
+*.orig
+*.rej

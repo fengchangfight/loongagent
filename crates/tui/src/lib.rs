@@ -402,12 +402,56 @@ fn human_ms(ms: u64) -> String {
 /// Ask the server process to stop the turn it is running. The process is our own child,
 /// so this is a signal rather than a protocol message: the client is blocked reading the
 /// turn's own stream, and a signal does not need the transport to be free.
+///
+/// Unix delivers `SIGINT` to one pid. Windows has no `kill`, so the same intent is
+/// carried by a console control event sent to the child's **process group** — which is
+/// why the launcher spawns the server with `CREATE_NEW_PROCESS_GROUP`
+/// (`crates/cli/src/main.rs`). `CTRL_C_EVENT` cannot be aimed at a group (Microsoft
+/// documents that it is delivered console-wide), so the child is sent `CTRL_BREAK_EVENT`
+/// and its server installs a `SIGBREAK` handler instead of a `SIGINT` one
+/// (`crates/server/src/lib.rs`). The user-visible behaviour is identical on both
+/// platforms: the running turn stops, the server and the session survive it.
 pub fn interrupt(pid: u32) {
-    // Safety: `kill` with a signal number on a pid we spawned; the failure mode is a
-    // process that has already exited, which the return value reports and nothing needs.
-    unsafe {
-        libc::kill(pid as libc::pid_t, libc::SIGINT);
+    #[cfg(unix)]
+    {
+        // Safety: `kill` with a signal number on a pid we spawned; the failure mode is a
+        // process that has already exited, which the return value reports and nothing needs.
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGINT);
+        }
     }
+    #[cfg(windows)]
+    {
+        // A process group created with CREATE_NEW_PROCESS_GROUP is identified by the pid
+        // of its root process, which is the server child we spawned.
+        const CTRL_BREAK_EVENT: u32 = 1;
+        const ERROR_INVALID_PARAMETER: i32 = 87;
+        // SAFETY: both arguments are plain integers; the call has no memory contract.
+        unsafe {
+            let sent = GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid);
+            if sent == 0 {
+                let err = GetLastError() as i32;
+                // `interrupt` has no error channel by design (its callers print
+                // "interrupting…" and let the turn's own stream report the outcome), but a
+                // silent failure is exactly the case someone debugging this needs to see.
+                // ERROR_INVALID_PARAMETER means the pid is gone, which is not worth noise.
+                if err != ERROR_INVALID_PARAMETER {
+                    eprintln!("loongagent: could not interrupt pid {pid} (win32 error {err})");
+                }
+            }
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+    }
+}
+
+#[cfg(windows)]
+extern "system" {
+    /// `kernel32` — send a control event to a console process group.
+    fn GenerateConsoleCtrlEvent(ctrl_event: u32, process_group_id: u32) -> i32;
+    fn GetLastError() -> u32;
 }
 
 impl<T: Transport> Client<T> {

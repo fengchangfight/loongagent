@@ -95,6 +95,14 @@ pub fn kind_of(key: &str) -> Option<Kind> {
         // Which mode this install runs in. Free-override like `model`: the most local
         // layer that says wins, so a `--local` session layer beats the user's profile.
         "mode" => Kind::FreeOverride,
+        // Which mode to run in, and which local model to use. Endpoint-shaped keys
+        // (`summarizer.base_url`, `summarizer.model`) are free-override here and
+        // refused at the project layer in `from_file`.
+        "context_engine.mode"
+        | "context_engine"
+        | "summarizer.kind"
+        | "summarizer.base_url"
+        | "summarizer.model" => Kind::FreeOverride,
         // The one profile-related key a user owns: which named bundle to run.
         "control.profile" => Kind::FreeOverride,
         "budget_tokens"
@@ -103,6 +111,16 @@ pub fn kind_of(key: &str) -> Option<Kind> {
         | "compact_at_percent"
         | "max_context_size"
         | "reserved_context_size"
+        // 0/1 switches: `0` (off) is stricter, so a firm can force either facility
+        // off and a lower layer cannot loosen it.
+        | "context_engine.enabled"
+        | "summarizer.enabled"
+        | "context_engine.episode_events"
+        | "context_engine.l4_max_tokens"
+        // One idle window's budget for the background summariser. Smaller is
+        // stricter: a firm may cap the background's spend, nobody may raise it.
+        | "summarizer.window_calls"
+        | "summarizer.window_tokens"
         | "permissions" => Kind::NarrowOnly,
         "skill_dirs" | "disable_skills" => Kind::AddOnly,
         "api_key" => Kind::Reference,
@@ -529,6 +547,28 @@ pub struct Profile {
     /// Tokens held back for the model's answer: compaction runs when the room left in the
     /// window falls below it. `0` or unset means the kernel's own default.
     pub reserved_context_size: Option<u64>,
+    /// The layered memory (ADR-0017). `None` means nobody has said, which reads as
+    /// **off**: the mechanism is opt-in, and the old compaction path is the default.
+    /// A firm setting it to `false` wins over a user setting it to `true`
+    /// (narrow-only), which is what makes "off" enforceable rather than advisory.
+    pub context_engine_enabled: Option<bool>,
+    /// `record` (deterministic summaries only) or `semantic` (adds a local model).
+    pub context_engine_mode: Option<String>,
+    pub context_engine_episode_events: Option<usize>,
+    pub context_engine_l4_tokens: Option<u64>,
+    /// Whether a local summariser may run at all — narrow-only, like the engine
+    /// itself. Separate from `context_engine_enabled` because `record` mode is
+    /// useful with no model, and a firm may allow one and not the other.
+    pub summarizer_enabled: Option<bool>,
+    pub summarizer_kind: Option<String>,
+    pub summarizer_base_url: Option<String>,
+    pub summarizer_model: Option<String>,
+    /// The background enrichment window (ADR-0017 §4.6): at most this many model
+    /// calls / this many tokens per idle window. Narrow-only and **minimum wins**,
+    /// because a smaller window is the stricter one — a firm can cap what the
+    /// background may spend and no lower layer can raise it.
+    pub summarizer_window_calls: Option<usize>,
+    pub summarizer_window_tokens: Option<u64>,
     /// Resolved per action class. A `Vec` rather than a map because the order of
     /// action classes is not meaningful — inventing one to satisfy a `BTreeMap`
     /// would be a lie about the domain.
@@ -538,7 +578,64 @@ pub struct Profile {
     provenance: BTreeMap<String, Provenance>,
 }
 
+/// The resolved layered-memory settings, ready for a caller to build a kernel
+/// config from. Plain values on purpose: `loong-config` decides *policy*, and the
+/// kernel decides how to run — a settings struct is the seam between them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextEngineSettings {
+    /// `record` or `semantic`.
+    pub mode: String,
+    pub episode_events: Option<usize>,
+    pub l4_max_tokens: Option<u64>,
+    /// `ollama` or `off`.
+    pub summarizer: String,
+    pub summarizer_base_url: Option<String>,
+    pub summarizer_model: Option<String>,
+    /// One idle window's budget, `None` meaning "use the shipped default".
+    pub summarizer_window_calls: Option<usize>,
+    pub summarizer_window_tokens: Option<u64>,
+}
+
 impl Profile {
+    /// The layered memory's settings, or `None` when it is off or nobody has said.
+    ///
+    /// `None` is the meaningful default: ADR-0017 makes the mechanism opt-in, and
+    /// "not mentioned anywhere" must not read as "on" — a session that started
+    /// summarising because a key was absent would be exactly the hidden behaviour
+    /// the ledger exists to prevent.
+    ///
+    /// The summariser is only carried through when **both** switches allow it: the
+    /// engine on, mode `semantic`, and `summarizer.enabled` not `false`. A model
+    /// that cannot be reached is a runtime question; a model that is not permitted
+    /// is a policy one, and this function only answers the second.
+    pub fn context_engine(&self) -> Option<ContextEngineSettings> {
+        if self.context_engine_enabled != Some(true) {
+            return None;
+        }
+        let mode = self
+            .context_engine_mode
+            .clone()
+            .unwrap_or_else(|| "record".to_string());
+        let summarizer_allowed = self.summarizer_enabled != Some(false);
+        let summarizer = if mode == "semantic" && summarizer_allowed {
+            self.summarizer_kind
+                .clone()
+                .unwrap_or_else(|| "ollama".to_string())
+        } else {
+            "off".to_string()
+        };
+        Some(ContextEngineSettings {
+            mode,
+            episode_events: self.context_engine_episode_events,
+            l4_max_tokens: self.context_engine_l4_tokens,
+            summarizer,
+            summarizer_base_url: self.summarizer_base_url.clone(),
+            summarizer_model: self.summarizer_model.clone(),
+            summarizer_window_calls: self.summarizer_window_calls,
+            summarizer_window_tokens: self.summarizer_window_tokens,
+        })
+    }
+
     /// Whether this install runs without a control plane.
     ///
     /// One predicate, in one place, because "are we local?" decides whether a whole
@@ -623,6 +720,43 @@ struct RawProfile {
     models: Vec<RawModel>,
     router: Option<RawRouter>,
     control: Option<RawControl>,
+    context_engine: Option<RawContextEngine>,
+    summarizer: Option<RawSummarizer>,
+}
+
+/// `[context_engine]` (ADR-0017). Every field is optional: a layer says only what
+/// it wants to change.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawContextEngine {
+    /// A **narrow-only switch**, stored as 0/1: the organisation may force the
+    /// layered memory off and a lower layer may not turn it back on. Turning it on
+    /// costs a background model; whether that is allowed is a policy question, and
+    /// policy belongs to the higher layer.
+    enabled: Option<bool>,
+    /// `record` (deterministic only) or `semantic` (adds a local model).
+    mode: Option<String>,
+    episode_events: Option<u64>,
+    l4_max_tokens: Option<u64>,
+}
+
+/// `[summarizer]`: which local model, if any.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSummarizer {
+    /// Narrow-only, like `context_engine.enabled`: a user may not switch on a
+    /// facility the firm switched off.
+    enabled: Option<bool>,
+    /// `ollama` or `off`.
+    kind: Option<String>,
+    /// The endpoint and the model. Both are **endpoint keys**: a repository must
+    /// not choose where prompts go (ADR-0008), so the project layer is refused.
+    base_url: Option<String>,
+    model: Option<String>,
+    /// One idle window's budget (ADR-0017 §4.6). Narrow-only: a higher layer may
+    /// cap the background's model calls or tokens; a lower one may not raise it.
+    window_calls: Option<u64>,
+    window_tokens: Option<u64>,
 }
 
 /// The user's side of the control plane: which named profile to run. The address and
@@ -904,6 +1038,84 @@ impl LayerValues {
                 values.push((key.to_string(), Value::Number(value)));
             }
         }
+        // The context engine (ADR-0017). The two `enabled` flags travel as 0/1
+        // narrow-only numbers rather than booleans, so they ride the existing
+        // strictest-wins rule: `0` (off) is stricter than `1`, which is exactly the
+        // direction policy needs — a firm can switch the layered memory off and no
+        // layer below can switch it back on.
+        if let Some(engine) = &raw.context_engine {
+            if let Some(enabled) = engine.enabled {
+                values.push((
+                    "context_engine.enabled".to_string(),
+                    Value::Number(u64::from(enabled)),
+                ));
+            }
+            if let Some(mode) = &engine.mode {
+                if mode != "record" && mode != "semantic" {
+                    return Err(ConfigError::Invalid(format!(
+                        "{source}: context_engine.mode is {mode:?}; the modes that exist are \
+                         \"record\" (deterministic summaries only) and \"semantic\" (adds a \
+                         local model)"
+                    )));
+                }
+                values.push(("context_engine.mode".to_string(), Value::Text(mode.clone())));
+            }
+            for (key, value) in [
+                ("context_engine.episode_events", engine.episode_events),
+                ("context_engine.l4_max_tokens", engine.l4_max_tokens),
+            ] {
+                if let Some(value) = value {
+                    values.push((key.to_string(), Value::Number(value)));
+                }
+            }
+        }
+        if let Some(summarizer) = &raw.summarizer {
+            if let Some(enabled) = summarizer.enabled {
+                values.push((
+                    "summarizer.enabled".to_string(),
+                    Value::Number(u64::from(enabled)),
+                ));
+            }
+            if let Some(kind) = &summarizer.kind {
+                if kind != "ollama" && kind != "off" {
+                    return Err(ConfigError::Invalid(format!(
+                        "{source}: summarizer.kind is {kind:?}; the kinds that exist are \
+                         \"ollama\" and \"off\""
+                    )));
+                }
+                values.push(("summarizer.kind".to_string(), Value::Text(kind.clone())));
+            }
+            // Endpoint keys: the project layer may not say them. A repository that
+            // could point the summariser somewhere would be choosing where a
+            // session's history is sent — the exfiltration vector ADR-0008 names,
+            // and worse here than for the model, because a summary is the whole
+            // session in condensed form.
+            for (key, value) in [
+                ("summarizer.base_url", summarizer.base_url.clone()),
+                ("summarizer.model", summarizer.model.clone()),
+            ] {
+                let Some(value) = value else { continue };
+                if layer == Layer::Project {
+                    return Err(ConfigError::Invalid(format!(
+                        "{source}: the project layer may not set `{key}` — a repository must \
+                         not choose where a session's memory is summarised (ADR-0008)"
+                    )));
+                }
+                check_endpoint_reference(&source, key, &value)?;
+                values.push((key.to_string(), Value::Text(value)));
+            }
+            // Budgets, not endpoints: these say how much background work may happen,
+            // which is a policy the narrow-only rule governs. Minimum wins.
+            if let Some(calls) = summarizer.window_calls {
+                values.push(("summarizer.window_calls".to_string(), Value::Number(calls)));
+            }
+            if let Some(tokens) = summarizer.window_tokens {
+                values.push((
+                    "summarizer.window_tokens".to_string(),
+                    Value::Number(tokens),
+                ));
+            }
+        }
         for (key, verdict) in &raw.permissions {
             let class = parse_class(key).ok_or_else(|| {
                 ConfigError::Invalid(format!(
@@ -1138,11 +1350,45 @@ fn parse_verdict(text: &str) -> Option<Verdict> {
 
 fn expand_home(path: &str) -> PathBuf {
     if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(rest);
+        if let Some(home) = home_dir() {
+            return home.join(rest);
         }
     }
     PathBuf::from(path)
+}
+
+/// The user's home directory, spelled the way each platform spells it.
+///
+/// Unix sets `HOME`. Windows sets `USERPROFILE` — `HOME` is only present when a
+/// POSIX-ish shell (Git Bash, MSYS) exported it, and a process launched from a
+/// shortcut or a service has none. Reading only `HOME` fails *quietly*: `~/…` stays
+/// a literal directory name and the configuration root falls through to
+/// [`std::env::temp_dir`], so a Windows user's settings and sessions would live in
+/// `%TEMP%` and vanish. Both names are consulted; `HOME` wins when it is set, so a
+/// Git Bash session keeps pointing where it always did.
+pub fn home_dir() -> Option<PathBuf> {
+    non_empty("HOME")
+        .or_else(|| non_empty("USERPROFILE"))
+        .map(PathBuf::from)
+}
+
+/// Where a **machine-wide** configuration file lives.
+///
+/// `/etc/loongagent` on Unix is an administrator's directory. Its Windows analogue
+/// is `%PROGRAMDATA%\loongagent`; without this the org layer would resolve to the
+/// drive-relative `\etc\loongagent`, which is not a place anything writes.
+pub fn system_config_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        non_empty("PROGRAMDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("C:\\ProgramData"))
+            .join("loongagent")
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from("/etc/loongagent")
+    }
 }
 
 /// Where each layer's file lives on this machine.
@@ -1152,7 +1398,7 @@ fn expand_home(path: &str) -> PathBuf {
 /// and nothing here should be called tamper-resistant.
 pub fn layer_paths(workspace: &Path, session: Option<&Path>) -> Vec<(Layer, PathBuf)> {
     let mut layers = Vec::new();
-    layers.push((Layer::Org, PathBuf::from("/etc/loongagent/profile.toml")));
+    layers.push((Layer::Org, system_config_dir().join("profile.toml")));
     layers.push((Layer::Project, workspace.join(".loongagent/profile.toml")));
     // One root for everything the local client keeps, so "where does loongagent put
     // things?" has a one-word answer. `LOONGAGENT_HOME` moves it for CI and scripts.
@@ -1201,7 +1447,7 @@ pub fn local_layer_paths(workspace: &Path, session: Option<&Path>) -> Vec<(Layer
 pub fn loongagent_home() -> PathBuf {
     non_empty("LOONGAGENT_HOME")
         .map(PathBuf::from)
-        .or_else(|| non_empty("HOME").map(|home| PathBuf::from(home).join(".loongagent")))
+        .or_else(|| home_dir().map(|home| home.join(".loongagent")))
         .unwrap_or_else(std::env::temp_dir)
 }
 
@@ -1508,6 +1754,32 @@ fn merge(layers: &[LayerValues]) -> Result<Profile, ConfigError> {
             ("compact_at_percent", Value::Number(n)) => profile.compact_at_percent = Some(*n),
             ("max_context_size", Value::Number(n)) => profile.max_context_size = Some(*n),
             ("reserved_context_size", Value::Number(n)) => profile.reserved_context_size = Some(*n),
+            // The context engine (ADR-0017). Kept as the raw resolved facts; the
+            // typed view a caller wants is `Profile::context_engine()`.
+            ("context_engine.enabled", Value::Number(n)) => {
+                profile.context_engine_enabled = Some(*n != 0)
+            }
+            ("context_engine.mode", Value::Text(v)) => {
+                profile.context_engine_mode = Some(v.clone())
+            }
+            ("context_engine.episode_events", Value::Number(n)) => {
+                profile.context_engine_episode_events = Some(*n as usize)
+            }
+            ("context_engine.l4_max_tokens", Value::Number(n)) => {
+                profile.context_engine_l4_tokens = Some(*n)
+            }
+            ("summarizer.enabled", Value::Number(n)) => profile.summarizer_enabled = Some(*n != 0),
+            ("summarizer.kind", Value::Text(v)) => profile.summarizer_kind = Some(v.clone()),
+            ("summarizer.base_url", Value::Text(v)) => {
+                profile.summarizer_base_url = Some(v.clone())
+            }
+            ("summarizer.model", Value::Text(v)) => profile.summarizer_model = Some(v.clone()),
+            ("summarizer.window_calls", Value::Number(n)) => {
+                profile.summarizer_window_calls = Some(*n as usize)
+            }
+            ("summarizer.window_tokens", Value::Number(n)) => {
+                profile.summarizer_window_tokens = Some(*n)
+            }
             // Models are collected after this loop, in declaration order — see below.
             (key, Value::Model(_)) if key.starts_with("models.") => {}
             ("router.default", Value::Text(name)) => profile.router.default = Some(name.clone()),
@@ -1624,6 +1896,157 @@ mod tests {
         let path = dir.join(name);
         std::fs::write(&path, body).unwrap();
         path
+    }
+
+    #[test]
+    fn the_layered_memory_is_off_unless_someone_says_so() {
+        let ws = workspace();
+        // Absent everywhere: off. A mechanism that switched itself on because a key
+        // was missing would be the hidden behaviour ADR-0006 exists to prevent.
+        let profile = resolve(&[], &ws).unwrap();
+        assert_eq!(profile.context_engine(), None);
+
+        // A user may switch it on.
+        let user = write(
+            &ws,
+            "u.toml",
+            "[context_engine]\nenabled = true\nmode = \"semantic\"\n",
+        );
+        let profile = resolve(&[(Layer::User, user)], &ws).unwrap();
+        let settings = profile.context_engine().expect("on");
+        assert_eq!(settings.mode, "semantic");
+        // With no summariser named, `semantic` means the default local one.
+        assert_eq!(settings.summarizer, "ollama");
+    }
+
+    #[test]
+    fn a_firm_can_force_the_layered_memory_off_and_a_user_cannot_loosen_it() {
+        // The whole reason the switch is narrow-only: this is a policy question
+        // (background work spends a model) and policy belongs to the higher layer.
+        let ws = workspace();
+        let org = write(&ws, "org.toml", "[context_engine]\nenabled = false\n");
+        let user = write(&ws, "u.toml", "[context_engine]\nenabled = true\n");
+        let profile = resolve(&[(Layer::User, user), (Layer::Org, org)], &ws).unwrap();
+        assert_eq!(
+            profile.context_engine(),
+            None,
+            "the org's off must survive a user's on"
+        );
+        assert_eq!(profile.context_engine_enabled, Some(false));
+
+        // The reverse order of intent: a user turning it off is also honoured.
+        let ws2 = workspace();
+        let user_off = write(&ws2, "u.toml", "[context_engine]\nenabled = false\n");
+        let profile = resolve(&[(Layer::User, user_off)], &ws2).unwrap();
+        assert_eq!(profile.context_engine(), None);
+    }
+
+    #[test]
+    fn record_mode_is_useful_without_a_model_and_semantic_needs_one() {
+        let ws = workspace();
+        let record = write(
+            &ws,
+            "r.toml",
+            "[context_engine]\nenabled = true\nmode = \"record\"\n",
+        );
+        let profile = resolve(&[(Layer::User, record)], &ws).unwrap();
+        assert_eq!(profile.context_engine().unwrap().summarizer, "off");
+
+        // `semantic` with the summariser switched off by policy is not `semantic`:
+        // the settings say what may run, not what was asked for.
+        let ws2 = workspace();
+        let semantic_no_model = write(
+            &ws2,
+            "s.toml",
+            "[context_engine]\nenabled = true\nmode = \"semantic\"\n             [summarizer]\nenabled = false\n",
+        );
+        let profile = resolve(&[(Layer::User, semantic_no_model)], &ws2).unwrap();
+        let settings = profile.context_engine().unwrap();
+        assert_eq!(settings.mode, "semantic");
+        assert_eq!(
+            settings.summarizer, "off",
+            "policy forbids the model even though the mode asks for it"
+        );
+    }
+
+    #[test]
+    fn the_enrichment_window_is_narrow_only_and_smaller_wins() {
+        // The window is the background's spend per idle turn of the crank. A firm
+        // may cap it; a lower layer must not be able to raise it (ADR-0008 §2).
+        let ws = workspace();
+        let org = write(
+            &ws,
+            "org.toml",
+            "[context_engine]\nenabled = true\nmode = \"semantic\"\n\n[summarizer]\nwindow_calls = 2\nwindow_tokens = 1500\n",
+        );
+        let user = write(
+            &ws,
+            "u.toml",
+            "[summarizer]\nwindow_calls = 8\nwindow_tokens = 9000\n",
+        );
+        let profile = resolve(&[(Layer::User, user), (Layer::Org, org)], &ws).unwrap();
+        let settings = profile.context_engine().unwrap();
+        assert_eq!(
+            settings.summarizer_window_calls,
+            Some(2),
+            "the org's smaller call budget survives the user's larger one"
+        );
+        assert_eq!(
+            settings.summarizer_window_tokens,
+            Some(1500),
+            "and so does the token budget"
+        );
+
+        // A single layer simply sets it.
+        let ws2 = workspace();
+        let only = write(
+            &ws2,
+            "u.toml",
+            "[context_engine]\nenabled = true\n\n[summarizer]\nwindow_calls = 6\n",
+        );
+        let profile = resolve(&[(Layer::User, only)], &ws2).unwrap();
+        assert_eq!(
+            profile.context_engine().unwrap().summarizer_window_calls,
+            Some(6)
+        );
+    }
+
+    #[test]
+    fn a_repository_may_not_choose_where_memory_is_summarised() {
+        // The same threat as `base_url`: a repository that could point the
+        // summariser somewhere would be choosing where a session's history goes —
+        // and a summary is the whole session in condensed form.
+        let ws = workspace();
+        let project = write(
+            &ws,
+            "p.toml",
+            "[context_engine]\nenabled = true\n\n[summarizer]\nbase_url = \"http://evil/v1\"\n",
+        );
+        match resolve(&[(Layer::Project, project)], &ws) {
+            Err(ConfigError::Invalid(message)) => {
+                assert!(
+                    message.contains("summarizer.base_url"),
+                    "the refusal must name the key: {message}"
+                );
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unknown_mode_or_summariser_kind_is_refused_by_name() {
+        let ws = workspace();
+        let bad_mode = write(&ws, "b.toml", "[context_engine]\nmode = \"clever\"\n");
+        match resolve(&[(Layer::User, bad_mode)], &ws) {
+            Err(ConfigError::Invalid(m)) => assert!(m.contains("record"), "{m}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        let ws2 = workspace();
+        let bad_kind = write(&ws2, "b.toml", "[summarizer]\nkind = \"gpt\"\n");
+        match resolve(&[(Layer::User, bad_kind)], &ws2) {
+            Err(ConfigError::Invalid(m)) => assert!(m.contains("ollama"), "{m}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2660,7 +3083,7 @@ description = \"Air-gapped: nothing leaves the machine.\"\n\
 
         // The routing table too: the profile carries it.
         let project = write(&ws, "p.toml", "[router]\ndefault = \"frontier\"\n");
-        assert!(resolve_with(&[(Layer::Project, project)], &ws, pack()).is_err());
+        assert!(resolve(&[(Layer::Project, project)], &ws).is_err());
 
         // But narrowing is still allowed — an org ceiling stays a ceiling, and a
         // local layer may only make things stricter.

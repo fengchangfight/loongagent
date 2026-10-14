@@ -25,6 +25,28 @@ export PATH="$HOME/.cargo/bin:$PATH"   # add to ~/.bashrc to make it permanent
 crates.io is mirrored in `~/.cargo/config.toml` (`[source.crates-io] replace-with
 = "tuna"`); without it, dependency downloads fail here.
 
+### Windows
+
+The workspace builds for Windows with the same command as everywhere else, provided a
+C compiler is present (bundled SQLite and `ring` both compile C, and neither is
+optional):
+
+```powershell
+cargo build --release --locked -p loongagent     # -> target\release\loongagent.exe
+
+# or, with the prerequisites checked first and the binary staged:
+powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1
+```
+
+`x86_64-pc-windows-msvc` is the supported target; `-gnu` works with MinGW-w64, which
+is also how this repository is cross-checked from Linux. The platform-specific code
+is deliberately small and lives in named places: `loong-sandbox` picks landlock or a
+stub PEP (`landlock.rs` vs `landlock_unsupported.rs`), `loong-proc` owns the shell
+and process-tree rules, `loong-tui`/`loong-server` own the interrupt mechanism, and
+`loong-config` owns the home/program-data paths. The build command, the TUI parity
+table and the gaps that are *not* closed yet are in
+[docs/runbooks/windows-build.md](docs/runbooks/windows-build.md).
+
 ## Gates
 
 One command runs exactly what CI runs, so "it passed here" means one thing:
@@ -470,6 +492,16 @@ largest-first, and every ledger entry with its source and cost. `p` marks a pinn
 (the system prompt, the tool descriptions, a decision), `c` one whose body was replaced
 to free space (ADR-0006 §4).
 
+Below those, the panel reports the **layered memory** when it is on (ADR-0017): its mode
+(`record`/`semantic`), the summariser's name, L1–L4 counts and tokens, the background
+worker's window/call/enrich/pending counts, and — never silently — the degradation
+reason. `memory_mode` is the on/off answer, not "is there a `cognitive_map` entry": a
+semantic session's first turns have no L4 map yet. When the memory is degraded the status
+bar also carries `mem ⚠ degraded`, so it is visible with the panel closed.
+`loong context status` prints the persisted layer, producer, pending and degradation
+facts for a session from the command line (the worker's live call counts exist only in
+the running process, so they are not part of that offline view).
+
 Two properties worth keeping:
 
 - **Reading it changes nothing.** `context.explain` is a question about the session, not
@@ -480,6 +512,34 @@ Two properties worth keeping:
 
 Opening the panel asks for the view immediately, and every finished turn refreshes it,
 so it is never an empty box and never stale.
+
+### Seeing what the model actually returned
+
+The event log records the *finished* message and every tool that ran, but not the wire:
+when a local model answers with a tool call **printed as text**, there is no `tool.call`
+event and the reply reads like success. That is a wire question, so the wire is what you
+need to look at. `--debug-model` appends every exchange to `<session>.models.jsonl`, one
+JSON object per line:
+
+```bash
+loongagent tui --local --debug-model          # or run/repl/web; forwarded to the server
+tail -1 ~/.loongagent/projects/<slug>/<id>.models.jsonl | python3 -m json.tool
+# or, for every session at once:
+LOONGAGENT_DEBUG_MODEL=/tmp/models.jsonl loongagent tui --local
+```
+
+Each line carries `finish_reason` (`stop` vs `tool_calls` — the server's own verdict),
+the full `content`, the parsed `tool_calls`, the usage, and the request that produced it.
+So "did it decide to call `write_file`?" is a `grep`, not an inference:
+
+```bash
+grep -c '"finish_reason": "tool_calls"' <session>.models.jsonl
+```
+
+It is deliberately **not** part of the event log: the log is the record (ADR-0003), and a
+raw provider body is bigger, provider-shaped, and nothing a session should carry forever.
+No credential is in it — the API key travels in a header the dump never sees — but the
+request does contain the prompt and history, so treat the file like the session itself.
 
 ### One root for the client
 
@@ -804,7 +864,13 @@ binary the TUI spawns as its server (used by the end-to-end test).
   `/etc/loongagent/profile.toml` (an administrator's file — the placeholder for
   ADR-0008's signed org pack), `<workspace>/.loongagent/profile.toml`,
   `~/.loongagent/profile.toml`, and `--profile FILE` as the session
-  layer.
+  layer. The **local** (unmanaged) install keeps its own file,
+  `~/.loongagent/local.toml`, and its own commands: `loongagent local add` for chat
+  models, and `loongagent local semantic on|off` for the layered memory (ADR-0017) —
+  no hand-editing for either. `local semantic` writes the `[context_engine]` /
+  `[summarizer]` tables with the same text-surgery rule as `local add`, so comments
+  and hand-written keys survive, and it names the endpoint's one supported provider
+  (`ollama`) rather than accepting a name the summariser cannot speak.
 - **Skills and commands** (`loong-skills`, T-18): one concept with two
   spellings, `.loongagent/skills/<name>/SKILL.md` and
   `.loongagent/commands/<name>.md`. The **description** enters context (in the

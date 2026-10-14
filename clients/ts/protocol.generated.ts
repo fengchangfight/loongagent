@@ -187,6 +187,46 @@ export interface ContextExplain {
   entries: ContextEntry[];
   /** totals per category, largest first */
   categories: ContextCategory[];
+  /** empty when the layered memory is off; record | semantic when it is on. This is the honest on/off answer: a new semantic session has no cognitive-map entry yet, so its absence cannot mean 'off' */
+  memory_mode: string;
+  /** the local model that fills semantic fields, or none; empty in record mode */
+  memory_summarizer: string;
+  /** why the memory is degraded, empty when it is not (ADR-0017 §11.1) */
+  memory_degraded: string;
+  /** one entry per layer: how many memories and what carrying them costs */
+  memory_layers: ContextLayer[];
+  memory_worker: ContextWorker;
+}
+
+/** One layer of the derived memory (ADR-0017 §10). */
+export interface ContextLayer {
+  /** 1 atom | 2 episode | 3 domain | 4 global */
+  level: number;
+  /** atom | episode | domain | global */
+  scope: string;
+  count: number;
+  /** what this layer costs; the retrieval layer is not carried, so it is 0 */
+  tokens: number;
+}
+
+/** What the background enrichment worker has done (ADR-0017 §4.6, §10). Every field is a counter the worker keeps or a count read from the store; the state is never inferred from whether a map exists yet. */
+export interface ContextWorker {
+  /** off | idle | active | deferred | stopped */
+  state: string;
+  /** idle windows entered */
+  windows: number;
+  /** requests sent, successful or not */
+  model_calls: number;
+  /** episodes a model added semantic fields to */
+  enriched: number;
+  /** requests that failed; each degraded exactly its own episode */
+  failed: number;
+  /** episodes still lacking semantic fields */
+  pending: number;
+  /** windows skipped because a turn was running */
+  deferrals: number;
+  /** the most recent enrichment failure, empty when there has been none */
+  last_error: string;
 }
 
 /** Token total for one category of context. */

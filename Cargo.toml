@@ -31,6 +31,7 @@ loong-providers = { path = "crates/providers" }
 loong-sandbox = { path = "crates/sandbox" }
 loong-tools = { path = "crates/tools" }
 loong-index = { path = "crates/index" }
+loong-context = { path = "crates/context" }
 loong-kernel = { path = "crates/kernel" }
 loong-server = { path = "crates/server" }
 loong-tui = { path = "crates/tui" }

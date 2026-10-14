@@ -14,6 +14,7 @@ loong-schema.workspace = true
 loong-protocol.workspace = true
 loong-eventlog.workspace = true
 loong-kernel.workspace = true
+loong-context.workspace = true
 loong-providers.workspace = true
 loong-server.workspace = true
 loong-tui.workspace = true

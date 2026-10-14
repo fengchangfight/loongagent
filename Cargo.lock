@@ -770,6 +770,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "loong-context"
+version = "0.0.1"
+dependencies = [
+ "loong-eventlog",
+ "loong-http",
+ "loong-schema",
+ "rusqlite",
+ "serde_json",
+]
+
+[[package]]
 name = "loong-control"
 version = "0.0.1"
 dependencies = [
@@ -825,6 +836,7 @@ name = "loong-kernel"
 version = "0.0.1"
 dependencies = [
  "loong-config",
+ "loong-context",
  "loong-eventlog",
  "loong-hooks",
  "loong-index",
@@ -976,6 +988,7 @@ name = "loongagent"
 version = "0.0.1"
 dependencies = [
  "loong-config",
+ "loong-context",
  "loong-control",
  "loong-eventlog",
  "loong-hooks",

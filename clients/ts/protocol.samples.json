@@ -132,7 +132,44 @@
           "category": "<string>",
           "tokens": 1
         }
-      ]
+      ],
+      "memory_mode": "<string>",
+      "memory_summarizer": "<string>",
+      "memory_degraded": "<string>",
+      "memory_layers": [
+        {
+          "level": 1,
+          "scope": "<string>",
+          "count": 1,
+          "tokens": 1
+        }
+      ],
+      "memory_worker": {
+        "state": "<string>",
+        "windows": 1,
+        "model_calls": 1,
+        "enriched": 1,
+        "failed": 1,
+        "pending": 1,
+        "deferrals": 1,
+        "last_error": "<string>"
+      }
+    },
+    "ContextLayer": {
+      "level": 1,
+      "scope": "<string>",
+      "count": 1,
+      "tokens": 1
+    },
+    "ContextWorker": {
+      "state": "<string>",
+      "windows": 1,
+      "model_calls": 1,
+      "enriched": 1,
+      "failed": 1,
+      "pending": 1,
+      "deferrals": 1,
+      "last_error": "<string>"
     },
     "ContextCategory": {
       "category": "<string>",

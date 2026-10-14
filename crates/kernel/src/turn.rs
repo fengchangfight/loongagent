@@ -173,6 +173,9 @@ pub struct KernelConfig {
     /// the profile's *name*. The kernel uses it for the two things it owns:
     /// narrowing the PDP ladder, and which skills exist.
     pub settings: Profile,
+    /// The layered context engine (ADR-0017). `None` means the kernel behaves
+    /// exactly as it did before that decision — compaction included.
+    pub context_engine: Option<crate::context_engine::ContextEngineConfig>,
 }
 
 impl KernelConfig {
@@ -186,13 +189,27 @@ impl KernelConfig {
             settings: Profile::default(),
             max_steps: DEFAULT_MAX_STEPS,
             reserved_context_size: DEFAULT_RESERVED_CONTEXT,
+            context_engine: None,
         }
+    }
+
+    /// Turn the layered memory on (ADR-0017). Off is the default, and off is the
+    /// rollback path: the old compaction behaviour, byte for byte.
+    pub fn with_context_engine(
+        mut self,
+        engine: crate::context_engine::ContextEngineConfig,
+    ) -> Self {
+        self.context_engine = Some(engine);
+        self
     }
 }
 
 /// The Landlock PEP, installed with `pre_exec` so the restriction lands in the
 /// forked child and can never leak into the server (or into a sibling tool).
 struct LandlockConfinement {
+    // Read only inside the `#[cfg(unix)]` half of `confine` below; off Linux there is no
+    // policy to apply and the field is carried for the shape of the type.
+    #[cfg_attr(not(unix), allow(dead_code))]
     policy: WorkspacePolicy,
 }
 
@@ -485,6 +502,14 @@ pub struct Kernel {
     index: loong_index::Index,
     index_path: PathBuf,
     index_stale: Option<String>,
+    /// The layered memory (ADR-0017), when the profile asked for it. Its absence
+    /// is not a degraded state: it is the documented rollback path.
+    context_engine: Option<crate::context_engine::ContextEngine>,
+    /// Ledger entry holding the L4 map, so it is refreshed in place rather than
+    /// appended again on every step.
+    map_entry: Option<u64>,
+    /// Index of the L4 map message in `messages`, kept in step with `entry_of`.
+    map_index: Option<usize>,
 }
 
 impl Kernel {
@@ -534,6 +559,23 @@ impl Kernel {
         mut config: KernelConfig,
         models: Vec<(String, Box<dyn Model>)>,
     ) -> Result<Self, KernelError> {
+        // Open the layered memory before anything else can fail, so a store that
+        // cannot be opened is reported once, at session start, rather than
+        // discovered later as a missing map.
+        let engine = match config.context_engine.take() {
+            Some(engine_config) if engine_config.enabled => {
+                match crate::context_engine::ContextEngine::open(engine_config) {
+                    Ok(engine) => Some(engine),
+                    Err(e) => {
+                        // Not fatal: the session runs without the map and the
+                        // reason is kept for the status surface.
+                        eprintln!("context engine unavailable: {e}");
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
         let router = config.settings.router.clone();
         let mut by_name = std::collections::BTreeMap::new();
         for (name, model) in models {
@@ -694,6 +736,9 @@ impl Kernel {
             index,
             index_path,
             index_stale: None,
+            context_engine: engine,
+            map_entry: None,
+            map_index: None,
         };
         // The catalogue enters context before any work does.
         kernel.seat_system_prompt()?;
@@ -778,11 +823,31 @@ impl Kernel {
     /// The one place the system prompt is built: a short frame plus the
     /// description-only skill catalogue (ADR-0006 progressive disclosure).
     fn seat_system_prompt(&mut self) -> Result<(), KernelError> {
+        // The tool names are listed rather than left to the schema, and the last
+        // paragraph is not politeness. Measured on this project's own sessions: when
+        // a person asked a local model to write a single-page HTML game, the model
+        // pasted the whole file into the reply and told them to save it themselves —
+        // 6 assistant messages and 0 tool calls in the log — and answered "I will
+        // create typing.html now" while emitting no call at all. Small models follow
+        // what the prompt says about *how to work*; a prompt that never mentions
+        // tools gets prose instead of actions.
+        let tool_names: Vec<String> = self.tools.names().into_iter().map(String::from).collect();
         let body = format!(
             "You are loongagent, a coding agent working in a user's workspace. Prefer reading \
-             over guessing, keep changes small, and say plainly when you are unsure.\n\n             Skills and commands available here are listed below as `/name — description`. They \
+             over guessing, keep changes small, and say plainly when you are unsure.\n\n\
+             You change the workspace only by calling tools. The tools available are: {}.\n\n\
+             Write files with `write_file`, change them with `edit_file`, and run commands with \
+             the shell tool. Never paste a file's contents into your reply and tell the person \
+             to save it: that is not doing the task. Never write a tool call as text either — \
+             no `<tool_call>` blocks, no JSON like {{\"name\": \"write_file\", ...}} in the \
+             reply; a call that is printed instead of emitted runs nothing. When someone asks \
+             you to create or change a file, emit the tool call, then report what you did in one \
+             or two sentences. A claim that you created a file must be true — the person can see \
+             the workspace.\n\n\
+             Skills and commands available here are listed below as `/name — description`. They \
              are not loaded yet: call the `skill` tool with a name to load its full instructions \
              before doing work that matches it.\n\n{}",
+            tool_names.join(", "),
             self.skills.catalogue()
         );
         // Pinned and Persistent: system prompt tokens are never evicted, and
@@ -1318,6 +1383,58 @@ impl Kernel {
             .collect();
         // Largest first: the panel's job is to show where the budget went.
         categories.sort_by(|a, b| b.tokens.cmp(&a.tokens).then(a.category.cmp(&b.category)));
+        // The memory's own state, reported rather than inferred. With no engine the
+        // mode is empty and the worker state is `off` — the surface must never have
+        // to guess "off" from "the ledger happens to hold no cognitive map yet",
+        // because a semantic session's first turns look exactly like that.
+        let (memory_mode, memory_summarizer, memory_degraded, memory_layers, memory_worker) =
+            match self.context_engine.as_ref() {
+                None => (
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    Vec::new(),
+                    gen::ContextWorker {
+                        state: "off".to_string(),
+                        windows: 0,
+                        model_calls: 0,
+                        enriched: 0,
+                        failed: 0,
+                        pending: 0,
+                        deferrals: 0,
+                        last_error: String::new(),
+                    },
+                ),
+                Some(engine) => {
+                    let status = engine.memory_status();
+                    let worker = status.worker;
+                    (
+                        status.mode,
+                        status.summarizer,
+                        status.degraded,
+                        status
+                            .layers
+                            .into_iter()
+                            .map(|layer| gen::ContextLayer {
+                                level: layer.level,
+                                scope: layer.scope.to_string(),
+                                count: layer.count,
+                                tokens: layer.tokens,
+                            })
+                            .collect(),
+                        gen::ContextWorker {
+                            state: worker.state.to_string(),
+                            windows: worker.windows,
+                            model_calls: worker.model_calls,
+                            enriched: worker.enriched,
+                            failed: worker.failed,
+                            pending: worker.pending,
+                            deferrals: worker.deferrals,
+                            last_error: worker.last_error,
+                        },
+                    )
+                }
+            };
         gen::ContextExplain {
             context_tokens: self.ledger.total_tokens(),
             budget_tokens: self.ledger.budget().unwrap_or(0),
@@ -1355,6 +1472,11 @@ impl Kernel {
                 })
                 .collect(),
             categories,
+            memory_mode,
+            memory_summarizer,
+            memory_degraded,
+            memory_layers,
+            memory_worker,
         }
     }
 
@@ -1559,11 +1681,43 @@ impl Kernel {
 
     // ------------------------------------------------------------- the loop
 
+    /// Run one turn while telling the context engine that the foreground is busy.
+    ///
+    /// The busy flag is what keeps background enrichment off the critical path
+    /// (ADR-0017 §4.6): the worker's own thread reads it and never opens a window
+    /// while a turn is running. Every path through [`Kernel::run_inner`] — an
+    /// answer, a stop, an approval question — clears it, including the error paths,
+    /// because a flag left set would starve the background for the session's life.
     fn run(
+        &mut self,
+        events: Vec<u64>,
+        on_delta: &mut dyn FnMut(&str),
+    ) -> Result<TurnOutcome, KernelError> {
+        let engine = self.context_engine.as_ref();
+        if let Some(engine) = engine {
+            engine.set_foreground_busy(true);
+        }
+        let result = self.run_inner(events, on_delta);
+        if let Some(engine) = self.context_engine.as_ref() {
+            engine.set_foreground_busy(false);
+        }
+        result
+    }
+
+    fn run_inner(
         &mut self,
         mut events: Vec<u64>,
         on_delta: &mut dyn FnMut(&str),
     ) -> Result<TurnOutcome, KernelError> {
+        // Which tools have actually run this turn, and whether we have already objected
+        // to a reply that only *described* the change. Both exist for one measured
+        // failure: a local model asked to write a file pasted the file into the reply
+        // instead, and the turn ended as if it had succeeded. The names (not a bool)
+        // matter for the *printed call* variant: a model that read a file and then
+        // printed `write_file` must still be corrected, while one that wrote the file and
+        // then quoted the call in its summary must not be asked to write it again.
+        let mut ran: Vec<String> = Vec::new();
+        let mut nudged = false;
         for step in 1..=self.config.max_steps {
             // A stop asked for between steps stops here: after the last tool finished,
             // before the next model call. Nothing half-done is left behind.
@@ -1583,6 +1737,7 @@ impl Kernel {
                     interrupted: true,
                 });
             }
+            self.refresh_map();
             self.compact_if_needed(&mut events)?;
             let request = CompletionRequest {
                 messages: self.messages.clone(),
@@ -1616,6 +1771,50 @@ impl Kernel {
 
             if response.tool_calls.is_empty() {
                 let text = response.text.unwrap_or_default();
+                // A reply that pastes a file, or prints a tool call, and never *calls* a
+                // tool is not a finished task. Object once, in as many words, and give the
+                // model a turn to act; if it does it again, accept the answer and let the
+                // person see what happened rather than looping.
+                if !nudged {
+                    // Two shapes of the same failure, and they need different words. A
+                    // printed call (measured with `qwen2.5:7b-instruct` on Ollama's
+                    // OpenAI shim: `{"name":"write_file",…}` inside `content`) named the
+                    // tool it wanted, so the correction can name it too; a pasted file
+                    // names nothing and the correction has to say `write_file` itself.
+                    let printed = leaked_tool_call(&text).filter(|tool| {
+                        // Printing a call for a tool that already ran this turn is a
+                        // summary of what happened, not an attempt that failed.
+                        !ran.iter().any(|done| done == tool)
+                    });
+                    // A pasted file is only suspect before anything has run: afterwards a
+                    // reply may quote code freely, which is the guard this keeps.
+                    let pasted =
+                        printed.is_none() && ran.is_empty() && looks_like_pasted_file(&text);
+                    if printed.is_some() || pasted {
+                        nudged = true;
+                        let correction = match &printed {
+                            Some(tool) => format!(
+                                "You wrote the `{tool}` call as text — a `<tool_call>` block or \
+                                 JSON in your reply — instead of emitting a real tool call, so \
+                                 nothing ran and the workspace is unchanged. Emit `{tool}` now \
+                                 as an actual tool call with the arguments you intended. Do not \
+                                 print the call and do not wrap it in `<tool_call>`: printing it \
+                                 is what made it do nothing."
+                            ),
+                            None => "You answered with the file's contents in chat and did not \
+                                     call a tool, so nothing was written to the workspace. Call \
+                                     `write_file` now with the full content in the `content` \
+                                     argument, then tell me the path you wrote."
+                                .to_string(),
+                        };
+                        self.messages.push(ChatMessage::User { text: correction });
+                        // Not recorded as a message event: this is the harness
+                        // course-correcting, not something the person said. The retry's
+                        // assistant message is what the log will show, which is the answer
+                        // that actually mattered.
+                        continue;
+                    }
+                }
                 events.push(self.record_assistant(Some(&text), &[])?);
                 return Ok(TurnOutcome {
                     steps: step,
@@ -1627,6 +1826,9 @@ impl Kernel {
                 });
             }
 
+            for call in &response.tool_calls {
+                ran.push(call.tool.clone());
+            }
             events.push(self.record_assistant(response.text.as_deref(), &response.tool_calls)?);
             for (at, call) in response.tool_calls.iter().enumerate() {
                 match self.dispatch(call, &mut events)? {
@@ -1682,6 +1884,27 @@ impl Kernel {
         call: &ToolCallRequest,
         events: &mut Vec<u64>,
     ) -> Result<Dispatch, KernelError> {
+        // `recall` is answered from this session's derived memory rather than from
+        // the filesystem, so it is not in the registry — but it is still a tool the
+        // model may call. It bypasses the registry *and* the PDP, on purpose: it is
+        // read-only over the session's own record, which is data the model has
+        // already been given in full, so there is nothing to gate. Doing this before
+        // the registry lookup is what makes the tool exist at all; without it the
+        // model would be told the tool is unknown.
+        if call.tool == RECALL_TOOL {
+            events.push(self.append(
+                gen::event::TOOL_CALL,
+                &gen::ToolCall {
+                    call_id: call.call_id.clone(),
+                    tool: RECALL_TOOL.to_string(),
+                    args: call.args.clone(),
+                    action_class: ActionClass::Investigate,
+                },
+            )?);
+            let (ok, output) = self.recall_tool(&call.args);
+            events.push(self.record_tool_result(&call.call_id, ok, &output)?);
+            return Ok(Dispatch::Done);
+        }
         let Some(tool) = self.tools.get(&call.tool) else {
             events.push(self.record_tool_result(
                 &call.call_id,
@@ -1822,6 +2045,19 @@ impl Kernel {
     /// The PEPs: the tool runner (which refuses to write outside the workspace)
     /// and whatever confinement the kernel was given, applied to each child.
     fn execute(&self, tool: &str, args: &Json) -> (bool, String) {
+        // `recall` is not in the registry: it answers from this session's derived
+        // memory rather than from the filesystem, so it needs state the registry
+        // deliberately has none of. It is still a tool from the model's side, and it
+        // is still reported the same way — as a `tool.result` event.
+        //
+        // It deliberately does **not** add a `Category::Retrieval` ledger entry: the
+        // answer becomes a tool-result message, which the ledger already counts. A
+        // second entry for the same bytes would double-count them against the
+        // context budget, which is the one number a person uses to decide whether
+        // the session is affordable.
+        if tool == RECALL_TOOL {
+            return self.recall_tool(args);
+        }
         match self.tools.get(tool) {
             Some(t) => {
                 let ctx = ExecContext::new(&self.config.cwd, self.confinement.as_ref());
@@ -1832,6 +2068,142 @@ impl Kernel {
             }
             None => (false, format!("unknown tool {tool:?}")),
         }
+    }
+
+    /// Put the current L4 map in front of the model, refreshing it in place.
+    ///
+    /// Placed as its own message rather than folded into the system prompt: the
+    /// system prompt is the operator's text and should not be rewritten on every
+    /// step, while the map is expected to change. The ledger entry is created once
+    /// and then refreshed with [`Ledger::replace`], so a long session has exactly
+    /// one map entry rather than one per step — "why is this in my context?" has one
+    /// answer, not a growing pile of them.
+    ///
+    /// Does nothing when the engine is off, which is the rollback path.
+    fn refresh_map(&mut self) {
+        let Some(engine) = self.context_engine.as_mut() else {
+            return;
+        };
+        engine.refresh();
+        let Some(text) = engine.map_text() else {
+            return;
+        };
+        match (self.map_entry, self.map_index) {
+            (Some(entry), Some(index)) if index < self.messages.len() => {
+                self.messages[index] = ChatMessage::System { text: text.clone() };
+                self.ledger.replace(entry, &text);
+            }
+            _ => {
+                let entry = self.ledger.add(
+                    Category::CognitiveMap,
+                    "context-engine:L4",
+                    &text,
+                    Lifetime::Session,
+                    // Pinned: the map is the one block whose value is that it is
+                    // always there. An evictable map is a map that disappears
+                    // exactly when the context is under pressure, which is when it
+                    // is worth the most.
+                    true,
+                );
+                // After the system prompt, before the conversation.
+                let at = usize::from(matches!(
+                    self.messages.first(),
+                    Some(ChatMessage::System { .. })
+                ));
+                self.messages.insert(at, ChatMessage::System { text });
+                self.entry_of.insert(at, Some(entry));
+                self.map_entry = Some(entry);
+                self.map_index = Some(at);
+            }
+        }
+    }
+
+    /// The `recall` tool: search the derived memory, or expand one summary into the
+    /// evidence beneath it.
+    ///
+    /// Read-only by construction — it never materialises, digests or writes; it asks
+    /// questions of what is already there. That is why it needs no approval step:
+    /// the answer is a *view* of the session's own record, which the model has
+    /// already been given the whole of.
+    fn recall_tool(&self, args: &Json) -> (bool, String) {
+        let Some(engine) = self.context_engine.as_ref() else {
+            return (
+                false,
+                "no memory is available in this session (the context engine is off)".to_string(),
+            );
+        };
+        if let Some(id) = args.get("expand").and_then(|v| v.as_str()) {
+            // Expansion stands alone: mixing it with a search would make the result
+            // shape depend on which keyword happened to be present.
+            return match engine.store().expand(id, 24) {
+                Ok(Some(expansion)) => (
+                    true,
+                    cap_chars(&render_expansion(&expansion), RECALL_MAX_CHARS),
+                ),
+                Ok(None) => (false, format!("no summary with id {id:?}")),
+                Err(e) => (false, format!("expanding {id:?} failed: {e}")),
+            };
+        }
+
+        let terms: Vec<String> = args
+            .get("query")
+            .and_then(|v| v.as_str())
+            .map(split_terms)
+            .unwrap_or_default();
+        let entity = args.get("entity").and_then(|v| v.as_str());
+        let tool = args.get("tool").and_then(|v| v.as_str());
+        let level = args.get("level").and_then(|v| v.as_i64()).map(|l| l as u32);
+        let limit = args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(8)
+            .clamp(1, 32) as usize;
+
+        // A bare `entity` or `tool` with no words is a legitimate way to ask "what
+        // touched src/config?" — it is not an error, so it is not reported as one.
+        if terms.is_empty() && entity.is_none() && tool.is_none() {
+            return (
+                false,
+                "give a `query`, an `entity`, a `tool`, or an `expand` id".to_string(),
+            );
+        }
+
+        let search = loong_context::SearchQuery {
+            terms,
+            limit,
+            ..Default::default()
+        };
+        // Summaries first: they are the concentrated answer. Raw events are the
+        // fallback, and they are what makes the memory complete rather than merely
+        // convenient.
+        let summaries = match engine.store().recall_at(level, &search) {
+            Ok(found) => found,
+            Err(e) => return (false, format!("searching summaries failed: {e}")),
+        };
+        let events = if summaries.is_empty() {
+            let mut search = search.clone();
+            search.kind = None;
+            // Entity and tool filters apply to events; summaries have no tool.
+            search.entity = entity.map(|e| e.to_string());
+            search.tool = tool.map(|t| t.to_string());
+            match engine.store().search(&search) {
+                Ok(found) => found,
+                Err(e) => return (false, format!("searching events failed: {e}")),
+            }
+        } else {
+            Vec::new()
+        };
+
+        if summaries.is_empty() && events.is_empty() {
+            return (
+                true,
+                "nothing in this session's memory matches. That is a real answer, not an \
+                 error: do not conclude from it that nothing happened — try different words."
+                    .to_string(),
+            );
+        }
+        let rendered = render_recall(&summaries, &events);
+        (true, cap_chars(&rendered, RECALL_MAX_CHARS))
     }
 
     /// ADR-0006 §4: compaction, in a fixed order, and visible.
@@ -1914,9 +2286,14 @@ impl Kernel {
             }
         }
 
-        // Phase 2: only if still over, drop the oldest whole exchanges.
+        // Phase 2: only if still over, drop the oldest whole exchanges — unless the
+        // layered engine is on, in which case the exchange must survive: the whole
+        // claim of ADR-0017 is that the original stays reachable, and a dropped
+        // message is exactly the lossy step it exists to remove. Stale tool output
+        // was already cleared above, which is where the bulk of the saving is.
         let mut dropped_messages = 0;
-        while self.ledger.total_tokens() > ceiling {
+        let may_drop = self.context_engine.is_none();
+        while may_drop && self.ledger.total_tokens() > ceiling {
             let removed = self.drop_oldest_exchange();
             if removed == 0 {
                 break; // nothing safe left to drop (a single long turn)
@@ -2220,7 +2597,8 @@ impl Kernel {
     }
 
     fn tool_specs(&self) -> Vec<loong_providers::ToolSpec> {
-        self.tools
+        let mut specs: Vec<loong_providers::ToolSpec> = self
+            .tools
             .specs()
             .into_iter()
             .map(
@@ -2230,8 +2608,309 @@ impl Kernel {
                     parameters,
                 },
             )
-            .collect()
+            .collect();
+        // `recall` is offered only when there is a memory behind it. A tool the
+        // model can call but that cannot answer is worse than an absent one: it
+        // teaches the model that asking about the past is useless.
+        if self.context_engine.is_some() {
+            specs.push(loong_providers::ToolSpec {
+                name: RECALL_TOOL.to_string(),
+                description: RECALL_DESCRIPTION.to_string(),
+                parameters: recall_parameters(),
+            });
+        }
+        specs
     }
+}
+
+/// The tool's name, in one place: it is used by `tool_specs`, by `dispatch` and by
+/// the executor, and three spellings of a tool name is how a tool stops working.
+const RECALL_TOOL: &str = "recall";
+
+/// Whether a reply is a **tool call printed as text** rather than emitted.
+///
+/// Measured in this project's own log (`47x75pvh.jsonl`, `qwen2.5:7b-instruct` on
+/// Ollama's OpenAI shim): asked to summarise a report into a file, the model answered
+/// with `{"name": "write_file", "arguments": {…}}` wrapped in `<tool_call>` **inside
+/// `content`**. The provider passes that through as ordinary text, so no `tool.call`
+/// event exists, the turn ends "successfully", and the workspace is unchanged — the
+/// same class of failure as pasting the file, with a different serialization.
+///
+/// It returns the tool's name so the correction can name it too (telling a model that
+/// tried to `edit_file` to call `write_file` would be a second wrong instruction). The
+/// match is deliberately narrow — a quoted `"name"` next to `"arguments"`, or an
+/// explicit `<tool_call>` marker — so prose that merely *mentions* a tool is not
+/// mistaken for an attempted call.
+fn leaked_tool_call(text: &str) -> Option<String> {
+    const KNOWN: &[&str] = &[
+        "write_file",
+        "edit_file",
+        "read_file",
+        "run_command",
+        "glob",
+        "grep",
+        "recall",
+        "skill",
+    ];
+    // `"name": "write_file"` or `"name":"write_file"`, wherever it sits. The text may be
+    // cut off on either side (the measured case began mid-word), so this scans rather
+    // than parsing the object.
+    let quoted_name = || -> Option<String> {
+        let at = text.find("\"name\"")?;
+        let rest = text[at + "\"name\"".len()..].trim_start();
+        let rest = rest.strip_prefix(':')?.trim_start();
+        let rest = rest.strip_prefix('"')?;
+        Some(rest.split('"').next()?.to_string())
+    };
+    let has_arguments = text.contains("\"arguments\"");
+    if let Some(name) = quoted_name() {
+        if has_arguments && KNOWN.contains(&name.as_str()) {
+            return Some(name);
+        }
+    }
+    let tagged = text.contains("<tool_call>") || text.contains("</tool_call>");
+    if tagged {
+        // A marker with no parseable name still says what happened; name the tool if the
+        // text names one, so the correction is not generic for no reason.
+        if let Some(name) = KNOWN.iter().find(|tool| text.contains(**tool)) {
+            return Some((*name).to_string());
+        }
+    }
+    None
+}
+
+/// Whether a reply is a file pasted into chat rather than a report.
+///
+/// Deliberately narrow: a fenced block whose opening line names a file, or a shell
+/// paste that names a tool. Merely quoting code is normal — explaining a fix with a
+/// snippet is not the failure this looks for. The failure is a *whole file* offered
+/// for the person to save, which leaves the workspace unchanged while the reply
+/// reads like success.
+fn looks_like_pasted_file(text: &str) -> bool {
+    let mut in_fence = false;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") {
+            if in_fence {
+                in_fence = false;
+                continue;
+            }
+            in_fence = true;
+            let info = trimmed.trim_start_matches("```").trim().to_lowercase();
+            // A fence labelled with a file, a language, or a tool name. An unlabelled
+            // fence is a snippet and is left alone.
+            if info.is_empty() {
+                continue;
+            }
+            if info.contains('.')
+                || [
+                    "html",
+                    "css",
+                    "javascript",
+                    "js",
+                    "python",
+                    "sh",
+                    "bash",
+                    "yaml",
+                    "json",
+                    "toml",
+                    "sql",
+                    "rust",
+                    "go",
+                    "java",
+                    "ts",
+                    "typescript",
+                ]
+                .iter()
+                .any(|lang| info.starts_with(lang))
+            {
+                return true;
+            }
+            if info.starts_with("write_file") || info.starts_with("edit_file") {
+                return true;
+            }
+        }
+        // `write_file path - "..."`: a tool call written out as prose.
+        if trimmed.starts_with("write_file ") || trimmed.starts_with("edit_file ") {
+            return true;
+        }
+    }
+    false
+}
+
+/// The description the model reads. Written as an instruction because that is what
+/// it is: the design's discipline ("recall before answering about the past, cite
+/// evidence") only works if the tool tells the model how it is meant to be used.
+const RECALL_DESCRIPTION: &str = "Search this session's memory for earlier work. Returns summaries with citations ([seq]) into the raw record. Pass \"expand\" with a summary id to get the summary together with the original events it rests on — do that before asserting that something was verified or fixed. Summaries are a derived index, not the record: when they disagree with the evidence, the evidence is right.";
+
+/// The tool's schema. Every field is optional except that `expand` stands alone.
+fn recall_parameters() -> Json {
+    json!({
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Words to look for. All of them must appear (AND). Chinese words of two characters work."
+            },
+            "entity": {
+                "type": "string",
+                "description": "Restrict to a file, module, tool, command, test or error, e.g. \"src/config\" or \"module:src/kernel\"."
+            },
+            "tool": {"type": "string", "description": "Restrict to one tool, e.g. \"edit_file\"."},
+            "level": {
+                "type": "integer",
+                "description": "2 = task summary, 3 = module map, 4 = global map. Omit for all."
+            },
+            "expand": {
+                "type": "string",
+                "description": "A summary id from a previous recall; returns it with the original events it cites."
+            },
+            "limit": {"type": "integer", "description": "Maximum results (default 8, capped at 32)."}
+        }
+    })
+}
+
+/// How many characters of retrieved memory one `recall` may put in front of the
+/// model. The whole point of the thin foreground is that retrieval competes for
+/// budget like everything else, so this is a ceiling rather than a hope.
+const RECALL_MAX_CHARS: usize = 4_800;
+
+/// Split a query into terms. Whitespace and the punctuation that would otherwise
+/// glue words together; the two-character Chinese word is preserved, which is the
+/// case a trigram index gets silently wrong.
+fn split_terms(query: &str) -> Vec<String> {
+    query
+        .split(|c: char| {
+            c.is_whitespace()
+                || matches!(
+                    c,
+                    ',' | ';'
+                        | '，'
+                        | '；'
+                        | '、'
+                        | '。'
+                        | '：'
+                        | '（'
+                        | '）'
+                        | '('
+                        | ')'
+                        | '"'
+                        | '\''
+                        | '“'
+                        | '”'
+                        | '|'
+                        | '/'
+                )
+        })
+        .map(|term| term.trim())
+        .filter(|term| !term.is_empty())
+        .map(|term| term.to_string())
+        .collect()
+}
+
+/// Truncate and say so. A silently shortened answer would read as "that is all
+/// there was", which is the one thing a retrieval result must never imply.
+fn cap_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let kept: String = text.chars().take(max).collect();
+    format!("{kept}\n…[truncated — narrow the query for the rest]")
+}
+
+/// Render summaries as an index the model can jump from. The citation is part of
+/// every line on purpose: a summary the model cannot trace is a claim, not memory.
+fn render_recall(summaries: &[loong_context::Summary], events: &[loong_context::Hit]) -> String {
+    let mut out = String::new();
+    if !summaries.is_empty() {
+        out.push_str("memory (summaries; expand one before relying on it):\n");
+        for summary in summaries {
+            let ranges: Vec<String> = summary
+                .citations
+                .iter()
+                .map(|(from, to)| {
+                    if from == to {
+                        format!("{from}")
+                    } else {
+                        format!("{from}-{to}")
+                    }
+                })
+                .collect();
+            let preview: String = summary
+                .content
+                .lines()
+                .take(6)
+                .collect::<Vec<_>>()
+                .join(" | ");
+            out.push_str(&format!(
+                "- [{}] L{} {} ({}) seq[{}]\n  {}\n",
+                summary.id,
+                summary.level,
+                summary.title,
+                summary.status,
+                ranges.join(","),
+                preview
+            ));
+        }
+    }
+    if !events.is_empty() {
+        out.push_str("memory (raw events; these are the record):\n");
+        for hit in events {
+            let who = hit
+                .tool
+                .clone()
+                .or_else(|| hit.role.clone())
+                .unwrap_or_else(|| hit.kind.clone());
+            out.push_str(&format!(
+                "- [{}] {} {}: {}\n",
+                hit.seq,
+                hit.kind,
+                who,
+                hit.preview.replace('\n', " ")
+            ));
+        }
+    }
+    out
+}
+
+/// Render a summary *with* the evidence it cites. The evidence is not a footnote:
+/// returning it in the same response is the mechanism that stops a derived index
+/// from being read as the record.
+fn render_expansion(expansion: &loong_context::Expansion) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "summary [{}] L{} {} ({})\n{}\n",
+        expansion.summary.id,
+        expansion.summary.level,
+        expansion.summary.title,
+        expansion.summary.status,
+        expansion.summary.content
+    ));
+    if expansion.evidence.is_empty() {
+        out.push_str("(this summary cites no events)\n");
+        return out;
+    }
+    out.push_str("evidence (the original events this summary rests on):\n");
+    for atom in &expansion.evidence {
+        let who = if !atom.tool.is_empty() {
+            atom.tool.clone()
+        } else if !atom.role.is_empty() {
+            atom.role.clone()
+        } else {
+            atom.kind.clone()
+        };
+        let outcome = match atom.ok {
+            Some(true) => " ok",
+            Some(false) => " FAILED",
+            None => "",
+        };
+        let text: String = atom.text.chars().take(300).collect();
+        out.push_str(&format!(
+            "[{}] {}{} {}: {}\n",
+            atom.seq, atom.kind, outcome, who, text
+        ));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -2776,7 +3455,11 @@ mod tests {
         );
     }
 
+    // The escape is stopped by landlock, so this test only means anything where
+    // landlock exists. On a platform without a PEP the kernel says `unconfined:`
+    // and the same command succeeds — which `sandbox self-test` reports loudly.
     #[test]
+    #[cfg(target_os = "linux")]
     fn the_pep_stops_an_escape_the_classifier_cannot_see() {
         let t = Temp::new();
         let escaped_name = format!(
@@ -4008,6 +4691,106 @@ Step one: breathe.
     }
 
     #[test]
+    fn the_context_view_says_which_memory_is_on_even_before_it_produces_a_map() {
+        // "Off" and "on, but nothing produced yet" have the same ledger — neither has
+        // a `cognitive_map` entry — so the explain view must carry the distinction
+        // itself. A surface left to infer it would draw a fresh semantic session as
+        // if the feature were switched off.
+        let off = Temp::new();
+        let (model, _seen) = RecordingModel::new(vec![response(vec![], Some("ok"))]);
+        let k = Kernel::create(&off.log, KernelConfig::new(&off.dir), Box::new(model)).unwrap();
+        let explained = k.context_explain();
+        assert!(
+            explained.memory_mode.is_empty(),
+            "with no engine the mode is empty: {:?}",
+            explained.memory_mode
+        );
+        assert_eq!(explained.memory_worker.state, "off");
+        assert!(explained.memory_layers.is_empty());
+
+        // Engine on, nothing derived yet.
+        let on = Temp::new();
+        let (model, _seen) = RecordingModel::new(vec![response(vec![], Some("ok"))]);
+        let mut config = KernelConfig::new(&on.dir);
+        config.context_engine = Some(crate::context_engine::ContextEngineConfig::new(
+            on.dir.join("session.context.db"),
+            on.log.clone(),
+        ));
+        let mut k = Kernel::create(&on.log, config, Box::new(model)).unwrap();
+        let fresh = k.context_explain();
+        assert_eq!(fresh.memory_mode, "record", "on, and it says so");
+        assert!(
+            fresh.memory_summarizer.is_empty(),
+            "record mode has no model"
+        );
+        let l4 = fresh
+            .memory_layers
+            .iter()
+            .find(|layer| layer.level == 4)
+            .expect("the layer list is honest about a map that does not exist");
+        assert_eq!(l4.count, 0, "no map has been produced yet");
+        assert_eq!(
+            fresh
+                .memory_layers
+                .iter()
+                .find(|layer| layer.level == 2)
+                .map(|layer| layer.count),
+            Some(0),
+            "and no episode either"
+        );
+
+        // After a turn the deterministic derivation has run, and the panel can show
+        // it — still without claiming a model wrote anything.
+        k.submit("hi").unwrap();
+        let after = k.context_explain();
+        assert_eq!(after.memory_mode, "record");
+        let l2 = after
+            .memory_layers
+            .iter()
+            .find(|layer| layer.level == 2)
+            .expect("an L2 row");
+        assert!(l2.count >= 1, "the digest runs synchronously: {l2:?}");
+        assert_eq!(
+            after.memory_worker.model_calls, 0,
+            "record mode asks no model"
+        );
+    }
+
+    #[test]
+    fn a_semantic_session_names_its_model_in_the_explain_view() {
+        let t = Temp::new();
+        let (model, _seen) = RecordingModel::new(vec![response(vec![], Some("ok"))]);
+        let mut config = KernelConfig::new(&t.dir);
+        config.context_engine = Some(
+            crate::context_engine::ContextEngineConfig::new(
+                t.dir.join("session.context.db"),
+                t.log.clone(),
+            )
+            .with_summarizer(crate::context_engine::SummarizerChoice {
+                kind: "ollama".to_string(),
+                // Nothing listens there; the point is the *configuration*, which is
+                // what the panel must report even when the model is unreachable.
+                base_url: "http://127.0.0.1:1".to_string(),
+                model: "qwen3:0.6b".to_string(),
+                window_calls: 2,
+                window_tokens: 6000,
+            }),
+        );
+        let k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+        let explained = k.context_explain();
+        assert_eq!(explained.memory_mode, "semantic");
+        assert_eq!(
+            explained.memory_summarizer, "ollama:qwen3:0.6b",
+            "which model, not just that there is one"
+        );
+        assert_ne!(
+            explained.memory_worker.state, "off",
+            "a semantic engine has a worker: {:?}",
+            explained.memory_worker.state
+        );
+    }
+
+    #[test]
     fn the_router_can_switch_models_and_the_log_says_why() {
         let t = Temp::new();
         // The first model answers with a tool call, so the turn needs a second model
@@ -4555,6 +5338,646 @@ Step one: breathe.
                 "turn {turn}: the prompt was never dropped"
             );
         }
+    }
+
+    /// A session with a fixed tool and argument, so `recall` has something to find.
+    fn scripted_edit(index: usize) -> CompletionResponse {
+        response(
+            vec![call(
+                &format!("c{index}"),
+                "edit_file",
+                json!({"path": "src/kernel/turn.rs", "new_string": "x"}),
+            )],
+            None,
+        )
+    }
+
+    #[test]
+    fn a_pasted_file_is_recognised_and_a_snippet_is_not() {
+        // The failure this exists for, verbatim in shape from a real session: the
+        // whole file in a fenced block, offered for the person to save.
+        assert!(looks_like_pasted_file(
+            "好的，下面是代码：\n```html\n<!DOCTYPE html>\n<html>…\n```\n请保存为 typing.html"
+        ));
+        assert!(looks_like_pasted_file("```python\nprint(1)\n```"));
+        // A tool call written out as prose instead of called.
+        assert!(looks_like_pasted_file(
+            "请允许我进行操作：\n\nwrite_file typing.html - \"<!DOCTYPE html>"
+        ));
+        // Not the failure: explaining with a snippet, or an unlabelled fence.
+        assert!(!looks_like_pasted_file(
+            "把这一行改成：\n```\nlet x = 1;\n```\n就对了"
+        ));
+        assert!(!looks_like_pasted_file("已经写好了，见 src/main.rs"));
+        assert!(!looks_like_pasted_file(""));
+    }
+
+    #[test]
+    fn a_printed_tool_call_is_recognised_and_prose_is_not() {
+        // Verbatim in shape from this project's own session (47x75pvh.jsonl): the call
+        // arrived inside `content`, wrapped in `<tool_call>`, and the leading text was
+        // even cut off mid-word — so the detector has to scan, not parse from the start.
+        let measured = "portun\n{\"name\": \"write_file\", \"arguments\": {\"content\":\"# 摘要\n- 出货量 -20%\", \"path\":\"/tmp/markdown.md\"}}\n</tool_call>";
+        assert_eq!(leaked_tool_call(measured).as_deref(), Some("write_file"));
+
+        // No spaces, and `edit_file` rather than `write_file`.
+        assert_eq!(
+            leaked_tool_call("{\"name\":\"edit_file\",\"arguments\":{\"path\":\"a.rs\"}}")
+                .as_deref(),
+            Some("edit_file")
+        );
+        // A marker without a parseable name still says what happened.
+        assert_eq!(
+            leaked_tool_call("<tool_call>\nwrite_file a.txt\n</tool_call>").as_deref(),
+            Some("write_file")
+        );
+
+        // Not the failure: talking *about* a tool, or a code sample that happens to name
+        // one. Neither may trigger a correction.
+        assert_eq!(leaked_tool_call("用 write_file 就能写文件。"), None);
+        assert_eq!(
+            leaked_tool_call("```json\n{\"name\": \"something_else\", \"arguments\": {}}\n```"),
+            None
+        );
+        assert_eq!(
+            leaked_tool_call("{\"name\": \"write_file\"}"),
+            None,
+            "a name with no arguments is a mention, not an attempted call"
+        );
+        assert_eq!(leaked_tool_call(""), None);
+    }
+
+    #[test]
+    fn the_system_prompt_names_the_printed_call_shape_too() {
+        // The prompt is the first half of the fix; this asserts it actually carries the
+        // clause (and that the `format!` braces rendered as braces, not as escapes).
+        let t = Temp::new();
+        let (model, _seen) = RecordingModel::new(vec![response(vec![], Some("ok"))]);
+        let k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        let prompt = match &k.messages()[0] {
+            ChatMessage::System { text } => text.clone(),
+            other => panic!("the first message is the system prompt: {other:?}"),
+        };
+        assert!(prompt.contains("write_file"), "{prompt}");
+        assert!(
+            prompt.contains("<tool_call>"),
+            "the printed-call shape is named: {prompt}"
+        );
+        assert!(
+            prompt.contains("{\"name\": \"write_file\""),
+            "and shown literally, not as escaped braces: {prompt}"
+        );
+    }
+
+    #[test]
+    fn a_model_that_pastes_a_file_gets_one_chance_to_actually_write_it() {
+        // First reply: the file in chat, no tool call. Second: the real call. Without
+        // the nudge the turn would end having written nothing while reading like success.
+        let t = Temp::new();
+        let (model, seen) = RecordingModel::new(vec![
+            response(
+                vec![],
+                Some("```html\n<!DOCTYPE html>\n<html><body>game</body></html>\n```\n请保存为 typing.html"),
+            ),
+            response(
+                vec![call(
+                    "c1",
+                    "write_file",
+                    json!({"path": "typing.html", "content": "<!DOCTYPE html>"}),
+                )],
+                None,
+            ),
+            response(vec![], Some("已写入 typing.html")),
+        ]);
+        let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        let outcome = k.submit("写一个单页打字游戏到 typing.html").unwrap();
+        assert_eq!(outcome.final_text.as_deref(), Some("已写入 typing.html"));
+
+        // The tool actually ran, and the file is on disk — the point of the nudge.
+        let events = loong_eventlog::replay(&t.log).unwrap().events;
+        assert!(
+            events.iter().any(|e| e.kind == ev::TOOL_CALL),
+            "the retry called a tool"
+        );
+        assert!(
+            std::fs::read_to_string(t.dir.join("typing.html")).is_ok(),
+            "and the file exists"
+        );
+
+        // The nudge itself is not in the log as something the person said: only the
+        // replies that mattered are.
+        let seen = seen.lock().unwrap();
+        let nudged = seen.iter().flatten().any(
+            |m| matches!(m, ChatMessage::User { text } if text.contains("did not call a tool")),
+        );
+        assert!(nudged, "the model was told what went wrong");
+        assert!(
+            !events.iter().any(|e| e.kind == ev::MESSAGE_APPENDED
+                && e.data["role"] == json!("user")
+                && e.data["text"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("did not call a tool")),
+            "the harness's own objection must not appear as a user message in the log"
+        );
+    }
+
+    #[test]
+    fn a_model_that_pastes_twice_is_believed_rather_than_looped() {
+        // One objection, then accept. A harness that argued forever would be worse
+        // than one that let the person see the model refuse.
+        let t = Temp::new();
+        let paste = response(vec![], Some("```html\n<html></html>\n```\n自己保存吧"));
+        let (model, _seen) = RecordingModel::new(vec![paste.clone(), paste]);
+        let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        let outcome = k.submit("写一个单页游戏").unwrap();
+        assert!(
+            outcome.final_text.unwrap().contains("自己保存吧"),
+            "the second answer is the turn's answer"
+        );
+        let events = loong_eventlog::replay(&t.log).unwrap().events;
+        assert_eq!(
+            events.iter().filter(|e| e.kind == ev::TOOL_CALL).count(),
+            0,
+            "nothing was called, and the log says so"
+        );
+    }
+
+    #[test]
+    fn a_model_that_prints_a_tool_call_gets_one_chance_to_emit_it() {
+        // The measured failure this exists for (47x75pvh.jsonl, qwen2.5:7b-instruct):
+        // the call arrived as `<tool_call>{…}</tool_call>` inside the reply, so no
+        // `tool.call` event was recorded and the turn ended as if the file had been
+        // written. One correction, then the real call.
+        let t = Temp::new();
+        let printed = "portun\n{\"name\": \"write_file\", \"arguments\": {\"content\":\"# 摘要\\n- 出货量 -20%\", \"path\":\"markdown.md\"}}\n</tool_call>";
+        let (model, seen) = RecordingModel::new(vec![
+            response(vec![], Some(printed)),
+            response(
+                vec![call(
+                    "c1",
+                    "write_file",
+                    json!({"path": "markdown.md", "content": "# 摘要\n- 出货量 -20%"}),
+                )],
+                None,
+            ),
+            response(vec![], Some("已写入 markdown.md")),
+        ]);
+        let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        let outcome = k
+            .submit("帮我总结一下 @report.txt 写入 markdown.md")
+            .unwrap();
+        assert_eq!(outcome.final_text.as_deref(), Some("已写入 markdown.md"));
+
+        let events = loong_eventlog::replay(&t.log).unwrap().events;
+        assert!(
+            events.iter().any(|e| e.kind == ev::TOOL_CALL),
+            "the retry actually called the tool"
+        );
+        assert!(
+            std::fs::read_to_string(t.dir.join("markdown.md")).is_ok(),
+            "and the file exists"
+        );
+        // The correction names the tool the model tried to print, so a model that meant
+        // `edit_file` is not told to `write_file`.
+        let seen = seen.lock().unwrap();
+        assert!(
+            seen.iter()
+                .flatten()
+                .any(|m| matches!(m, ChatMessage::User { text }
+                if text.contains("wrote the `write_file` call as text")
+                    && text.contains("Do not print the call"))),
+            "the model was told what went wrong, in terms of its own call"
+        );
+        assert!(
+            !events.iter().any(|e| e.kind == ev::MESSAGE_APPENDED
+                && e.data["role"] == json!("user")
+                && e.data["text"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("wrote the `write_file` call")),
+            "the harness's correction is not a user message in the log"
+        );
+    }
+
+    #[test]
+    fn a_read_then_printed_write_is_still_corrected() {
+        // The guard is per tool, not per turn: reading a file counts as "a tool ran",
+        // but it is not the tool the model then printed. Without the names, this reply
+        // would end the turn having written nothing.
+        let t = Temp::new();
+        std::fs::write(t.dir.join("report.txt"), "Counterpoint: -20%").unwrap();
+        let printed = "{\"name\": \"write_file\", \"arguments\": {\"content\":\"摘要\", \"path\":\"markdown.md\"}}\n</tool_call>";
+        let (model, _seen) = RecordingModel::new(vec![
+            response(
+                vec![call("c1", "read_file", json!({"path": "report.txt"}))],
+                None,
+            ),
+            response(vec![], Some(printed)),
+            response(
+                vec![call(
+                    "c2",
+                    "write_file",
+                    json!({"path": "markdown.md", "content": "摘要"}),
+                )],
+                None,
+            ),
+            response(vec![], Some("已写入 markdown.md")),
+        ]);
+        let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        let outcome = k.submit("总结 report.txt 到 markdown.md").unwrap();
+        assert_eq!(outcome.final_text.as_deref(), Some("已写入 markdown.md"));
+        assert!(std::fs::read_to_string(t.dir.join("markdown.md")).is_ok());
+    }
+
+    #[test]
+    fn printing_a_call_for_a_tool_that_already_ran_is_not_corrected() {
+        // A model that wrote the file and then quotes the call in its summary is
+        // describing what happened. Nudging here would write the file a second time.
+        let t = Temp::new();
+        let quoted = "已写入：\n{\"name\": \"write_file\", \"arguments\": {\"path\":\"a.txt\",\"content\":\"hi\"}}\n</tool_call>";
+        let (model, _seen) = RecordingModel::new(vec![
+            response(
+                vec![call(
+                    "c1",
+                    "write_file",
+                    json!({"path": "a.txt", "content": "hi"}),
+                )],
+                None,
+            ),
+            response(vec![], Some(quoted)),
+        ]);
+        let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        let outcome = k.submit("写 a.txt").unwrap();
+        assert_eq!(outcome.final_text.as_deref(), Some(quoted));
+        let events = loong_eventlog::replay(&t.log).unwrap().events;
+        assert_eq!(
+            events.iter().filter(|e| e.kind == ev::TOOL_CALL).count(),
+            1,
+            "no second write was attempted"
+        );
+    }
+
+    #[test]
+    fn a_finished_turn_with_tool_calls_is_never_nudged() {
+        // The guard that keeps the nudge from firing on honest work: once a tool has
+        // run, a later reply may quote code freely.
+        let t = Temp::new();
+        let (model, _seen) = RecordingModel::new(vec![
+            response(
+                vec![call(
+                    "c1",
+                    "write_file",
+                    json!({"path": "a.txt", "content": "hi"}),
+                )],
+                None,
+            ),
+            response(vec![], Some("写好了：\n```html\n<html></html>\n```")),
+        ]);
+        let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        let outcome = k.submit("写个文件").unwrap();
+        assert!(
+            outcome.final_text.unwrap().contains("写好了"),
+            "the answer stands; no objection after real work"
+        );
+    }
+
+    #[test]
+    fn recall_is_offered_only_when_there_is_memory_behind_it() {
+        let t = Temp::new();
+        let (model, _seen) = RecordingModel::new(vec![response(vec![], Some("ok"))]);
+        let off = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+        assert!(
+            !off.tool_specs().iter().any(|s| s.name == "recall"),
+            "a tool that cannot answer must not be advertised"
+        );
+
+        let t2 = Temp::new();
+        let (model, _seen) = RecordingModel::new(vec![response(vec![], Some("ok"))]);
+        let mut config = KernelConfig::new(&t2.dir);
+        config.context_engine = Some(crate::context_engine::ContextEngineConfig::new(
+            t2.dir.join("session.context.db"),
+            t2.log.clone(),
+        ));
+        let on = Kernel::create(&t2.log, config, Box::new(model)).unwrap();
+        assert!(on.tool_specs().iter().any(|s| s.name == "recall"));
+    }
+
+    #[test]
+    fn recall_finds_earlier_work_and_cites_it() {
+        let t = Temp::new();
+        let (model, seen) = RecordingModel::new(vec![
+            scripted_edit(1),
+            response(vec![], Some("第一轮完成")),
+            response(vec![call("c9", "recall", json!({"query": "层叠"}))], None),
+            response(vec![], Some("我查到了")),
+        ]);
+        let mut config = KernelConfig::new(&t.dir);
+        config.context_engine = Some(crate::context_engine::ContextEngineConfig::new(
+            t.dir.join("session.context.db"),
+            t.log.clone(),
+        ));
+        let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+        k.submit("修一下 src/kernel/turn.rs 的层叠失效").unwrap();
+        k.submit("刚才那个任务是什么来着？").unwrap();
+
+        // The answer reached the model as a normal tool result…
+        let seen = seen.lock().unwrap();
+        let recall_output = seen
+            .iter()
+            .flatten()
+            .find_map(|m| match m {
+                ChatMessage::Tool { output, .. } if output.contains("memory") => {
+                    Some(output.clone())
+                }
+                _ => None,
+            })
+            .expect("recall returned something");
+        // …carrying a citation into the record, which is what makes it checkable.
+        assert!(recall_output.contains("seq["), "{recall_output}");
+        assert!(recall_output.contains("层叠"), "{recall_output}");
+
+        // And a following `expand` hands back the original events too.
+        let events = loong_eventlog::replay(&t.log).unwrap().events;
+        assert!(
+            events.iter().any(|e| e.kind == ev::TOOL_RESULT
+                && e.data["output"].as_str().unwrap_or("").contains("seq[")),
+            "the recall answer is an auditable event"
+        );
+    }
+
+    #[test]
+    fn recall_says_so_when_it_finds_nothing_rather_than_failing() {
+        // "Nothing matched" is a real answer. An error would teach the model that
+        // asking about the past is broken.
+        let t = Temp::new();
+        let (model, seen) = RecordingModel::new(vec![
+            scripted_edit(1),
+            response(vec![], Some("完成")),
+            response(
+                vec![call("c9", "recall", json!({"query": "完全不存在的词"}))],
+                None,
+            ),
+            response(vec![], Some("没有找到")),
+        ]);
+        let mut config = KernelConfig::new(&t.dir);
+        config.context_engine = Some(crate::context_engine::ContextEngineConfig::new(
+            t.dir.join("session.context.db"),
+            t.log.clone(),
+        ));
+        let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+        k.submit("修一下 src/kernel/turn.rs").unwrap();
+        k.submit("找点不存在的东西").unwrap();
+
+        let seen = seen.lock().unwrap();
+        let output = seen
+            .iter()
+            .flatten()
+            .find_map(|m| match m {
+                ChatMessage::Tool { output, .. } if output.contains("nothing in this session") => {
+                    Some(output.clone())
+                }
+                _ => None,
+            })
+            .expect("a not-found answer reached the model");
+        assert!(output.contains("real answer"), "{output}");
+    }
+
+    #[test]
+    fn recall_refuses_a_request_with_nothing_to_search_for() {
+        let t = Temp::new();
+        let (model, seen) = RecordingModel::new(vec![
+            scripted_edit(1),
+            response(vec![], Some("完成")),
+            response(vec![call("c9", "recall", json!({}))], None),
+            response(vec![], Some("好")),
+        ]);
+        let mut config = KernelConfig::new(&t.dir);
+        config.context_engine = Some(crate::context_engine::ContextEngineConfig::new(
+            t.dir.join("session.context.db"),
+            t.log.clone(),
+        ));
+        let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+        k.submit("修一下 src/kernel/turn.rs").unwrap();
+        k.submit("随便问").unwrap();
+
+        let seen = seen.lock().unwrap();
+        assert!(
+            seen.iter()
+                .flatten()
+                .any(|m| matches!(m, ChatMessage::Tool { output, .. }
+                if output.contains("give a `query`"))),
+            "an empty request is refused with what to do instead"
+        );
+    }
+
+    #[test]
+    fn expand_returns_the_summary_with_its_original_events() {
+        let t = Temp::new();
+        let (model, seen) = RecordingModel::new(vec![
+            scripted_edit(1),
+            response(vec![], Some("完成")),
+            // The model asks for something that cannot exist; the point is the
+            // error message, not a successful expansion, which is covered in the
+            // context crate's own tests against a real store.
+            response(
+                vec![call("c9", "recall", json!({"expand": "no-such-summary"}))],
+                None,
+            ),
+            response(vec![], Some("好")),
+        ]);
+        let mut config = KernelConfig::new(&t.dir);
+        config.context_engine = Some(crate::context_engine::ContextEngineConfig::new(
+            t.dir.join("session.context.db"),
+            t.log.clone(),
+        ));
+        let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+        k.submit("修一下 src/kernel/turn.rs").unwrap();
+        k.submit("展开一个不存在的摘要").unwrap();
+
+        let seen = seen.lock().unwrap();
+        assert!(
+            seen.iter()
+                .flatten()
+                .any(|m| matches!(m, ChatMessage::Tool { output, .. }
+                if output.contains("no summary with id"))),
+            "an unknown id is named, not silently empty"
+        );
+    }
+
+    #[test]
+    fn a_recall_answer_is_capped_and_says_it_was_capped() {
+        // The thin foreground depends on retrieval being bounded: an unbounded
+        // answer would spend exactly the context the design exists to save.
+        let t = Temp::new();
+        for index in 1..8 {
+            std::fs::write(t.dir.join(format!("f{index}.txt")), "some content").unwrap();
+        }
+        let mut responses = Vec::new();
+        for index in 1..8 {
+            responses.push(scripted_edit(index));
+            responses.push(response(vec![], Some("done")));
+        }
+        responses.push(response(
+            vec![call("c99", "recall", json!({"query": "src/kernel"}))],
+            None,
+        ));
+        responses.push(response(vec![], Some("好了")));
+        let (model, seen) = RecordingModel::new(responses);
+        let mut config = KernelConfig::new(&t.dir);
+        config.context_engine = Some(crate::context_engine::ContextEngineConfig::new(
+            t.dir.join("session.context.db"),
+            t.log.clone(),
+        ));
+        let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+        for index in 1..8 {
+            k.submit(&format!("任务 {index} 修一下 src/kernel/turn.rs"))
+                .unwrap();
+        }
+        k.submit("回顾一下").unwrap();
+
+        let seen = seen.lock().unwrap();
+        for messages in seen.iter() {
+            for message in messages {
+                if let ChatMessage::Tool { output, .. } = message {
+                    assert!(
+                        output.chars().count() <= RECALL_MAX_CHARS + 64,
+                        "a recall answer must stay inside its ceiling: {} chars",
+                        output.chars().count()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_layered_engine_puts_a_map_in_front_of_the_model() {
+        let t = Temp::new();
+        let (model, seen) = RecordingModel::new(vec![
+            response(
+                vec![call(
+                    "c1",
+                    "edit_file",
+                    json!({"path": "src/kernel/a.rs", "new_string": "x"}),
+                )],
+                None,
+            ),
+            response(vec![], Some("done")),
+            response(vec![], Some("second turn")),
+        ]);
+        let mut config = KernelConfig::new(&t.dir);
+        config.context_engine = Some(crate::context_engine::ContextEngineConfig::new(
+            t.dir.join("session.context.db"),
+            t.log.clone(),
+        ));
+        let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+        k.submit("修一下 src/kernel/a.rs").unwrap();
+        k.submit("继续").unwrap();
+
+        let seen = seen.lock().unwrap();
+        let last = seen.last().expect("a request happened");
+        let map = last.iter().find_map(|m| match m {
+            ChatMessage::System { text } if text.starts_with("L4 · 全局认知地图") => {
+                Some(text.clone())
+            }
+            _ => None,
+        });
+        let map = map.expect("the L4 map is in the request");
+        assert!(map.contains("src/kernel"), "{map}");
+
+        // Exactly one map entry, refreshed rather than appended per step.
+        let maps = k
+            .ledger()
+            .entries()
+            .iter()
+            .filter(|e| e.category == Category::CognitiveMap)
+            .count();
+        assert_eq!(maps, 1, "one map entry, not one per step");
+
+        // And the map message sits after the system prompt, not before it.
+        let positions: Vec<usize> = last
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| matches!(m, ChatMessage::System { .. }))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(positions[0], 0, "the operator's system prompt stays first");
+        assert!(positions.len() >= 2, "the map is its own system message");
+    }
+
+    #[test]
+    fn with_the_engine_on_a_long_session_never_drops_an_exchange() {
+        // The core promise of ADR-0017: the original stays reachable, so the one
+        // lossy step compaction used to take must not happen.
+        let t = Temp::new();
+        let filler = "x".repeat(2_000);
+        let (model, seen) = RecordingModel::new(vec![
+            response(vec![], Some("first")),
+            response(vec![], Some("second")),
+            response(vec![], Some("third")),
+        ]);
+        let mut config = KernelConfig::new(&t.dir);
+        config.budget_tokens = Some(1_200);
+        config.keep_newest_tokens = 200;
+        config.context_engine = Some(crate::context_engine::ContextEngineConfig::new(
+            t.dir.join("session.context.db"),
+            t.log.clone(),
+        ));
+        let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+        k.submit(&format!("turn one {filler}")).unwrap();
+        k.submit(&format!("turn two {filler}")).unwrap();
+        k.submit(&format!("turn three {filler}")).unwrap();
+
+        let events = loong_eventlog::replay(&t.log).unwrap().events;
+        let dropped: u64 = events
+            .iter()
+            .filter(|e| e.kind == ev::COMPACTION_APPLIED)
+            .map(|e| e.data["dropped_messages"].as_u64().unwrap_or(0))
+            .sum();
+        assert_eq!(
+            dropped, 0,
+            "with the engine on, no exchange is ever dropped"
+        );
+
+        // The oldest prompt is still in the request, which is the point.
+        let seen = seen.lock().unwrap();
+        let last = seen.last().unwrap();
+        assert!(
+            last.iter()
+                .any(|m| matches!(m, ChatMessage::User { text } if text.contains("turn one"))),
+            "the first turn is still reachable in the request"
+        );
+    }
+
+    #[test]
+    fn with_the_engine_off_compaction_still_drops_exchanges() {
+        // The rollback path has to be exactly the old behaviour, not an
+        // approximation of it. This mirrors
+        // `compaction_drops_the_oldest_exchange_when_clearing_is_not_enough`
+        // with the engine explicitly configured off.
+        let t = Temp::new();
+        let filler = "x".repeat(2_000);
+        let (model, _seen) = RecordingModel::new(vec![
+            response(vec![], Some("first")),
+            response(vec![], Some("second")),
+            response(vec![], Some("third")),
+        ]);
+        let mut config = KernelConfig::new(&t.dir);
+        config.budget_tokens = Some(1_200);
+        config.keep_newest_tokens = 200;
+        config.context_engine = Some(crate::context_engine::ContextEngineConfig::off());
+        let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+        k.submit(&format!("turn one {filler}")).unwrap();
+        k.submit(&format!("turn two {filler}")).unwrap();
+        k.submit(&format!("turn three {filler}")).unwrap();
+
+        let events = loong_eventlog::replay(&t.log).unwrap().events;
+        let dropped: u64 = events
+            .iter()
+            .filter(|e| e.kind == ev::COMPACTION_APPLIED)
+            .map(|e| e.data["dropped_messages"].as_u64().unwrap_or(0))
+            .sum();
+        assert!(dropped >= 1, "off means the old behaviour: {dropped}");
     }
 
     #[test]

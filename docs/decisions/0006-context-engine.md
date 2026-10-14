@@ -54,6 +54,11 @@ outside a typed, visible, token-counted ledger entry.**
      user may tighten it, per ADR-0008's merge kinds). Both Claude Code and Pi
      converge on this order; dropping tool output before prose preserves working
      state at the lowest semantic cost.
+   - **Revised by [ADR-0017](0017-layered-context.md) (Proposed, 2026-10-14)**:
+     with the layered memory enabled, the second half — dropping the oldest whole
+     exchanges — is **disabled**; the original stays in the log and `recall` brings
+     it back. With the engine off this section stands exactly as written, and that
+     equivalence is a control test rather than a promise.
 5. **Retrieval is a kernel service that writes through the ledger.** The
    layered pipeline (grep/symbols → token-budgeted repo map → explore
    subagent) produces ordinary ledger entries. A retrieval result has no

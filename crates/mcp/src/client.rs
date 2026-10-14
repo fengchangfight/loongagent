@@ -98,6 +98,16 @@ impl McpClient {
             use std::os::unix::process::CommandExt;
             command.process_group(0);
         }
+        // Windows: an MCP server is a tree of processes like any other child (npx
+        // spawns node, a wrapper spawns the real server), so it leads its own group for
+        // `taskkill /T` in `Drop` — and so a console control event aimed at the agent
+        // does not reach it.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+            command.creation_flags(CREATE_NEW_PROCESS_GROUP);
+        }
         let mut child = command.spawn().map_err(|e| {
             err(format!(
                 "starting MCP server {:?} ({}): {e}",
@@ -410,6 +420,18 @@ impl Drop for McpClient {
             unsafe {
                 syscall(SYS_KILL, -pid, 9);
             }
+        }
+        // Windows has no kill(-pgid): `taskkill /T` follows the parent links instead, so
+        // the `npx`/`node` pair behind a server does not outlive the session.
+        #[cfg(windows)]
+        {
+            let pid = self.child.id().to_string();
+            let _ = std::process::Command::new("taskkill")
+                .args(["/T", "/F", "/PID", pid.as_str()])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
         }
         let _ = self.child.kill();
         let _ = self.child.wait();

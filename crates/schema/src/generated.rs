@@ -244,6 +244,48 @@ pub struct ContextExplain {
     pub entries: Vec<ContextEntry>,
     /// totals per category, largest first
     pub categories: Vec<ContextCategory>,
+    /// empty when the layered memory is off; record | semantic when it is on. This is the honest on/off answer: a new semantic session has no cognitive-map entry yet, so its absence cannot mean 'off'
+    pub memory_mode: String,
+    /// the local model that fills semantic fields, or none; empty in record mode
+    pub memory_summarizer: String,
+    /// why the memory is degraded, empty when it is not (ADR-0017 §11.1)
+    pub memory_degraded: String,
+    /// one entry per layer: how many memories and what carrying them costs
+    pub memory_layers: Vec<ContextLayer>,
+    pub memory_worker: ContextWorker,
+}
+
+/// One layer of the derived memory (ADR-0017 §10).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContextLayer {
+    /// 1 atom | 2 episode | 3 domain | 4 global
+    pub level: u64,
+    /// atom | episode | domain | global
+    pub scope: String,
+    pub count: u64,
+    /// what this layer costs; the retrieval layer is not carried, so it is 0
+    pub tokens: u64,
+}
+
+/// What the background enrichment worker has done (ADR-0017 §4.6, §10). Every field is a counter the worker keeps or a count read from the store; the state is never inferred from whether a map exists yet.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContextWorker {
+    /// off | idle | active | deferred | stopped
+    pub state: String,
+    /// idle windows entered
+    pub windows: u64,
+    /// requests sent, successful or not
+    pub model_calls: u64,
+    /// episodes a model added semantic fields to
+    pub enriched: u64,
+    /// requests that failed; each degraded exactly its own episode
+    pub failed: u64,
+    /// episodes still lacking semantic fields
+    pub pending: u64,
+    /// windows skipped because a turn was running
+    pub deferrals: u64,
+    /// the most recent enrichment failure, empty when there has been none
+    pub last_error: String,
 }
 
 /// Token total for one category of context.

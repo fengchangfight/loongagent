@@ -20,6 +20,11 @@ pub enum Category {
     Tools,
     Rules,
     Memory,
+    /// The always-present global map (ADR-0017 §11): a few hundred tokens that
+    /// say what the project is and where it stands. It sits between the rules and
+    /// memory in eviction order — cheaper to lose than a rule the operator wrote,
+    /// more valuable than a stale tool result.
+    CognitiveMap,
     McpTools,
     Retrieval,
     History,
@@ -32,6 +37,7 @@ impl Category {
             Category::Tools => "tools",
             Category::Rules => "rules",
             Category::Memory => "memory",
+            Category::CognitiveMap => "cognitive_map",
             Category::McpTools => "mcp_tools",
             Category::Retrieval => "retrieval",
             Category::History => "history",
@@ -46,6 +52,7 @@ impl Category {
             Category::Retrieval => 80,
             Category::McpTools => 70,
             Category::Memory => 50,
+            Category::CognitiveMap => 45,
             Category::Rules => 40,
             Category::Tools => 30,
             Category::SystemPrompt => 0,
@@ -147,6 +154,27 @@ impl Ledger {
 
     pub fn entries(&self) -> &[Entry] {
         &self.entries
+    }
+
+    /// Rewrite the text behind one entry, keeping its id, category, lifetime and
+    /// pin. Used for blocks whose *content* is refreshed rather than replaced —
+    /// the cognitive map, which is re-derived as work proceeds.
+    ///
+    /// Deliberately not a general "edit the ledger" door: it cannot change what an
+    /// entry *is*, only how large it currently is. A caller that could reclassify
+    /// an entry could hide where context came from, which is the one thing the
+    /// ledger exists to prevent (ADR-0006 §1).
+    pub fn replace(&mut self, id: u64, text: &str) -> bool {
+        match self.entries.iter_mut().find(|entry| entry.id == id) {
+            Some(entry) => {
+                entry.tokens = estimate_tokens(text);
+                // A refreshed block is present again: it is not the marker of a
+                // cleared tool output.
+                entry.cleared = false;
+                true
+            }
+            None => false,
+        }
     }
 
     pub fn len(&self) -> usize {

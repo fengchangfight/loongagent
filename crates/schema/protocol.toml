@@ -286,6 +286,37 @@ fields = [
   { name = "compactions", type = "u64", doc = "how many compactions this session has recorded" },
   { name = "entries", type = "ContextEntry", list = true },
   { name = "categories", type = "ContextCategory", list = true, doc = "totals per category, largest first" },
+  { name = "memory_mode", type = "string", doc = "empty when the layered memory is off; record | semantic when it is on. This is the honest on/off answer: a new semantic session has no cognitive-map entry yet, so its absence cannot mean 'off'" },
+  { name = "memory_summarizer", type = "string", doc = "the local model that fills semantic fields, or none; empty in record mode" },
+  { name = "memory_degraded", type = "string", doc = "why the memory is degraded, empty when it is not (ADR-0017 §11.1)" },
+  { name = "memory_layers", type = "ContextLayer", list = true, doc = "one entry per layer: how many memories and what carrying them costs" },
+  { name = "memory_worker", type = "ContextWorker" },
+]
+
+[[types]]
+name = "ContextLayer"
+kind = "struct"
+doc = "One layer of the derived memory (ADR-0017 §10)."
+fields = [
+  { name = "level", type = "u64", doc = "1 atom | 2 episode | 3 domain | 4 global" },
+  { name = "scope", type = "string", doc = "atom | episode | domain | global" },
+  { name = "count", type = "u64" },
+  { name = "tokens", type = "u64", doc = "what this layer costs; the retrieval layer is not carried, so it is 0" },
+]
+
+[[types]]
+name = "ContextWorker"
+kind = "struct"
+doc = "What the background enrichment worker has done (ADR-0017 §4.6, §10). Every field is a counter the worker keeps or a count read from the store; the state is never inferred from whether a map exists yet."
+fields = [
+  { name = "state", type = "string", doc = "off | idle | active | deferred | stopped" },
+  { name = "windows", type = "u64", doc = "idle windows entered" },
+  { name = "model_calls", type = "u64", doc = "requests sent, successful or not" },
+  { name = "enriched", type = "u64", doc = "episodes a model added semantic fields to" },
+  { name = "failed", type = "u64", doc = "requests that failed; each degraded exactly its own episode" },
+  { name = "pending", type = "u64", doc = "episodes still lacking semantic fields" },
+  { name = "deferrals", type = "u64", doc = "windows skipped because a turn was running" },
+  { name = "last_error", type = "string", doc = "the most recent enrichment failure, empty when there has been none" },
 ]
 
 [[types]]

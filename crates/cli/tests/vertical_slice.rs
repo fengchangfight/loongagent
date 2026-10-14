@@ -23,7 +23,14 @@ fn isolated_command() -> Command {
 
 static N: AtomicU64 = AtomicU64::new(0);
 
-const ESCAPE: &str = "/tmp/loongagent-demo-escape.txt";
+const ESCAPE_NAME: &str = "loongagent-demo-escape.txt";
+
+/// The path `demo-escape` names, derived the same way the model derives it rather
+/// than written as a literal `/tmp/...`: that literal is not absolute on Windows, so
+/// the "escape" would land inside the workspace and the test would prove nothing.
+fn escape_path() -> PathBuf {
+    std::env::temp_dir().join(ESCAPE_NAME)
+}
 
 struct Temp(PathBuf);
 impl Temp {
@@ -212,7 +219,7 @@ fn a_tool_runs_inside_the_workspace_and_the_log_is_the_same_truth() {
 
 #[test]
 fn an_out_of_bounds_write_asks_before_it_touches_anything() {
-    let _ = std::fs::remove_file(ESCAPE);
+    let _ = std::fs::remove_file(escape_path());
     let t = Temp::new();
     let mut session = Session::start(t.path(), "demo-escape");
     let (events, _) = session.prompt("write outside the workspace");
@@ -228,7 +235,7 @@ fn an_out_of_bounds_write_asks_before_it_touches_anything() {
         .unwrap()
         .contains("out_of_bounds"));
     assert!(
-        !Path::new(ESCAPE).exists(),
+        !escape_path().exists(),
         "nothing is written before the answer"
     );
 
@@ -242,7 +249,7 @@ fn an_out_of_bounds_write_asks_before_it_touches_anything() {
     assert_eq!(decided["data"]["scope"], "once");
     let tool_result = events.iter().find(|e| e["kind"] == "tool.result").unwrap();
     assert_eq!(tool_result["data"]["ok"], false);
-    assert!(!Path::new(ESCAPE).exists());
+    assert!(!escape_path().exists());
 
     let logged = logged_kinds(t.path());
     assert!(logged.contains(&"approval.requested".to_string()));

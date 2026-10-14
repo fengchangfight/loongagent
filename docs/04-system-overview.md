@@ -119,7 +119,7 @@ concept and one loader — and configuration packs (ADR-0004).
 | AQ-4 | Microkernel: pluggable edges, tiny fixed kernel; WASM for deep extensions | [0004](decisions/0004-microkernel-extension-model.md) |
 | AQ-5 | Deliberately small control plane: identity, packs, gateway, opt-in stats | [0012](decisions/0012-control-plane.md) |
 | AQ-6 | Routing: **local decides live**, server learns and ships policy packs | [0005](decisions/0005-routing-philosophy.md) |
-| AQ-7 | Context ledger only; per-profile budgets; visible compaction; memory = propose-and-confirm | [0006](decisions/0006-context-engine.md) |
+| AQ-7 | Context ledger only; per-profile budgets; visible compaction; memory = propose-and-confirm. Layered reversible memory (optional, opt-in) | [0006](decisions/0006-context-engine.md), [0017](decisions/0017-layered-context.md) (Proposed) |
 | AQ-8 | PDP in the kernel, PEPs at the OS; per-action autonomy ladder; approvals are events | [0007](decisions/0007-permission-sandbox-engine.md) |
 | AQ-9 | Monotonic config layers; TOML vs markdown; one signed pack envelope | [0008](decisions/0008-configuration-layering.md) |
 | AQ-10 | Local parallelism: worktree isolation, artifact-returning subagents, one orchestrator | [0011](decisions/0011-local-parallelism.md) |

@@ -328,7 +328,14 @@ fn keygen(args: &[String]) -> Result<(), String> {
         std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))
             .map_err(|e| format!("setting permissions on {}: {e}", key_path.display()))?;
     }
-    println!("wrote {} (mode 0600)", key_path.display());
+    // The message must describe what actually happened: Windows has no owner-only bit,
+    // so the key inherits the ACL of whatever directory `--out` named.
+    #[cfg(unix)]
+    let mode = " (mode 0600)";
+    #[cfg(not(unix))]
+    let mode =
+        " (no 0600 off Unix — it inherits the directory's ACL; keep that directory owner-only)";
+    println!("wrote {}{mode}", key_path.display());
     println!();
     println!("public key (pin this in every install):");
     println!("  {}", loong_pack::hex(&public));

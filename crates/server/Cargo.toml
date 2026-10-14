@@ -6,13 +6,17 @@ license.workspace = true
 description = "Local agent server: JSON-RPC over stdio/unix socket (ADR-0001, ADR-0002)"
 
 [dependencies]
-libc = "0.2"
 loong-schema.workspace = true
 loong-protocol.workspace = true
 loong-eventlog.workspace = true
 loong-kernel.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+# `libc` is the Unix half of `catch_interrupts`: `signal(SIGINT, …)`. Windows installs
+# a console control routine (kernel32) instead, so the crate is not built there.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 loong-providers.workspace = true

@@ -16,5 +16,6 @@ loong-skills.workspace = true
 loong-config.workspace = true
 loong-tools.workspace = true
 loong-index.workspace = true
+loong-context.workspace = true
 serde.workspace = true
 serde_json.workspace = true

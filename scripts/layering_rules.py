@@ -32,8 +32,11 @@ ALLOWED = {
     "loong-config": {"loong-schema"},
     # the derived index reads the log; it is disposable and rebuildable
     "loong-index": {"loong-schema", "loong-eventlog"},
+    # the layered context memory is derived from the log too, and is equally
+    # disposable; it must never learn about the kernel (ADR-0017)
+    "loong-context": {"loong-schema", "loong-eventlog", "loong-http"},
     # the fixed kernel calls its edges through traits; it never knows adapters
-    "loong-kernel": {"loong-schema", "loong-eventlog", "loong-index", "loong-providers", "loong-sandbox", "loong-tools", "loong-hooks", "loong-mcp", "loong-skills", "loong-config"},
+    "loong-kernel": {"loong-schema", "loong-eventlog", "loong-index", "loong-context", "loong-providers", "loong-sandbox", "loong-tools", "loong-hooks", "loong-mcp", "loong-skills", "loong-config"},
     # surfaces
     "loong-server": {"loong-schema", "loong-protocol", "loong-eventlog", "loong-kernel"},
     "loong-tui": {"loong-schema", "loong-protocol"},
@@ -42,7 +45,7 @@ ALLOWED = {
     # the one binary that ties faces together
     "loongagent": {
         "loong-schema", "loong-protocol", "loong-eventlog", "loong-http", "loong-proc", "loong-manifest", "loong-providers",
-        "loong-sandbox", "loong-tools", "loong-hooks", "loong-mcp", "loong-skills", "loong-config", "loong-index", "loong-kernel", "loong-server", "loong-tui", "loong-tui-app", "loong-web", "loong-control", "loong-pack",
+        "loong-sandbox", "loong-tools", "loong-hooks", "loong-mcp", "loong-skills", "loong-config", "loong-index", "loong-context", "loong-kernel", "loong-server", "loong-tui", "loong-tui-app", "loong-web", "loong-control", "loong-pack",
     },
 }
 

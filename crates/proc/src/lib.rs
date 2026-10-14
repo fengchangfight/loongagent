@@ -20,6 +20,86 @@ use std::time::{Duration, Instant};
 /// 64 KiB pipe buffer, or a child that never reads stdin would block us.
 pub const STDIN_LIMIT: usize = 32 * 1024;
 
+/// How this platform hands a command or a script to a shell.
+///
+/// The agent's shell tool, its hooks and its skills all speak POSIX shell: the
+/// classifier reads `rm`/`curl`/`>` and the hook contract is "a script that exits
+/// non-zero to deny". So a `sh` that is on PATH is used **even on Windows** (Git
+/// for Windows, MSYS, Cygwin and WSL all provide one) — that is what keeps the
+/// behaviour identical to Ubuntu. Only where there is no POSIX shell does
+/// `cmd.exe /C` step in, and then the command text is whatever `cmd` understands.
+///
+/// Detected rather than hard-coded, because "is there a shell?" is a property of
+/// the machine, not of the build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shell {
+    /// `sh -c <command>` / `sh <script>`
+    Posix,
+    /// `cmd.exe /C <command-or-script>`
+    Cmd,
+}
+
+impl Shell {
+    pub fn detect() -> Self {
+        if !cfg!(windows) || on_path("sh") {
+            Shell::Posix
+        } else {
+            Shell::Cmd
+        }
+    }
+
+    pub fn is_posix(&self) -> bool {
+        matches!(self, Shell::Posix)
+    }
+
+    /// The program to spawn.
+    pub fn program(&self) -> &'static str {
+        match self {
+            Shell::Posix => "sh",
+            Shell::Cmd => "cmd.exe",
+        }
+    }
+
+    /// Program plus arguments for running a **command string**.
+    pub fn command(&self, text: &str) -> (String, Vec<String>) {
+        let flag = match self {
+            Shell::Posix => "-c",
+            Shell::Cmd => "/C",
+        };
+        (
+            self.program().to_string(),
+            vec![flag.to_string(), text.to_string()],
+        )
+    }
+
+    /// Program plus arguments for running a **script file**.
+    ///
+    /// Different from [`Shell::command`] on purpose: `sh <script>` does not need the
+    /// script to be executable and does not need a shebang, which is exactly how the
+    /// hook runner writes its scripts.
+    pub fn script(&self, path: &Path) -> (String, Vec<String>) {
+        let path = path.to_string_lossy().to_string();
+        match self {
+            Shell::Posix => (self.program().to_string(), vec![path]),
+            Shell::Cmd => (self.program().to_string(), vec!["/C".to_string(), path]),
+        }
+    }
+}
+
+/// Is `name` an executable a shell could find on PATH?
+///
+/// Windows resolves bare names through `PATHEXT`, so `sh.exe` has to be looked for
+/// explicitly; Unix just looks for the name.
+fn on_path(name: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| {
+        let candidate = dir.join(name);
+        candidate.is_file() || (cfg!(windows) && dir.join(format!("{name}.exe")).is_file())
+    })
+}
+
 pub struct RunSpec<'a> {
     pub program: &'a str,
     pub args: &'a [String],
@@ -237,7 +317,11 @@ fn read_bounded(path: &Path, limit: usize) -> Result<(String, bool), ProcError> 
             .map(|m| m.len() as usize > limit)
             .unwrap_or(false);
     }
-    Ok((String::from_utf8_lossy(&collected).to_string(), truncated))
+    // A Windows child writes CRLF; a Unix one writes LF. The model, the log and the
+    // person reading a tool report should see the same text on both, so the carriage
+    // returns are dropped here rather than being explained everywhere downstream.
+    let text = String::from_utf8_lossy(&collected).replace("\r\n", "\n");
+    Ok((text, truncated))
 }
 
 #[cfg(unix)]
@@ -246,7 +330,19 @@ fn prepare_process_group(cmd: &mut Command) {
     cmd.process_group(0);
 }
 
-#[cfg(not(unix))]
+/// Windows: the child leads its own process group.
+///
+/// The group is what `taskkill /T` follows and what a console control event can be
+/// aimed at; it also keeps a Ctrl-C aimed at the console from reaching the agent's
+/// own process group by accident.
+#[cfg(windows)]
+fn prepare_process_group(cmd: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
+}
+
+#[cfg(not(any(unix, windows)))]
 fn prepare_process_group(_cmd: &mut Command) {}
 
 /// Kill the child **and everything it spawned**.
@@ -265,7 +361,25 @@ fn kill_process_group(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
-#[cfg(not(unix))]
+/// Windows: `taskkill /T` walks the parent links from the child down.
+///
+/// There is no `kill(-pgid)` equivalent, and killing the root alone would leave a
+/// `timeout` or a spawned server running — exactly the leak this module exists to
+/// prevent. `taskkill` ships with every supported Windows.
+#[cfg(windows)]
+fn kill_process_group(child: &mut std::process::Child) {
+    let pid = child.id().to_string();
+    let _ = Command::new("taskkill")
+        .args(["/T", "/F", "/PID", pid.as_str()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(not(any(unix, windows)))]
 fn kill_process_group(child: &mut std::process::Child) {
     let _ = child.kill();
     let _ = child.wait();
@@ -290,6 +404,9 @@ mod tests {
         vec!["-c".to_string(), script.to_string()]
     }
 
+    // POSIX shell script: skipped where there is no `sh` (Windows without Git for
+    // Windows/WSL). The portable behaviour is covered by the tests that do not spawn a shell.
+    #[cfg_attr(windows, ignore = "needs a POSIX shell (sh)")]
     #[test]
     fn output_and_exit_status_come_back() {
         let cwd = tempdir();
@@ -302,6 +419,9 @@ mod tests {
         assert!(!out.timed_out);
     }
 
+    // POSIX shell script: skipped where there is no `sh` (Windows without Git for
+    // Windows/WSL). The portable behaviour is covered by the tests that do not spawn a shell.
+    #[cfg_attr(windows, ignore = "needs a POSIX shell (sh)")]
     #[test]
     fn stdin_reaches_the_child() {
         let cwd = tempdir();
@@ -312,6 +432,9 @@ mod tests {
         assert_eq!(out.stdout, "{\"event\":\"pre_tool\"}");
     }
 
+    // POSIX shell script: skipped where there is no `sh` (Windows without Git for
+    // Windows/WSL). The portable behaviour is covered by the tests that do not spawn a shell.
+    #[cfg_attr(windows, ignore = "needs a POSIX shell (sh)")]
     #[test]
     fn output_is_bounded_per_stream() {
         let cwd = tempdir();
@@ -322,6 +445,9 @@ mod tests {
         assert!(out.stdout.len() <= 1024);
     }
 
+    // POSIX shell script: skipped where there is no `sh` (Windows without Git for
+    // Windows/WSL). The portable behaviour is covered by the tests that do not spawn a shell.
+    #[cfg_attr(windows, ignore = "needs a POSIX shell (sh)")]
     #[test]
     fn a_timeout_kills_the_whole_tree() {
         let cwd = tempdir();
@@ -348,6 +474,9 @@ mod tests {
         }
     }
 
+    // POSIX shell script: skipped where there is no `sh` (Windows without Git for
+    // Windows/WSL). The portable behaviour is covered by the tests that do not spawn a shell.
+    #[cfg_attr(windows, ignore = "needs a POSIX shell (sh)")]
     #[test]
     fn an_oversized_stdin_payload_is_refused_before_spawning() {
         let cwd = tempdir();
@@ -367,5 +496,31 @@ mod tests {
             Duration::from_secs(5),
         );
         assert!(run(&spec).unwrap_err().0.contains("spawning"));
+    }
+
+    #[test]
+    fn the_shell_is_the_one_the_platform_actually_has() {
+        let shell = Shell::detect();
+        // On Unix there is always a `sh`; on Windows it depends on Git for Windows,
+        // MSYS, Cygwin or WSL being on PATH, and the fallback is `cmd.exe`.
+        if cfg!(unix) {
+            assert!(shell.is_posix(), "a Unix build always finds sh");
+        }
+        match shell {
+            Shell::Posix => {
+                assert_eq!(shell.program(), "sh");
+                assert_eq!(shell.command("echo hi").1, vec!["-c", "echo hi"]);
+                // A script is read, not exec'd: no `-c`, so it need not be executable.
+                assert_eq!(shell.script(Path::new("hook.sh")).1, vec!["hook.sh"]);
+            }
+            Shell::Cmd => {
+                assert_eq!(shell.program(), "cmd.exe");
+                assert_eq!(shell.command("echo hi").1, vec!["/C", "echo hi"]);
+                assert_eq!(
+                    shell.script(Path::new("hook.cmd")).1,
+                    vec!["/C", "hook.cmd"]
+                );
+            }
+        }
     }
 }

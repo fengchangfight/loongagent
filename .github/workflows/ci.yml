@@ -23,10 +23,10 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: toolchain
-        run: |
-          rustup toolchain install "$RUST_VERSION" --profile minimal \
-            --component rustfmt --no-self-update
-          rustup default "$RUST_VERSION"
+        # Mirror first, upstream when the mirror does not carry this version — a
+        # Chinese mirror serves the rolling channels, not every `channel-rust-<v>.toml`,
+        # which is why this step used to 404 before the code was ever looked at.
+        run: ./scripts/install-toolchain.sh
 
       - name: caches
         uses: actions/cache@v4
@@ -52,10 +52,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: toolchain
-        run: |
-          rustup toolchain install "$RUST_VERSION" --profile minimal \
-            --component rustfmt --no-self-update
-          rustup default "$RUST_VERSION"
+        # Mirror first, upstream when the mirror does not carry this version — a
+        # Chinese mirror serves the rolling channels, not every `channel-rust-<v>.toml`,
+        # which is why this step used to 404 before the code was ever looked at.
+        run: ./scripts/install-toolchain.sh
       - name: artifact
         run: ./scripts/release.sh
       - uses: actions/upload-artifact@v4

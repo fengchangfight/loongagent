@@ -23,10 +23,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: toolchain
-        run: |
-          rustup toolchain install "$RUST_VERSION" --profile minimal \
-            --component rustfmt --no-self-update
-          rustup default "$RUST_VERSION"
+        # Mirror first, upstream when the mirror does not carry this version.
+        run: ./scripts/install-toolchain.sh
 
       # Gitea's cache action is optional; without it the job is slower, not wrong.
 
@@ -45,10 +43,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: toolchain
-        run: |
-          rustup toolchain install "$RUST_VERSION" --profile minimal \
-            --component rustfmt --no-self-update
-          rustup default "$RUST_VERSION"
+        # Mirror first, upstream when the mirror does not carry this version.
+        run: ./scripts/install-toolchain.sh
       - name: artifact
         run: ./scripts/release.sh
       - name: artifact

@@ -44,4 +44,17 @@ else
 fi
 
 rustup default "$version"
+
+# `rust-toolchain.toml` pins the *channel* (`stable`) so a developer's machine needs no
+# network — and a toolchain file outranks the default, so inside this repository the
+# default we just set was never the one that ran: rustup resolved `stable` instead and
+# auto-installed it on top. Two downloads, and the version pin the workflow promises was
+# not actually in force. A directory override outranks the file.
+#
+# Only CI gets the override: somebody running this by hand should not find their
+# checkout silently pinned to a toolchain they did not ask for.
+if [ -n "${CI:-}" ]; then
+  rustup override set "$version"
+fi
+
 rustc --version

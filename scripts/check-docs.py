@@ -24,9 +24,17 @@ import re
 import subprocess
 import sys
 
+
+class CheckError(Exception):
+    """The check cannot run at all; main turns this into a one-line failure."""
+
+
 # The three URL forms a markdown link may use without naming a file here, and
 # the fragment form, which points inside the current document.
 SKIPPED_SCHEMES = ("http:", "https:", "mailto:")
+
+# A blank line — any run of spaces or tabs on it — ends a paragraph.
+BLANK_LINE = re.compile(r"\n[ \t]*\n")
 
 # [text](target) and ![alt](target). Targets never contain an unbalanced
 # bracket in this repository; the plan and the craft documents do not use
@@ -58,7 +66,8 @@ def tracked_markdown(root: str) -> list[str]:
         text=True,
     )
     if listing.returncode != 0:
-        raise RuntimeError(listing.stderr.strip() or "git ls-files failed")
+        reason = " ".join(listing.stderr.split()) or "failed"
+        raise CheckError(f"git ls-files in {root}: {reason}")
     return listing.stdout.split()
 
 
@@ -67,35 +76,68 @@ def _blank(text: str) -> str:
     return "".join(c if c == "\n" else " " for c in text)
 
 
+def _opening_fence(line: str) -> tuple[str, int] | None:
+    """(character, run length) if line opens a fenced block, else None."""
+    stripped = line.lstrip(" ")
+    if len(line) - len(stripped) > 3 or stripped[:3] not in ("```", "~~~"):
+        return None
+    return stripped[0], _run(stripped, stripped[0])
+
+
+def _run(text: str, character: str) -> int:
+    """How many times character starts text."""
+    return len(text) - len(text.lstrip(character))
+
+
+def _closing_fence(line: str, fence: tuple[str, int]) -> bool:
+    """At least as long a run of the same character, and nothing else on it."""
+    character, length = fence
+    stripped = line.lstrip(" ")
+    run = _run(stripped, character)
+    return run >= length and stripped[run:].strip() == ""
+
+
+def _fence_name(fence: tuple[str, int]) -> str:
+    """A fence named unambiguously: a run of a character, spelled out."""
+    character, length = fence
+    return f"{length} x {character!r}"
+
+
 def code_free(text: str) -> str:
     """A copy of text with fenced blocks and inline code spans blanked out.
 
     A document is allowed to *show* a link without owning it — the plan for
     this very check contains `[text](target)` inside code spans — so code is
-    removed before any target is looked for. Blanks keep every line number.
+    removed before any target is looked for. Blanks keep every line number, so
+    masking can never *hide* a link silently: a fence left open at end of file
+    is an error rather than a licence to blank the rest of the document.
     """
     lines = text.split("\n")
     out: list[str] = []
-    fence: str | None = None
-    for line in lines:
-        stripped = line.lstrip(" ")
-        indent = len(line) - len(stripped)
-        # The opening fence is at most three spaces in and is a run of one
-        # character; the closing one only has to be at least as long.
-        if fence is None and indent <= 3 and stripped[:3] in ("```", "~~~"):
-            fence = stripped[0] * (len(stripped) - len(stripped.lstrip(stripped[0])))
-            out.append(_blank(line))
-            continue
+    fence: tuple[str, int] | None = None
+    fence_line = 0
+    for number, line in enumerate(lines, 1):
         if fence is None:
+            fence = _opening_fence(line)
+            if fence is not None:
+                fence_line = number
+                out.append(_blank(line))
+                continue
             out.append(line)
         else:
-            # A closing fence is the same character, at least as long.
-            if stripped.startswith(fence) and stripped[len(fence) :].strip() == "":
+            if _closing_fence(line, fence):
                 fence = None
             out.append(_blank(line))
+    if fence is not None:
+        raise CheckError(
+            f"line {fence_line} opens a fence of {_fence_name(fence)} and it is never "
+            "closed; everything after it would be ignored."
+        )
 
     # Inline spans, run by run: `x`, ``x``, and so on. A run is closed by a run
-    # of the same length, which is what CommonMark does.
+    # of the same length inside the same paragraph — CommonMark forbids an
+    # inline span from crossing a blank line, and without that bound one stray
+    # backtick would swallow every link down to the next one.
     joined = "\n".join(out)
     chars = list(joined)
     i = 0
@@ -106,7 +148,19 @@ def code_free(text: str) -> str:
         run = 1
         while i + run < len(joined) and joined[i + run] == "`":
             run += 1
-        closer = joined.find("`" * run, i + run)
+        # A blank line, not the end of the document, is where a span must stop.
+        paragraph_break = BLANK_LINE.search(joined, i)
+        bound = paragraph_break.start() + 1 if paragraph_break else len(joined)
+        # The closer run must have the same length, so skip past longer runs.
+        closer = i + run
+        while True:
+            closer = joined.find("`" * run, closer, bound)
+            if closer == -1:
+                break
+            after = closer + run
+            if after >= len(joined) or joined[after] != "`":
+                break
+            closer = after
         if closer == -1:
             i += run
             continue
@@ -126,6 +180,24 @@ def find_links(text: str) -> list[tuple[int, str]]:
     return found
 
 
+def check_one_link(root: str, name: str, line: int, target: str) -> str | None:
+    """A failure line if this target names nothing that exists, else None."""
+    # Markdown may wrap a target in angle brackets; titles are not used in this
+    # repository, and a bare space in a target is a typo.
+    if target.startswith("<") and target.endswith(">"):
+        target = target[1:-1].strip()
+    if not target or target.startswith(("#",) + SKIPPED_SCHEMES):
+        return None
+    # A fragment points inside a document this link already names.
+    destination = target.split("#", 1)[0]
+    if not destination:
+        return None
+    resolved = os.path.normpath(os.path.join(os.path.dirname(os.path.join(root, name)), destination))
+    if os.path.exists(resolved):
+        return None
+    return f"FAIL {name}:{line}: {target} does not exist"
+
+
 def check_links(root: str) -> list[str]:
     """Every relative link in every tracked document must resolve."""
     broken = []
@@ -133,34 +205,37 @@ def check_links(root: str) -> list[str]:
         path = os.path.join(root, name)
         with open(path, encoding="utf-8") as handle:
             text = handle.read()
-        for line, target in find_links(text):
-            # Markdown may wrap a target in angle brackets; titles are not used
-            # in this repository, and a bare space in a target is a typo.
-            if target.startswith("<") and target.endswith(">"):
-                target = target[1:-1].strip()
-            if not target or target.startswith(("#",) + SKIPPED_SCHEMES):
-                continue
-            # A fragment points inside a document this link already names.
-            destination = target.split("#", 1)[0]
-            if not destination:
-                continue
-            resolved = os.path.normpath(os.path.join(os.path.dirname(path), destination))
-            if not os.path.exists(resolved):
-                broken.append(f"FAIL {name}:{line}: {target} does not exist")
+        try:
+            links = find_links(text)
+        except CheckError as error:
+            # A document whose own markdown cannot be read is a failure, not a
+            # licence to skip it.
+            broken.append(f"FAIL {name}: {error}")
+            continue
+        for line, target in links:
+            problem = check_one_link(root, name, line, target)
+            if problem:
+                broken.append(problem)
     return broken
 
 
 def check_counts(counts_file: str | None, *, requested: bool) -> list[str]:
-    """Not written yet; the parameter is the interface a later task fills in.
+    """Not implemented yet; the parameter is the interface a later task fills.
 
-    Asked for by name without --test-counts it must be an error, not a skip: a
-    check that quietly does nothing is worse than no check. Asked for as part
-    of "all" it simply cannot run here, and "all" means all that can.
+    Until that task lands there is no counts logic at all, so even with a file
+    in hand the check must say so instead of printing OK. Asked for by name
+    without --test-counts it is an error too: a check that quietly does nothing
+    is worse than no check.
     """
     if requested and counts_file is None:
         return [
             "FAIL --check counts needs --test-counts FILE; "
             "a check that cannot read the counts must not pass silently"
+        ]
+    if counts_file is not None:
+        return [
+            "FAIL --check counts: not implemented yet; it must not report OK "
+            "while it checks nothing"
         ]
     return []
 
@@ -206,7 +281,7 @@ def main() -> int:
             problems += check_links(root)
         if "counts" in wanted:
             problems += check_counts(args.test_counts, requested=args.check == "counts")
-    except OSError as error:
+    except (CheckError, OSError) as error:
         return fail(str(error))
 
     if problems:

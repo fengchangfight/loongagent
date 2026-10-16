@@ -9,13 +9,13 @@ Usage:
     scripts/check-docs.py [--root DIR] [--check NAME] [--test-counts FILE]
 
     --root DIR          repository root (default: this script's parent)
-    --check NAME        run one check: links, crate-map, orphans, counts or all
-                        (default: all)
+    --check NAME        run one check: links, crate-map, orphans, citations,
+                        counts or all (default: all)
     --test-counts FILE  parsed test results, for the counts check
 
-Only links, crate-map and orphans exist today; later tasks add checks behind the
-same interface, which is why --check and --test-counts are already here. A check
-that is asked for and cannot run is an error, never a silent skip.
+The counts check arrives in a later task; the rest exist today behind the same
+interface, which is why --check and --test-counts are already here. A check that
+is asked for and cannot run is an error, never a silent skip.
 """
 from __future__ import annotations
 
@@ -56,7 +56,20 @@ INDEX = "docs/README.md"
 
 # Checks the file knows how to run. A name outside this set is a usage error,
 # so a typo in check.sh cannot turn a gate into a no-op.
-CHECKS = ("links", "crate-map", "orphans", "counts")
+CHECKS = ("links", "crate-map", "orphans", "citations", "counts")
+
+# An ADR is named by a four-digit number and a topic by a two-digit one. Both
+# acronyms are upper case in this repository, and both numbers are zero-padded,
+# so the match is exact rather than a prefix of some longer name.
+ADR_CITATION = re.compile(r"ADR-(\d{4})")
+TOPIC_CITATION = re.compile(r"\bT-(\d{2})\b")
+
+# An ADR file is named by the number it records, so the directory is its own
+# list of the ADRs that exist.
+ADR_FILENAME = re.compile(r"^(\d{4})-")
+
+# A topic is a `## T-NN · …` heading; the title after the number is prose.
+TOPIC_HEADING = re.compile(r"^## T-(\d{2})\b", re.MULTILINE)
 
 
 def fail(*lines: str) -> int:
@@ -399,6 +412,104 @@ def check_orphans(root: str) -> list[str]:
     return problems
 
 
+def highest_adr(root: str) -> int:
+    """The highest ADR number that exists, from the ADR filenames.
+
+    The directory is read live, so a new `docs/decisions/NNNN-*.md` raises the
+    limit by existing and no later task has to edit this check. A directory
+    with nothing matching is an error: a bound that cannot be derived would
+    wave every citation through, which is exactly the silent pass this gate
+    must never produce.
+    """
+    directory = os.path.join(root, "docs", "decisions")
+    try:
+        names = os.listdir(directory)
+    except OSError as error:
+        raise CheckError(f"docs/decisions: {error.strerror or error}") from error
+    numbers = [
+        int(match.group(1))
+        for name in names
+        if (match := ADR_FILENAME.match(name)) and name.endswith(".md")
+    ]
+    if not numbers:
+        raise CheckError(
+            "docs/decisions: no NNNN-*.md file; the highest ADR cannot be derived"
+        )
+    return max(numbers)
+
+
+def highest_topic(root: str) -> int:
+    """The highest topic number in docs/02-topics.md, from its `## T-NN` headings.
+
+    Read live for the same reason as the ADRs: the topics file will grow, and
+    the limit has to grow with it without an edit here. The file is where
+    topics are declared, so if it cannot be read, or declares none, the check
+    cannot judge a citation and says so instead of passing.
+    """
+    path = os.path.join(root, "docs", "02-topics.md")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+    except OSError as error:
+        raise CheckError(f"docs/02-topics.md: {error.strerror or error}") from error
+    numbers = [int(match.group(1)) for match in TOPIC_HEADING.finditer(text)]
+    if not numbers:
+        raise CheckError(
+            "docs/02-topics.md: no '## T-NN' heading; the highest topic cannot "
+            "be derived"
+        )
+    return max(numbers)
+
+
+def check_citations(root: str) -> list[str]:
+    """No document may cite an ADR or a topic that does not exist.
+
+    What this catches, exactly:
+
+      * `ADR-NNNN` above the highest ADR file in docs/decisions/, and `T-NN`
+        above the highest `## T-NN` heading in docs/02-topics.md.
+
+    What it does not catch, by design: a *stale* citation. `ADR-0001…ADR-0014`
+    passes even though 18 ADRs exist, because 14 is a real ADR; deciding which
+    of the real ones a paragraph should have named instead is prose judgement,
+    not a citation that points at nothing. This gate checks existence only.
+
+    Scope is every tracked .md file, the same set the links check reads: a
+    citation can rot in README.md or DEVELOPMENT.md just as easily as under
+    docs/, and a gate that read only docs/** would miss them.
+
+    Code is masked first with code_free, exactly as the links check does: a
+    document may *show* a citation without owning it, and the plan that
+    specifies this check spells out `ADR-0099` as its example. Masking keeps
+    that plan and spec under the rule that governs every other document, so a
+    bare ADR-0099 in the same prose still fails.
+    """
+    adr_limit = highest_adr(root)
+    topic_limit = highest_topic(root)
+    problems = []
+    for name in tracked_markdown(root):
+        path = os.path.join(root, name)
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+        try:
+            scan = code_free(text)
+        except CheckError as error:
+            # A document whose own markdown cannot be read is a failure, not a
+            # licence to skip it.
+            problems.append(f"FAIL {name}: {error}")
+            continue
+        limits = ((ADR_CITATION, adr_limit), (TOPIC_CITATION, topic_limit))
+        for pattern, limit in limits:
+            for match in pattern.finditer(scan):
+                if int(match.group(1)) > limit:
+                    line = scan.count("\n", 0, match.start()) + 1
+                    problems.append(
+                        f"FAIL {name}:{line}: {match.group(0)} does not exist "
+                        f"(highest is {limit})"
+                    )
+    return problems
+
+
 def check_counts(counts_file: str | None, *, requested: bool) -> list[str]:
     """Not implemented yet; the parameter is the interface a later task fills.
 
@@ -463,6 +574,8 @@ def main() -> int:
             problems += check_crate_map(root)
         if "orphans" in wanted:
             problems += check_orphans(root)
+        if "citations" in wanted:
+            problems += check_citations(root)
         if "counts" in wanted:
             problems += check_counts(args.test_counts, requested=args.check == "counts")
     except (CheckError, OSError) as error:

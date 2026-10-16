@@ -120,3 +120,29 @@ test("a path outside the workspace stays absolute so it reads as outside", () =>
   })));
   assert.match(text, /\/etc\/hostname/);
 });
+
+test("a resumed session is summarised, not replayed in full", () => {
+  const renderer = new Renderer({ cwd: CWD });
+  const events: EventEnvelope[] = [];
+  for (let i = 0; i < 20; i++) {
+    events.push(event(
+      "message.appended",
+      { role: i % 2 === 0 ? "user" : "assistant", text: `message ${i}` },
+      i + 1,
+    ));
+  }
+  events.push(event("approval.decided", { request_id: "appr-1", granted: true, scope: "once" }, 21));
+
+  const parts = renderer.resumed(events);
+  const text = textOf(parts);
+  assert.match(parts[0].text, /21/, "the first part names the event count");
+  assert.match(text, /message 18/, "the newest question is shown");
+  assert.match(text, /message 19/, "the newest answer is shown");
+  assert.doesNotMatch(text, /message 0\b/, "the whole history is not replayed");
+});
+
+test("an empty replay says so instead of rendering nothing", () => {
+  const parts = new Renderer({ cwd: CWD }).resumed([]);
+  assert.equal(parts.length, 1);
+  assert.match(parts[0].text, /no events/);
+});

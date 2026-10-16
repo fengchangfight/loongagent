@@ -105,6 +105,33 @@ export class Renderer {
   }
 
   /**
+   * What a reopened session shows: where you were, not every word ever said.
+   *
+   * The chat's transcript belongs to the window; the session belongs to the log
+   * (spec §4.6). So this is a card, not a replay.
+   */
+  resumed(events: EventEnvelope[]): UiPart[] {
+    if (events.length === 0) {
+      return [{ kind: "markdown", text: "Resumed session — the log has no events yet." }];
+    }
+    const newest = (role: string): string | undefined => {
+      for (let index = events.length - 1; index >= 0; index--) {
+        const envelope = events[index];
+        if (envelope.kind !== EVENTS.messageAppended) continue;
+        const message = envelope.data as unknown as MessageAppended;
+        if (message.role === role) return message.text;
+      }
+      return undefined;
+    };
+    const lines = [`Resumed session — ${events.length} events in the log.`];
+    const asked = newest("user");
+    const answered = newest("assistant");
+    if (asked !== undefined) lines.push(`\n**You last said:** ${asked}`);
+    if (answered !== undefined) lines.push(`\n**The agent last said:** ${answered}`);
+    return [{ kind: "markdown", text: lines.join("\n") }];
+  }
+
+  /**
    * Every path this turn mentioned.
    *
    * "Mentioned", not "modified": a read mentions a path too. The caller that

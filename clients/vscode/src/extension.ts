@@ -89,8 +89,8 @@ async function startFreshSession(
   output: vscode.OutputChannel,
 ): Promise<void> {
   try {
-    const session = await agent.ensure();
-    const id = await session.newSession();
+    // Through the agent, so the new id is remembered for the next window.
+    const id = await agent.startFresh();
     output.appendLine(`ready: new session ${id}`);
     stream.markdown(`Started a new session: \`${id}\`.`);
   } catch (error) {
@@ -118,6 +118,10 @@ async function runTurn(
 
   const renderer = new Renderer({ cwd: folder.uri.fsPath });
   renderer.beginTurn();
+  // A reopened session says where you were, once per activation: the chat's
+  // transcript belongs to the window, the session belongs to the log.
+  const resume = agent.takeResumeEvents();
+  if (resume !== undefined) emit(stream, renderer.resumed(resume));
   const from = session.events.length;
   let controller: TurnController;
   try {

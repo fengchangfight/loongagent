@@ -100,9 +100,10 @@ swapped can hide (ADR-0004):
    none may append directly (ADR-0006).
 4. **The PDP** — policy decisions happen in the kernel at the single tool
    chokepoint, returning allow / ask / deny **plus the rule that fired**;
-   enforcement lives at the OS (ADR-0007) — Landlock, with bubblewrap as a
-   fallback, on Linux today; seatbelt and Job Objects are decided, not built,
-   and `sandbox self-test` reports `UNAVAILABLE` where they are missing.
+   enforcement lives at the OS (ADR-0007) — Landlock on Linux today; seatbelt
+   and Job Objects are decided, not yet built. `bubblewrap` is detected and
+   named by `sandbox self-test` but not applied, and without Landlock that
+   self-test reports `UNAVAILABLE`.
 
 **Everything else is an edge:** provider adapters, protocol transformers, tools
 (built-ins included), hooks (shell / HTTP / MCP), routing strategies, WASM
@@ -141,7 +142,7 @@ concept and one loader — and configuration packs (ADR-0004).
 |---|---|
 | **Nothing hidden** — every token, decision, and cost is inspectable | Context ledger (ADR-0006) + "the rule that fired" (ADR-0007) + everything is an event (ADR-0003) |
 | **Cost is visible before it is spent** | Per-category token counts + the request's token floor (ADR-0006), fed to routing (ADR-0005); cost-affecting changes are breaking (ADR-0009) |
-| **Prompts are not permissions** | Decision in the kernel, enforcement at the OS; a sandbox bug cannot be talked away (ADR-0007) — Landlock on Linux today, seatbelt and Job Objects decided, not built |
+| **Prompts are not permissions** | Decision in the kernel, enforcement at the OS; a sandbox bug cannot be talked away (ADR-0007) — Landlock on Linux today, seatbelt and Job Objects decided, not yet built |
 | **Shared knowledge cannot escalate privilege** | Content keys are add-only; permissions, budgets, and autonomy are narrow-only and org-owned (ADR-0008, ADR-0010) |
 | **Offline is never dead** | Cached packs; the local brain decides every live call (ADR-0005, ADR-0008, ADR-0012) |
 | **Private by default** | Uplink is an allow-list; session content is not in the contract; approvals, policy, and credentials never travel (ADR-0012, ADR-0014) |

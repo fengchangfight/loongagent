@@ -760,11 +760,11 @@ git commit -m "refactor(tui-app): the wizard and the worker are not the screen"
 
 - [ ] **Step 1: Move by the spec's tree, keeping the `Raw*` structs with `from_file`**
 
-Follow the spec's §4.4 tree exactly. The one coupling that matters: `merge` consumes the private fields of the seven `Raw*` structs, so they must stay in the same module as `LayerValues::from_file` — otherwise about 40 serde fields need field-level widening. Keep the `pub use` re-exports in `lib.rs` so `loong_config::Profile` and the other public paths are unchanged, and keep a `pub(crate) use` for anything `catalog.rs`'s rustdoc links to (`catalog.rs:11` links `crate::check_secret_reference`, so a bare move would break the doc link rather than the build).
+Follow the spec's §4.4 tree exactly. Keep the `pub use` re-exports in `lib.rs` so `loong_config::Profile` and the other public paths are unchanged, and keep a `pub(crate) use` for anything `catalog.rs`'s rustdoc links to (`catalog.rs:11` links `crate::check_secret_reference`, so a bare move would break the doc link rather than the build). *Corrected during execution (Task 21):* this step named the wrong coupling. `merge` reads `LayerValues`' three private fields, not the `Raw*` structs; the real `Raw*` coupling is `profiles_from_payload`, which reads twelve private `RawModel` / `RawRouter` / `RawRule` fields, so it moves with `LayerValues::from_file` into `layer.rs`. Nothing about the `Raw*` fields changed. The instruction's *conclusion* — keep them together — survived by accident, which is the only reason it did no harm.
 
 - [ ] **Step 2: All four proofs, plus the public surface**
 
-Additionally: snapshot the public item paths of `loong_config` before and after (rustdoc JSON or `cargo public-api`) and require them identical. Then commit.
+Additionally: snapshot the public item paths of `loong_config` before and after and require them identical. *Corrected during execution (Task 21):* this said "rustdoc JSON or `cargo public-api`", and **neither is available in this environment** — there is no `cargo public-api` and no nightly toolchain (the rustup directory is read-only). Task 21 substituted two checks that do test the claim: `cargo doc` output for the crate before and after (the 29 root item pages, `sidebar-items.js` and `all.html` byte-identical), and the item tool's own output filtered to `vis == pub`, which it can do because every line carries a visibility column (45 of 45 public items present with identical hashes). Do not promise a tool without checking it exists.
 
 ```bash
 git add crates/config/src/

@@ -188,7 +188,7 @@ dedented block and `cargo fmt --check` is a gate (§4.4 has the corrected standa
 | `crates/cli/src/main.rs` | 6 924 | `main.rs` ≈640 (doc, `use`, `USAGE`, `main`, `Args` + `impl Args`, `config_dir`, `run`) plus `control`, `session`, `context`, `server`, `tui`, `local`, `web`, `repl`, `mcp`, `config_cmd`, `plugin`, `hooks`, `sandbox`, `headless` | ~61 items `pub(crate)`; a binary crate, so nothing is exported |
 | `crates/tui-app/src/lib.rs` | 7 661 | `tests.rs` (3 734 lines, `#[cfg(test)] mod tests;`) plus `worker`, `setup`, `wizard`, `surface`; `lib.rs` ≈2 520 | 2 items `pub(super)`, plus `pub use` re-exports keeping every existing path |
 | `crates/kernel/src/turn.rs` | 6 509 | `turn.rs` (≈340) plus `turn/{build,confinement,hooks,session,model,loop,compaction,events,recall,nudge,tests}.rs` | ~16 items `pub(super)`, because the write spine stays in the parent; ≈30 if it were moved too |
-| `crates/config/src/lib.rs` | 3 155 | `lib.rs` (≈190, keeps the `pub use` re-exports) plus `{profile,layer,secret,paths,merge,tests}.rs` | ~8–10 items `pub(super)` |
+| `crates/config/src/lib.rs` | 3 155 | `lib.rs` (131 in the event: the `pub use` re-exports plus the `Profile` and `LayerValues` structs, because only their impls move) plus `{profile,layer,secret,paths,merge,tests}.rs` | 9 items `pub(super)` |
 
 Three facts make this mechanical rather than invasive:
 
@@ -200,8 +200,16 @@ Three facts make this mechanical rather than invasive:
   `fire_hooks`, `tool_specs`; in `cli`, `Args`, `impl Args`, `PackState`, `USAGE`, `run`. This is
   what keeps the visibility budget at ~16 rather than ~30 for the kernel.
 - `loong_config`'s `Raw*` structs (7 types, ~40 serde fields) must stay in the same module as
-  `LayerValues::from_file`, because `merge` consumes their private fields. Same-module placement is
-  the whole reason no field-level widening is needed.
+  `profiles_from_payload`, which reads twelve of their private fields. Same-module placement is the
+  whole reason no field-level widening is needed. *Corrected during execution (Task 21):* this said
+  "because `merge` consumes their private fields". `merge` reads `LayerValues`' three private fields
+  instead, and the real coupling is `profiles_from_payload`; the conclusion happened to be right and
+  the reason was not.
+- **Field-level widening is not merely discouraged here; it is unrepresentable in the evidence.**
+  The item tool's field 6 strips only an item's *own* visibility, so a widened struct field would
+  compare as CHANGED and fail — Task 21 demonstrated this with a probe. That is a happy accident rather
+  than a design: a private field declared in the parent is visible to the parent's descendants, so the
+  splits never need field widening, and the tool would refuse one if they did.
 
 `crates/kernel/src/lib.rs` and the `pub use` shape of `loong_config` and `loong_tui_app` are
 unchanged, so all external call sites — including the 12 `loong_tui_app::X` uses inside the CLI —

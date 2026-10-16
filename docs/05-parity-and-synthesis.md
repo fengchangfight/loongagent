@@ -183,6 +183,8 @@ rows below are what "not losing" means concretely.
 | D8 | Vector DB in v1 | Structural retrieval first (ADR-0006/T-15) |
 | D9 | Marketplace in v1 | Signed internal catalog later; git-URL installs at project/user layers |
 | D10 | Server-side live **routing** — and the model ceilings and task-class policy it would carry | The local brain decides every live call and the server never routes; the server learns and ships policy packs only (ADR-0005) |
+| D11 | Hidden **context injection** — anything reaching the model that the user cannot see or review | The context ledger is the only write path and there is no side channel to the model: plugins, MCP servers, skills, hooks and subagents may only *propose* entries (ADR-0006) |
+| D12 | Session **merge** — reconciling two session logs into one | There is no sync, so there is nothing to merge; import keeps the original id when it is absent locally and records `importedFrom` on collision (ADR-0014 §5) |
 
 ---
 

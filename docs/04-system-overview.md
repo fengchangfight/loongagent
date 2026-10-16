@@ -153,24 +153,11 @@ concept and one loader — and configuration packs (ADR-0004).
 
 ## 6. What we deliberately do **not** do
 
-Each of these was decided, not forgotten:
-
-- **No multi-user live sessions** — no co-watching, co-steering, or cross-user
-  session viewing. Collaboration is git-shared rules and knowledge (ADR-0010).
-- **No session sync service** — the backend never holds session state.
-  Continuity is a **file you move**: export/import (ADR-0012 §6, ADR-0014).
-- **No scheduler, no cross-user or scheduled orchestration, no cloud runners** —
-  no use case yet. Local orchestration is the parent agent's visible plan
-  (ADR-0011).
-- **No desktop app and no CI surface** — dropped as product surfaces; a headless
-  mode may exist internally (ADR-0009).
-- **No editor fork** — be the agent other editors talk to, via ACP (ADR-0009).
-- **No vector DB in v1** — structural retrieval first: grep/symbols → repo map →
-  explore subagent, all entering through the ledger (ADR-0006).
-- **No hidden injections, ever** — if it cannot be described as a ledger entry,
-  it cannot reach the model (ADR-0006).
-- **No merge** — with no sync, there is nothing to merge, so there is no merge
-  to get wrong (ADR-0014).
+The decisions this project has made to refuse something — each with the reason
+and the ADR behind it — are kept together in
+[05-parity-and-synthesis.md](05-parity-and-synthesis.md) §D. They live there
+rather than here so that a decision already made is not re-argued from a
+shorter copy of itself.
 
 ---
 

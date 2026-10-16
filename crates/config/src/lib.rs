@@ -25,9 +25,10 @@
 //! the same provenance principle as the context ledger and the PDP's "rule that
 //! fired".
 //!
-//! **What is not here:** signed org packs (ADR-0008 §6). The org layer resolves
-//! like any other file today; the signature check that makes it tamper-resistant
-//! is not implemented, so nothing should describe it as enforced.
+//! **What is not here:** signing. This crate reads the org layer's *local* file,
+//! and that file has no signature. What brings org policy is the pack envelope,
+//! and it is signed and verified against a pinned key before it can occupy the
+//! `control` layer (ADR-0016); neither is the file this module reads.
 
 pub mod catalog;
 

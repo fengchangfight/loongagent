@@ -9,18 +9,20 @@ Usage:
     scripts/check-docs.py [--root DIR] [--check NAME] [--test-counts FILE]
 
     --root DIR          repository root (default: this script's parent)
-    --check NAME        run one check: links, crate-map, counts or all (default: all)
+    --check NAME        run one check: links, crate-map, orphans, counts or all
+                        (default: all)
     --test-counts FILE  parsed test results, for the counts check
 
-Only --check links and --check crate-map exist today; later tasks add checks
-behind the same interface, which is why --check and --test-counts are already
-here. A check that is asked for and cannot run is an error, never a silent skip.
+Only links, crate-map and orphans exist today; later tasks add checks behind the
+same interface, which is why --check and --test-counts are already here. A check
+that is asked for and cannot run is an error, never a silent skip.
 """
 from __future__ import annotations
 
 import argparse
 import difflib
 import os
+import posixpath
 import re
 import subprocess
 import sys
@@ -42,9 +44,19 @@ BLANK_LINE = re.compile(r"\n[ \t]*\n")
 # reference-style links.
 LINK = re.compile(r"!?\[[^\]]*\]\(([^)]*)\)")
 
+# The first cell of a table row, which the index uses in two forms: a link
+# (`| [crate-map.md](crate-map.md) |`) or a bare relative path (`| decisions/ |`).
+# Both name something; only the first is a link.
+TABLE_ROW = re.compile(r"^[ \t]*\|[ \t]*([^|\n]+?)[ \t]*(?=\|)", re.MULTILINE)
+
+# The one document allowed to list the others, and so the only one the orphans
+# check reads. It is itself the index: it must not need a row about itself, and
+# a missing index is an error rather than a list of orphans it cannot judge.
+INDEX = "docs/README.md"
+
 # Checks the file knows how to run. A name outside this set is a usage error,
 # so a typo in check.sh cannot turn a gate into a no-op.
-CHECKS = ("links", "crate-map", "counts")
+CHECKS = ("links", "crate-map", "orphans", "counts")
 
 
 def fail(*lines: str) -> int:
@@ -267,6 +279,126 @@ def check_crate_map(root: str) -> list[str]:
     ]
 
 
+def docs_markdown(root: str) -> list[str]:
+    """Every .md under docs/ that git would carry, in git's order.
+
+    Tracked *and* untracked-but-not-ignored: the orphan rule is about a
+    document existing without a row in the index, and a writer who saves a new
+    document sees that the moment it exists, not at the next commit. Ignored
+    files are excluded, so a local scratch pile under docs/ is not a gate
+    failure; the other checks keep to tracked files, which are the ones a
+    committed link can actually rot.
+    """
+    listing = subprocess.run(
+        ["git", "-C", root, "ls-files", "--cached", "--others",
+         "--exclude-standard", "--", "docs"],
+        capture_output=True,
+        text=True,
+    )
+    if listing.returncode != 0:
+        reason = " ".join(listing.stderr.split()) or "failed"
+        raise CheckError(f"git ls-files -- docs in {root}: {reason}")
+    return [name for name in listing.stdout.split() if name.endswith(".md")]
+
+
+def indexed_targets(root: str) -> set[str]:
+    """Every repository-relative path the index names, however it names it.
+
+    Two ways of naming are read, because this index uses both. A markdown link
+    target (`[crate-map.md](crate-map.md)`) is one. The other is the first cell
+    of a table row that holds a bare relative path instead of a link, which is
+    how the index lists the directory rows: `| decisions/ |`, `| research/ |`.
+    Only table rows are read for the second form, so a directory merely
+    *mentioned* in a sentence or in a later cell is a mention, not a row.
+    """
+    path = os.path.join(root, *INDEX.split("/"))
+    try:
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+    except OSError as error:
+        raise CheckError(f"{INDEX}: {error.strerror or error}") from error
+    try:
+        # find_links raises on a fence left open in the index, which would hide
+        # the rest of the rows; a target list that cannot be trusted is an
+        # error, never a shorter list of indexed documents.
+        links = find_links(text)
+    except CheckError as error:
+        raise CheckError(f"{INDEX}: {error}") from error
+
+    targets: set[str] = {match.group(1).strip() for match in TABLE_ROW.finditer(text)}
+    targets.update(target for _, target in links)
+
+    indexed: set[str] = set()
+    for target in targets:
+        if target.startswith("<") and target.endswith(">"):
+            target = target[1:-1].strip()
+        if not target or target.startswith(("#",) + SKIPPED_SCHEMES):
+            continue
+        destination = target.split("#", 1)[0]
+        if not destination:
+            continue
+        # Paths in a document are URLs, so they use "/" on every platform;
+        # resolve them on POSIX rather than with the host's separator.
+        own = posixpath.normpath(posixpath.join("docs", destination))
+        if own == "docs" or own.startswith("docs/"):
+            indexed.add(own)
+    return indexed
+
+
+def check_orphans(root: str) -> list[str]:
+    """Every .md under docs/ must be reachable from the one index.
+
+    The rule, exactly:
+
+      * A document is indexed when its repository-relative path is named in
+        docs/README.md — that is, the path is one of the index's link targets,
+        or the bare relative path in the first cell of one of its table rows.
+        docs/README.md itself is the index and is not required to list itself.
+      * Otherwise the document is indexed when the first path segment below
+        docs/ is named there. So a row naming `superpowers/` indexes every
+        document anywhere under docs/superpowers/, at any depth, and a row
+        naming `decisions/` indexes the 18 ADRs. This is the deliberate broad
+        case: it is why one row covers a whole subtree, and why a new file in
+        an already-indexed subtree does not need a new row.
+      * A document at the root of docs/ has no such first directory, so
+        docs/00-vision.md is indexed only by being named itself.
+
+    Matching is a case-sensitive, exact comparison of normalised
+    repository-relative paths: no prefix or substring matching, so `docs/research/`
+    never covers `docs/research-notes/x.md`. The set is built from the index as
+    it actually is — markdown link targets plus table row first cells — because
+    this index writes directory rows bare (`| decisions/ |`) and file rows as
+    links, and both name a document.
+    """
+    indexed = indexed_targets(root)
+    problems = []
+    for name in docs_markdown(root):
+        if not name.startswith("docs/") or not name.endswith(".md"):
+            continue
+        if name == INDEX:
+            continue
+        if name in indexed:
+            continue
+        # The first directory below docs/: "superpowers" for
+        # docs/superpowers/plans/x.md, None for a file at the root of docs/.
+        rest = name[len("docs/"):]
+        first = rest.split("/", 1)[0] if "/" in rest else None
+        # A row may name that directory with or without its trailing slash.
+        if first is not None and (
+            f"docs/{first}/" in indexed or f"docs/{first}" in indexed
+        ):
+            continue
+        if first is None:
+            hint = f"add a row naming {name}"
+        else:
+            hint = (
+                f"add a row naming it, or a row naming docs/{first}/, which "
+                "covers everything under it"
+            )
+        problems.append(f"FAIL {name}: not indexed in {INDEX}; {hint}")
+    return problems
+
+
 def check_counts(counts_file: str | None, *, requested: bool) -> list[str]:
     """Not implemented yet; the parameter is the interface a later task fills.
 
@@ -329,6 +461,8 @@ def main() -> int:
             problems += check_links(root)
         if "crate-map" in wanted:
             problems += check_crate_map(root)
+        if "orphans" in wanted:
+            problems += check_orphans(root)
         if "counts" in wanted:
             problems += check_counts(args.test_counts, requested=args.check == "counts")
     except (CheckError, OSError) as error:

@@ -1,7 +1,7 @@
 # 00 — Vision
 
 - **Status:** Draft
-- **Last updated:** 2026-09-26
+- **Last updated:** 2026-10-16
 
 ## Name
 
@@ -26,9 +26,11 @@ impossible merge.
 
 ## Ambition (as stated by the owner)
 
-1. **Every surface, user's choice.** Terminal TUI, desktop app, web app, IDE
-   plugin (VS Code first, others later) — same brain, multiple faces. Users pick
-   their flavor; sessions ideally roam across surfaces.
+1. **Every surface, user's choice.** The TUI, the web page, the REPL and
+   headless `run` — same brain, multiple faces; the IDE arrives as a thin ACP
+   client (the third build target). Users pick their flavor; sessions roam
+   across a machine's surfaces. Desktop and CI are not product surfaces
+   (ADR-0009).
 2. **Every engineering role.** Not just "software developer": frontend, backend,
    DevOps/SRE, QA/test, data engineering, and more. The agent should have
    role-appropriate tools, context sources, and workflows.
@@ -78,10 +80,19 @@ impossible merge.
 ## Open questions (seed list — grows during brainstorming)
 
 - [x] ~~Project name?~~ → **loongagent** (decided 2026-09-26)
-- [ ] Implementation language(s) for core vs. surfaces?
-- [ ] One shared core + thin surfaces, or surface-native apps over an API?
-- [ ] What does "support all roles" mean concretely — tool packs, personas,
-      permission profiles?
-- [ ] ~~Local-first, cloud-first, or hybrid sessions?~~ → leaning **hybrid:
-  local-capable client + rich backend control plane** (see T-05); to be
-  confirmed when T-05 is discussed in depth
+- [x] ~~Implementation language(s) for core vs. surfaces?~~ → **Rust** for the
+  kernel, the servers and the TUI; **TypeScript** for the thin web client
+  (ADR-0013)
+- [x] ~~One shared core + thin surfaces, or surface-native apps over an API?~~
+  → **one binary, always client/server** (ADR-0001); every surface is a
+  **thin client** that renders the event stream and holds zero agent logic
+  (ADR-0009 §2)
+- [x] ~~What does "support all roles" mean concretely — tool packs, personas,
+  permission profiles?~~ → **roles are data, not forked code**: a named profile
+  plus a versioned context pack (ADR-0006 §7) and per-action-class autonomy
+  offsets (ADR-0007 §4). The per-role *UX composition* itself is still T-06's
+  open work.
+- [x] ~~Local-first, cloud-first, or hybrid sessions?~~ → **local-first**: the
+  session log stays local and the backend holds no session state (ADR-0012 §6),
+  fronted by a deliberately small control plane — identity, packs, the model
+  gateway and opt-in aggregate statistics (ADR-0012; T-05)

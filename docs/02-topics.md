@@ -2,7 +2,12 @@
 
 - **Status:** Living document — append ideas as they come; promote to numbered
   design docs or ADRs when discussed.
-- **Last updated:** 2026-10-05 (E1–E4 applied: compaction heuristic §ADR-0006, hook kinds+events §ADR-0007, commands merged into skills §T-18, `ignorable` envelope §ADR-0003; T-22…T-25 added from [05-parity-and-synthesis](05-parity-and-synthesis.md))
+- **Last updated:** 2026-10-16 (statuses brought up to the decisions the ADRs
+  record: T-01…T-21 re-marked `Promoted →` or `Wanted`; T-26 added — cross-crate
+  helper duplication recorded, not consolidated. Previously 2026-10-05: E1–E4
+  applied: compaction heuristic §ADR-0006, hook kinds+events §ADR-0007, commands
+  merged into skills §T-18, `ignorable` envelope §ADR-0003; T-22…T-25 added from
+  [05-parity-and-synthesis](05-parity-and-synthesis.md))
 How this works: the owner drops raw ideas in conversation; they land here as
 topics with a one-line seed connecting them to what the research already knows
 (`research/`, `01-landscape-synthesis.md`). When a topic gets discussed in
@@ -42,9 +47,13 @@ Legend: `Seed` (captured, not yet discussed) · `Discussing` · `Promoted → <d
 
 ---
 
-## T-01 · Smart cascading model routing — `Seed`
+## T-01 · Smart cascading model routing — `Promoted → ADR-0005`
 
-Seeded 2026-09-26.
+Seeded 2026-09-26. **Execution point decided 2026-10-02 (ADR-0005):** the local
+brain makes every live routing decision; the server learns from the routing and
+escalation events reported to it and ships policy packs. Still open: the
+cascading strategy itself (fallback chains vs. escalation vs. budget-aware
+routing), the policy-pack format, and what the server counts as a bad decision.
 
 Idea: route work across models intelligently instead of one model per session.
 
@@ -61,9 +70,14 @@ Research hooks:
 - Open question: cascading = fallback chains on failure? escalation when a
   cheap model's output fails verification? budget-aware routing?
 
-## T-02 · Audit & statistics & implicit feedback loop — `Seed`
+## T-02 · Audit & statistics & implicit feedback loop — `Promoted → ADR-0003, ADR-0012`
 
-Seeded 2026-09-26.
+Seeded 2026-09-26. **Substrate decided 2026-09-30 (ADR-0003):** audit events
+and session events are one JSONL stream, and the derived SQLite index serves
+local statistics. The backend consumes the same stream for **opt-in aggregated**
+audit/statistics, under an allow-listed uplink (ADR-0012 §3/§5), and the routing
+feedback loop is that same stream (ADR-0005). Still open: which statistics are
+shown first and where the opt-in line sits.
 
 Idea: record everything the agent does, measure it, and let usage signals
 improve the system without explicit user effort.
@@ -81,9 +95,14 @@ Research hooks:
 - Tension to resolve: implicit feedback vs. our local-first promise — what
   leaves the machine must be opt-in (OpenCode's stealth-telemetry backlash).
 
-## T-03 · Deployment & ways of using (local, cloud, team sharing, cloud statistics) — `Seed`
+## T-03 · Deployment & ways of using (local, cloud, team sharing, cloud statistics) — `Promoted → ADR-0012, ADR-0010`
 
-Seeded 2026-09-26.
+Seeded 2026-09-26. **Decided 2026-10-04:** managed and self-hosted are
+*literally the same backend code* (ADR-0012 §1); team sharing is git-shared
+knowledge, not a shared live session server (ADR-0010); and the backend's whole
+job list is identity, pack distribution, the model gateway and opt-in
+statistics (ADR-0012 §5). Still open: packaging and the managed/self-hosted
+split in practice.
 
 Idea: one core, many deployment shapes — solo local, self-hosted team server,
 managed cloud — with sharing and aggregated statistics.
@@ -103,9 +122,15 @@ Research hooks:
   already trust), Codex two-phase environments (setup with secrets/internet,
   agent phase locked down), governance defaults (requester can't approve PR).
 
-## T-04 · Cost governance (anti-waste by design) — `Seed`
+## T-04 · Cost governance (anti-waste by design) — `Promoted → ADR-0005, ADR-0006, ADR-0009`
 
-Seeded 2026-09-26.
+Seeded 2026-09-26. **Mechanisms decided:** cheap-first escalation, with every
+escalation an auditable event with a reason (ADR-0005); per-category budgets and
+a token floor, visible before the call (ADR-0006 §3); org hard caps enforced as
+`deny` in the PDP so local routing cannot route around them (ADR-0007 §3); and
+cost-affecting changes treated as breaking (ADR-0009 §6). Still open: the $0
+path for trivial requests (the cheap local classifier) and the task-class policy
+layer.
 
 Owner's motivation: when firms rolled out Claude Code, bills exploded because
 engineers sent *everything* to the most expensive model — including trivial
@@ -143,7 +168,7 @@ Research hooks: T10 (cost transparency), CCR scenario routing, Amp capability
 dial, Codex enterprise `requirements.toml`, HN "agentic coding only makes sense
 through subscription billing" (BYOK users get burned — budgets are the fix).
 
-## T-05 · Rich backend / control plane (not a local-only tool) — `Seed`
+## T-05 · Rich backend / control plane (not a local-only tool) — `Promoted → ADR-0012`
 
 Seeded 2026-09-26. **Decided 2026-10-04 (ADR-0012):** the backend is
 deliberately small — identity/auth, policy & profile pack distribution, the
@@ -192,10 +217,14 @@ dependency:**
   providers anyway. Cloud workers are the explicit exception: there the code
   lives on the runner by definition.)
 
-## T-06 · Per-role UX: the "this is THE tool for me" moment — `Seed` (HIGH PRIORITY)
+## T-06 · Per-role UX: the "this is THE tool for me" moment — `Wanted` (HIGH PRIORITY)
 
 Seeded 2026-09-26. Owner emphasis: **"I cannot emphasize more about how
-important UX is for the success of this project."**
+important UX is for the success of this project."** **Direction agreed:** a role
+is a *surface + profile* composition — a named profile plus a versioned context
+pack (ADR-0006 §7) and per-action-class autonomy offsets (ADR-0007 §4) — never
+a forked product (ADR-0009). Still to design: the personas' wow moments, the
+beachhead, and the wow metrics.
 
 Idea: every role — regardless of seniority or surface preference — should get a
 strong "oh my god, this is just the tool I want" feeling. Not one average UX for
@@ -248,16 +277,20 @@ Open questions:
 - How do role profiles (T: role-specialized research) map to UX personas —
   same thing or two axes (role × seniority)?
 
-## T-07 · Model profiles, not model pickers — `Seed`
+## T-07 · Model profiles, not model pickers — `Promoted → ADR-0008, ADR-0016`
 
 Seeded 2026-09-26. **Distribution decided 2026-10-04 (ADR-0008):** the org
 layer is admin-authored in the control plane and shipped to local installs as a
 **signed, versioned pack** (same envelope as policy/context packs); the local
 install verifies the signature, caches the pack, and stays functional offline
 with the last synced version; live routing decisions remain local (ADR-0005).
-Unsigned artifacts can never occupy the org layer. Still open: profile payload
-schema, pack transport/update cadence (AQ-5), and the power-user escape-hatch
-design.
+Unsigned artifacts can never occupy the org layer. Still open: the **policy and
+context** payload schemas — the envelope is built for them, the payload schemas
+are not written (ADR-0016) — while the *profiles* payload schema **is** written
+and used to verify (`PROFILES_SCHEMA`, `crates/pack/src/lib.rs`); pack **update
+cadence** (transport is decided: HTTPS, or plain HTTP on loopback — ADR-0016
+§4); and the power-user escape-hatch design, which ADR-0016 §5 keeps a
+profile-layer feature rather than a config-layer loophole.
 
 Owner's idea: in the firm-internal context, engineers should NOT pick raw
 models/providers directly (DeepSeek here, Claude there). Instead the org packs
@@ -333,7 +366,7 @@ Design shape (to discuss):
   can plug its own without forking. Zero auth logic in the local client
   beyond token acquisition/refresh.
 
-## T-09 · Hooks & deterministic enforcement — `Seed`
+## T-09 · Hooks & deterministic enforcement — `Promoted → ADR-0007`
 
 Seeded 2026-09-30. **Veto + trust gate decided 2026-10-04 (ADR-0007):** hooks
 advise/veto at the PDP (never *are* the decider), their reasons feed back to the
@@ -361,7 +394,7 @@ agent behavior"). Open questions: hook language (shell vs in-process TS/WASM),
 sync vs async, trust gating (repo-shipped hooks caused Claude Code CVEs —
 untrusted repos must never auto-execute).
 
-## T-10 · Memory system — `Seed`
+## T-10 · Memory system — `Promoted → ADR-0006`
 
 Seeded 2026-09-30. **Write path decided 2026-10-04 (ADR-0006):**
 agent-proposed into a staging area; low-risk project facts may auto-accept;
@@ -415,9 +448,12 @@ user picks (AskUserQuestion pattern). Combined with T-13, the event tree is
 the user's x-ray into agent behavior — and with shadow git snapshots
 (synthesis T9), rewind covers both conversation and code.
 
-## T-13 · Observability: "what is the agent doing and *why*" — `Seed`
+## T-13 · Observability: "what is the agent doing and *why*" — `Promoted → ADR-0006, ADR-0007, ADR-0003`
 
-Seeded 2026-09-30.
+Seeded 2026-09-30. **Decided:** every block entering context is a typed ledger
+entry with provenance and token cost, so "why is this here?" is a query
+(ADR-0006); every policy decision records the rule that fired (ADR-0007); and
+every decision is an event in the session log (ADR-0003).
 
 Pi's founding promise, owner-endorsed: **nothing hidden, everything
 inspectable, documented session format.** Concrete requirements: verbose
@@ -476,7 +512,7 @@ run in a subagent keeping main context clean. Claude Code's evolution note:
 custom commands merged into skills — decide whether our commands and skills
 (T-18) are one mechanism or two. Layers: built-in < team < user.
 
-## T-17 · Subagents — `Seed`
+## T-17 · Subagents — `Promoted → ADR-0011`
 
 Seeded 2026-09-30. **Execution model decided 2026-10-04 (ADR-0011):**
 write-capable subagents run in their own **git worktree** (read-only ones share
@@ -495,7 +531,7 @@ general. Per-subagent model routing (T-01: cheap explore, strong build).
 OpenCode trick: denied subagents are removed from the task tool's description
 so the model never attempts them.
 
-## T-18 · Skills & marketplace — `Seed`
+## T-18 · Skills & marketplace — `Promoted → ADR-0018`
 
 Seeded 2026-09-30. **Commands merged in (2026-10-05, T-16 → here):** a
 **command is a manually-invoked skill**, not a separate concept — one loader,
@@ -505,6 +541,13 @@ convention; a legacy `commands/` directory is read as skills for
 compatibility. Two loaders and two frontmatter contracts cost more than they
 buy, and Claude Code already converged on the single concept.
 
+**Marketplace decided 2026-10-15 (ADR-0018):** content is installed from a git
+checkout by name through a curated catalogue in the binary — there is no network
+marketplace index, only skills are installed (hooks and MCP servers stay
+per-repository trust gates), and a plugin may seat named skill bodies in the
+system prompt as `bootstrap`. Still open: the firm-internal registry, trust
+tiers/signatures for third-party content, and org-approved distribution.
+
 Agent Skills open standard (Anthropic): description-only in context until
 invoked; skills bundle files/scripts and (Amp-style) their own MCP config.
 **Marketplace**: firm-internal registry first (org-approved, versioned,
@@ -512,7 +555,7 @@ auditable — Continue's "hub" concept is ownerless and ours to take); public
 registry later. Trust: skills can carry code → same trust gating as hooks
 (T-09). Tessl's post-pivot registry is proof the concept has legs.
 
-## T-19 · IDE integration via ACP — `Seed` (direction agreed in round-2 research)
+## T-19 · IDE integration via ACP — `Promoted → ADR-0009` (direction agreed in round-2 research)
 
 Seeded 2026-09-30. **Surface decision recorded 2026-10-04 (ADR-0009):** ACP is
 the third build target (after TUI and web), served by `loongagent acp` as a
@@ -540,9 +583,13 @@ specs, auto-triage when to spec at all (a bug fix ≠ 4 stories/16 criteria),
 requirement↔task traceability links; NEVER spec-as-source (Tessl's $125M
 lesson). Specs are the handoff protocol between personas (T-06/T-14).
 
-## T-21 · Layered approachability: junior-proof defaults, senior-proof depth — `Seed`
+## T-21 · Layered approachability: junior-proof defaults, senior-proof depth — `Promoted → ADR-0007, ADR-0008, ADR-0009`
 
-Seeded 2026-09-30.
+Seeded 2026-09-30. **Decided:** junior-proof defaults come from the per-action
+autonomy ladder (ADR-0007 §4); every layer is openable through monotonic config
+layers that a lower layer cannot loosen (ADR-0008); and YOLO is a visible,
+recorded opt-out (ADR-0009 §6). Self-modification covers the extension surface —
+skills, commands, rules, plugins — not the kernel (ADR-0013 §5).
 
 Owner: avoid Pi's steep learning curve. Pi converts experts but "has no
 guardrails to catch" newcomers. Resolution: **defaults carry juniors**
@@ -599,6 +646,28 @@ hit rate** in usage, `/init` and `/doctor` (generate / trim instruction files),
 `@path` imports in instruction files (depth-limited, approval-gated), and the
 description token-budget warning for skills/subagents. Individually small;
 collectively the difference between "feature-complete" and "feels finished".
+
+---
+
+## T-26 · Cross-crate helper duplication — `Seed`
+
+Seeded 2026-10-16 (navigability review §3 — **recorded, deliberately not
+fixed**). The same small helper is written again in each crate that needs it:
+
+- `now_ms` — `crates/hooks/src/run.rs` (the `pub` one),
+  `crates/eventlog/src/lib.rs` (`i64`), `crates/plugin/src/lib.rs` and
+  `crates/control/src/lib.rs`;
+- `expand_home` — `crates/plugin/src/lib.rs` and `crates/config/src/lib.rs`;
+- `first_line` — `crates/cli/src/main.rs` and
+  `crates/control/src/bin/loongagent-control.rs` (byte-identical), plus a
+  different, length-bounded third in `crates/hooks/src/run.rs`.
+
+**Not consolidated now:** one home for these means a **new shared public
+surface** — a crate or a `pub` module that each of those crates depends on — and
+that is an API change, not a tidy-up. Five ten-line functions do not justify
+one: the new dependency edge and its public commitment cost more than the
+copies do. Revisit when a sixth caller appears, or when one copy has to change
+in a way the others must follow.
 
 ---
 

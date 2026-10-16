@@ -28,13 +28,13 @@ byte difference a split may introduce is rustfmt's own reflow of the moved
 block:
 
     move_evidence.py reflow --rev REV --from-path OLD --start A --end B \
-        --dedent N --to-path NEW [--edition ED]
+        --dedent N --to-path NEW [--to-rev REV] [--edition ED]
 
 It takes lines A-B of OLD at REV, removes the N columns of indentation they had
 where they lived, formats the result with rustfmt, and requires the output to be
-byte-for-byte what NEW contains.  If it is, then every difference between the
-original block and the committed file is rustfmt's output, which is the whole of
-what this standard accepts.
+byte-for-byte what NEW contains -- NEW in the worktree, or at `--to-rev REV` when
+that is given.  If it is, then every difference between the original block and the
+new file is rustfmt's output, which is the whole of what this standard accepts.
 
 Hashing whole items rather than bodies is the point.  A moved signature (a
 parameter renamed or retyped, a `&mut` added), a dropped `pub`, a lost
@@ -68,11 +68,16 @@ dropped, because Rust's grammar makes it optional and rustfmt adds and removes
 it.  A trailing comma inside a macro token tree is *not* dropped, because a
 macro can observe it.  The one exception inside a literal is the whitespace
 after a line-continuation backslash in a string, which Rust itself discards and
-rustfmt reindents.  Everything that can change what the code means is still
-hashed: identifiers, punctuation, numbers, the contents of every string, char
-and raw-string literal, and every comment inside the item (whose own internal
-whitespace is collapsed, since rustfmt may reindent a comment but not reword
-it).  Comments *before* an item are not part of it; only `#[...]` attributes
+rustfmt reindents.  Apart from those three format-level equivalences, the whole
+item is hashed and lexed by maximal munch, so a token is never merged with its
+neighbour: identifiers (including raw identifiers such as `r#try`), numbers
+(`12` is not `1` `2`) and multi-character operators (`&&` is not `&` `&`) are
+each one token, and every token is joined back with a separator, so dropping
+whitespace can never remove a distinction.  That covers identifiers,
+punctuation, numbers, the contents of every string, char and raw-string literal,
+and every comment inside the item (whose own internal whitespace is collapsed,
+since rustfmt may reindent a comment but not reword it).  Comments *before* an
+item are not part of it; only `#[...]` attributes
 are.
 
 `mod` is the one kind hashed without its body: a module's body is a list of
@@ -128,6 +133,20 @@ _PUB = re.compile(r"\bpub\b\s*(\(([^)]*)\))?")
 
 _DELIMITER_PAIRS = {"(": ")", "[": "]", "{": "}"}
 
+# Multi-character Rust operators, longest first, so lexing is by maximal munch:
+# `&&` is one token, not two `&`; `..=` is one token, not `..` then `=`.
+_OPERATORS = tuple(
+    sorted(
+        (
+            "<<=", ">>=", "...", "..=",
+            "::", "->", "=>", "==", "!=", "<=", ">=", "&&", "||", "<<", ">>",
+            "+=", "-=", "*=", "/=", "%=", "^=", "&=", "|=", "..",
+        ),
+        key=len,
+        reverse=True,
+    )
+)
+
 
 def _blank(chars: list[str], start: int, end: int) -> None:
     """Replace [start, end) with spaces, keeping newlines so offsets survive."""
@@ -182,15 +201,19 @@ def _scan_char(text: str, start: int) -> int | None:
     return None
 
 
-def _scan_raw(text: str, start: int) -> int:
-    """`start` is the `r` of a raw string (optionally after `b`/`c`)."""
+def _raw_string_end(text: str, start: int) -> int | None:
+    """If a raw string starts at the `r` at `start`, return its end, else None.
+
+    None is what keeps `r#try` (a raw identifier) from being mistaken for a raw
+    string: the `"` must follow the hashes.
+    """
     index = start + 1
     hashes = 0
     while index < len(text) and text[index] == "#":
         hashes += 1
         index += 1
     if index >= len(text) or text[index] != '"':
-        return start + 1  # not actually a raw string; consume the `r` only
+        return None
     terminator = '"' + "#" * hashes
     close = text.find(terminator, index + 1)
     if close == -1:
@@ -200,6 +223,36 @@ def _scan_raw(text: str, start: int) -> int:
 
 def _is_ident_char(char: str) -> bool:
     return char.isalnum() or char == "_"
+
+
+def _scan_number(text: str, start: int) -> int:
+    """Return the end of the numeric literal that starts at `start`."""
+    index = start
+    length = len(text)
+    while index < length and (text[index].isdigit() or text[index] == "_"):
+        index += 1
+    if index + 1 < length and text[index] == "." and text[index + 1].isdigit():
+        index += 1
+        while index < length and (text[index].isdigit() or text[index] == "_"):
+            index += 1
+    if index < length and text[index] in "eE":
+        probe = index + 1
+        if probe < length and text[probe] in "+-":
+            probe += 1
+        if probe < length and text[probe].isdigit():
+            index = probe
+            while index < length and (text[index].isdigit() or text[index] == "_"):
+                index += 1
+    while index < length and (text[index].isalnum() or text[index] == "_"):
+        index += 1
+    return index
+
+
+def _match_operator(text: str, start: int) -> str | None:
+    for operator in _OPERATORS:
+        if text.startswith(operator, start):
+            return operator
+    return None
 
 
 def _skip_ws(text: str, start: int) -> int:
@@ -252,12 +305,17 @@ def _canon_escaped_string(raw: str) -> str:
 
 
 def tokenize(text: str) -> list[str]:
-    """Return the text's significant tokens.
+    """Return the text's significant tokens, lexed by maximal munch.
 
     Whitespace between tokens is dropped, so a move that only reindents or
-    reflows the code cannot be seen.  Literals and comments are kept as single
-    tokens: a literal's bytes (including its internal whitespace) are preserved
-    exactly, and a comment is collapsed to single spaces.
+    reflows the code cannot be seen; every token is joined back with a single
+    space, so two tokens can never merge into a third.  Identifiers (including
+    raw identifiers such as `r#try`), numbers and multi-character operators are
+    each one token -- `&&` is not `&` `&`, and `12` is not `1` `2` -- so a
+    whitespace change that alters the token sequence still changes the hash.
+    Literals and comments are single tokens: a literal's bytes (including its
+    internal whitespace) are preserved exactly, and a comment is collapsed to
+    single spaces.
     """
     tokens: list[str] = []
     index = 0
@@ -293,30 +351,29 @@ def tokenize(text: str) -> list[str]:
             continue
 
         at_prefix = not (index > 0 and _is_ident_char(text[index - 1]))
-        if at_prefix and char == "r" and index + 1 < length and text[index + 1] in '#"':
-            end = _scan_raw(text, index)
-            tokens.append(text[index:end])
-            index = end
-            continue
-        if at_prefix and char in "bc":
-            if index + 1 < length and text[index + 1] == "r" and (
-                index + 2 < length and text[index + 2] in '#"'
-            ):
-                end = _scan_raw(text, index + 1)
+        if at_prefix and char == "r":
+            end = _raw_string_end(text, index)
+            if end is not None:
                 tokens.append(text[index:end])
                 index = end
                 continue
-            if index + 1 < length and text[index + 1] == '"':
-                end = _scan_string(text, index + 1)
-                tokens.append(_canon_escaped_string(text[index:end]))
+        if at_prefix and char in "bc" and index + 1 < length and text[index + 1] == "r":
+            end = _raw_string_end(text, index + 1)
+            if end is not None:
+                tokens.append(text[index:end])
                 index = end
                 continue
-            if index + 1 < length and text[index + 1] == "'":
-                end = _scan_char(text, index + 1)
-                if end is not None:
-                    tokens.append(text[index:end])
-                    index = end
-                    continue
+        if at_prefix and char in "bc" and index + 1 < length and text[index + 1] == '"':
+            end = _scan_string(text, index + 1)
+            tokens.append(_canon_escaped_string(text[index:end]))
+            index = end
+            continue
+        if at_prefix and char in "bc" and index + 1 < length and text[index + 1] == "'":
+            end = _scan_char(text, index + 1)
+            if end is not None:
+                tokens.append(text[index:end])
+                index = end
+                continue
 
         if char == '"':
             end = _scan_string(text, index)
@@ -343,6 +400,18 @@ def tokenize(text: str) -> list[str]:
         if name:
             tokens.append(name.group(0))
             index = name.end()
+            continue
+
+        if char.isdigit():
+            end = _scan_number(text, index)
+            tokens.append(text[index:end])
+            index = end
+            continue
+
+        operator = _match_operator(text, index)
+        if operator is not None:
+            tokens.append(operator)
+            index += len(operator)
             continue
 
         tokens.append(char)
@@ -421,15 +490,16 @@ def sanitize(text: str) -> str:
         at_prefix = (char in "bcr") and not (
             index > 0 and _is_ident_char(text[index - 1])
         )
-        if at_prefix and char == "r" and index + 1 < length and text[index + 1] in '#"':
-            end = _scan_raw(text, index)
-            _blank(chars, index, end)
-            index = end
-            continue
+        if at_prefix and char == "r":
+            end = _raw_string_end(text, index)
+            if end is not None:
+                _blank(chars, index, end)
+                index = end
+                continue
 
         if at_prefix and char in "bc" and index + 1 < length and text[index + 1] == "r":
-            if index + 2 < length and text[index + 2] in '#"':
-                end = _scan_raw(text, index + 1)
+            end = _raw_string_end(text, index + 1)
+            if end is not None:
                 _blank(chars, index, end)
                 index = end
                 continue
@@ -811,13 +881,16 @@ def _reflow(
     end: int,
     amount: int,
     to_path: str,
+    to_rev: str | None,
     edition: str,
 ) -> int:
-    """Assert `rustfmt(dedent(old block))` equals the committed new file.
+    """Assert `rustfmt(dedent(old block))` equals the new file.
 
-    This is the whole of what a split is allowed to change: if the new file is
-    exactly what rustfmt makes of the old block with its old indentation
-    removed, then every difference between the two is rustfmt's own reflow.
+    The new side is `--to-path` in the worktree unless `--to-rev` names a
+    revision, in which case it is `git show REV:<path>`.  This is the whole of
+    what a split is allowed to change: if the new file is exactly what rustfmt
+    makes of the old block with its old indentation removed, then every
+    difference between the two is rustfmt's own reflow.
     """
     old_lines = _read_source(root, rev, from_path).split("\n")
     if not 1 <= start <= end <= len(old_lines):
@@ -848,21 +921,20 @@ def _reflow(
     finally:
         os.unlink(handle.name)
 
-    committed = _read_source(root, None, to_path)
-    if formatted == committed:
-        print(
-            f"reflow: rustfmt(dedent({from_path}:{start}-{end})) == {to_path}"
-        )
+    where = to_path if to_rev is None else f"{to_rev}:{to_path}"
+    actual = _read_source(root, to_rev, to_path)
+    if formatted == actual:
+        print(f"reflow: rustfmt(dedent({from_path}:{start}-{end})) == {where}")
         return 0
     sys.stderr.write(
         f"move_evidence: reflow check failed: rustfmt(dedent({from_path}:"
-        f"{start}-{end})) is not {to_path}\n"
+        f"{start}-{end})) is not {where}\n"
     )
     diff = difflib.unified_diff(
         formatted.split("\n"),
-        committed.split("\n"),
+        actual.split("\n"),
         fromfile=f"rustfmt(dedent({from_path}:{start}-{end}))",
-        tofile=to_path,
+        tofile=where,
         lineterm="",
     )
     for line in diff:
@@ -910,6 +982,11 @@ def main(argv: list[str] | None = None) -> int:
     reflow.add_argument("--dedent", metavar="N", type=int, default=0,
                         help="columns of indentation the block had where it lived")
     reflow.add_argument("--to-path", metavar="PATH", required=True)
+    reflow.add_argument(
+        "--to-rev",
+        metavar="REV",
+        help="read the new file from this revision instead of the worktree",
+    )
     reflow.add_argument("--edition", metavar="ED", default="2021")
 
     args = parser.parse_args(argv)
@@ -954,6 +1031,7 @@ def main(argv: list[str] | None = None) -> int:
             args.end,
             args.dedent,
             args.to_path,
+            args.to_rev,
             args.edition,
         )
     return 2

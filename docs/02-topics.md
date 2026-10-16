@@ -180,6 +180,12 @@ allow-list with session bodies excluded; the model gateway is the one residual
 concentration point, avoidable by self-hosting (T-03). Still open: the auth
 protocol (T-08), rollup schema/retention, and packaging.
 
+**Rejected (ADR-0005):** the original **routing & policy brain** — live routing,
+model ceilings and task-class policy decided *server-side* — is refused, not
+deferred: the local brain makes every live call and the server never routes. It
+is recorded with the deliberate "no"s in
+[05-parity-and-synthesis](05-parity-and-synthesis.md) §D so it is not re-argued.
+
 Owner's idea: loongagent is **not a local-only tool**. There should be a rich
 backend that local clients *smartly* communicate with — handling audit,
 statistics, cascading/routing decisions, and other smart orchestration work
@@ -197,7 +203,7 @@ What the backend could own (to discuss):
   team knowledge, session sync across the user's devices and surfaces.
   **Cross-user and scheduled orchestration dropped for now** (owner,
   2026-10-04: no use case — see AQ-10); personal cross-device session sync is
-  still an open sub-question.
+  **not built** (ADR-0012 §6; export/import is the continuity path, ADR-0014).
 - **Identity**: the account as the rendezvous between surfaces (Codex's lesson:
   identity, not file sync, is the coordination mechanism).
 
@@ -652,7 +658,8 @@ collectively the difference between "feature-complete" and "feels finished".
 ## T-26 · Cross-crate helper duplication — `Seed`
 
 Seeded 2026-10-16 (navigability review §3 — **recorded, deliberately not
-fixed**). The same small helper is written again in each crate that needs it:
+fixed**). Five small helpers are written again in each crate that needs them —
+thirteen definitions in all:
 
 - `now_ms` — `crates/hooks/src/run.rs` (the `pub` one),
   `crates/eventlog/src/lib.rs` (`i64`), `crates/plugin/src/lib.rs` and
@@ -660,14 +667,17 @@ fixed**). The same small helper is written again in each crate that needs it:
 - `expand_home` — `crates/plugin/src/lib.rs` and `crates/config/src/lib.rs`;
 - `first_line` — `crates/cli/src/main.rs` and
   `crates/control/src/bin/loongagent-control.rs` (byte-identical), plus a
-  different, length-bounded third in `crates/hooks/src/run.rs`.
+  different, length-bounded third in `crates/hooks/src/run.rs`;
+- `truncate` — `crates/context/src/store.rs` and `crates/tui/src/lib.rs`;
+- `clip` — `crates/tui-app/src/lib.rs` (columns, CJK-aware) and
+  `crates/cli/src/main.rs` (characters).
 
 **Not consolidated now:** one home for these means a **new shared public
 surface** — a crate or a `pub` module that each of those crates depends on — and
-that is an API change, not a tidy-up. Five ten-line functions do not justify
-one: the new dependency edge and its public commitment cost more than the
-copies do. Revisit when a sixth caller appears, or when one copy has to change
-in a way the others must follow.
+that is an API change, not a tidy-up. Thirteen definitions of five ten-line
+helpers do not justify one: the new dependency edge and its public commitment
+cost more than the copies do. Revisit when a sixth caller appears, or when one
+copy has to change in a way the others must follow.
 
 ---
 

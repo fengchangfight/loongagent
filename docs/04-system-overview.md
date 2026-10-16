@@ -214,7 +214,7 @@ and avoidable by self-hosting (T-03).
 |---|---|
 | [00-vision.md](00-vision.md) | Mission, ambition, principles |
 | [01-landscape-synthesis.md](01-landscape-synthesis.md) | Cross-tool synthesis and the T1–T10 design tensions |
-| [02-topics.md](02-topics.md) | Idea backlog (T-01…T-25) and the owner's coverage map |
+| [02-topics.md](02-topics.md) | Idea backlog (T-01…T-26) and the owner's coverage map |
 | [03-architecture.md](03-architecture.md) | The question-by-question decision record (AQ-1…AQ-12) |
 | **04-system-overview.md** | **This document — the current picture** |
 | [`decisions/`](decisions/) | ADRs 0001–0018: the authoritative answers |

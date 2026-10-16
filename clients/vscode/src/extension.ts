@@ -111,10 +111,19 @@ export function activate(context: vscode.ExtensionContext): void {
     return made;
   };
 
-  context.subscriptions.push(
-    vscode.chat.createChatParticipant(PARTICIPANT_ID, (request, _chat, stream, token) =>
-      handleRequest(request, stream, token, output, agentFor)),
+  const participant = vscode.chat.createChatParticipant(
+    PARTICIPANT_ID,
+    (request, _chat, stream, token) => handleRequest(request, stream, token, output, agentFor),
   );
+  // Two, and only two: a menu nobody reads is worse than no menu. The diffs are
+  // the button above, because a follow-up cannot carry the turn's file list.
+  participant.followupProvider = {
+    provideFollowups: () => [
+      { prompt: "Explain what you just did, and why.", label: "Explain this" },
+      { prompt: "Review the changes you just made and tell me what to check.", label: "Review the changes" },
+    ],
+  };
+  context.subscriptions.push(participant);
 
   context.subscriptions.push(
     vscode.workspace.onDidGrantWorkspaceTrust(() =>
@@ -172,10 +181,11 @@ async function handleRequest(
       return startFreshSession(agent, stream, output);
     case "yolo":
       return toggleAutoApprove(agent, stream, output, folder);
+    // eslint-disable-next-line no-fallthrough
     case "model":
+      return chooseModel(agent, stream, output);
     case "context":
-      stream.markdown(`/${request.command} is ${NOT_YET}.`);
-      return;
+      return showContext(agent, stream, output);
     default:
       return runTurn(request, stream, token, output, agent, folder);
   }
@@ -244,6 +254,44 @@ async function toggleAutoApprove(
   }
 }
 
+async function chooseModel(
+  agent: WorkspaceAgent,
+  stream: vscode.ChatResponseStream,
+  output: vscode.OutputChannel,
+): Promise<void> {
+  try {
+    const session = await agent.ensure();
+    const before = await session.models();
+    const picked = await vscode.window.showQuickPick(
+      before.models.map((offering) => ({
+        label: offering.name,
+        description: offering.model,
+        picked: offering.name === before.selected,
+      })),
+      { title: "Model for this session" },
+    );
+    if (picked === undefined) return;
+    emit(stream, new Renderer({ cwd: "" }).models(await session.selectModel(picked.label)));
+  } catch (error) {
+    stream.markdown(`I could not change the model: ${explain(error)}`);
+    output.appendLine(`failed: ${explain(error)}`);
+  }
+}
+
+async function showContext(
+  agent: WorkspaceAgent,
+  stream: vscode.ChatResponseStream,
+  output: vscode.OutputChannel,
+): Promise<void> {
+  try {
+    const session = await agent.ensure();
+    emit(stream, new Renderer({ cwd: "" }).context(await session.context()));
+  } catch (error) {
+    stream.markdown(`I could not read the context: ${explain(error)}`);
+    output.appendLine(`failed: ${explain(error)}`);
+  }
+}
+
 async function runTurn(
   request: vscode.ChatRequest,
   stream: vscode.ChatResponseStream,
@@ -269,6 +317,13 @@ async function runTurn(
   // transcript belongs to the window, the session belongs to the log.
   const resume = agent.takeResumeEvents();
   if (resume !== undefined) emit(stream, renderer.resumed(resume));
+  const previous = agent.takeLastExit();
+  if (previous !== undefined) {
+    stream.markdown(
+      `\n(The previous loongagent server exited: ${previous.signal ?? `code ${previous.code}`} ` +
+      "— started a new one.)\n",
+    );
+  }
   const from = session.events.length;
   let controller: TurnController;
   try {

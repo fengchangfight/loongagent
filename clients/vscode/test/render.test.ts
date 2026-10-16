@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { MAX_TOOL_OUTPUT_CHARS, Renderer, pathsInArgs } from "../src/render.ts";
-import type { EventEnvelope } from "../../ts/protocol.generated.ts";
+import type { ContextExplain, EventEnvelope } from "../../ts/protocol.generated.ts";
 
 const CWD = "/w";
 
@@ -175,4 +175,54 @@ test("an approval request names the action class and the reason the policy gave"
   })));
   assert.match(text, /out_of_bounds/);
   assert.match(text, /network access/);
+});
+
+function explain(overrides: Partial<ContextExplain> = {}): ContextExplain {
+  return {
+    context_tokens: 1200,
+    budget_tokens: 8000,
+    messages: 4,
+    tools: 9,
+    compactions: 0,
+    entries: [],
+    categories: [],
+    memory_mode: "",
+    memory_summarizer: "",
+    memory_degraded: "",
+    memory_layers: [],
+    memory_worker: {
+      state: "off",
+      windows: 0,
+      model_calls: 0,
+      enriched: 0,
+      failed: 0,
+      pending: 0,
+      deferrals: 0,
+      last_error: "",
+    },
+    ...overrides,
+  };
+}
+
+test("the model list names every model and marks the current one", () => {
+  const renderer = new Renderer({ cwd: CWD });
+  const text = textOf(renderer.models({
+    models: [
+      { name: "a", model: "a-model" },
+      { name: "b", model: "b-model" },
+    ],
+    selected: "b",
+  }));
+  assert.match(text, /a/);
+  assert.match(text, /b/);
+  assert.match(text, /current/, "the current model is marked, not inferred");
+});
+
+test("the context table quotes the numbers it was given and computes nothing", () => {
+  const renderer = new Renderer({ cwd: CWD });
+  const text = textOf(renderer.context(explain()));
+  for (const number of ["1200", "8000", "4", "9"]) {
+    assert.match(text, new RegExp(`\\b${number}\\b`), `${number} appears as it was given`);
+  }
+  assert.doesNotMatch(text, /%/, "no percentage of our own invention");
 });

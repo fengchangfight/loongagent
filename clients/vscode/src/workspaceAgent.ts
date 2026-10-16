@@ -27,6 +27,7 @@ export class WorkspaceAgent {
   private agent: AgentSession | undefined;
   private live: LoongSession | undefined;
   private announced = false;
+  private lastExit: { code: number | null; signal: string | null } | undefined;
 
   constructor(options: {
     folder: vscode.WorkspaceFolder;
@@ -97,6 +98,16 @@ export class WorkspaceAgent {
    * Once, because the card says where you were: repeating it on every turn
    * would be the surface narrating the same history forever.
    */
+  /**
+   * How the previous child died, once, so the next reply can say why it started
+   * a new one instead of leaving it to the output channel alone.
+   */
+  takeLastExit(): { code: number | null; signal: string | null } | undefined {
+    const exit = this.lastExit;
+    this.lastExit = undefined;
+    return exit;
+  }
+
   takeResumeEvents(): EventEnvelope[] | undefined {
     if (this.announced) return undefined;
     this.announced = true;
@@ -161,6 +172,7 @@ export class WorkspaceAgent {
         if (this.agent === agent) {
           this.agent = undefined;
           this.live = undefined;
+          this.lastExit = { code, signal };
         }
       },
     });

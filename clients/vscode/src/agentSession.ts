@@ -25,6 +25,14 @@ export interface AgentSessionHooks {
   onExit(code: number | null, signal: string | null): void;
 }
 
+/** How long one request may wait before it is reported as stalled. */
+const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
+
+export interface AgentSessionOptions {
+  /** Override the wait for one request. 0 waits forever. */
+  requestTimeoutMs?: number;
+}
+
 /** A JSON-RPC error response. The code is the server's, never one we invented. */
 export class JsonRpcError extends Error {
   readonly code: number;
@@ -43,6 +51,7 @@ export class JsonRpcError extends Error {
 interface Pending {
   resolve(value: unknown): void;
   reject(error: Error): void;
+  timer: NodeJS.Timeout | undefined;
 }
 
 interface Incoming {
@@ -65,6 +74,7 @@ export class AgentSession {
   private readonly child: ChildLike;
   private readonly hooks: AgentSessionHooks;
   private notify: (method: string, params: unknown) => void;
+  private readonly requestTimeoutMs: number;
   private readonly pending = new Map<number, Pending>();
   private nextId = 1;
   private exited = false;
@@ -74,10 +84,11 @@ export class AgentSession {
   private outBuffer = "";
   private errBuffer = "";
 
-  constructor(child: ChildLike, hooks: AgentSessionHooks) {
+  constructor(child: ChildLike, hooks: AgentSessionHooks, options: AgentSessionOptions = {}) {
     this.child = child;
     this.hooks = hooks;
     this.notify = hooks.onNotification;
+    this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     child.stdout?.on("data", (chunk) => this.readStdout(chunk));
     child.stderr?.on("data", (chunk) => this.readStderr(chunk));
     child.on("exit", (code, signal) => this.gone(code, signal));
@@ -94,14 +105,30 @@ export class AgentSession {
     this.notify = handler;
   }
 
-  /** Send one request and resolve with its result. */
-  request<T = unknown>(method: string, params: Record<string, unknown>): Promise<T> {
+  /**
+   * Send one request and resolve with its result.
+   *
+   * A request that is never answered rejects rather than waiting forever: a chat
+   * that says nothing at all is worse than one that says it is stalled (§4.9).
+   */
+  request<T = unknown>(
+    method: string,
+    params: Record<string, unknown>,
+    options: AgentSessionOptions = {},
+  ): Promise<T> {
     if (this.exited) {
       return Promise.reject(new Error("the loongagent server is gone; nothing was sent"));
     }
     const id = this.nextId++;
+    const timeoutMs = options.requestTimeoutMs ?? this.requestTimeoutMs;
     return new Promise<T>((resolve, reject) => {
-      this.pending.set(id, { resolve: resolve as (value: unknown) => void, reject });
+      const timer = timeoutMs > 0
+        ? setTimeout(() => {
+            this.pending.delete(id);
+            reject(new Error(`no response to ${method} after ${Math.round(timeoutMs / 1000)}s`));
+          }, timeoutMs)
+        : undefined;
+      this.pending.set(id, { resolve: resolve as (value: unknown) => void, reject, timer });
       this.write({ jsonrpc: "2.0", id, method, params });
     });
   }
@@ -173,12 +200,11 @@ export class AgentSession {
       this.hooks.onLog(`unparsable line: ${line}`);
       return;
     }
-    const entry = this.pending.get(message.id);
+    const entry = this.take(message.id);
     if (entry === undefined) {
       this.hooks.onLog(`no request is waiting for id ${message.id}`);
       return;
     }
-    this.pending.delete(message.id);
     const failure = message.error;
     if (failure !== undefined) {
       entry.reject(
@@ -213,8 +239,20 @@ export class AgentSession {
     this.hooks.onExit(null, null);
   }
 
+  /** Remove one waiting request and stop its clock. */
+  private take(id: number): Pending | undefined {
+    const entry = this.pending.get(id);
+    if (entry === undefined) return undefined;
+    this.pending.delete(id);
+    if (entry.timer !== undefined) clearTimeout(entry.timer);
+    return entry;
+  }
+
   private rejectAll(error: Error): void {
-    for (const entry of this.pending.values()) entry.reject(error);
+    for (const entry of this.pending.values()) {
+      if (entry.timer !== undefined) clearTimeout(entry.timer);
+      entry.reject(error);
+    }
     this.pending.clear();
   }
 }

@@ -101,11 +101,33 @@ test("cancel sends SIGINT to the child", () => {
   assert.deepEqual(child.signals, ["SIGINT"]);
 });
 
-test("a handler installed later receives later notifications", () => {
-  const { child, session, notifications } = makeSession();
+test("a handler installed later receives later notifications", () => {  const { child, session, notifications } = makeSession();
   const swapped: { method: string; params: unknown }[] = [];
   session.setNotificationHandler((method, params) => { swapped.push({ method, params }); });
   child.emitStdout(`{"jsonrpc":"2.0","method":"model.delta","params":{"turn_id":1,"text":"later"}}\n`);
   assert.deepEqual(swapped, [{ method: "model.delta", params: { turn_id: 1, text: "later" } }]);
   assert.deepEqual(notifications, [], "the original handler is replaced, not also called");
+});
+
+test("a request that is never answered gives up and names the method", async () => {
+  // The real timeout is two minutes; the behaviour under test is what happens when
+  // it expires, so the test sets its own.
+  const child = new FakeChild();
+  const session = new AgentSession(child, {
+    onNotification: () => {},
+    onLog: () => {},
+    onExit: () => {},
+  }, { requestTimeoutMs: 20 });
+  await assert.rejects(
+    session.request("prompt.submit", { session_id: "s1" }),
+    /no response to prompt\.submit after/,
+  );
+});
+
+test("an answer arriving in time leaves no timer behind", async () => {
+  const { child, session } = makeSession();
+  const pending = session.request("model.list", { session_id: "s1" }, { requestTimeoutMs: 60_000 });
+  const id = child.sent()[0].id;
+  child.emitStdout(`{"jsonrpc":"2.0","id":${id},"result":{"models":[]}}\n`);
+  assert.deepEqual(await pending, { models: [] });
 });

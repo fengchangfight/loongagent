@@ -4,7 +4,9 @@ import type {
   ApprovalRequested,
   EventEnvelope,
   JsonValue,
+  ContextExplain,
   MessageAppended,
+  ModelList,
   PermissionsRelaxed,
   PolicyDecided,
   ToolCall,
@@ -119,6 +121,32 @@ export class Renderer {
       default:
         return [];
     }
+  }
+
+  /** The models this session offers, with the current one marked as given. */
+  models(list: ModelList): UiPart[] {
+    const lines = list.models.map((offering) => {
+      const current = offering.name === list.selected ? " — current" : "";
+      return `- \`${offering.name}\` (${offering.model})${current}`;
+    });
+    return [{ kind: "markdown", text: `Models for this session:\n${lines.join("\n")}` }];
+  }
+
+  /** What the next request will carry, exactly as the kernel reported it. */
+  context(explain: ContextExplain): UiPart[] {
+    const rows: [string, number][] = [
+      ["context tokens", explain.context_tokens],
+      ["budget tokens", explain.budget_tokens],
+      ["messages", explain.messages],
+      ["tools", explain.tools],
+      ["compactions", explain.compactions],
+    ];
+    const table = [
+      "| what | how much |",
+      "|---|---|",
+      ...rows.map(([what, howMuch]) => `| ${what} | ${howMuch} |`),
+    ].join("\n");
+    return [{ kind: "markdown", text: table }];
   }
 
   /**

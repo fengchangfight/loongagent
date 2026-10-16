@@ -240,19 +240,31 @@ pieces of evidence, because "it compiles and the tests pass" does not prove noth
    attributes, visibility and signature included — from `git show HEAD:<old path>` and from the new
    files, hashes each item's canonical token stream, and compares `(sha256, kind, name, visibility)`
    tuples; they must be equal. The script must be shown to fail both when an item's body is edited and
-   when only a **signature** or visibility is edited. *Corrected during execution (Task 19):* this
-   originally said "function bodies are byte-identical", which is unachievable — rustfmt dedents and
-   reflows moved text and `cargo fmt --check` is a gate — and which left signatures, visibility,
-   attributes and every non-`fn` item outside the evidence. Alongside the comparison, each split shows
-   that the committed file equals rustfmt's output applied to a byte-preserving dedent of the original,
-   so that the only difference between the two is rustfmt's own reflow. *Corrected again during
-   execution (Task 20):* that assertion cannot hold literally for a **submodule** split, because a
-   submodule does not inherit the parent's `use` lines and so each new file must carry a header no
-   contiguous range of the old file contains — and the body may carry a permitted visibility widening
-   the old text lacks. The check therefore takes two bounded allowances, `--header-file` for the
-   permitted leading lines and `--allow-widening NAME` for a line that differs by its visibility
-   keyword only (verified by stripping the visibility token from both sides), and still fails on
-   anything else.
+   when only a **signature** or visibility is edited.
+   *Corrected during execution (Task 19):* this originally said "function bodies are byte-identical",
+   which is unachievable — rustfmt dedents and reflows moved text and `cargo fmt --check` is a gate —
+   and which left signatures, visibility, attributes and every non-`fn` item outside the evidence.
+   Alongside the comparison, each split shows that the committed file equals rustfmt's output applied
+   to a byte-preserving dedent of the original, so that the only difference between the two is
+   rustfmt's own reflow.
+   *Corrected again during execution (Task 20):* that assertion cannot hold literally for a
+   **submodule** split, because a submodule does not inherit the parent's `use` lines and so each new
+   file must carry a header no contiguous range of the old file contains — and the body may carry a
+   permitted visibility widening the old text lacks. The check therefore takes two bounded allowances,
+   `--header-file` for the permitted leading lines and `--allow-widening NAME` for a line that differs
+   by its visibility keyword only (verified by stripping the visibility token from both sides), and
+   still fails on anything else. It applies to a contiguous block move; where a file is assembled from
+   scattered methods no `--start/--end` range describes it, and the item identity plus the formatting
+   gate is the evidence instead.
+   *Corrected a third time during execution (Task 20):* **a method inside an `impl` block is an item in
+   its own right**, named for its type (`Kernel::build`). The earlier model counted only free functions
+   and one entry per `impl` block, which left the units that Tasks 21–23 actually move — 183 methods in
+   `crates/kernel/src/turn.rs`, 79 in `crates/cli/src/main.rs`, 68 in `crates/config/src/lib.rs` —
+   completely invisible; a method's body could have been rewritten with the comparison none the wiser.
+   An `impl` **container** is a third thing, hashed over its attributes and header only, so that
+   re-creating `impl Kernel` in each new file yields identical containers rather than a page of
+   "changed" entries. A container is the only item allowed to become several; every copy must hash
+   identically, and `compare` names each.
    **Strict equality is Task 19's case only.** Tasks 20–23 split a file into submodules, which
    legitimately adds `mod` / `use` / `pub use` lines and may widen an item to `pub(crate)` or
    `pub(super)` so a sibling module can reach it. Their rule is directional: every before-item still

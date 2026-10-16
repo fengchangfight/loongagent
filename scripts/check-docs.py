@@ -206,6 +206,48 @@ def find_links(text: str) -> list[tuple[int, str]]:
     return found
 
 
+def masked_document(root: str, name: str) -> tuple[str, str | None]:
+    """One tracked document's text with code blanked out, or why it cannot be read.
+
+    Every check that reads a document needs the same two things and the same
+    two decisions, so they live here once rather than in each caller:
+
+      * the text is masked with code_free, because a document may *show* a
+        target, a link or a citation without owning it;
+      * a document whose own markdown cannot be read is a failure for that
+        document, not a licence to skip it.
+
+    Returns (masked text, failure line or None). A mask that cannot be trusted
+    is the failure; the caller reports it and keeps over the rest of the walk.
+    """
+    path = os.path.join(root, name)
+    with open(path, encoding="utf-8") as handle:
+        text = handle.read()
+    try:
+        return code_free(text), None
+    except CheckError as error:
+        return "", f"FAIL {name}: {error}"
+
+
+def judged_documents(root: str) -> list[str]:
+    """The tracked documents the reading checks judge; never an empty list.
+
+    tracked_markdown is the raw walk. This is its entry point for the checks
+    that *read* what they find, and it owns the empty case once, for all of
+    them: a walk that lists no document would make the caller loop zero times
+    and report OK while judging nothing, which is the silent pass this gate
+    exists to refuse. A tree with no tracked markdown is an error, not a green
+    run.
+    """
+    names = tracked_markdown(root)
+    if not names:
+        raise CheckError(
+            "no tracked .md file to check; the walk is empty, so a green run "
+            "here would have judged nothing"
+        )
+    return names
+
+
 def check_one_link(root: str, name: str, line: int, target: str) -> str | None:
     """A failure line if this target names nothing that exists, else None."""
     # Markdown may wrap a target in angle brackets; titles are not used in this
@@ -227,18 +269,15 @@ def check_one_link(root: str, name: str, line: int, target: str) -> str | None:
 def check_links(root: str) -> list[str]:
     """Every relative link in every tracked document must resolve."""
     broken = []
-    for name in tracked_markdown(root):
-        path = os.path.join(root, name)
-        with open(path, encoding="utf-8") as handle:
-            text = handle.read()
-        try:
-            links = find_links(text)
-        except CheckError as error:
-            # A document whose own markdown cannot be read is a failure, not a
-            # licence to skip it.
-            broken.append(f"FAIL {name}: {error}")
+    for name in judged_documents(root):
+        scan, failure = masked_document(root, name)
+        if failure:
+            broken.append(failure)
             continue
-        for line, target in links:
+        # find_links masks again; code_free is idempotent on masked text
+        # (verified over every tracked document), and it owns that step for
+        # its other caller, indexed_targets, which passes raw text.
+        for line, target in find_links(scan):
             problem = check_one_link(root, name, line, target)
             if problem:
                 broken.append(problem)
@@ -478,25 +517,20 @@ def check_citations(root: str) -> list[str]:
     citation can rot in README.md or DEVELOPMENT.md just as easily as under
     docs/, and a gate that read only docs/** would miss them.
 
-    Code is masked first with code_free, exactly as the links check does: a
-    document may *show* a citation without owning it, and the plan that
-    specifies this check spells out `ADR-0099` as its example. Masking keeps
-    that plan and spec under the rule that governs every other document, so a
-    bare ADR-0099 in the same prose still fails.
+    Code is blanked out first, through the same masked_document helper the
+    links check reads through: a document may *show* a citation without owning
+    it, and the plan that specifies this check spells out `ADR-0099` as its
+    example. Sharing that step keeps the plan and spec under the rule that
+    governs every other document, so a bare ADR-0099 in the same prose still
+    fails.
     """
     adr_limit = highest_adr(root)
     topic_limit = highest_topic(root)
     problems = []
-    for name in tracked_markdown(root):
-        path = os.path.join(root, name)
-        with open(path, encoding="utf-8") as handle:
-            text = handle.read()
-        try:
-            scan = code_free(text)
-        except CheckError as error:
-            # A document whose own markdown cannot be read is a failure, not a
-            # licence to skip it.
-            problems.append(f"FAIL {name}: {error}")
+    for name in judged_documents(root):
+        scan, failure = masked_document(root, name)
+        if failure:
+            problems.append(failure)
             continue
         limits = ((ADR_CITATION, adr_limit), (TOPIC_CITATION, topic_limit))
         for pattern, limit in limits:

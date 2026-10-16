@@ -1,3 +1,5 @@
+use super::nudge::{leaked_tool_call, looks_like_pasted_file};
+use super::recall::RECALL_MAX_CHARS;
 use super::*;
 use loong_providers::{CompletionRequest, CompletionResponse, Model, ModelError, ScriptedModel};
 use loong_schema::generated::event as ev;

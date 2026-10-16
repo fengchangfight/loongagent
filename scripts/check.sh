@@ -10,6 +10,8 @@
 #                   why the generator now writes formatted Rust
 #   schema check    generated types drifting from crates/schema/protocol.toml
 #   layering        a crate dependency pointing the wrong way (ADR-0004)
+#   documents       a relative link to a file that no longer exists (the documents
+#                   are also what nothing else in this list reads)
 #   tests           including three end-to-end tests against the real binary
 #   release build   code that compiles in debug and not with optimisations
 set -euo pipefail
@@ -26,6 +28,9 @@ bold "generated schema is current"
 
 bold "crate dependencies point down (ADR-0004)"
 ./scripts/check-layering.sh
+
+bold "documents"
+python3 scripts/check-docs.py
 
 bold "tests"
 cargo test --workspace --locked

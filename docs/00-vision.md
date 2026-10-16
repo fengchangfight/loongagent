@@ -35,7 +35,7 @@ impossible merge.
    DevOps/SRE, QA/test, data engineering, and more. The agent should have
    role-appropriate tools, context sources, and workflows.
 3. **Best-of-breed composition.** Systematically harvest the best design ideas
-   from the existing landscape (see `research/` and `01-landscape-synthesis.md`),
+   from the existing landscape (see `research/` and `05-parity-and-synthesis.md`),
    and resolve contradictions through explicit trade-offs recorded in
    `decisions/`.
 

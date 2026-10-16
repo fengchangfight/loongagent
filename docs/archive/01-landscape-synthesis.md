@@ -2,9 +2,9 @@
 
 - **Status:** Draft (basis for brainstorming round 1)
 - **Last updated:** 2026-09-26
-- **Sources:** `research/claude-code.md`, `research/codex.md`, `research/opencode.md`,
-  `research/cursor.md`, `research/pi.md`, `research/deepseek-harness.md`,
-  `research/other-agents.md` (all with inline citations)
+- **Sources:** `../research/claude-code.md`, `../research/codex.md`, `../research/opencode.md`,
+  `../research/cursor.md`, `../research/pi.md`, `../research/deepseek-harness.md`,
+  `../research/other-agents.md` (all with inline citations)
 
 This document compresses ~1,300 lines of research into: (A) a feature matrix,
 (B) the design **tensions** where tools contradict each other and we must pick a
@@ -232,7 +232,7 @@ existing primitives:
 
 ## F. Round-2 landscape additions (2026-09-26)
 
-Seven more categories researched (`research/kiro-spec-driven.md`,
+Seven more categories researched (`../research/kiro-spec-driven.md`,
 `role-specialized.md`, `multi-agent-orchestration.md`, `web-app-builders.md`,
 `ide-ecosystem.md`, `china-ecosystem.md`, `enterprise-context-review.md`).
 The decision-relevant lessons:

@@ -213,7 +213,7 @@ and avoidable by self-hosting (T-03).
 | Doc | Role |
 |---|---|
 | [00-vision.md](00-vision.md) | Mission, ambition, principles |
-| [01-landscape-synthesis.md](01-landscape-synthesis.md) | Cross-tool synthesis and the T1–T10 design tensions |
+| [01-landscape-synthesis.md](archive/01-landscape-synthesis.md) | Cross-tool synthesis and the T1–T10 design tensions — archived; superseded by [05-parity-and-synthesis.md](05-parity-and-synthesis.md) |
 | [02-topics.md](02-topics.md) | Idea backlog (T-01…T-26) and the owner's coverage map |
 | [03-architecture.md](03-architecture.md) | The question-by-question decision record (AQ-1…AQ-12) |
 | **04-system-overview.md** | **This document — the current picture** |

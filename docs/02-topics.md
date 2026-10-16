@@ -10,7 +10,7 @@
   [05-parity-and-synthesis](05-parity-and-synthesis.md))
 How this works: the owner drops raw ideas in conversation; they land here as
 topics with a one-line seed connecting them to what the research already knows
-(`research/`, `01-landscape-synthesis.md`). When a topic gets discussed in
+(`research/`, `05-parity-and-synthesis.md`). When a topic gets discussed in
 depth, it graduates to its own `NN-<topic>.md` or an ADR in `decisions/`, and
 its status here changes to **Promoted**.
 

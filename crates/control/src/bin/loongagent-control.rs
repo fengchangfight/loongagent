@@ -702,9 +702,3 @@ fn first_line(text: &str) -> String {
         .trim()
         .to_string()
 }
-
-#[allow(dead_code)]
-fn pack_of(path: &Path) -> Result<Envelope, String> {
-    Envelope::from_json(&std::fs::read_to_string(path).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())
-}

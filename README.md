@@ -375,15 +375,12 @@ loongagent use default       # 选一个
 
 ## 文档
 
+全部设计文档都在 **[docs/README.md](docs/README.md)** 里按主题列好了；下面是索引不覆盖的
+一项——索引只收 `docs/` 下的文档。
+
 | 想了解 | 看 |
 |---|---|
-| 整体架构（一读到底） | [docs/04-system-overview.md](docs/04-system-overview.md) |
-| 分层记忆 / R 与 S 模式 | [docs/06-context-engineering.md](docs/06-context-engineering.md)、[ADR-0017](docs/decisions/0017-layered-context.md) |
-| 决策记录（ADR 0001–0017） | [docs/decisions/](docs/decisions/) |
-| Windows 构建与运行 | [docs/runbooks/windows-build.md](docs/runbooks/windows-build.md) |
-| 控制面 runbook | [docs/runbooks/control-plane.md](docs/runbooks/control-plane.md) |
 | 工具链、crate 地图、日常命令 | [DEVELOPMENT.md](DEVELOPMENT.md) |
-| 全部设计文档索引 | [docs/README.md](docs/README.md) |
 
 ---
 

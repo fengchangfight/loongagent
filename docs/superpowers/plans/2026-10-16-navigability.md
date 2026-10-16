@@ -373,7 +373,9 @@ Only T-11 (`:382` → ADR-0007), T-14 (`:430` → ADR-0010) and T-16 (`:463`, me
 
 - [ ] **Step 3: Record the duplicates that are deliberately not consolidated**
 
-Add one topic to the backlog covering the five small cross-crate helper duplicates the spec lists under "Record, do not fix" — `now_ms` (3 copies), `expand_home` (2), `first_line` (2 identical, with a different third in `hooks`), and the rest — naming each with its files, marking it `Seed`, and stating why it is not being done now: consolidating needs a new shared public surface, which is an API change, and five ten-line functions do not justify one. This is the record; the spec deliberately removes nothing.
+Add one topic to the backlog covering the five small cross-crate helper duplicates the spec lists under "Record, do not fix" — **measured during execution: `now_ms` (4 copies: `control`, `hooks` — already `pub` — `plugin`, `eventlog`), `first_line` (3), `expand_home` (2), `truncate` (2), `clip` (2)** — naming each with its files, marking it `Seed`, and stating why it is not being done now: consolidating needs a new shared public surface, which is an API change, and five ten-line functions do not justify one. This is the record; the spec deliberately removes nothing.
+
+*Corrected during execution (Ruling 33):* the first draft said `now_ms` (3 copies) and named only `expand_home` and `first_line` — omitting `truncate` and `clip` and undercounting `now_ms` by one, because a `grep` for `^fn now_ms` does not match `pub fn now_ms`, which is the copy in `hooks`. Use the measured list above.
 
 - [ ] **Step 4: Verify by reading**
 

@@ -71,9 +71,14 @@ Deliberately out of scope, each for a stated reason:
 - **`docs/06-context-engineering.md` and `ADR-0017` are not translated.** ~1 400 lines of Chinese
   technical prose; the translation cost and terminology loss exceed the benefit. They are marked as
   the documented language exceptions instead.
-- **Cross-crate helper duplication is reported, not removed.** `now_ms` (3 copies), `expand_home`
-  (2), `first_line` (2, identical) and the rest need a new shared public surface to consolidate,
-  which is an API change. Five ten-line functions do not justify one.
+- **Cross-crate helper duplication is reported, not removed.** Measured after execution: `now_ms` (4
+  copies — `control`, `hooks` — where it is already `pub` — `plugin` and `eventlog`), `first_line` (3),
+  `expand_home` (2), `truncate` (2) and `clip` (2): five names, thirteen definitions, and the first
+  draft of this list both miscounted `now_ms` as 3 and omitted `truncate` and `clip` entirely.
+  Consolidating any of them needs a new shared public surface, which is an API change, and five
+  ten-line functions do not justify one. Cost of leaving them: thirteen copies that can drift; cost of
+  consolidating: a new public surface in a workspace whose whole design is that the kernel is the only
+  fixed thing. Recorded as T-26 in `docs/02-topics.md` rather than fixed.
 - **`impl App` in `tui-app` is not split.** 48 mutually-calling methods and 4 private fields the
   tests write directly; splitting it costs ~48 method-level visibility changes for a smaller
   readability gain than moving the 3 734 lines of tests out of the file already gives.

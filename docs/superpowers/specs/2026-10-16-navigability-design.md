@@ -245,7 +245,14 @@ pieces of evidence, because "it compiles and the tests pass" does not prove noth
    reflows moved text and `cargo fmt --check` is a gate — and which left signatures, visibility,
    attributes and every non-`fn` item outside the evidence. Alongside the comparison, each split shows
    that the committed file equals rustfmt's output applied to a byte-preserving dedent of the original,
-   so that the only difference between the two is rustfmt's own reflow.
+   so that the only difference between the two is rustfmt's own reflow. *Corrected again during
+   execution (Task 20):* that assertion cannot hold literally for a **submodule** split, because a
+   submodule does not inherit the parent's `use` lines and so each new file must carry a header no
+   contiguous range of the old file contains — and the body may carry a permitted visibility widening
+   the old text lacks. The check therefore takes two bounded allowances, `--header-file` for the
+   permitted leading lines and `--allow-widening NAME` for a line that differs by its visibility
+   keyword only (verified by stripping the visibility token from both sides), and still fails on
+   anything else.
    **Strict equality is Task 19's case only.** Tasks 20–23 split a file into submodules, which
    legitimately adds `mod` / `use` / `pub use` lines and may widen an item to `pub(crate)` or
    `pub(super)` so a sibling module can reach it. Their rule is directional: every before-item still

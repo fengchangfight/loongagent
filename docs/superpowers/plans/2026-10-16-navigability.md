@@ -835,6 +835,16 @@ Recorded here so the plan and the execution ledger tell the same story. Each was
 execution, against the spec as the binding authority, and each names what it costs if it is wrong.
 The inline corrections above cite the relevant one.
 
+**This table covers rulings 9 to 18 only** — the ones made while Tasks 1 to 5 were executing. It is a
+partial index rather than the record, which is a small deliberate retreat from the sentence above: the
+rulings from 19 onward are written *inline at the tasks they affected*, where a reader meets them next
+to the text they correct, and duplicating them here would recreate exactly the two-copies-of-one-fact
+drift this plan exists to remove. The complete list, including every deferred Minor, is in the
+execution ledger (`.superpowers/sdd/2026-10-16-navigability/progress.md`, which is gitignored because
+it is a working record rather than a document), and the final report collects the rulings for the
+human. A reader of this plan alone sees every correction that changes what to do; what they do not see
+here is the bookkeeping.
+
 | # | Task | Ruling | Cost if wrong |
 |---|---|---|---|
 | 9 | 1 | Seed the broken link in `DEVELOPMENT.md`, not `docs/runbooks/windows-build.md`, which has no links | A reader of the uncorrected draft retries an impossible seed |

@@ -54,8 +54,10 @@ install:
   ln -sfn /opt/${name} /opt/loongagent/current   # or wherever you keep versions
   ln -sfn /opt/loongagent/current/bin/loongagent /usr/local/bin/loongagent
 
-This artifact is not signed. A signature is what would make an organisation's
-configuration layer tamper-resistant (ADR-0008 §6), and that is not implemented.
+This artifact is not signed. The configuration layer is protected by the pack
+envelope instead: it is signed and verified against a pinned key. What is not
+signed is the local org file an administrator owns -- that is the thing that
+must not be called enforced.
 EOF
 
 echo "== packing"

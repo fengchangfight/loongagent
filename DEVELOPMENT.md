@@ -1061,9 +1061,10 @@ ln -sfn /opt/loongagent/current/bin/loongagent /usr/local/bin/loongagent
 
 Two limits worth knowing before distributing it:
 
-- **The artifact is not signed.** ADR-0008 §6 makes an organisation's configuration
-  layer tamper-resistant through a signature, and that is not implemented — so do
-  not describe the org layer as enforced yet.
+- **The artifact is not signed.** That says nothing about the configuration
+  layer: the pack envelope *is* signed and verified against a pinned key, while
+  the **local** org file an administrator owns is the unsigned thing, and that is
+  what must not be called enforced.
 - **The binary is dynamically linked against glibc** (`ldd target/release/loongagent`),
   so it runs on distributions at least as new as the build host. For an older fleet,
   build in a container pinned to that glibc or add a musl target.

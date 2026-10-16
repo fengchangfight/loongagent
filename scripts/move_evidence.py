@@ -5,8 +5,10 @@ A structural move (splitting an oversized Rust file into sibling modules) is
 supposed to reorder text, never to change it.  This script extracts every item
 -- `fn` and `method`, `impl`, `struct`, `enum`, `union`, `trait`, `type`,
 `const`, `static`, `mod`, `use` and `macro_rules!` -- from a set of files by
-brace matching, hashes each item's entire canonical token stream (attributes,
-visibility, signature and body together), and prints one line per item as
+brace matching, hashes each item's canonical token stream (attributes,
+visibility, signature and body together, except that a `mod` or `impl`
+declaration is hashed as a header: its body is a list of items that are in the
+multiset in their own right), and prints one line per item as
 
     sha256<TAB>kind<TAB>name<TAB>vis<TAB>path<TAB>vis-stripped-sha256
 
@@ -916,10 +918,110 @@ def _impl_blocks(sanitized: str, text: str) -> list[tuple[int, int, str]]:
     return blocks
 
 
+def _enclosing_impl(
+    blocks: list[tuple[int, int, str]], position: int
+) -> tuple[int, int, str] | None:
+    """The *innermost* `impl` containing `position`, not the outermost.
+
+    An `impl Write for Lines` written inside a method of `impl Out` owns its own
+    methods; taking the first enclosing block would print them as `Out::write`.
+    """
+    best: tuple[int, int, str] | None = None
+    for block in blocks:
+        if block[0] <= position < block[1]:
+            if best is None or block[0] > best[0]:
+                best = block
+    return best
+
+
+def _brace_depth(sanitized: str, start: int, end: int) -> int:
+    """Unmatched `{` between two offsets, in sanitised (blanked) text."""
+    depth = 0
+    for index in range(start, end):
+        char = sanitized[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+    return depth
+
+
+def _fn_names(
+    sanitized: str, impl_blocks: list[tuple[int, int, str]]
+) -> dict[int, tuple[str, str]]:
+    """(kind, name) for every `fn`, keyed by its keyword's offset.
+
+    A `fn` at the top level of an `impl` body is a `method` named
+    `Owner::name`.  A `fn` nested deeper -- inside a method body, or inside
+    another nested function -- is not a method of that container at all: it
+    stays kind `fn` and is named after the function that encloses it, so its
+    nesting is visible and it cannot be mistaken for a sibling of the methods.
+    """
+    records: list[dict[str, object]] = []
+    for match in _KEYWORD_RE.finditer(sanitized):
+        if match.group(1) != "fn":
+            continue
+        if not _at_item_position(sanitized, match.start()):
+            continue
+        name_match = _IDENT.match(sanitized, _skip_ws(sanitized, match.end()))
+        if not name_match:
+            continue
+        found, body = _find_body(sanitized, match.end())
+        if found is None or body is None:
+            continue
+        if found == "brace":
+            closer = _match_brace(sanitized, body)
+            if closer is None:
+                continue
+            end = closer + 1
+        else:
+            end = body + 1
+        enclosing = _enclosing_impl(impl_blocks, match.start())
+        records.append(
+            {
+                "start": match.start(),
+                "end": end,
+                "simple": name_match.group(0),
+                "impl": enclosing,
+                "depth": (
+                    0
+                    if enclosing is None
+                    else _brace_depth(sanitized, enclosing[0], match.start())
+                ),
+            }
+        )
+
+    resolved: dict[int, tuple[str, str]] = {}
+    for record in records:
+        start = int(record["start"])
+        end = int(record["end"])
+        simple = str(record["simple"])
+        enclosing = record["impl"]
+        if enclosing is not None and record["depth"] == 0:
+            resolved[start] = (_METHOD_KIND, f"{enclosing[2]}::{simple}")
+            continue
+        containing = [
+            (other, resolved[int(other["start"])])
+            for other in records
+            if int(other["start"]) < start
+            and int(other["end"]) >= end
+            and int(other["start"]) in resolved
+        ]
+        if containing:
+            innermost, (_, enclosing_name) = min(
+                containing, key=lambda pair: int(pair[0]["end"]) - int(pair[0]["start"])
+            )
+            resolved[start] = ("fn", f"{enclosing_name}::{simple}")
+        else:
+            resolved[start] = ("fn", simple)
+    return resolved
+
+
 def extract_items(text: str) -> list[tuple[str, str, str, str, str]]:
     """Return (sha256, kind, name, vis, vis-stripped sha256) for every item."""
     sanitized = sanitize(text)
     impl_blocks = _impl_blocks(sanitized, text)
+    fn_names = _fn_names(sanitized, impl_blocks)
     items: list[tuple[str, str, str, str, str]] = []
     for match in _KEYWORD_RE.finditer(sanitized):
         keyword = match.group(1)
@@ -1003,14 +1105,9 @@ def extract_items(text: str) -> list[tuple[str, str, str, str, str]]:
                 end = body + 1
             kind = keyword
             if keyword == "fn":
-                for inner_start, inner_end, owner in impl_blocks:
-                    if inner_start <= match.start() < inner_end:
-                        # A method: the same attributes, visibility, signature
-                        # and body as a free `fn`, but named by the container it
-                        # is written in, so two types' `new` cannot be confused.
-                        kind = _METHOD_KIND
-                        name = f"{owner}::{name}"
-                        break
+                resolved = fn_names.get(match.start())
+                if resolved is not None:
+                    kind, name = resolved
 
         item_text = text[item_start:end]
         digest = hashlib.sha256(_canonical(item_text).encode("utf-8")).hexdigest()

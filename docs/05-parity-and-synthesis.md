@@ -161,7 +161,7 @@ rows below are what "not losing" means concretely.
 | # | Property | Why CC/DSH structurally can't match it |
 |---|---|---|
 | C1 | **Cost governance as policy**: profiles, local-decides routing, org hard caps enforced as `deny`, escalation as auditable events | CC has subscription windows and `/usage`; DSH leaves budgets to plugins |
-| C2 | **Org policy distribution**: signed packs, monotonic layers, org > project > user | CC has managed settings; DSH has none. **Layers + monotonicity ship**; the signed envelope does not, so the org layer is a plain file and nothing should be called tamper-resistant yet |
+| C2 | **Org policy distribution**: signed packs, monotonic layers, org > project > user | CC has managed settings; DSH has none. **The signed envelope ships and is verified** (ADR-0016): a pack is Ed25519-signed under a pinned key and checked on every start before it can occupy the org layer. What is *not* signed is the **local** org file, `/etc/loongagent/profile.toml`, which an administrator owns; that file — not the pack — is the one that must not be called tamper-resistant |
 | C3 | **Control plane for aggregate audit/statistics** (opt-in, allow-listed uplink) | CC is per-user; DSH has no control plane |
 | C4 | **Model-agnostic by design**: any provider, any local model, no vendor lock | CC is Claude-first; DSH is DeepSeek-first |
 | C5 | **Session portability**: export/import bundles with ancestry, approvals never travel (ADR-0014) | CC has local JSONL but no first-class portable bundle |

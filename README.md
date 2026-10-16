@@ -5,7 +5,9 @@
 
 - **本地版**：`loongagent tui --local`，模型可以是本机 ollama，也可以是你自己的 API key；
   配置、密钥、会话都在 `~/.loongagent/` 下，别人碰不到。
-- **控制面（in development）**：企业侧用签名 pack 下发 profile，模型/端点/密钥不进用户配置。
+- **控制面（已实现）**：企业侧用**签名 pack** 下发 profile：包由 Ed25519 签发、本地按固定公钥
+  验签，验不过就用不了，模型/端点/密钥不进用户配置。**但本机的 org 层文件
+  `/etc/loongagent/profile.toml` 不签名**，它只是一个管理员拥有的文件，不能叫防篡改。
   两条路共用同一个内核，本地版不需要它。
 
 ![loongagent TUI](screenshottui.png)
@@ -23,7 +25,7 @@
 |---|---|---|
 | **R 模式**（record，默认回滚路径） | 不调用任何模型：检索层 + 确定性 digest 全部工作。没装小模型也完整可用 | 已实现 |
 | **S 模式 · semantic local**（可选装） | 在 R 之上，L2 归纳、L3、L4 交给**本机 ollama 小模型**生成；开启后不再丢消息，只清工具输出，`recall` 能回到原文 | 已实现（ADR-0017 P5） |
-| **控制面**（企业下发） | 签名 pack + 固定公钥；模型 id、端点、token 都不出现在用户配置里 | **in development** |
+| **控制面**（企业下发） | 签名 pack + 固定公钥；验签在 pack 进入 org 层之前；模型 id、端点、token 都不出现在用户配置里 | **已实现**（本机 org 文件 `profile.toml` 不签名；SSO/审计/密钥轮换未做） |
 
 三层的关系是「同一套存储、同一套引用语义、同一个 API，只改变**谁生成理解层**」：
 
@@ -349,7 +351,7 @@ catalogue 坏掉（比如和工程里的 skill 重名）会**自动回滚**，�
 
 ---
 
-## 控制面（in development）
+## 控制面（已实现）
 
 设计已经定了（[ADR-0012](docs/decisions/0012-control-plane.md)、
 [ADR-0016](docs/decisions/0016-pack-distribution.md)）：控制面签发 profile pack，
@@ -357,14 +359,17 @@ catalogue 坏掉（比如和工程里的 skill 重名）会**自动回滚**，�
 本地版不需要它，两条路共用同一个内核，随时可以切。
 
 ```bash
-# 目前能跑的形态（还没实现签名，所以还不能算防篡改）
+# 目前能跑的形态（签名已实现：pack 由 Ed25519 签发、本地固定公钥验签，验不过就用不了）
 loongagent setup --url https://control.your-firm.internal --public-key <hex>
 loongagent profiles          # 有哪些 profile
 loongagent use default       # 选一个
 ```
 
-**还没做完**：签名 org pack（所以企业层现在只是一个管理员拥有的文件，不是防篡改的）、
-Windows 上的控制面布局。落地步骤见 [docs/runbooks/control-plane.md](docs/runbooks/control-plane.md)。
+**还没做完**：**本机 org 层文件 `/etc/loongagent/profile.toml` 没有签名**，它只是一个管理员
+拥有的文件，不能叫防篡改（防篡改的是控制面下发、验签通过后才生效的签名 pack）；把同一套
+签名信封用到 policy / context 载荷上（[ADR-0016](docs/decisions/0016-pack-distribution.md)
+明确这两类载荷还没写）；Windows 上的控制面布局。落地步骤见
+[docs/runbooks/control-plane.md](docs/runbooks/control-plane.md)。
 
 ---
 
@@ -393,8 +398,10 @@ skills/commands、**插件**（`plugin add superpowers` 一键装 skills，见�
 Linux 与 **Windows** 都能构建运行，命令面一致。测试 736 个通过、11 个忽略。
 <!-- test-counts: 736 passed, 11 ignored -->
 
-**没做完，也不假装**：签名 org pack、subagents、插件的索引/搜索与逐插件开关（现在用
-`disable_skills`）、LSP 代码工具、`grep`/`glob` 的
+**没做完，也不假装**：subagents、插件的索引/搜索与逐插件开关（现在用
+`disable_skills`）、第三方内容的签名与信任分级
+（[ADR-0018](docs/decisions/0018-plugin-install-and-bootstrap.md) 留给 WASM 那一层）、
+LSP 代码工具、`grep`/`glob` 的
 `.gitignore` 感知、MCP 的 HTTP 传输、多用户会话（同一时刻一个浏览器驱动会话）、
 `memory.*` 事件回写日志、`recall` 在真实长会话上的验证，以及
 **Windows 上的 OS 强制边界** —— Landlock 是 Linux 的，那里 `sandbox self-test`

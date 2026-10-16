@@ -9,16 +9,17 @@ Usage:
     scripts/check-docs.py [--root DIR] [--check NAME] [--test-counts FILE]
 
     --root DIR          repository root (default: this script's parent)
-    --check NAME        run one check: links, counts or all (default: all)
+    --check NAME        run one check: links, crate-map, counts or all (default: all)
     --test-counts FILE  parsed test results, for the counts check
 
-Only --check links exists today; later tasks add checks behind the same
-interface, which is why --check and --test-counts are already here. A check
-that is asked for and cannot run is an error, never a silent skip.
+Only --check links and --check crate-map exist today; later tasks add checks
+behind the same interface, which is why --check and --test-counts are already
+here. A check that is asked for and cannot run is an error, never a silent skip.
 """
 from __future__ import annotations
 
 import argparse
+import difflib
 import os
 import re
 import subprocess
@@ -43,7 +44,7 @@ LINK = re.compile(r"!?\[[^\]]*\]\(([^)]*)\)")
 
 # Checks the file knows how to run. A name outside this set is a usage error,
 # so a typo in check.sh cannot turn a gate into a no-op.
-CHECKS = ("links", "counts")
+CHECKS = ("links", "crate-map", "counts")
 
 
 def fail(*lines: str) -> int:
@@ -219,6 +220,53 @@ def check_links(root: str) -> list[str]:
     return broken
 
 
+def check_crate_map(root: str) -> list[str]:
+    """docs/crate-map.md must equal what scripts/layering_rules.py generates.
+
+    Regenerate-and-compare, the same shape as gen-schema.py --check: the map the
+    reader sees is a product of the rules CI enforces, so the two cannot drift.
+    A generator that cannot run is a failure, never an OK over a stale file.
+    """
+    generator = os.path.join(root, "scripts", "layering_rules.py")
+    generated = subprocess.run(
+        [sys.executable, generator, "--emit-map", root],
+        capture_output=True,
+    )
+    if generated.returncode != 0:
+        reason = generated.stderr.decode("utf-8", "replace").strip().splitlines()
+        raise CheckError(
+            "cannot generate the crate map (scripts/layering_rules.py --emit-map): "
+            + (reason[0] if reason else f"exit {generated.returncode}")
+        )
+
+    path = os.path.join(root, "docs", "crate-map.md")
+    try:
+        with open(path, "rb") as handle:
+            current = handle.read()
+    except OSError as error:
+        raise CheckError(f"docs/crate-map.md: {error.strerror or error}")
+    if current == generated.stdout:
+        return []
+
+    diff = list(
+        difflib.unified_diff(
+            current.decode("utf-8", "replace").splitlines(),
+            generated.stdout.decode("utf-8", "replace").splitlines(),
+            fromfile="docs/crate-map.md (on disk)",
+            tofile="docs/crate-map.md (generated)",
+            lineterm="",
+        )
+    )
+    if not diff:
+        diff = ["(the two differ only in line endings or encoding)"]
+    return [
+        "FAIL docs/crate-map.md: does not match what scripts/layering_rules.py "
+        "generates; regenerate with "
+        "`python3 scripts/layering_rules.py --emit-map . > docs/crate-map.md`\n"
+        + "\n".join("    " + line for line in diff)
+    ]
+
+
 def check_counts(counts_file: str | None, *, requested: bool) -> list[str]:
     """Not implemented yet; the parameter is the interface a later task fills.
 
@@ -279,6 +327,8 @@ def main() -> int:
     try:
         if "links" in wanted:
             problems += check_links(root)
+        if "crate-map" in wanted:
+            problems += check_crate_map(root)
         if "counts" in wanted:
             problems += check_counts(args.test_counts, requested=args.check == "counts")
     except (CheckError, OSError) as error:

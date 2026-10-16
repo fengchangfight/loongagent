@@ -1,0 +1,40 @@
+# Crate map
+
+Generated from the `ALLOWED` edges in `scripts/layering_rules.py`, which
+`scripts/check-layering.sh` enforces in CI. Regenerate it with:
+
+```
+python3 scripts/layering_rules.py --emit-map . > docs/crate-map.md
+```
+
+Dependencies may only point **down**: the schema depends on nothing, the
+kernel never depends on a surface, and a client never reaches back into the
+kernel. The edges below are every internal dependency allowed; anything not
+listed is a violation. The middle column is each crate's own `//!` header.
+
+| Crate | What it is | Allowed dependencies |
+|---|---|---|
+| `loong-config` | Configuration and profile layering (ADR-0008). | `loong-schema` |
+| `loong-context` | Layered, reversible context memory (ADR-0017). | `loong-eventlog`, `loong-http`, `loong-schema` |
+| `loong-control` | Talking to the control plane: fetching the signed profile pack, verifying it, | `loong-config`, `loong-http`, `loong-pack` |
+| `loong-eventlog` | Append-only JSONL event log — the source of truth (ADR-0003). | `loong-schema` |
+| `loong-hooks` | Lifecycle hooks: the deterministic enforcement layer (ADR-0007 §7). | `loong-http`, `loong-manifest`, `loong-proc`, `loong-schema` |
+| `loong-http` | The smallest HTTP/1.1 client that can carry a JSON POST — shared by the | — |
+| `loong-index` | Derived, disposable SQLite index over the JSONL truth (ADR-0003). | `loong-eventlog`, `loong-schema` |
+| `loong-kernel` | The fixed kernel (ADR-0004): the model+tool loop, the context ledger that is | `loong-config`, `loong-context`, `loong-eventlog`, `loong-hooks`, `loong-index`, `loong-mcp`, `loong-providers`, `loong-sandbox`, `loong-schema`, `loong-skills`, `loong-tools` |
+| `loong-manifest` | Manifest trust: a repository's configuration is **content from that | — |
+| `loong-mcp` | MCP (T-15): external tools behind the same interface as the built-ins. | `loong-manifest`, `loong-protocol`, `loong-schema`, `loong-tools` |
+| `loong-pack` | The one signed envelope every distributed artifact travels in. | — |
+| `loong-plugin` | Plugins: a bundle of skills you install **by name**, instead of hand-copying | `loong-config`, `loong-skills` |
+| `loong-proc` | Running a child process safely: bounded output, a hard timeout, and teardown | — |
+| `loong-protocol` | JSON-RPC 2.0 envelopes and framing (ADR-0002). | `loong-schema` |
+| `loong-providers` | Model providers behind one `Model` interface (ADR-0004). | `loong-http`, `loong-schema` |
+| `loong-sandbox` | Policy decision point (ADR-0007): the kernel decides, the OS enforces. | `loong-schema` |
+| `loong-schema` | Protocol schema: the single source of truth for every message on the wire. | — |
+| `loong-server` | The local agent server (ADR-0001): sessions live here, clients attach. | `loong-eventlog`, `loong-kernel`, `loong-protocol`, `loong-schema` |
+| `loong-skills` | Skills and commands — **one concept** (T-18, T-16 merged in 2026-10-05). | `loong-schema`, `loong-tools` |
+| `loong-tools` | Tools behind one uniform, MCP-shaped interface — built-ins included | `loong-proc`, `loong-schema` |
+| `loong-tui` | Terminal client (ADR-0009): renders the event stream and sends intents. | `loong-protocol`, `loong-schema` |
+| `loong-tui-app` | The full-screen terminal surface (ADR-0009, ADR-0013): a ratatui view over a | `loong-schema`, `loong-tui` |
+| `loong-web` | The web surface (ADR-0009): the same session, in a browser. | — |
+| `loongagent` | loongagent — one binary, many faces (ADR-0009). | `loong-config`, `loong-context`, `loong-control`, `loong-eventlog`, `loong-hooks`, `loong-http`, `loong-index`, `loong-kernel`, `loong-manifest`, `loong-mcp`, `loong-pack`, `loong-plugin`, `loong-proc`, `loong-protocol`, `loong-providers`, `loong-sandbox`, `loong-schema`, `loong-server`, `loong-skills`, `loong-tools`, `loong-tui`, `loong-tui-app`, `loong-web` |

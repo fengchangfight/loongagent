@@ -704,21 +704,7 @@ cargo test  --workspace            # 69 tests
 
 ## Layout
 
-Nine of the eleven crates are layers; dependencies may only point **down**.
-
-| Crate | Layer | Owns |
-|---|---|---|
-| `loong-schema` | 0 | `protocol.toml` (the only hand-written wire definition) + generated Rust types |
-| `loong-eventlog` | 1 | append-only JSONL truth; the `ignorable` envelope is enforced, not trusted |
-| `loong-index` | 1 | derived, disposable SQLite (counts, search, event-tree children) |
-| `loong-providers` | 1 | the `Model` trait + provider doubles |
-| `loong-tools` | 1 | MCP-shaped tools; action class per **call**; path classification |
-| `loong-sandbox` | 1 | the PDP: allow / ask / deny **plus the rule that fired**; narrow-only tightening |
-| `loong-kernel` | 2 | the fixed kernel: turn loop, context ledger (the only write path), wiring |
-| `loong-protocol` | 2 | JSON-RPC 2.0 envelopes and framing |
-| `loong-server` | 3 | the local server: sessions live here, events are streamed |
-| `loong-tui` | 3 | the terminal client: renders events, sends intents, zero agent logic |
-| `loongagent` | 4 | the binary: `server` / `tui` / `run` |
+Every crate in the workspace, its own `//!` header, and the dependencies it is allowed to have are generated into [the crate map](docs/crate-map.md). Dependencies may only point **down**; `scripts/layering_rules.py` is the authority that enforces it, and `scripts/check-layering.sh` runs it in CI.
 
 ## Running it
 

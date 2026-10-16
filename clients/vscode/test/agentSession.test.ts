@@ -100,3 +100,12 @@ test("cancel sends SIGINT to the child", () => {
   session.cancel();
   assert.deepEqual(child.signals, ["SIGINT"]);
 });
+
+test("a handler installed later receives later notifications", () => {
+  const { child, session, notifications } = makeSession();
+  const swapped: { method: string; params: unknown }[] = [];
+  session.setNotificationHandler((method, params) => { swapped.push({ method, params }); });
+  child.emitStdout(`{"jsonrpc":"2.0","method":"model.delta","params":{"turn_id":1,"text":"later"}}\n`);
+  assert.deepEqual(swapped, [{ method: "model.delta", params: { turn_id: 1, text: "later" } }]);
+  assert.deepEqual(notifications, [], "the original handler is replaced, not also called");
+});

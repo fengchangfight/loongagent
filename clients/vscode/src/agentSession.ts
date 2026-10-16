@@ -64,6 +64,7 @@ interface Incoming {
 export class AgentSession {
   private readonly child: ChildLike;
   private readonly hooks: AgentSessionHooks;
+  private notify: (method: string, params: unknown) => void;
   private readonly pending = new Map<number, Pending>();
   private nextId = 1;
   private exited = false;
@@ -76,10 +77,21 @@ export class AgentSession {
   constructor(child: ChildLike, hooks: AgentSessionHooks) {
     this.child = child;
     this.hooks = hooks;
+    this.notify = hooks.onNotification;
     child.stdout?.on("data", (chunk) => this.readStdout(chunk));
     child.stderr?.on("data", (chunk) => this.readStderr(chunk));
     child.on("exit", (code, signal) => this.gone(code, signal));
     child.on("error", (error) => this.broke(error));
+  }
+
+  /**
+   * Hand future notifications to `handler` instead.
+   *
+   * The protocol wrapper is built on top of this transport, so it is created
+   * *after* it and has to be able to take the notification stream over.
+   */
+  setNotificationHandler(handler: (method: string, params: unknown) => void): void {
+    this.notify = handler;
   }
 
   /** Send one request and resolve with its result. */
@@ -149,7 +161,7 @@ export class AgentSession {
     }
     const message = parsed as Incoming;
     if (typeof message.method === "string") {
-      this.hooks.onNotification(message.method, message.params);
+      this.notify(message.method, message.params);
       if (message.id !== undefined) {
         // Nothing in this protocol asks the client anything, so a server request
         // is not answered — but it is not silently dropped either.

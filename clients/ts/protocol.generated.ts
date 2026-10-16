@@ -113,7 +113,7 @@ export interface CompactionApplied {
 
 export interface SessionAttachParams {
   cwd: string;
-  /** tui | web | acp */
+  /** tui | web | vscode | acp */
   client: string;
 }
 

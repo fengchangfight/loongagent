@@ -1,6 +1,6 @@
 import { JsonRpcError } from "./agentSession.ts";
 import type { AgentSession } from "./agentSession.ts";
-import { METHODS } from "../../ts/protocol.generated.ts";
+import { METHODS, NOTIFICATIONS } from "../../ts/protocol.generated.ts";
 import type {
   ApprovalScope,
   ContextExplain,
@@ -44,6 +44,8 @@ export class LoongSession {
   private readonly agent: AgentSession;
   private current: string | undefined;
   private readonly seen: EventEnvelope[] = [];
+  private eventObserver: ((event: EventEnvelope) => void) | undefined;
+  private deltaObserver: ((text: string) => void) | undefined;
 
   constructor(agent: AgentSession) {
     this.agent = agent;
@@ -80,6 +82,30 @@ export class LoongSession {
     const result = await this.call<{ events: EventEnvelope[] }>(METHODS.sessionReplay, this.mine());
     this.seen.push(...result.events);
     return result.events;
+  }
+
+  /**
+   * Submit a turn.
+   *
+   * It resolves at the turn's first **pause**, not at its end: when the policy
+   * asks, the server streams `approval.requested` and returns, and the turn
+   * continues on `respondApproval`. Callers that want the whole turn loop.
+   */
+  async submit(text: string): Promise<{ turn_id: number; accepted: boolean }> {
+    return this.call<{ turn_id: number; accepted: boolean }>(
+      METHODS.promptSubmit,
+      this.mine({ text }),
+    );
+  }
+
+  /** Called for every logged event as it arrives. Replaces any earlier observer. */
+  onEvent(handler: (event: EventEnvelope) => void): void {
+    this.eventObserver = handler;
+  }
+
+  /** Called for each fragment of the answer, in the order the model wrote them. */
+  onDelta(handler: (text: string) => void): void {
+    this.deltaObserver = handler;
   }
 
   async models(): Promise<ModelList> {
@@ -127,9 +153,17 @@ export class LoongSession {
   }
 
   private receive(method: string, params: unknown): void {
-    if (method !== EVENT_NOTIFICATION) return;
     if (params === null || typeof params !== "object") return;
-    this.seen.push(params as EventEnvelope);
+    if (method === EVENT_NOTIFICATION) {
+      const event = params as EventEnvelope;
+      this.seen.push(event);
+      this.eventObserver?.(event);
+      return;
+    }
+    if (method === NOTIFICATIONS.modelDelta) {
+      const fragment = params as { text?: unknown };
+      if (typeof fragment.text === "string") this.deltaObserver?.(fragment.text);
+    }
   }
 
   private async call<T>(method: string, params: Record<string, unknown>): Promise<T> {

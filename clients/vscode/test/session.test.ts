@@ -135,3 +135,32 @@ test("cancel reaches the child", () => {
   session.cancel();
   assert.deepEqual(child.signals, ["SIGINT"]);
 });
+
+test("submit names the session and returns the turn", async () => {
+  const { child, session } = makeSession();
+  await attachTo(child, session, "s1");
+  const pending = session.submit("hello");
+  assert.equal(child.sent()[1].method, "prompt.submit");
+  assert.deepEqual(child.sent()[1].params, { session_id: "s1", text: "hello" });
+  answer(child, 1, { turn_id: 1, accepted: true });
+  assert.deepEqual(await pending, { turn_id: 1, accepted: true });
+});
+
+test("an event observer hears events as they arrive", () => {
+  const { child, session } = makeSession();
+  const heard: number[] = [];
+  session.onEvent((event) => { heard.push(event.seq); });
+  notifyEvent(child, envelope(1));
+  notifyEvent(child, envelope(2));
+  assert.deepEqual(heard, [1, 2]);
+  assert.equal(session.events.length, 2, "observing does not stop the events accumulating");
+});
+
+test("a delta observer hears each fragment", () => {
+  const { child, session } = makeSession();
+  const fragments: string[] = [];
+  session.onDelta((text) => { fragments.push(text); });
+  child.emitStdout(`{"jsonrpc":"2.0","method":"model.delta","params":{"turn_id":1,"text":"he"}}\n`);
+  child.emitStdout(`{"jsonrpc":"2.0","method":"model.delta","params":{"turn_id":1,"text":"llo"}}\n`);
+  assert.deepEqual(fragments, ["he", "llo"]);
+});

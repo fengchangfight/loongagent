@@ -30,6 +30,12 @@
         ]
       }
     ],
+    "commands": [
+      {
+        "command": "loongagent.smoke",
+        "title": "loongagent: Smoke test (spawn, attach, one prompt)"
+      }
+    ],
     "configuration": {
       "title": "loongagent",
       "properties": {

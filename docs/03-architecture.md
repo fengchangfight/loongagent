@@ -406,8 +406,8 @@ kind, so no lower layer can loosen a higher one.**
   AQ-9 fixes the envelope; payload schemas stay with their domains.
 
 Deferred: key schemas per domain, pack transport/update cadence (AQ-5),
-signature algorithm and key distribution, discovery paths, importer
-normalization.
+signature algorithm and key distribution (both settled later by ADR-0016),
+discovery paths, importer normalization.
 
 **Constrains:** T-07, T-21 (what seniors can open), enterprise managed-config
 story (Codex `requirements.toml` precedent).

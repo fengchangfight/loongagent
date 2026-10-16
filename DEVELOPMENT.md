@@ -848,8 +848,8 @@ binary the TUI spawns as its server (used by the end-to-end test).
   threat model rather than the table: **the project layer may not set `model`,
   `base_url` or `api_key`** (a repository must not choose where prompts go), and a
   project layer's `skill_dirs` must stay inside the workspace. Layer files:
-  `/etc/loongagent/profile.toml` (an administrator's file — the placeholder for
-  ADR-0008's signed org pack), `<workspace>/.loongagent/profile.toml`,
+  `/etc/loongagent/profile.toml` (an administrator's file, unsigned by design —
+  the signed pack is the layer above it), `<workspace>/.loongagent/profile.toml`,
   `~/.loongagent/profile.toml`, and `--profile FILE` as the session
   layer. The **local** (unmanaged) install keeps its own file,
   `~/.loongagent/local.toml`, and its own commands: `loongagent local add` for chat

@@ -9,6 +9,8 @@ import type { EventEnvelope } from "../../ts/protocol.generated.ts";
 
 /** Where this workspace's session id is remembered between windows. */
 const SESSION_KEY = "loongagent.sessionId";
+/** Whether this workspace last chose to stop being asked (ADR-0007 §5). */
+const AUTO_APPROVE_KEY = "loongagent.autoApprove";
 
 /**
  * The agent for one workspace folder: the child process, the session, and the
@@ -38,6 +40,24 @@ export class WorkspaceAgent {
 
   get sessionId(): string | undefined {
     return this.live?.sessionId;
+  }
+
+  /** The last answer to "stop asking?", or nothing if this workspace never answered. */
+  get autoApprove(): boolean | undefined {
+    return this.context.workspaceState.get<boolean>(AUTO_APPROVE_KEY);
+  }
+
+  async rememberAutoApprove(on: boolean): Promise<void> {
+    await this.context.workspaceState.update(AUTO_APPROVE_KEY, on);
+  }
+
+  /** What a new session should start with: the workspace's answer, then the setting. */
+  private preferredAutoApprove(): boolean {
+    const remembered = this.autoApprove;
+    if (remembered !== undefined) return remembered;
+    return vscode.workspace
+      .getConfiguration("loongagent", this.folder.uri)
+      .get<boolean>("autoApprove", false);
   }
 
   /**
@@ -161,6 +181,12 @@ export class WorkspaceAgent {
       `ready: session ${attached.session_id} (schema ${attached.schema_version}, ` +
       `${attached.existing_events} events already)`,
     );
+    // A workspace that chose to stop being asked comes back that way — and the
+    // session records it, so the log still explains itself.
+    if (this.preferredAutoApprove()) {
+      await session.setAutoApprove(true);
+      this.output.appendLine("ready: approval prompts are off for this session (permissions.relaxed)");
+    }
     return session;
   }
 }

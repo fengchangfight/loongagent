@@ -5,6 +5,7 @@ import { TurnBusyError } from "./turn.ts";
 import { WorkspaceAgent } from "./workspaceAgent.ts";
 import { EVENTS } from "../../ts/protocol.generated.ts";
 import type { UiPart } from "./render.ts";
+import type { ApprovalAnswer, ApprovalRequest } from "./turn.ts";
 import type { LoongSession } from "./session.ts";
 import type { TurnController } from "./turn.ts";
 
@@ -73,9 +74,10 @@ async function handleRequest(
   switch (request.command) {
     case "new":
       return startFreshSession(agent, stream, output);
+    case "yolo":
+      return toggleAutoApprove(agent, stream, output, folder);
     case "model":
     case "context":
-    case "yolo":
       stream.markdown(`/${request.command} is ${NOT_YET}.`);
       return;
     default:
@@ -95,6 +97,53 @@ async function startFreshSession(
     stream.markdown(`Started a new session: \`${id}\`.`);
   } catch (error) {
     stream.markdown(`I could not start a new session: ${explain(error)}`);
+    output.appendLine(`failed: ${explain(error)}`);
+  }
+}
+
+/**
+ * The human's answer to a policy question, in the protocol's own terms.
+ *
+ * A dismissed modal is a denial, never an allow: closing a dialog is not
+ * consent, and reading it as consent is how a guard becomes decorative.
+ *
+ * `project` scope is deliberately not on the menu (spec §4.4, §8): three buttons
+ * is already the limit of what a modal can carry honestly, and "the whole
+ * project, forever" is not a thing to slip into a stray click.
+ */
+export async function decideFromModal(request: ApprovalRequest): Promise<ApprovalAnswer> {
+  const answer = await vscode.window.showWarningMessage(
+    `loongagent wants to act: ${request.action_class} — ${request.reason}`,
+    { modal: true },
+    "Allow once",
+    "Allow always",
+    "Deny",
+  );
+  if (answer === "Allow once") return { granted: true, scope: "once" };
+  if (answer === "Allow always") return { granted: true, scope: "action_class" };
+  return { granted: false, scope: "once", reason: "denied in VS Code" };
+}
+
+async function toggleAutoApprove(
+  agent: WorkspaceAgent,
+  stream: vscode.ChatResponseStream,
+  output: vscode.OutputChannel,
+  folder: vscode.WorkspaceFolder,
+): Promise<void> {
+  try {
+    const session = await agent.ensure();
+    const current = agent.autoApprove ?? vscode.workspace
+      .getConfiguration("loongagent", folder.uri)
+      .get<boolean>("autoApprove", false);
+    const state = await session.setAutoApprove(!current);
+    await agent.rememberAutoApprove(state);
+    output.appendLine(`ready: approval prompts ${state ? "off" : "on"} for this session`);
+    stream.markdown(state
+      ? "Approval prompts are **off** for this session. The sandbox is untouched — only the *asking* "
+        + "stopped, and the session records it (`permissions.relaxed`)."
+      : "Approval prompts are **on** again for this session. The sandbox was never changed.");
+  } catch (error) {
+    stream.markdown(`I could not change the approval setting: ${explain(error)}`);
     output.appendLine(`failed: ${explain(error)}`);
   }
 }
@@ -128,13 +177,8 @@ async function runTurn(
     controller = await agent.controller({
       onEvent: (event) => emit(stream, renderer.event(event)),
       onDelta: (text) => emit(stream, renderer.delta(text)),
-      decide: async (asked) => {
-        output.appendLine(`awaiting approval: ${asked.action_class} — ${asked.reason}`);
-        stream.markdown(`\nApproval needed: **${asked.action_class}** — ${asked.reason}\n`);
-        // Task 9 replaces this with the modal. Until then the honest answer is
-        // "no", never a silent yes.
-        return { granted: false, scope: "once", reason: "approvals are not implemented yet" };
-      },
+      // The person answers, in the editor, while the turn waits.
+      decide: decideFromModal,
     });
   } catch (error) {
     stream.markdown(startupAdvice(explain(error)));

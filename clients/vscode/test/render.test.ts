@@ -146,3 +146,33 @@ test("an empty replay says so instead of rendering nothing", () => {
   assert.equal(parts.length, 1);
   assert.match(parts[0].text, /no events/);
 });
+
+test("a session that stopped asking is announced, not silently quieter", () => {
+  const renderer = new Renderer({ cwd: CWD });
+  const text = textOf(renderer.event(event("permissions.relaxed", {
+    auto_approve: true,
+    reason: "the person asked for it",
+  })));
+  assert.match(text, /approval prompts are off/);
+  assert.match(text, /the person asked for it/);
+});
+
+test("prompts coming back are announced too", () => {
+  const renderer = new Renderer({ cwd: CWD });
+  const text = textOf(renderer.event(event("permissions.relaxed", {
+    auto_approve: false,
+    reason: "back to asking",
+  })));
+  assert.match(text, /approval prompts are on/);
+});
+
+test("an approval request names the action class and the reason the policy gave", () => {
+  const renderer = new Renderer({ cwd: CWD });
+  const text = textOf(renderer.event(event("approval.requested", {
+    request_id: "appr-1",
+    action_class: "out_of_bounds",
+    reason: "network access",
+  })));
+  assert.match(text, /out_of_bounds/);
+  assert.match(text, /network access/);
+});

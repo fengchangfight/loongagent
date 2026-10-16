@@ -1,9 +1,11 @@
 import { EVENTS } from "../../ts/protocol.generated.ts";
 import type {
   ApprovalDecided,
+  ApprovalRequested,
   EventEnvelope,
   JsonValue,
   MessageAppended,
+  PermissionsRelaxed,
   PolicyDecided,
   ToolCall,
   ToolResult,
@@ -92,10 +94,25 @@ export class Renderer {
           },
         ];
       }
+      case EVENTS.approvalRequested: {
+        const asked = envelope.data as unknown as ApprovalRequested;
+        return [
+          { kind: "markdown", text: `approval needed: ${asked.action_class} — ${asked.reason}` },
+        ];
+      }
       case EVENTS.approvalDecided: {
         const decided = envelope.data as unknown as ApprovalDecided;
         const outcome = decided.granted ? "granted" : "denied";
         return [{ kind: "markdown", text: `approval ${outcome} (${decided.scope})` }];
+      }
+      case EVENTS.permissionsRelaxed: {
+        const relaxed = envelope.data as unknown as PermissionsRelaxed;
+        // ADR-0007 §5: a session that stops asking is a session whose log has to
+        // say why, and a surface that hides it would be hiding the relaxation.
+        const state = relaxed.auto_approve
+          ? "approval prompts are off for this session (the sandbox is unchanged)"
+          : "approval prompts are on again for this session";
+        return [{ kind: "markdown", text: `${state} — ${relaxed.reason}` }];
       }
       case EVENTS.messageAppended:
         return this.message(envelope.data as unknown as MessageAppended);

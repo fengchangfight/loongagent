@@ -33,7 +33,14 @@ bold "documents"
 python3 scripts/check-docs.py
 
 bold "tests"
-cargo test --workspace --locked
+# The counts check judges the test totals README.md states against the totals
+# the suite *reports*, so the run is teed into a scratch file outside the
+# repository. pipefail is set above, so a failing test still fails the gate
+# here; the trap removes the scratch file however this script leaves.
+test_capture="$(mktemp "${TMPDIR:-/tmp}/loongcoder-tests.XXXXXX")"
+trap 'rm -f "$test_capture"' EXIT
+cargo test --workspace --locked | tee "$test_capture"
+python3 scripts/check-docs.py --check counts --test-counts "$test_capture"
 
 if [ "${FAST:-0}" = "1" ]; then
   bold "release build"

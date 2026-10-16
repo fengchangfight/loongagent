@@ -390,7 +390,8 @@ skills/commands、**插件**（`plugin add superpowers` 一键装 skills，见�
 六个内置工具（`read_file` / `write_file` / `edit` / `glob` / `grep` / `shell`，
 记忆打开时再加一个 `recall`）、四个界面（tui / web / repl / run）、流式回答、
 以及可选的**分层记忆**（R 模式 + S 模式、后台增量、`recall`/`expand`、F2 可见性）。
-Linux 与 **Windows** 都能构建运行，命令面一致。736 个测试。
+Linux 与 **Windows** 都能构建运行，命令面一致。测试 736 个通过、11 个忽略。
+<!-- test-counts: 736 passed, 11 ignored -->
 
 **没做完，也不假装**：签名 org pack、subagents、插件的索引/搜索与逐插件开关（现在用
 `disable_skills`）、LSP 代码工具、`grep`/`glob` 的

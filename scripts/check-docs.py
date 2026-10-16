@@ -13,9 +13,10 @@ Usage:
                         counts or all (default: all)
     --test-counts FILE  parsed test results, for the counts check
 
-The counts check arrives in a later task; the rest exist today behind the same
-interface, which is why --check and --test-counts are already here. A check that
-is asked for and cannot run is an error, never a silent skip.
+The counts check compares the test totals README.md states with the totals a
+test run actually printed, so the number is checked rather than retyped; because
+it needs that capture it is the one check that is not part of a bare run. A
+check that is asked for and cannot run is an error, never a silent skip.
 """
 from __future__ import annotations
 
@@ -70,6 +71,20 @@ ADR_FILENAME = re.compile(r"^(\d{4})-")
 
 # A topic is a `## T-NN · …` heading; the title after the number is prose.
 TOPIC_HEADING = re.compile(r"^## T-(\d{2})\b", re.MULTILINE)
+
+# One `test result:` line per test binary, and the only place the number of
+# tests that actually ran is stated. The counts check sums these lines: with
+# many binaries in the workspace, one binary's numbers are not the suite's.
+TEST_RESULT = re.compile(r"^test result:.*$", re.MULTILINE)
+PASSED_TESTS = re.compile(r"(\d+) passed")
+IGNORED_TESTS = re.compile(r"(\d+) ignored")
+
+# The one machine-readable line README.md carries, on its own line beneath the
+# Chinese sentence a reader sees. The format is fixed by the plan; the check
+# compares these two numbers and never tries to read the prose around them.
+COUNTS_COMMENT = re.compile(
+    r"^<!-- test-counts: (\d+) passed, (\d+) ignored -->$", re.MULTILINE
+)
 
 
 def fail(*lines: str) -> int:
@@ -544,25 +559,93 @@ def check_citations(root: str) -> list[str]:
     return problems
 
 
-def check_counts(counts_file: str | None, *, requested: bool) -> list[str]:
-    """Not implemented yet; the parameter is the interface a later task fills.
+def reported_totals(counts_text: str, source: str) -> tuple[int, int]:
+    """(passed, ignored) summed over every `test result:` line in counts_text.
 
-    Until that task lands there is no counts logic at all, so even with a file
-    in hand the check must say so instead of printing OK. Asked for by name
-    without --test-counts it is an error too: a check that quietly does nothing
-    is worse than no check.
+    A `test result:` line is what one test binary prints once for the whole
+    binary, and there are many binaries in this workspace, so the suite's total
+    is the *sum* over all of them. A file with no such line is an error: a
+    counts check that parsed nothing and reported OK would be the exact silent
+    pass this gate exists to refuse.
+    """
+    lines = TEST_RESULT.findall(counts_text)
+    if not lines:
+        raise CheckError(
+            f"{source}: no 'test result:' line; there is nothing to compare, so "
+            "a green run here would have checked nothing"
+        )
+    passed = ignored = 0
+    for line in lines:
+        found_passed = PASSED_TESTS.search(line)
+        found_ignored = IGNORED_TESTS.search(line)
+        if found_passed is None or found_ignored is None:
+            raise CheckError(f"{source}: cannot read passed/ignored from {line!r}")
+        passed += int(found_passed.group(1))
+        ignored += int(found_ignored.group(1))
+    return passed, ignored
+
+
+def check_counts(root: str, counts_file: str | None, *, requested: bool) -> list[str]:
+    """README.md's test numbers must equal what the suite itself reported.
+
+    The number that started this gate was hand-typed and wrong; it drifted
+    three times without any build noticing. So the two fields of the README's
+    `test-counts` comment are compared with the `passed` and `ignored` totals
+    in the captured test output, and nothing else in the file is read.
+
+    Why the capture is parsed rather than the source counted: counting the
+    tree finds 748 `#[test]`/`#[tokio::test]` attributes and 13 occurrences of
+    `#[ignore`, two of which are prose in doc comments — and neither number is
+    what the harness runs. A test behind a `cfg`, a macro-generated test, or an
+    ignored-but-listed test makes the source count a different number again.
+    The suite's own totals are the authority for how many tests the suite has;
+    anything else here is a guess wearing a number.
     """
     if requested and counts_file is None:
         return [
             "FAIL --check counts needs --test-counts FILE; "
             "a check that cannot read the counts must not pass silently"
         ]
-    if counts_file is not None:
-        return [
-            "FAIL --check counts: not implemented yet; it must not report OK "
-            "while it checks nothing"
-        ]
-    return []
+    if counts_file is None:
+        return []
+
+    try:
+        with open(counts_file, encoding="utf-8", errors="replace") as handle:
+            counts_text = handle.read()
+    except OSError as error:
+        raise CheckError(f"{counts_file}: {error.strerror or error}") from error
+    passed, ignored = reported_totals(counts_text, counts_file)
+
+    path = os.path.join(root, "README.md")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            readme = handle.read()
+    except OSError as error:
+        raise CheckError(f"README.md: {error.strerror or error}") from error
+
+    stated = COUNTS_COMMENT.findall(readme)
+    if not stated:
+        raise CheckError(
+            "README.md: no '<!-- test-counts: N passed, M ignored -->' line; "
+            "the counts it states cannot be read"
+        )
+    if len(stated) > 1:
+        raise CheckError(
+            f"README.md: {len(stated)} 'test-counts' comments; which one states "
+            "the counts is ambiguous"
+        )
+    said_passed, said_ignored = (int(value) for value in stated[0])
+
+    problems = []
+    if said_passed != passed:
+        problems.append(
+            f"FAIL README.md: says {said_passed} passed, the suite reports {passed}"
+        )
+    if said_ignored != ignored:
+        problems.append(
+            f"FAIL README.md: says {said_ignored} ignored, the suite reports {ignored}"
+        )
+    return problems
 
 
 def main() -> int:
@@ -611,7 +694,9 @@ def main() -> int:
         if "citations" in wanted:
             problems += check_citations(root)
         if "counts" in wanted:
-            problems += check_counts(args.test_counts, requested=args.check == "counts")
+            problems += check_counts(
+                root, args.test_counts, requested=args.check == "counts"
+            )
     except (CheckError, OSError) as error:
         return fail(str(error))
 

@@ -1,0 +1,734 @@
+# Navigability Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use subagent-driven-development (recommended) or executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Make the repository's answers findable in one hop and unable to silently rot, by giving every topic exactly one authority, adding a documentation gate that catches rot, correcting today's false statements, removing the redundancy that costs nothing, and splitting four oversized files with zero behaviour and zero API change.
+
+**Architecture:** Five phases. Phase A builds the gate first, so it protects every later change including its own. Phases B–D make the documents true and single-sourced. Phase E removes redundancy that needs no API change. Phase F does the four mechanical splits, each as its own commit with four independent proofs that nothing but placement changed.
+
+**Tech Stack:** Rust 2021 workspace (24 crates, edition 2021, `rust-version = 1.80`), Python 3 for the existing gate scripts, `bash` for `scripts/check.sh`.
+
+**Spec:** `docs/superpowers/specs/2026-10-16-navigability-design.md` — the plan argues from it; read both.
+
+## Global Constraints
+
+Copied from the spec. Every task's requirements include these.
+
+- **Zero behaviour change.** No change to what any program computes, prints or writes.
+- **Zero `pub` API change.** The splits may add `pub(crate)` / `pub(super)` and `pub use` re-exports only. `pub(crate)` and `pub(super)` cannot reach a public surface.
+- **Zero crate boundary change.** No new crate, no removed crate, no new edge between crates.
+- **Inside moved code, the only lines that may be added are `mod`, `use`, `pub use`, `pub(crate)` and `pub(super)`.** Function bodies are byte-identical.
+- **No `Cargo.toml` diff in any split commit** (`git diff -- '**/Cargo.toml'` is empty for Phase F).
+- **Every new gate check must be shown failing on a seeded defect before it is trusted.** A check that has never failed has not been shown to work.
+- **`./scripts/check.sh` is green at every commit.** It gates formatting, `gen-schema.py --check`, `check-layering.sh`, `cargo test --workspace --locked`, and a release build.
+- **Language:** `README.md` is Chinese. `DEVELOPMENT.md`, `docs/**` and `docs/decisions/**` are English, **except** `docs/06-context-engineering.md` and `docs/decisions/0017-layered-context.md`, which are Chinese and get a `Language: zh` line.
+- **ADRs keep their `Status:` line.** Every other document loses its `Status` / `Last updated` line; status lives in the `docs/README.md` index.
+- **Machine-readable test counts** live in `README.md` as an HTML comment of exactly this shape, on its own line:
+  `<!-- test-counts: 736 passed, 11 ignored -->`
+- **Commit identity:** `git -c user.name="loongagent" -c user.email="noreply@local" commit`.
+- **Commit messages:** `type(scope): a sentence about why`, with a body that names the problem. One logical change per commit.
+- **Do not touch:** the untracked root files `tank-battle.html`, `.smoke.js`, `:memory:.ses`; the gitignored local artefacts under `dist/` and `target/`.
+
+## Review Focus
+
+Six things the spec implies that no gate will catch, so each gets a test in the task that owns the code.
+
+1. **A moved document's relative links break.** `git mv docs/01-landscape-synthesis.md docs/archive/` silently breaks every `research/...` link inside it. Task 10 fixes the links as part of the move and proves the gate saw them before and after.
+2. **A body-hash extractor that matches nothing passes vacuously.** Brace matching can extract zero bodies and report "identical". Task 19 requires `--min` and a step that proves the script fails when `--min` exceeds what it found.
+3. **The test-name multiset is not a set.** `named` is defined both in `crates/cli/src/main.rs`'s test module and in `crates/kernel/src/turn.rs`'s, so a global set of names would collapse two tests into one. The comparison must stay per target — and cargo's `Running … (target/debug/deps/<name>-<hash>)` lines cannot be compared raw, because the hash changes for reasons unrelated to the move. Normalise them to the binary name first.
+4. **`cargo` does not warn about declared-but-unused dependencies.** Removing `serde` from six crates cannot be verified by the compiler. Task 16 verifies by `cargo tree -p <crate>` no longer naming `serde`.
+5. **Stripping a document's status before the index records it loses the information.** Task 13 writes the index first, then removes the headers.
+6. **The gate cannot detect stale prose** — only impossible citations, broken links, orphan documents, a stale crate map and wrong counts. A sentence that is merely out of date still passes. That is why Phase B exists and is reviewed by reading, not by a green gate, and why Phase B must not be skipped on the grounds that the gate is green.
+
+---
+
+## Phase A — the gate
+
+### Task 1: `scripts/check-docs.py` and the relative-link check
+
+**Files:**
+- Create: `scripts/check-docs.py`
+- Modify: `scripts/check.sh`
+
+**Interfaces:**
+- Produces: `scripts/check-docs.py [--root DIR] [--check NAME] [--test-counts FILE]`, exit 0 when every requested check passes and 1 with one line per failure otherwise. `--root` defaults to the repository root; `--check` runs one check and defaults to all. Later tasks add checks to this same file behind the same interface.
+
+- [ ] **Step 1: Write the check, and a seeded defect to prove it fails**
+
+Create `scripts/check-docs.py` with one check, `links`: walk `--root` for tracked `.md` files (use `git -C root ls-files '*.md'` so untracked scratch piles are never scanned), parse every `[text](target)`, skip `http:`, `https:`, `mailto:` and `#` targets, and fail for any other target where `os.path.normpath(join(dirname(file), target))` does not exist. Ignore anything inside fenced code blocks (triple backticks) and inline code spans, so a document may *show* a broken link without failing.
+
+- [ ] **Step 2: Prove it catches a real defect**
+
+Temporarily change `docs/runbooks/windows-build.md`'s first relative link to point at a non-existent file.
+Run: `python3 scripts/check-docs.py --check links`
+Expected: exit 1, one line naming `docs/runbooks/windows-build.md` and the missing target.
+Then restore the file with `git checkout -- docs/runbooks/windows-build.md`.
+
+- [ ] **Step 3: Prove it passes on the real tree**
+
+Run: `python3 scripts/check-docs.py --check links`
+Expected: exit 0, no output. (The tree has 0 broken relative links as of 2026-10-16, after `4add563` fixed the one in `DEVELOPMENT.md`.)
+
+- [ ] **Step 4: Wire it into the gate**
+
+In `scripts/check.sh`, add a `bold "documents"` step running `python3 scripts/check-docs.py` immediately after the `check-layering.sh` step, and add a line to the file's header comment listing this gate and what it has caught.
+
+- [ ] **Step 5: Run the whole gate and commit**
+
+Run: `./scripts/check.sh`
+Expected: `all gates passed`, exit 0.
+
+```bash
+git add scripts/check-docs.py scripts/check.sh
+git commit -m "docs: a gate for the documents, because nothing checked 10 700 lines of them"
+```
+
+### Task 2: the crate map is generated, not hand-copied
+
+**Files:**
+- Modify: `scripts/layering_rules.py`, `scripts/check-docs.py`, `DEVELOPMENT.md:705-722`
+- Create: `docs/crate-map.md`
+
+**Interfaces:**
+- Consumes: `--check` dispatch from Task 1.
+- Produces: `scripts/layering_rules.py --emit-map` writing the map to stdout; `check-docs.py --check crate-map` regenerating and diffing.
+
+- [ ] **Step 1: Make `layering_rules.py` able to emit the map**
+
+Add an `--emit-map PATH_TO_ROOT` flag. It prints a markdown table with one row per key of `ALLOWED`, sorted by crate name: the crate name, the first line of that crate's `//!` header, and its allowed internal edges sorted. Resolve a crate's directory by stripping the `loong-` prefix, with the single exception `loongagent` → `cli`, and take the header's first line from `crates/<dir>/src/lib.rs` (or `src/main.rs` for `loongagent`). Every one of the 24 crates has a `//!` header of 5–38 lines; fail loudly if one is missing rather than emitting a blank cell.
+Keep the existing stdin-validation behaviour when `--emit-map` is absent.
+
+- [ ] **Step 2: Generate the map and prove the check fails when it drifts**
+
+Run: `python3 scripts/layering_rules.py --emit-map . > docs/crate-map.md`
+Add the `crate-map` check to `check-docs.py`: regenerate into a string and compare with the file's contents; on mismatch, exit 1 and print the diff.
+Then hand-edit `docs/crate-map.md` (delete one row).
+Run: `python3 scripts/check-docs.py --check crate-map`
+Expected: exit 1 showing the missing row.
+Run: `python3 scripts/layering_rules.py --emit-map . > docs/crate-map.md` and re-run the check. Expected: exit 0.
+
+- [ ] **Step 3: Point `DEVELOPMENT.md` at the authority**
+
+Replace the `## Layout` section's table (`DEVELOPMENT.md:705-722`, the "Nine of the eleven crates" table, which names 11 of 24 crates) with two sentences and a link to `docs/crate-map.md`. Keep one sentence stating the rule the hand-written table conveyed — dependencies may only point down — and note that `scripts/layering_rules.py` is what enforces it.
+
+- [ ] **Step 4: Gate and commit**
+
+Run: `./scripts/check.sh`
+Expected: `all gates passed`.
+
+```bash
+git add scripts/layering_rules.py scripts/check-docs.py docs/crate-map.md DEVELOPMENT.md
+git commit -m "docs: generate the crate map from the layering rules, which are the real authority"
+```
+
+### Task 3: no orphan documents, and index the new subtree
+
+**Files:**
+- Modify: `scripts/check-docs.py`, `docs/README.md`
+
+**Interfaces:**
+- Consumes: the `--check` dispatch from Task 1.
+- Produces: `check-docs.py --check orphans`.
+
+- [ ] **Step 1: Add the check**
+
+An `.md` under `docs/` is indexed when either its repository-relative path appears in a markdown link target in `docs/README.md`, or it lives in a direct subdirectory of `docs/` whose name appears in a link target in `docs/README.md`. Fail listing every unindexed document.
+
+- [ ] **Step 2: Prove it fails**
+
+Temporarily create `docs/orphan-probe.md`.
+Run: `python3 scripts/check-docs.py --check orphans`
+Expected: exit 1 naming `docs/orphan-probe.md`.
+Delete the probe and re-run. Expected: exit 1 naming `docs/superpowers/specs/2026-10-16-navigability-design.md`, because the `superpowers/` subtree is not yet indexed — which is the real defect this task fixes.
+
+- [ ] **Step 3: Index the subtree**
+
+Add a `superpowers/` row to the `docs/README.md` index table, describing it as the design specs and implementation plans produced while working, and linking `superpowers/specs/2026-10-16-navigability-design.md`.
+
+- [ ] **Step 4: Gate and commit**
+
+Run: `python3 scripts/check-docs.py --check orphans && ./scripts/check.sh`
+Expected: both exit 0.
+
+```bash
+git add scripts/check-docs.py docs/README.md
+git commit -m "docs: an index that can be checked for orphans, and the spec subtree indexed"
+```
+
+### Task 4: impossible citations
+
+**Files:**
+- Modify: `scripts/check-docs.py`
+
+**Interfaces:**
+- Consumes: the `--check` dispatch from Task 1.
+- Produces: `check-docs.py --check citations`.
+
+- [ ] **Step 1: Add the check**
+
+Derive the highest ADR number from the `docs/decisions/NNNN-*.md` filenames and the highest topic from `^## T-(\d+)` in `docs/02-topics.md`. Fail for any document mentioning `ADR-(\d{4})` above the former or `T-(\d{2})` above the latter. Document in the check's own comment that it catches *impossible* citations, not stale ones — `ADR-0001…ADR-0014` passes even though 18 exist, because 14 is a real ADR.
+
+- [ ] **Step 2: Prove it fails, then gate and commit**
+
+Write `ADR-0099` into a scratch line of `docs/README.md`, run `python3 scripts/check-docs.py --check citations`, expected exit 1 naming the file; remove the line, re-run, expected exit 0. Then `./scripts/check.sh` and commit.
+
+```bash
+git add scripts/check-docs.py
+git commit -m "docs: refuse citations of an ADR or a topic that does not exist"
+```
+
+### Task 5: the test counts in `README.md` are the reported ones
+
+**Files:**
+- Modify: `scripts/check-docs.py`, `scripts/check.sh`, `README.md:393`
+
+**Interfaces:**
+- Consumes: the `--test-counts FILE` parameter from Task 1.
+- Produces: `check-docs.py --check counts --test-counts FILE`.
+
+- [ ] **Step 1: Capture the suite's own totals in `check.sh`**
+
+Change the test step at `scripts/check.sh:31` to tee `cargo test --workspace --locked` into a temporary file and pass its path to `check-docs.py --check counts --test-counts "$file"`. `set -o pipefail` is already set, so a failing test still fails the gate.
+
+- [ ] **Step 2: Add the check**
+
+Sum the `passed` and `ignored` fields of every `test result:` line in the captured file. Fail unless `README.md` contains an HTML comment of exactly the shape fixed in Global Constraints whose two numbers match. Compare numbers only, never the surrounding prose.
+
+- [ ] **Step 3: State the counts in `README.md`**
+
+Replace the bare `736 个测试。` at `README.md:393` with a sentence naming both figures and carrying the machine-readable comment on its own line beneath it. The values today are `736 passed, 11 ignored`.
+
+- [ ] **Step 4: Prove the check fails**
+
+Change the comment's passed count to `700`, run `./scripts/check.sh`, expected failure naming the two numbers. Restore, re-run, expected `all gates passed`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add scripts/check-docs.py scripts/check.sh README.md
+git commit -m "docs: check the test counts against the suite, instead of retyping them"
+```
+
+---
+
+## Phase B — the documents are true
+
+Phase B has no gate to lean on (Review Focus 6). Each task's proof is the quoted evidence, re-read after the edit.
+
+### Task 6: `docs/04-system-overview.md` is brought current
+
+**Files:**
+- Modify: `docs/04-system-overview.md`
+
+- [ ] **Step 1: Fix the four stale numbers**
+
+Header (`:3`): `ADR-0001…ADR-0014` → `ADR-0001…ADR-0018`. `:212` `T-01…T-21` → `T-01…T-25`. `:215` `ADRs 0001–0014` → `0001–0018`. `:216` `14 cited deep dives` → `15`. `:225-226` `fourteen ADRs` → `eighteen`.
+
+- [ ] **Step 2: Complete the decision table**
+
+In §4 ("Every decision, in one table"), add the two missing rows: ADR-0016 (pack distribution) and ADR-0018 (plugin install and bootstrap). Read both ADRs and write one line each in the style of the existing rows.
+
+- [ ] **Step 3: Replace the "not started" ending**
+
+Rewrite §10 (`:223-236`) from "**Design: complete.** … **Implementation: not started.**" to the current state: the design is complete and the implementation exists, with the build order named as history rather than as a plan. Take the facts from `README.md` §状态 and from `git log`.
+
+- [ ] **Step 4: Verify by reading**
+
+Run: `grep -n 'not started\|0014\|T-21\|14 cited\|fourteen' docs/04-system-overview.md`
+Expected: no output.
+Run: `python3 scripts/check-docs.py` and `./scripts/check.sh`. Expected: exit 0.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add docs/04-system-overview.md
+git commit -m "docs: the one-read picture said the implementation had not started"
+```
+
+### Task 7: `DEVELOPMENT.md` is brought current
+
+**Files:**
+- Modify: `DEVELOPMENT.md`
+
+- [ ] **Step 1: Fix the test count and the numbering**
+
+`:698` `# 69 tests` → the current figures. `:1031` and `:1034` are both numbered `11.`; renumber the second through the rest of that list.
+
+- [ ] **Step 2: Remove the self-contradiction about streaming**
+
+Delete the sentence "Response streaming is not implemented, so the answer appears when the turn completes." at `:756-757`. The same file describes streaming as shipped at `:917-923`; that description is the true one, verified by `crates/providers/src/openai_compat.rs`'s SSE handling and the `model.delta` notification.
+
+- [ ] **Step 3: Correct the "not started" list**
+
+`:1039-1040` lists session export/import, WASM extensions, the web client, compaction and the control plane as not started. Session export/import is ADR-0014 and `loongagent export`/`import` exist; the web client is `crates/web` and `loongagent web`; compaction is ADR-0006 §4; the control plane is ADR-0012 with a runbook. Rewrite item 12 to what is actually outstanding (WASM extensions are), moving the rest out.
+
+- [ ] **Step 4: Verify by reading**
+
+Run: `grep -n '69 tests\|not implemented\|Not started' DEVELOPMENT.md`
+Expected: no false claim among the hits — read each one.
+Run: `./scripts/check.sh`. Expected: exit 0.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add DEVELOPMENT.md
+git commit -m "docs: the maintainer guide called shipped work unstarted, and contradicted itself"
+```
+
+### Task 8: the signing story, stated once and correctly
+
+**Files:**
+- Modify: `README.md`, `docs/05-parity-and-synthesis.md`
+
+- [ ] **Step 1: Establish what is true from the code**
+
+Confirm three things and quote them in the commit body: `crates/pack/src/lib.rs:1-22` (the signed envelope, Ed25519 against a pinned key), `crates/cli/src/main.rs:743` (the pack is verified before it can occupy the org layer), and `crates/config/src/lib.rs:1401` (the local org layer is a plain `/etc/loongagent/profile.toml` with no signature).
+
+- [ ] **Step 2: Correct `docs/05` §C**
+
+The C2 row at `docs/05:164` says the signed envelope does not ship and nothing should be called tamper-resistant. Correct it: the signed envelope ships and is verified for *packs*; the *local* org layer file is unsigned, and that is the thing that must not be called tamper-resistant.
+
+- [ ] **Step 3: Correct `README.md`**
+
+`:360` and `:366` and the status list at `:395` say signing is not implemented. Rewrite them to the same distinction: packs are signed and verified; the local org file is not.
+
+- [ ] **Step 4: Verify by reading**
+
+Run: `grep -rn '签名\|signed\|tamper' README.md docs/05-parity-and-synthesis.md docs/decisions/0016-pack-distribution.md`
+Expected: every hit agrees that packs are signed and the local org layer is not.
+Run: `./scripts/check.sh`. Expected: exit 0.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add README.md docs/05-parity-and-synthesis.md
+git commit -m "docs: a signed pack and an unsigned local org file are two different things"
+```
+
+### Task 9: `docs/00` and `docs/02`
+
+**Files:**
+- Modify: `docs/00-vision.md`, `docs/02-topics.md`
+
+- [ ] **Step 1: Correct the vision's surfaces and resolved questions**
+
+`:29` lists a desktop app as a surface every user may choose; ADR-0009 `:18` drops desktop and CI. Correct the bullet to the surfaces that exist (TUI, web, REPL, headless) and cite ADR-0009 as the authority. Then resolve the three open questions at `:81-87`, which are decided: check each against the ADRs and mark it resolved with the ADR that decided it.
+
+- [ ] **Step 2: Bring `docs/02-topics.md`'s statuses up to the decisions**
+
+Only T-11 (`:382` → ADR-0007), T-14 (`:430` → ADR-0010) and T-16 (`:463`, merged into T-18) carry a non-`Seed` status, while 21 topics remain `Seed`. Go through them and mark `Promoted → ADR-00NN` wherever an ADR already decides the topic, and `Wanted`/`Discussing` where the conversation has moved on. Leave genuinely undiscussed topics as `Seed`, and be able to say why each one is still open. Do not delete any topic.
+
+- [ ] **Step 3: Record the duplicates that are deliberately not consolidated**
+
+Add one topic to the backlog covering the five small cross-crate helper duplicates the spec lists under "Record, do not fix" — `now_ms` (3 copies), `expand_home` (2), `first_line` (2 identical, with a different third in `hooks`), and the rest — naming each with its files, marking it `Seed`, and stating why it is not being done now: consolidating needs a new shared public surface, which is an API change, and five ten-line functions do not justify one. This is the record; the spec deliberately removes nothing.
+
+- [ ] **Step 4: Verify by reading**
+
+Run: `grep -c 'Promoted' docs/02-topics.md`
+Expected: substantially more than 2. Read the ones left as `Seed` and be able to say why each is still open.
+Run: `python3 scripts/check-docs.py && ./scripts/check.sh`. Expected: exit 0.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add docs/00-vision.md docs/02-topics.md
+git commit -m "docs: the vision promised a desktop app, and the backlog had not caught up with the ADRs"
+```
+
+---
+
+## Phase C — one authority each
+
+### Task 10: the superseded history moves to `docs/archive/`
+
+**Files:**
+- Create: `docs/archive/` (with a short `README.md` explaining what is in it and why)
+- Move: `docs/01-landscape-synthesis.md`, part of `docs/03-architecture.md`
+- Modify: `docs/README.md`, `scripts/check-docs.py` if the orphan rule needs the new subtree
+
+**Interfaces:**
+- Consumes: Task 1's link check, which is what proves the move did not break links (Review Focus 1).
+
+- [ ] **Step 1: Move `docs/01` and fix its links**
+
+`git mv docs/01-landscape-synthesis.md docs/archive/`. Every relative link inside it that pointed at a sibling of `docs/` now resolves one directory higher; repair each, then confirm with `python3 scripts/check-docs.py --check links` that no link broke. Run the link check *before* the move and save the output, so the before-and-after can be compared rather than assumed.
+
+- [ ] **Step 2: Move `docs/03`'s history and keep its decision map**
+
+Move Part 1 (`:20-48`, "Foundations — historical framing") and Part 3 (`:539-808`, the discussion log, ~290 lines) into `docs/archive/03-architecture-history.md`, and leave Part 2 (the AQ-1…AQ-12 decision map) in `docs/03-architecture.md`. Repair relative links in both halves. The discussion log is the owner's verbal trade-offs, which a commit message cannot reproduce — that is why it is archived rather than deleted.
+
+- [ ] **Step 3: Write `docs/archive/README.md` and index it**
+
+One short document: what is archived, that it is history rather than current guidance, and that `docs/05` supersedes `01` while the ADRs supersede `03` Part 2. Add a row for `archive/` to the `docs/README.md` index.
+
+- [ ] **Step 4: Verify and commit**
+
+Run: `python3 scripts/check-docs.py && ./scripts/check.sh`
+Expected: exit 0, and the orphan check accepts the new subtree.
+
+```bash
+git add -A docs/
+git commit -m "docs: the superseded synthesis and discussion log are history, not guidance"
+```
+
+### Task 11: one index
+
+**Files:**
+- Modify: `docs/04-system-overview.md`, `README.md`
+
+- [ ] **Step 1: Replace `docs/04` §9 with a pointer**
+
+§9 ("Where to read what", `:206-221`) is a second index with its own two errors. Replace the table with two sentences pointing at `docs/README.md` as the index and at `README.md`/`DEVELOPMENT.md` as the two entries.
+
+- [ ] **Step 2: Replace `README.md`'s document table with a pointer**
+
+The table at `:371-381` lists seven rows of the same map, in Chinese. Replace it with one sentence and a link to `docs/README.md`, keeping any row that is not in the index.
+
+- [ ] **Step 3: Verify and commit**
+
+Run: `python3 scripts/check-docs.py --check orphans && ./scripts/check.sh`
+Expected: exit 0.
+
+```bash
+git add docs/04-system-overview.md README.md
+git commit -m "docs: three indexes drift apart; one of them is enough"
+```
+
+### Task 12: one "deliberate no"s list
+
+**Files:**
+- Modify: `docs/04-system-overview.md`
+
+- [ ] **Step 1: Replace `docs/04` §6 with a pointer**
+
+`docs/04` §6 ("What we deliberately do **not** do", `:149-171`) restates the list whose authority is `docs/05` §D (`:172-184`). Check each item is present in `docs/05` §D first — if any is not, add it there — then replace §6 with a two-sentence pointer. `docs/01` §D leaves with the archive in Task 10.
+
+- [ ] **Step 2: Verify and commit**
+
+Run: `grep -n 'deliberately' docs/04-system-overview.md docs/05-parity-and-synthesis.md`
+Expected: the list expands once, in `docs/05`.
+Run: `./scripts/check.sh`. Expected: exit 0.
+
+```bash
+git add docs/04-system-overview.md docs/05-parity-and-synthesis.md
+git commit -m "docs: the things we refuse to do were written down three times"
+```
+
+### Task 13: status lives in the index
+
+**Files:**
+- Modify: `docs/README.md`, `docs/00-vision.md`, `docs/01`'s replacement if any, `docs/02-topics.md`, `docs/03-architecture.md`, `docs/04-system-overview.md`, `docs/05-parity-and-synthesis.md`, `docs/06-context-engineering.md`
+
+**Interfaces:**
+- Consumes: nothing. Order matters internally (Review Focus 5).
+
+- [ ] **Step 1: Fill the index's Status column for every document**
+
+Every row in the `docs/README.md` table, plus a row for each of `00`–`07`, carries a status. Read each document's current header where it has one and its content where it does not. This step comes first so nothing is lost.
+
+- [ ] **Step 2: Rewrite the convention paragraph**
+
+Replace `docs/README.md:14-15` ("Every doc starts with a header: **Status** … and **Last updated** date") with the new rule: status is recorded in this table, documents carry a title, and ADRs keep their own `Status:` line because an ADR's status is part of its record.
+
+- [ ] **Step 3: Strip the per-document headers**
+
+Remove the `- **Status:** …` and `- **Last updated:** …` lines from `docs/00`, `02`, `03`, `04`, `05`, `06` and from `docs/research/dsh-plugin-ecosystem.md`, whose status is now in the index. Leave every `docs/decisions/*.md` header untouched.
+
+- [ ] **Step 4: Verify and commit**
+
+Run: `grep -rln 'Last updated' docs/ | grep -v decisions/`
+Expected: no output.
+Run: `python3 scripts/check-docs.py && ./scripts/check.sh`. Expected: exit 0.
+
+```bash
+git add docs/
+git commit -m "docs: 35 of 43 documents ignored the header rule; keep status where it is read"
+```
+
+### Task 14: `DEVELOPMENT.md`'s status sections stop being a second verdict
+
+**Files:**
+- Modify: `DEVELOPMENT.md`
+
+**Interpretation, stated so it can be rejected:** the spec makes `README.md` §"状态，说实话" the sole authority for the works/not-works verdict, and says `DEVELOPMENT.md`'s §"What works today" and §"What is not done yet" shrink to a pointer. Taken literally that deletes roughly 220 lines of per-feature detail, which is information rather than duplication. This plan implements the *authority* rule and keeps the detail: the verdict is stated once, in `README.md`, and both `DEVELOPMENT.md` sections open with a line naming `README.md` as the authority so they read as detail behind it, not as a competing verdict.
+
+- [ ] **Step 1: Make the subordination explicit**
+
+Add to the head of §"What works today" (`:766`) and §"What is not done yet" (`:989`) one line each: the verdict is `README.md` §状态; this section is the detail behind it. Remove any sentence in either section that states a works/not-works verdict rather than describing behaviour.
+
+- [ ] **Step 2: Make sure the two agree**
+
+Walk `README.md` §状态's two lists against `DEVELOPMENT.md`'s. Where they disagree about an item's state, `README.md` wins and the detail section is corrected. This is the drift the change exists to stop.
+
+- [ ] **Step 3: Verify and commit**
+
+Run: `./scripts/check.sh`. Expected: exit 0.
+Then read both sections and the README list side by side; there must be no item whose state differs.
+
+```bash
+git add DEVELOPMENT.md README.md
+git commit -m "docs: one place states whether it works; the other explains why"
+```
+
+---
+
+## Phase D — the maintainer layer
+
+### Task 15: `docs/07-extending.md`
+
+**Files:**
+- Create: `docs/07-extending.md`
+- Modify: `docs/README.md`, `README.md`, `DEVELOPMENT.md` (pointers only)
+
+**Interfaces:**
+- Consumes: Task 3's orphan check, which forces the new document into the index.
+
+- [ ] **Step 1: Establish the four procedures from the code, quoting where each lives**
+
+Read and record the exact anchors for each procedure before writing a word:
+
+| Procedure | Anchors |
+|---|---|
+| Add a built-in tool | `crates/tools/src/lib.rs:72` (`pub trait Tool`), `:116` (`pub fn specs`), the kernel assembling them at `crates/kernel/src/turn.rs:2668`, and the permission classification the tool must declare |
+| Add an event | `crates/schema/protocol.toml` (events are `kind = "enum"` / `"struct"` declarations), `scripts/gen-schema.py` (generates the Rust, the TypeScript and the samples), and `crates/eventlog`'s envelope rules including `ignorable` |
+| Attach a hook | `crates/hooks` (`hooks.toml`, verdict combination in `crates/hooks/src/run.rs`), and why a hook is inert until `loongagent hooks trust` |
+| How routing picks a model | ADR-0005, `crates/config/src/lib.rs`'s `Router`/`RouterRule`/`parse_condition`, and the provider layer |
+
+- [ ] **Step 2: Write the document**
+
+One section per procedure, each with the files to touch, the order to touch them, and the one command that proves the change took effect. Point at the ADRs and at the code rather than restating them — long restatements are how the duplicates in §1 accumulated. Include the two things a newcomer cannot infer: that `gen-schema.py` must be run (and that `check.sh` fails if its output is stale), and that a hook is trust-gated per repository.
+
+- [ ] **Step 3: Index it and point at it**
+
+Add the row to `docs/README.md`. Add one line to `DEVELOPMENT.md` near the gates pointing a maintainer at `07-extending.md`.
+
+- [ ] **Step 4: Verify and commit**
+
+Run: `python3 scripts/check-docs.py && ./scripts/check.sh`
+Expected: exit 0.
+Then check the document's own claim: for each procedure, follow its first instruction and confirm the file it names is the file that does the job.
+
+```bash
+git add docs/07-extending.md docs/README.md DEVELOPMENT.md
+git commit -m "docs: nothing explained how to add a tool or how routing picks a model"
+```
+
+---
+
+## Phase E — redundancy that costs no API change
+
+### Task 16: seven declared-but-unused dependencies
+
+**Files:**
+- Modify: `crates/cli/Cargo.toml`, `crates/eventlog/Cargo.toml`, `crates/sandbox/Cargo.toml`, `crates/skills/Cargo.toml`, `crates/tools/Cargo.toml`, `crates/tui-app/Cargo.toml`, `crates/control/Cargo.toml`, `Cargo.lock`
+
+- [ ] **Step 1: Record the before state, per crate (Review Focus 4)**
+
+Run: `cargo tree -p loongagent -e normal | grep -c loong-protocol` and `cargo tree -p loong-eventlog -e normal | grep -c '^serde '`, repeated for `loong-sandbox`, `loong-skills`, `loong-tools`, `loong-tui-app`, `loong-control`.
+Expected: `loong-protocol` appears for `loongagent` via the dependency graph; `serde` appears for each of the six. Save the output — the compiler will *not* tell us if the removal is wrong, because cargo does not warn about unused declared dependencies.
+
+- [ ] **Step 2: Remove them**
+
+Delete the `loong-protocol.workspace = true` line from `crates/cli/Cargo.toml` and the `serde.workspace = true` line from the six crates. Do not touch `serde_json` anywhere; it is a separate dependency and all six use it.
+
+- [ ] **Step 3: Prove the removal took effect and broke nothing**
+
+Re-run the `cargo tree` lines from Step 1: `serde` must no longer appear for the six, and `cargo tree -p loongagent` must still resolve (the crate never referenced `loong_protocol`, so nothing loses a name it used).
+Run: `cargo check --workspace --all-targets` and confirm the same 0 warnings.
+Run: `./scripts/check.sh` with `FAST=1` first (skips the slow release build), expected `all gates passed`; then the full `./scripts/check.sh`.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add Cargo.toml Cargo.lock crates/*/Cargo.toml
+git commit -m "chore: seven dependencies nobody referenced, including serde in six crates that only use serde_json"
+```
+
+### Task 17: one dead function
+
+**Files:**
+- Modify: `crates/control/src/bin/loongagent-control.rs:706-710`
+
+- [ ] **Step 1: Delete `pack_of` and its `#[allow(dead_code)]`**
+
+`pack_of` is defined once and called nowhere (`grep -rn pack_of crates/` returns only the definition), and its `#[allow(dead_code)]` is the workspace's only one.
+
+- [ ] **Step 2: Prove the workspace still compiles warning-free**
+
+Run: `cargo check --workspace --all-targets`
+Expected: exit 0 and no `warning:` line — which is what the `allow` was hiding, so its absence is the proof.
+Run: `./scripts/check.sh`. Expected: `all gates passed`.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add crates/control/src/bin/loongagent-control.rs
+git commit -m "chore: pack_of was called by nothing, and the allow(dead_code) kept it quiet"
+```
+
+### Task 18: three copies of one test helper
+
+**Files:**
+- Create: `crates/cli/tests/common/mod.rs`
+- Modify: `crates/cli/tests/tui_surface.rs`, `crates/cli/tests/web_surface.rs`, `crates/cli/tests/vertical_slice.rs`
+
+- [ ] **Step 1: Move the helper**
+
+`isolated_command` is byte-identical in the three files (`tui_surface.rs:9`, `web_surface.rs:17`, `vertical_slice.rs:15`). Move it to `crates/cli/tests/common/mod.rs`, keep it `pub`, and have each of the three declare `mod common;` and call `common::isolated_command`. Do not change its body. Leave the two duplicated `build.rs` `fn main`s and the two `named` test helpers alone — a `build.rs` per crate is normal shape and the two `named` helpers belong to different crates.
+
+- [ ] **Step 2: Prove the tests still run and the duplication is gone**
+
+Run: `cargo test -p loongagent --test tui_surface --test web_surface --test vertical_slice`
+Expected: all pass, same count as before (record it first).
+Re-run the body-hash extractor from Task 19 if it already exists, or `grep -rn 'fn isolated_command' crates/`
+Expected: exactly one definition.
+
+- [ ] **Step 3: Gate and commit**
+
+Run: `./scripts/check.sh`. Expected: `all gates passed`.
+
+```bash
+git add crates/cli/tests/
+git commit -m "test: one isolated_command instead of three byte-identical copies"
+```
+
+---
+
+## Phase F — the four mechanical splits
+
+Read the module trees, the visibility budgets and the "three facts that make this mechanical" from the spec's §4.4; they are not repeated here. Each task below is one commit and must produce all four proofs.
+
+**The four proofs, common to Tasks 19–23:**
+1. `python3 scripts/move_evidence.py bodies --rev HEAD --path <old files> --min <N>` and the same with `--worktree` produce identical output.
+2. The test inventory is unchanged. Capture `cargo test --workspace --locked -- --list`, then normalise every `Running … (target/debug/deps/<name>-<hash>)` line down to `<name>` (the hash changes when the code changes, so a raw comparison would fail for the wrong reason), sort, and require the result identical to the before capture. Keeping the normalised target name on each group is what stops two same-named tests in different targets from cancelling out.
+3. `git diff -- '**/Cargo.toml'` is empty.
+4. `./scripts/check.sh` is green, including the 8 integration tests under `crates/cli/tests/`.
+
+### Task 19: the evidence script, and `tui-app`'s tests leave the file
+
+**Files:**
+- Create: `scripts/move_evidence.py`, `crates/tui-app/src/tests.rs`
+- Modify: `crates/tui-app/src/lib.rs`
+
+**Interfaces:**
+- Produces: `scripts/move_evidence.py bodies (--rev REV | --worktree) --path PATH [--path PATH ...] --min N`, printing one line per function body as `sha256<TAB>name<TAB>path` sorted, and exiting 1 if fewer than `N` bodies were extracted or if the two modes disagree. Tasks 20–23 consume it.
+
+- [ ] **Step 1: Write the extractor, and make it refuse to pass vacuously**
+
+Brace-matching extraction of every `fn` and `impl` body, hashed. `--min N` is mandatory so that an extractor which matches nothing fails instead of reporting two empty sets as equal (Review Focus 2). Skip braces inside string, char and raw-string literals and inside comments, or a body containing `'}'` will truncate silently.
+
+- [ ] **Step 2: Prove the extractor fails when it should**
+
+Run: `python3 scripts/move_evidence.py bodies --worktree --path crates/tui-app/src/lib.rs --min 999999`
+Expected: exit 1 saying it found fewer bodies than `--min`. Then run it with the real count as `--min` and expected exit 0.
+
+- [ ] **Step 3: Capture the before state**
+
+Run: `cargo test --workspace --locked -- --list > /tmp/before-tests-raw`, then normalise it exactly as proof 2 describes and save the result as `/tmp/before-tests`. Sanity-check that it contains 747 `: test` lines as of 2026-10-16.
+Run: `python3 scripts/move_evidence.py bodies --rev HEAD --path crates/tui-app/src/lib.rs --min 1 > /tmp/before-bodies` and note how many bodies it found; that number becomes `--min` for this task.
+
+- [ ] **Step 4: Move the tests**
+
+`git mv` is not applicable — the tests stay in the crate. Create `crates/tui-app/src/tests.rs` containing the `#[cfg(test)] mod tests` body from `lib.rs:3928-7661` (3 734 lines), and in `lib.rs` replace it with `#[cfg(test)] mod tests;`. `mod tests` reached from `lib.rs` still sees the same `super::*`, so this step adds no visibility change at all — it is the pilot precisely because it is the cheapest and the most valuable (48.7% of the file).
+
+- [ ] **Step 5: All four proofs, then commit**
+
+Run the four proofs above with `--min` set from the before state.
+If any fails, the move is not mechanical — fix the move, never the proof.
+
+```bash
+git add scripts/move_evidence.py crates/tui-app/src/
+git commit -m "refactor(tui-app): the tests are half the file; they can still be in the same module"
+```
+
+### Task 20: `tui-app`'s four blocks leave `lib.rs`
+
+**Files:**
+- Create: `crates/tui-app/src/{worker,setup,wizard,surface}.rs`
+- Modify: `crates/tui-app/src/lib.rs`
+
+- [ ] **Step 1: Move the four blocks and re-export**
+
+Move `spawn_worker` (`:2510-2736`), the setup form (`:2737-2952`), the wizard (`:2953-3775`) and `run` (`:3776-3927`) into the four files named in the spec's §4.4 tree, and add the `pub use` lines the spec lists so that every existing path — including the 12 `loong_tui_app::X` uses inside the CLI — resolves unchanged. The palette, the free helpers and `impl App` stay in `lib.rs` (they are used by both the root and the moved draw functions).
+Expect only two widening changes: `draw_setup_form` and `draw_local_wizard` become `pub(super)`.
+
+- [ ] **Step 2: All four proofs, then commit**
+
+One extra check this task needs: run `cargo check -p loongagent` and confirm the CLI, which is the only consumer, compiles without a single edit to its own source — `git diff --stat crates/cli/` must be empty.
+
+```bash
+git add crates/tui-app/src/
+git commit -m "refactor(tui-app): the wizard and the worker are not the screen"
+```
+
+### Task 21: `config`'s `lib.rs`
+
+**Files:**
+- Create: `crates/config/src/{profile,layer,secret,paths,merge,tests}.rs`
+- Modify: `crates/config/src/lib.rs`
+
+- [ ] **Step 1: Move by the spec's tree, keeping the `Raw*` structs with `from_file`**
+
+Follow the spec's §4.4 tree exactly. The one coupling that matters: `merge` consumes the private fields of the seven `Raw*` structs, so they must stay in the same module as `LayerValues::from_file` — otherwise about 40 serde fields need field-level widening. Keep the `pub use` re-exports in `lib.rs` so `loong_config::Profile` and the other public paths are unchanged, and keep a `pub(crate) use` for anything `catalog.rs`'s rustdoc links to (`catalog.rs:11` links `crate::check_secret_reference`, so a bare move would break the doc link rather than the build).
+
+- [ ] **Step 2: All four proofs, plus the public surface**
+
+Additionally: snapshot the public item paths of `loong_config` before and after (rustdoc JSON or `cargo public-api`) and require them identical. Then commit.
+
+```bash
+git add crates/config/src/
+git commit -m "refactor(config): layering, profiles, secrets and merging are four things"
+```
+
+### Task 22: `kernel`'s `turn.rs`
+
+**Files:**
+- Create: `crates/kernel/src/turn/{build,confinement,hooks,session,model,loop,compaction,events,recall,nudge,tests}.rs`
+- Modify: `crates/kernel/src/turn.rs` (unchanged in name; `lib.rs` untouched)
+
+- [ ] **Step 1: Move the blocks, keeping the write spine in the parent**
+
+`turn.rs` keeps the module doc, the error and config types, the `Kernel` struct, and the items that span every topic: `append`, the `record_*` family, `fire_hooks`, `tool_specs`. That is what keeps this to ~16 `pub(super)` rather than ~30. The other eleven files take the blocks named in the spec's §4.4 tree. `crates/kernel/src/lib.rs` is 17 lines and does not change.
+The tests move to `turn/tests.rs`; they reach three private items across module boundaries (`leaked_tool_call`, `looks_like_pasted_file`, `narrow_budget`), so either keep those three in the parent or add the two `use` lines — decide by which needs fewer widened items.
+
+- [ ] **Step 2: All four proofs, plus the public surface**
+
+Additionally: the `loong_kernel` public item paths must be identical before and after (all public types stay in `turn.rs`, so nothing should move in the public path space). Then commit.
+
+```bash
+git add crates/kernel/src/
+git commit -m "refactor(kernel): the turn loop, its events and its compaction were one 6 500-line file"
+```
+
+### Task 23: the CLI
+
+**Files:**
+- Create: `crates/cli/src/{control,session,context,server,tui,local,web,repl,mcp,config_cmd,plugin,hooks,sandbox,headless}.rs`
+- Modify: `crates/cli/src/main.rs`
+
+- [ ] **Step 1: Move the subcommand families, keeping the spine in `main.rs`**
+
+`main.rs` keeps the module doc, `USAGE`, `main`, `Args` and `impl Args` (43 uses of `args.cwd` and 16 cross-module calls to `settings_with_pack()` make it the free place to stay), `PackState` (its private fields are read from ten sites), `config_dir` and `run`. Everything else moves by the spec's §4.4 tree.
+This is the only task with a large visibility budget (~61 items `pub(crate)`). It is a binary crate, so `pub(crate)` cannot leak: the `[bin]` target has no exported surface at all.
+
+- [ ] **Step 2: The four inline test modules move with their hosts**
+
+Each of `mod tests`, `session_tests`, `context_command_tests` and `endpoint_key_tests` moves into the file that now owns the code it tests, which changes what `use super::*` reaches: `super` becomes the host module rather than the crate root, so items they use from the root (`Args`, `SessionSource`, `ControlFile`) need a `use crate::…` line. Moving the tests into the hosts is also what saves about 17 items from needing `pub(crate)`.
+
+- [ ] **Step 3: All four proofs, then commit**
+
+`--min` comes from the before state. The 8 integration tests are the ones that matter most here, because they launch the real binary.
+
+```bash
+git add crates/cli/src/
+git commit -m "refactor(cli): fourteen subcommand families, each in its own file"
+```
+
+---
+
+## Self-review notes
+
+- **Spec coverage:** §1 problem → Phase B. §2 criteria 1 → Phase C, 2 → Phase B, 3 → Phase A, 4 → Phase F, 5 → Phase E. §3 non-goals → honoured by omission and by the "leave alone" clauses in Tasks 18, 19 and 23. §4.1 → Phases B–D. §4.2 → Task 13. §4.3 checks 1–5 → Tasks 1–5. §4.4 → Phase F. §4.5 → Phase E. §5 → the four proofs. §6 sequencing → the phases. §7 risks → the Review Focus list. §8 → the Global Constraints' "do not touch".
+- **One spec line the plan interprets rather than transcribes:** Task 14, stated in the task so it can be rejected during review.
+- **Task ordering:** `cli/tests/common/mod.rs` in Task 18 and the four splits in Phase F are independent of Phase B; Phase A must come first because it protects the rest.
+- **The split order is deliberate:** cheapest and highest-value first (`tui-app`'s tests), hardest and largest last (the CLI), so the evidence machinery is exercised before it carries the biggest move.

@@ -54,6 +54,30 @@ explicit flags rather than silent tolerances:
 
 With neither flag the assertion is exactly what it was before them.
 
+The third subcommand applies the directional rule to two `items` captures and
+prints the classification, so every split's comparison is one implementation
+rather than per-task scratch:
+
+    move_evidence.py compare --before OLD.items --after NEW.items
+
+It groups by `(kind, name)` -- `fn new` and repeated inner `use` paths make the
+pair non-unique, and the `path` column is not part of identity because a move
+changes it -- and classifies each group as exact matches, visibility widenings,
+additions, changes and losses.  It exits non-zero on a lost item, on a hash that
+moved without an allowed widening, and on an addition of any kind other than
+`mod` / `use`; a broken capture is refused rather than partly compared.  The
+direction is enforced in code, not by convention: the only permitted transition
+is `private` to `pub(crate)` or `pub(super)`, because anything that reaches
+`pub` changes the public API and a narrowing is not a widening.  A widening also
+requires field 1 to differ and field 6 to match, exactly as `--allow-widening`
+does.
+
+When `--header-file` is given, `reflow` reports each header line with its kind
+(`use`, `mod`, `comment`, `blank`, `attribute`, `other`), because the header is
+prepended text and only its `mod` / `use` lines are covered by `compare`'s
+permitted-addition check -- a comment or a blank line in a header would
+otherwise be invisible.
+
 Hashing whole items rather than bodies is the point.  A moved signature (a
 parameter renamed or retyped, a `&mut` added), a dropped `pub`, a lost
 `#[test]`/`#[cfg]`, or an entire `struct` can change and still compile, pass
@@ -148,6 +172,19 @@ _TRAILING_CLOSERS = frozenset(")]}>")
 
 _IDENT = re.compile(r"(?:r#)?[A-Za-z_][A-Za-z0-9_]*")
 _PUB = re.compile(r"\bpub\b\s*(\(([^)]*)\))?")
+
+# `compare` refuses to read a capture line that is not one `items` printed.
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+_VISIBILITY = re.compile(r"private|pub|pub\([^)]*\)")
+
+# The only visibility transitions a split may make: private becomes visible to
+# the crate.  Anything that reaches `pub` is a public API change, and a
+# narrowing or a swap between two restricted keywords is not a widening.
+_ALLOWED_WIDENINGS = frozenset(("pub(crate)", "pub(super)"))
+
+# The only item kinds a split may *add*: the module declaration and the
+# `use` / `pub use` lines that keep the paths alive.
+_ADDABLE_KINDS = frozenset(("mod", "use"))
 
 _DELIMITER_PAIRS = {"(": ")", "[": "]", "{": "}"}
 
@@ -720,6 +757,30 @@ def _allowed_widening(old_line: str, new_line: str, names: list[str]) -> str | N
     return None
 
 
+def _header_line_kind(line: str) -> str:
+    """Name what a `--header-file` line is, so a smuggled line is visible.
+
+    Only `mod` / `use` lines are covered by `compare`'s "every addition is a
+    permitted kind" interlock, because the header is prepended text rather than
+    a parsed item.  Reporting each line's kind is what keeps a comment or a
+    blank line from being invisible; anything unrecognised is called `other`
+    rather than passed over.
+    """
+    stripped = line.strip()
+    if not stripped:
+        return "blank"
+    if stripped.startswith("//") or stripped.startswith("/*") or stripped.startswith("*"):
+        return "comment"
+    if stripped.startswith("#["):
+        return "attribute"
+    without_visibility = _without_visibility(stripped).strip()
+    if without_visibility.startswith("use ") or without_visibility == "use":
+        return "use"
+    if without_visibility.startswith("mod ") or without_visibility == "mod":
+        return "mod"
+    return "other"
+
+
 def _find_body(sanitized: str, start: int) -> tuple[str | None, int | None]:
     """Find `{` or `;` at depth zero after an item header."""
     parens = 0
@@ -942,6 +1003,171 @@ def _collect(root: str, rev: str | None, paths: list[str], minimum: int) -> list
     return lines
 
 
+def _parse_items_capture(path: str, root: str) -> list[tuple[str, str, str, str, str, str]]:
+    """Read one `items` capture, refusing anything a capture cannot contain.
+
+    A line that is not six tab-separated fields with a sha256 in fields 1 and 6,
+    a known kind and a valid visibility is a broken capture, not evidence, so
+    this fails loudly instead of quietly comparing less than it was given.
+    """
+    full = path if os.path.isabs(path) else os.path.join(root, path)
+    try:
+        with open(full, "r", encoding="utf-8") as handle:
+            text = handle.read()
+    except OSError as error:
+        raise SystemExit(f"move_evidence: cannot read items capture {path}: {error}")
+    items: list[tuple[str, str, str, str, str, str]] = []
+    for number, line in enumerate(text.splitlines(), start=1):
+        if not line.strip():
+            continue
+        fields = line.split("\t")
+        if len(fields) != 6:
+            raise SystemExit(
+                f"move_evidence: {path}:{number}: expected 6 tab-separated "
+                f"fields, got {len(fields)}: {line!r}"
+            )
+        digest, kind, name, visibility, item_path, stripped = fields
+        if not _SHA256.fullmatch(digest):
+            raise SystemExit(
+                f"move_evidence: {path}:{number}: field 1 is not a sha256: {digest!r}"
+            )
+        if not _SHA256.fullmatch(stripped):
+            raise SystemExit(
+                f"move_evidence: {path}:{number}: field 6 is not a sha256: {stripped!r}"
+            )
+        if kind not in _ITEM_KEYWORDS:
+            raise SystemExit(
+                f"move_evidence: {path}:{number}: unknown kind {kind!r}"
+            )
+        if not _VISIBILITY.fullmatch(visibility):
+            raise SystemExit(
+                f"move_evidence: {path}:{number}: unknown visibility {visibility!r}"
+            )
+        items.append((digest, kind, name, visibility, item_path, stripped))
+    return items
+
+
+def _is_allowed_widening(
+    before: tuple[str, str, str, str, str, str],
+    after: tuple[str, str, str, str, str, str],
+) -> bool:
+    """Whether `after` is `before` widened by its visibility keyword alone.
+
+    The direction is enforced here rather than by convention: field 1 must have
+    moved, field 6 (the visibility-stripped hash) must be identical, and the
+    only permitted transition is `private` to `pub(crate)` or `pub(super)`.
+    `pub(crate)` to `pub` reaches the public API and is a finding; so is a
+    narrowing, or a swap between two restricted keywords.
+    """
+    if before[0] == after[0]:
+        return False
+    if before[5] != after[5]:
+        return False
+    return before[3] == "private" and after[3] in _ALLOWED_WIDENINGS
+
+
+def _compare_items(
+    before: list[tuple[str, str, str, str, str, str]],
+    after: list[tuple[str, str, str, str, str, str]],
+    before_label: str,
+    after_label: str,
+) -> int:
+    """Classify an after capture against a before one, directionally.
+
+    Matching is on `(kind, name)` within a group because `fn new`, `fn
+    handle_key` and repeated inner `use` paths make the pair non-unique; the
+    `path` column is deliberately not part of identity, because a move changes
+    it.  Anything that cannot be classified as unchanged, a permitted widening
+    or a permitted `mod`/`use` addition is printed and makes the result fail.
+    """
+    groups_before: dict[tuple[str, str], list[tuple[str, str, str, str, str, str]]] = {}
+    groups_after: dict[tuple[str, str], list[tuple[str, str, str, str, str, str]]] = {}
+    for item in before:
+        groups_before.setdefault((item[1], item[2]), []).append(item)
+    for item in after:
+        groups_after.setdefault((item[1], item[2]), []).append(item)
+
+    exact = 0
+    widenings: list[tuple[tuple[str, str, str, str, str, str], tuple[str, str, str, str, str, str]]] = []
+    changed: list[tuple[tuple[str, str, str, str, str, str], tuple[str, str, str, str, str, str]]] = []
+    additions: list[tuple[str, str, str, str, str, str]] = []
+    lost: list[tuple[str, str, str, str, str, str]] = []
+
+    for key in sorted(set(groups_before) | set(groups_after)):
+        olds = list(groups_before.get(key, []))
+        news = list(groups_after.get(key, []))
+        for item in list(news):
+            match = next(
+                (
+                    candidate
+                    for candidate in olds
+                    if candidate[0] == item[0]
+                    and candidate[3] == item[3]
+                    and candidate[5] == item[5]
+                ),
+                None,
+            )
+            if match is not None:
+                olds.remove(match)
+                news.remove(item)
+                exact += 1
+        for item in list(news):
+            match = next(
+                (candidate for candidate in olds if _is_allowed_widening(candidate, item)),
+                None,
+            )
+            if match is not None:
+                olds.remove(match)
+                news.remove(item)
+                widenings.append((match, item))
+        while olds and news:
+            changed.append((olds.pop(0), news.pop(0)))
+        lost.extend(olds)
+        additions.extend(news)
+
+    unpermitted = [item for item in additions if item[1] not in _ADDABLE_KINDS]
+
+    print(f"compare: before {before_label}: {len(before)} item(s)")
+    print(f"compare: after  {after_label}: {len(after)} item(s)")
+    print(f"compare: exact matches: {exact}")
+    print(f"compare: visibility widenings: {len(widenings)}")
+    for old, new in widenings:
+        print(f"  WIDENED {new[1]} {new[2]}: {old[3]} -> {new[3]}")
+        print(f"    before sha256 {old[0]}  visibility-stripped {old[5]}  (path {old[4]})")
+        print(f"    after  sha256 {new[0]}  visibility-stripped {new[5]}  (path {new[4]})")
+        print(
+            f"    field 1 differs: {old[0] != new[0]}; "
+            f"field 6 equal: {old[5] == new[5]}; "
+            f"direction private -> {new[3]}: "
+            f"{_is_allowed_widening(old, new)}"
+        )
+    print(f"compare: added items: {len(additions)}")
+    for item in sorted(additions):
+        permitted = item[1] in _ADDABLE_KINDS
+        print(
+            f"  ADDED {item[1]:11s} {item[2]}  (vis {item[3]}, path {item[4]})"
+            + ("" if permitted else "  FINDING: a split may add only mod/use lines")
+        )
+    print(f"compare: changed without an allowed widening: {len(changed)}")
+    for old, new in changed:
+        print(f"  CHANGED {new[1]} {new[2]}: {old[3]} -> {new[3]}")
+        print(f"    before sha256 {old[0]}  visibility-stripped {old[5]}  (path {old[4]})")
+        print(f"    after  sha256 {new[0]}  visibility-stripped {new[5]}  (path {new[4]})")
+    print(f"compare: lost items: {len(lost)}")
+    for item in sorted(lost):
+        print(f"  LOST {item[1]:11s} {item[2]}  (vis {item[3]}, path {item[4]})")
+
+    findings = len(changed) + len(lost) + len(unpermitted)
+    if findings:
+        print(
+            f"compare: RESULT FAIL ({len(lost)} lost, {len(changed)} changed, "
+            f"{len(unpermitted)} addition(s) of a kind a split may not add)"
+        )
+        return 1
+    print("compare: RESULT PASS")
+    return 0
+
+
 def _dedent(lines: list[str], amount: int) -> list[str]:
     """Remove the indentation a block had where it used to live.
 
@@ -1048,6 +1274,16 @@ def _reflow(
                 f"move_evidence: cannot read header file {header_path}: {error}\n"
             )
             return 1
+        header_lines = header.split("\n")
+        if header_lines and header_lines[-1] == "":
+            header_lines.pop()
+        print(f"header {header_path}: {len(header_lines)} line(s)")
+        for number, header_line in enumerate(header_lines, start=1):
+            kind = _header_line_kind(header_line)
+            print(f"  line {number}: {kind:9s} {header_line}")
+        # A failure writes its diff to stderr; without this flush the report
+        # would surface after it and read as if the header were unexamined.
+        sys.stdout.flush()
     expected = header + formatted
 
     label = f"rustfmt(dedent({from_path}:{start}-{end}))"
@@ -1154,6 +1390,24 @@ def main(argv: list[str] | None = None) -> int:
         "only (repeatable); any other edit on that line still fails",
     )
 
+    compare = subparsers.add_parser(
+        "compare",
+        help="classify two `items` captures directionally, with the direction "
+        "enforced in code",
+    )
+    compare.add_argument(
+        "--before",
+        metavar="PATH",
+        required=True,
+        help="the `items` capture from the old revision",
+    )
+    compare.add_argument(
+        "--after",
+        metavar="PATH",
+        required=True,
+        help="the `items` capture from the new tree",
+    )
+
     args = parser.parse_args(argv)
 
     root = _repo_root()
@@ -1201,6 +1455,16 @@ def main(argv: list[str] | None = None) -> int:
             args.header_file,
             args.allow_widening,
         )
+    if args.command == "compare":
+        before = _parse_items_capture(args.before, root)
+        after = _parse_items_capture(args.after, root)
+        if not before or not after:
+            sys.stderr.write(
+                "move_evidence: refusing to compare: a capture with no items "
+                "would compare two empty sets as equal\n"
+            )
+            return 1
+        return _compare_items(before, after, args.before, args.after)
     return 2
 
 

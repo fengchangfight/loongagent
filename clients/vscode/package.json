@@ -34,6 +34,11 @@
       {
         "command": "loongagent.smoke",
         "title": "loongagent: Smoke test (spawn, attach, one prompt)"
+      },
+      {
+        "command": "loongagent.reviewChanges",
+        "title": "loongagent: Review the changes from a turn",
+        "description": "Opens the before/after diff for the files a turn changed. Normally reached from the button in the reply."
       }
     ],
     "configuration": {

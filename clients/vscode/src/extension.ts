@@ -1,10 +1,17 @@
 import * as vscode from "vscode";
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { basename, relative } from "node:path";
+import { DiffProvider } from "./diffProvider.ts";
 import { promptText } from "./prompt.ts";
-import { Renderer } from "./render.ts";
+import { pathsInArgs, Renderer } from "./render.ts";
+import { FileSnapshots } from "./snapshots.ts";
 import { TurnBusyError } from "./turn.ts";
 import { WorkspaceAgent } from "./workspaceAgent.ts";
 import { EVENTS } from "../../ts/protocol.generated.ts";
+import type { DiffUris } from "./diffProvider.ts";
 import type { UiPart } from "./render.ts";
+import type { JsonValue } from "../../ts/protocol.generated.ts";
 import type { ApprovalAnswer, ApprovalRequest } from "./turn.ts";
 import type { LoongSession } from "./session.ts";
 import type { TurnController } from "./turn.ts";
@@ -12,6 +19,79 @@ import type { TurnController } from "./turn.ts";
 const PARTICIPANT_ID = "loongagent.chat";
 const SMOKE_PROMPT = "Say hello in one sentence, then stop.";
 const NOT_YET = "not implemented yet";
+/** The private URI scheme whose documents are a turn's "before" side. */
+const LEFT_SCHEME = "loongagent-left";
+
+interface Review {
+  workspace: string;
+  snapshots: FileSnapshots;
+  provider: DiffProvider<vscode.Uri>;
+}
+
+/**
+ * The window's turn-review state.
+ *
+ * One per window rather than one per folder: the participant works on the first
+ * workspace folder (spec §4.6), and the path inside the URI is what identifies a
+ * left side, so there is nothing to keep per folder.
+ */
+let review: Review | undefined;
+
+function reviewFor(folder: vscode.WorkspaceFolder): Review {
+  if (review !== undefined && review.workspace === folder.uri.fsPath) return review;
+  const snapshots = new FileSnapshots({ workspace: folder.uri.fsPath });
+  const uris: DiffUris<vscode.Uri> = {
+    make: (path, label) => vscode.Uri.from({ scheme: LEFT_SCHEME, path, query: label }),
+    pathOf: (uri) => uri.path,
+  };
+  review = {
+    workspace: folder.uri.fsPath,
+    snapshots,
+    provider: new DiffProvider(snapshots, gitShowIn(folder), uris),
+  };
+  return review;
+}
+
+/** `git show HEAD:<path>`, or nothing at all — no git, no HEAD or untracked are all fine. */
+function gitShowIn(folder: vscode.WorkspaceFolder): (path: string) => string | undefined {
+  return (path) => {
+    const inside = relative(folder.uri.fsPath, path);
+    if (inside === "" || inside.startsWith("..")) return undefined;
+    try {
+      return execFileSync("git", ["show", `HEAD:${inside}`], {
+        cwd: folder.uri.fsPath,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+    } catch {
+      return undefined;
+    }
+  };
+}
+
+function readNow(path: string): string | undefined {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return undefined;
+  }
+}
+
+async function openDiffs(paths: string[] | undefined, output: vscode.OutputChannel): Promise<void> {
+  if (paths === undefined || paths.length === 0) {
+    output.appendLine("review: nothing to review — ask for a change first, then use the button in the reply");
+    return;
+  }
+  for (const path of paths) {
+    const left = review === undefined ? vscode.Uri.file(path) : review.provider.uriFor(path, "before");
+    await vscode.commands.executeCommand(
+      "vscode.diff",
+      left,
+      vscode.Uri.file(path),
+      `${basename(path)} (before ↔ after)`,
+    );
+  }
+}
 
 export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel("loongagent");
@@ -43,6 +123,22 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand("loongagent.smoke", () => runSmoke(output, context)),
+  );
+
+  // The left pane of every diff this window opens. Registered once; the path in
+  // the URI says which file it is about.
+  context.subscriptions.push(
+    vscode.workspace.registerTextDocumentContentProvider(LEFT_SCHEME, {
+      provideTextDocumentContent: (uri) =>
+        review === undefined
+          ? "[loongagent] no turn has run in this window yet\n"
+          : review.provider.provideTextDocumentContent(uri),
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("loongagent.reviewChanges", (paths?: string[]) =>
+      openDiffs(paths, output)),
   );
 }
 
@@ -167,6 +263,8 @@ async function runTurn(
 
   const renderer = new Renderer({ cwd: folder.uri.fsPath });
   renderer.beginTurn();
+  const { snapshots, provider } = reviewFor(folder);
+  snapshots.clear();
   // A reopened session says where you were, once per activation: the chat's
   // transcript belongs to the window, the session belongs to the log.
   const resume = agent.takeResumeEvents();
@@ -175,7 +273,15 @@ async function runTurn(
   let controller: TurnController;
   try {
     controller = await agent.controller({
-      onEvent: (event) => emit(stream, renderer.event(event)),
+      onEvent: (event) => {
+        // Before the tool runs: that timing is what makes the recorded left side
+        // the pre-turn content even when the tree was already dirty (spec §4.5).
+        if (event.kind === EVENTS.toolCall) {
+          const args = (event.data as { args?: JsonValue }).args;
+          if (args !== undefined) snapshots.see(pathsInArgs(args));
+        }
+        emit(stream, renderer.event(event));
+      },
       onDelta: (text) => emit(stream, renderer.delta(text)),
       // The person answers, in the editor, while the turn waits.
       decide: decideFromModal,
@@ -195,6 +301,14 @@ async function runTurn(
   output.appendLine("turn running");
   try {
     await controller.run(promptText(request.prompt, request.references));
+    const changed = provider.changedAmong(renderer.touchedFiles(), readNow);
+    if (changed.length > 0) {
+      stream.button({
+        command: "loongagent.reviewChanges",
+        title: `Review ${changed.length} changed file${changed.length === 1 ? "" : "s"}`,
+        arguments: [changed],
+      });
+    }
     const interrupted = session.events
       .slice(from)
       .filter((event) => event.kind === EVENTS.turnInterrupted)

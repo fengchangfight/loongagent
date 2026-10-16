@@ -3,16 +3,30 @@
 
 A structural move (splitting an oversized Rust file into sibling modules) is
 supposed to reorder text, never to change it.  This script extracts every item
--- `fn`, `impl`, `struct`, `enum`, `union`, `trait`, `type`, `const`, `static`,
-`mod`, `use` and `macro_rules!` -- from a set of files by brace matching, hashes
-each item's entire canonical token stream (attributes, visibility, signature and
-body together), and prints one line per item as
+-- `fn` and `method`, `impl`, `struct`, `enum`, `union`, `trait`, `type`,
+`const`, `static`, `mod`, `use` and `macro_rules!` -- from a set of files by
+brace matching, hashes each item's entire canonical token stream (attributes,
+visibility, signature and body together), and prints one line per item as
 
     sha256<TAB>kind<TAB>name<TAB>vis<TAB>path<TAB>vis-stripped-sha256
 
 sorted.  Comparing the sorted multisets of two revisions is the evidence that
 the move changed nothing: every item that existed before still exists, with the
 same code, whether it stayed in the parent file or left for a new one.
+
+Two granularities make a method distribution visible rather than a churn of
+giant blocks:
+
+* **A method is an item.**  A `fn` written inside an `impl` is printed with kind
+  `method` and a qualified name (`Kernel::build`, `App::handle_key`), hashed over
+  its attributes, visibility, signature and body exactly as a free `fn` is.  A
+  method that moves between files keeps the same `(kind, name, sha256)`; one
+  whose body, signature or visibility changes shows it.
+* **A container is a header, not a body candidate.**  An `impl` item hashes only
+  its attributes and header (`impl Kernel`, its generics and where-clause), never
+  the methods inside it, and is named after that header.  Re-creating `impl
+  Kernel` in eleven files therefore yields eleven containers with one identical
+  hash, and the distribution stops looking like a change.
 
 The last column is the same canonical token stream with the visibility token
 removed.  It exists so that a *visibility widening* -- the one change a split is
@@ -58,19 +72,25 @@ The third subcommand applies the directional rule to two `items` captures and
 prints the classification, so every split's comparison is one implementation
 rather than per-task scratch:
 
-    move_evidence.py compare --before OLD.items --after NEW.items
+    move_evidence.py compare BEFORE AFTER
 
-It groups by `(kind, name)` -- `fn new` and repeated inner `use` paths make the
-pair non-unique, and the `path` column is not part of identity because a move
+It groups by `(kind, name)` -- method names and repeated inner `use` paths make
+the pair non-unique, and the `path` column is not part of identity because a move
 changes it -- and classifies each group as exact matches, visibility widenings,
-additions, changes and losses.  It exits non-zero on a lost item, on a hash that
-moved without an allowed widening, and on an addition of any kind other than
-`mod` / `use`; a broken capture is refused rather than partly compared.  The
-direction is enforced in code, not by convention: the only permitted transition
-is `private` to `pub(crate)` or `pub(super)`, because anything that reaches
-`pub` changes the public API and a narrowing is not a widening.  A widening also
-requires field 1 to differ and field 6 to match, exactly as `--allow-widening`
-does.
+container multiplications, additions, changes and losses.  It exits non-zero on a
+lost item, on a hash that moved without an allowed widening, and on an addition
+of any kind other than `mod` / `use`; a broken capture is refused rather than
+partly compared.  The direction is enforced in code, not by convention: the only
+permitted transition is `private` to `pub(crate)` or `pub(super)`, because
+anything that reaches `pub` changes the public API and a narrowing is not a
+widening.  A widening also requires field 1 to differ and field 6 to match,
+exactly as `--allow-widening` does.
+
+One container before may become several after -- that is the only item allowed to
+multiply.  Every copy must carry the identical hash and the count may only grow;
+`compare` names the container, the two counts, the shared hash and each copy's
+path.  An `impl` group whose copies do not all hash alike is classified normally,
+so a changed header is a finding rather than a multiplication.
 
 When `--header-file` is given, `reflow` reports each header line with its kind
 (`use`, `mod`, `comment`, `blank`, `attribute`, `other`), because the header is
@@ -185,6 +205,17 @@ _ALLOWED_WIDENINGS = frozenset(("pub(crate)", "pub(super)"))
 # The only item kinds a split may *add*: the module declaration and the
 # `use` / `pub use` lines that keep the paths alive.
 _ADDABLE_KINDS = frozenset(("mod", "use"))
+
+# `method` is not a keyword and so is not in `_ITEM_KEYWORDS`, but it is a kind
+# `items` prints: a `fn` defined inside an `impl`, named `Owner::name`.
+_METHOD_KIND = "method"
+
+# Every kind a capture may legitimately carry.
+_KNOWN_KINDS = frozenset(_ITEM_KEYWORDS) | {_METHOD_KIND}
+
+# The one kind allowed to multiply: distributing methods across files re-creates
+# one `impl` container per file, and every copy carries the identical header.
+_CONTAINER_KIND = "impl"
 
 _DELIMITER_PAIRS = {"(": ")", "[": "]", "{": "}"}
 
@@ -860,9 +891,35 @@ def _match_delimiter(sanitized: str, opening: int) -> int | None:
     return None
 
 
+def _impl_blocks(sanitized: str, text: str) -> list[tuple[int, int, str]]:
+    """Return (inner start, inner end, header name) for every `impl` block.
+
+    A method is an item in its own right and is named after the container it is
+    written in, so the containers have to be located before the item scan rather
+    than while it runs.  The name is the tokenised header (`App`, `< T > Foo < T >`),
+    which is what makes every copy of one type's container the same item.
+    """
+    blocks: list[tuple[int, int, str]] = []
+    for match in _KEYWORD_RE.finditer(sanitized):
+        if match.group(1) != "impl":
+            continue
+        if not _at_item_position(sanitized, match.start()):
+            continue
+        found, body = _find_body(sanitized, match.end())
+        if found != "brace" or body is None:
+            continue
+        closer = _match_brace(sanitized, body)
+        if closer is None:
+            continue
+        name = " ".join(tokenize(text[match.end():body]))
+        blocks.append((body + 1, closer, name))
+    return blocks
+
+
 def extract_items(text: str) -> list[tuple[str, str, str, str, str]]:
     """Return (sha256, kind, name, vis, vis-stripped sha256) for every item."""
     sanitized = sanitize(text)
+    impl_blocks = _impl_blocks(sanitized, text)
     items: list[tuple[str, str, str, str, str]] = []
     for match in _KEYWORD_RE.finditer(sanitized):
         keyword = match.group(1)
@@ -898,7 +955,10 @@ def extract_items(text: str) -> list[tuple[str, str, str, str, str]]:
             if closer is None:
                 continue
             name = " ".join(tokenize(text[match.end():body]))
-            end = closer + 1
+            # A container is a header, not a body candidate.  The methods inside
+            # it are items in their own right, so hashing the body here would
+            # make every copy of one type's container differ from every other.
+            end = body
             kind = "impl"
 
         elif keyword in ("type", "const", "static", "use"):
@@ -942,6 +1002,15 @@ def extract_items(text: str) -> list[tuple[str, str, str, str, str]]:
             else:
                 end = body + 1
             kind = keyword
+            if keyword == "fn":
+                for inner_start, inner_end, owner in impl_blocks:
+                    if inner_start <= match.start() < inner_end:
+                        # A method: the same attributes, visibility, signature
+                        # and body as a free `fn`, but named by the container it
+                        # is written in, so two types' `new` cannot be confused.
+                        kind = _METHOD_KIND
+                        name = f"{owner}::{name}"
+                        break
 
         item_text = text[item_start:end]
         digest = hashlib.sha256(_canonical(item_text).encode("utf-8")).hexdigest()
@@ -1035,7 +1104,7 @@ def _parse_items_capture(path: str, root: str) -> list[tuple[str, str, str, str,
             raise SystemExit(
                 f"move_evidence: {path}:{number}: field 6 is not a sha256: {stripped!r}"
             )
-        if kind not in _ITEM_KEYWORDS:
+        if kind not in _KNOWN_KINDS:
             raise SystemExit(
                 f"move_evidence: {path}:{number}: unknown kind {kind!r}"
             )
@@ -1074,11 +1143,12 @@ def _compare_items(
 ) -> int:
     """Classify an after capture against a before one, directionally.
 
-    Matching is on `(kind, name)` within a group because `fn new`, `fn
-    handle_key` and repeated inner `use` paths make the pair non-unique; the
-    `path` column is deliberately not part of identity, because a move changes
-    it.  Anything that cannot be classified as unchanged, a permitted widening
-    or a permitted `mod`/`use` addition is printed and makes the result fail.
+    Matching is on `(kind, name)` within a group because `fn new`, method names
+    and repeated inner `use` paths make the pair non-unique; the `path` column
+    is deliberately not part of identity, because a move changes it.  Anything
+    that cannot be classified as unchanged, a permitted widening, a permitted
+    `mod`/`use` addition or a container multiplication is printed and makes the
+    result fail.
     """
     groups_before: dict[tuple[str, str], list[tuple[str, str, str, str, str, str]]] = {}
     groups_after: dict[tuple[str, str], list[tuple[str, str, str, str, str, str]]] = {}
@@ -1089,6 +1159,7 @@ def _compare_items(
 
     exact = 0
     widenings: list[tuple[tuple[str, str, str, str, str, str], tuple[str, str, str, str, str, str]]] = []
+    multiplications: list[tuple[str, int, int, str, list[tuple[str, str, str, str, str, str]]]] = []
     changed: list[tuple[tuple[str, str, str, str, str, str], tuple[str, str, str, str, str, str]]] = []
     additions: list[tuple[str, str, str, str, str, str]] = []
     lost: list[tuple[str, str, str, str, str, str]] = []
@@ -1096,6 +1167,23 @@ def _compare_items(
     for key in sorted(set(groups_before) | set(groups_after)):
         olds = list(groups_before.get(key, []))
         news = list(groups_after.get(key, []))
+        # A container is header-only, so distributing one type's methods across
+        # files re-creates one identical container per file.  That is the only
+        # item allowed to multiply: every copy must carry the identical hash,
+        # the count may only grow, and each copy is printed.
+        if (
+            key[0] == _CONTAINER_KIND
+            and olds
+            and news
+            and len({item[0] for item in olds + news}) == 1
+            and len(news) >= len(olds)
+        ):
+            exact += len(olds)
+            if len(news) > len(olds):
+                multiplications.append(
+                    (key[1], len(olds), len(news), news[0][0], sorted(news, key=lambda i: i[4]))
+                )
+            continue
         for item in list(news):
             match = next(
                 (
@@ -1135,12 +1223,14 @@ def _compare_items(
         print(f"  WIDENED {new[1]} {new[2]}: {old[3]} -> {new[3]}")
         print(f"    before sha256 {old[0]}  visibility-stripped {old[5]}  (path {old[4]})")
         print(f"    after  sha256 {new[0]}  visibility-stripped {new[5]}  (path {new[4]})")
+    print(f"compare: container multiplications: {len(multiplications)}")
+    for name, before_count, after_count, digest, copies in multiplications:
         print(
-            f"    field 1 differs: {old[0] != new[0]}; "
-            f"field 6 equal: {old[5] == new[5]}; "
-            f"direction private -> {new[3]}: "
-            f"{_is_allowed_widening(old, new)}"
+            f"  MULTIPLIED {_CONTAINER_KIND} {name}: {before_count} -> {after_count} "
+            f"copies, identical hash {digest}"
         )
+        for copy in copies:
+            print(f"    copy: {copy[4]}")
     print(f"compare: added items: {len(additions)}")
     for item in sorted(additions):
         permitted = item[1] in _ADDABLE_KINDS
@@ -1396,16 +1486,28 @@ def main(argv: list[str] | None = None) -> int:
         "enforced in code",
     )
     compare.add_argument(
-        "--before",
-        metavar="PATH",
-        required=True,
+        "before",
+        metavar="BEFORE",
+        nargs="?",
         help="the `items` capture from the old revision",
     )
     compare.add_argument(
-        "--after",
-        metavar="PATH",
-        required=True,
+        "after",
+        metavar="AFTER",
+        nargs="?",
         help="the `items` capture from the new tree",
+    )
+    compare.add_argument(
+        "--before",
+        dest="before_option",
+        metavar="PATH",
+        help="the old capture, as an alternative to the BEFORE positional",
+    )
+    compare.add_argument(
+        "--after",
+        dest="after_option",
+        metavar="PATH",
+        help="the new capture, as an alternative to the AFTER positional",
     )
 
     args = parser.parse_args(argv)
@@ -1456,15 +1558,22 @@ def main(argv: list[str] | None = None) -> int:
             args.allow_widening,
         )
     if args.command == "compare":
-        before = _parse_items_capture(args.before, root)
-        after = _parse_items_capture(args.after, root)
+        before_path = args.before or args.before_option
+        after_path = args.after or args.after_option
+        if not before_path or not after_path:
+            parser.error(
+                "compare needs BEFORE and AFTER, positionally or as "
+                "--before/--after"
+            )
+        before = _parse_items_capture(before_path, root)
+        after = _parse_items_capture(after_path, root)
         if not before or not after:
             sys.stderr.write(
                 "move_evidence: refusing to compare: a capture with no items "
                 "would compare two empty sets as equal\n"
             )
             return 1
-        return _compare_items(before, after, args.before, args.after)
+        return _compare_items(before, after, before_path, after_path)
     return 2
 
 

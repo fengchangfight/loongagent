@@ -186,7 +186,7 @@ dedented block and `cargo fmt --check` is a gate (§4.4 has the corrected standa
 | File | Lines now | Target | Visibility cost |
 |---|---|---|---|
 | `crates/cli/src/main.rs` | 6 924 | `main.rs` ≈640 (doc, `use`, `USAGE`, `main`, `Args` + `impl Args`, `config_dir`, `run`) plus `control`, `session`, `context`, `server`, `tui`, `local`, `web`, `repl`, `mcp`, `config_cmd`, `plugin`, `hooks`, `sandbox`, `headless` | ~61 items `pub(crate)`; a binary crate, so nothing is exported |
-| `crates/tui-app/src/lib.rs` | 7 661 | `tests.rs` (3 734 lines, `#[cfg(test)] mod tests;`) plus `worker`, `setup`, `wizard`, `surface`; `lib.rs` ≈2 520 | 2 items `pub(crate)`, plus `pub use` re-exports keeping every existing path |
+| `crates/tui-app/src/lib.rs` | 7 661 | `tests.rs` (3 734 lines, `#[cfg(test)] mod tests;`) plus `worker`, `setup`, `wizard`, `surface`; `lib.rs` ≈2 520 | 2 items `pub(super)`, plus `pub use` re-exports keeping every existing path |
 | `crates/kernel/src/turn.rs` | 6 509 | `turn.rs` (≈340) plus `turn/{build,confinement,hooks,session,model,loop,compaction,events,recall,nudge,tests}.rs` | ~16 items `pub(super)`, because the write spine stays in the parent; ≈30 if it were moved too |
 | `crates/config/src/lib.rs` | 3 155 | `lib.rs` (≈190, keeps the `pub use` re-exports) plus `{profile,layer,secret,paths,merge,tests}.rs` | ~8–10 items `pub(super)` |
 

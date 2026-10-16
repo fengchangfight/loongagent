@@ -64,8 +64,9 @@ collaboration platform (see §6).
 ```
 
 **One artifact, many faces:** the single `loongagent` binary *contains* the
-local agent server. `loongagent web` serves the web UI; `loongagent acp` speaks
-ACP to editors. Installing loongagent means getting that binary (ADR-0009).
+local agent server. `loongagent web` serves the web UI; ACP to editors is
+decided, not yet built. Installing loongagent means getting that binary
+(ADR-0009).
 
 **Two binaries, one repository** (ADR-0012). The local agent and the control
 plane are **separate binaries** with genuinely different jobs and deployment —
@@ -189,14 +190,14 @@ and avoidable by self-hosting (T-03).
 
 - **Sessions are files** (JSONL + derived index), so moving one is a file copy,
   not a service call.
-- **`loongagent session export/import`** carries one session's **complete**
-  event log, its **ancestor** sessions (the lineage that makes it meaningful), a
-  manifest (workspace path, git revision, profiles, plugin/MCP inventory), and
-  optionally file-history snapshots — then **re-binds** the workspace on import
-  and reports mismatches instead of enforcing them. **Descendant sessions are
-  not included by default**; `--with-branches` adds the whole subtree. The
-  parent's context already holds each subagent's summary, which is what
-  continuation needs (ADR-0014).
+- **`loongagent session export/import` is decided, not yet built** (ADR-0014).
+  The decision: one session's **complete** event log, its **ancestor** sessions
+  (the lineage that makes it meaningful), a manifest (workspace path, git
+  revision, profiles, plugin/MCP inventory), and optionally file-history
+  snapshots — then **re-binds** the workspace on import and reports mismatches
+  instead of enforcing them. **Descendant sessions are not included by
+  default**; `--with-branches` adds the whole subtree. The parent's context
+  already holds each subagent's summary, which is what continuation needs.
 - **Roaming is per machine** across that machine's surfaces (ADR-0009);
   cross-machine continuity is explicit export/import, never automatic.
 - **The code travels through git**, not through session bundles.

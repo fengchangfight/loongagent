@@ -71,6 +71,10 @@ same gates run wherever the repository is hosted. Both install rustfmt (the
 toolchain uses the `minimal` profile) and use the TUNA mirror, because this project
 is built from behind one.
 
+**Changing the machinery rather than running it?** [docs/07-extending.md](docs/07-extending.md)
+is the maintainer's path — a new built-in tool or event, attaching a hook, a routing
+change — and names the file that does the work and the command that proves it.
+
 ### The control plane (ADR-0012, ADR-0016)
 
 Two binaries, one shared crate, and a deliberate division of labour:

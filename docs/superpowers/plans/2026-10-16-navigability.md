@@ -408,6 +408,10 @@ git commit -m "docs: the vision promised a desktop app, and the backlog had not 
 
 `git mv docs/01-landscape-synthesis.md docs/archive/`. Every relative link inside it that pointed at a sibling of `docs/` now resolves one directory higher; repair each, then confirm with `python3 scripts/check-docs.py --check links` that no link broke. Run the link check *before* the move and save the output, so the before-and-after can be compared rather than assumed.
 
+*Corrected during execution (Task 10):* this step asks the gate to prove half the move with a check that **cannot see it**. `docs/01` contains zero markdown links — `grep -c '](' ` returns 0 — because its `research/…` references are code spans, which the `links` check masks by design. The repair there has to be done by grep and reported by hand, since a bare path in backticks is invisible to every check in the gate. That masking is correct (it is what lets these documents quote paths), but it means a code-span path can rot unobserved, and the count of paths repaired by hand is the only record. Same defect class as Ruling 9.
+
+*Also corrected:* the move leaves `docs/03` with a dangling `## Part 2` heading (the only part left) and AQ-10's "see discussion log" pointing at a file that has moved. Closing both belongs to this task, because the move created them; the brief's "keep Part 2 intact" was about the decision map's *content*, which is untouched.
+
 - [ ] **Step 2: Move `docs/03`'s history and keep its decision map**
 
 Move Part 1 (`:20-48`, "Foundations — historical framing") and Part 3 (`:539-808`, the discussion log, ~290 lines) into `docs/archive/03-architecture-history.md`, and leave Part 2 (the AQ-1…AQ-12 decision map) in `docs/03-architecture.md`. Repair relative links in both halves. The discussion log is the owner's verbal trade-offs, which a commit message cannot reproduce — that is why it is archived rather than deleted.
@@ -493,7 +497,9 @@ Remove the `- **Status:** …` and `- **Last updated:** …` lines from `docs/00
 
 - [ ] **Step 4: Verify and commit**
 
-Run: `grep -rln 'Last updated' docs/ | grep -v decisions/`
+Run: `grep -rln 'Last updated' docs/ | grep -v 'decisions/\|archive/'`
+
+*Corrected during execution:* the original grep excluded only `decisions/`, but `docs/archive/` keeps its headers under Ruling 5 (archived material is history and is not maintained), so `docs/archive/01-landscape-synthesis.md` matched and the "no output" expectation could never hold. Excluding `archive/` is the whole correction; nothing else about the step changes.
 Expected: no output.
 Run: `python3 scripts/check-docs.py && ./scripts/check.sh`. Expected: exit 0.
 

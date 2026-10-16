@@ -26,11 +26,11 @@ impossible merge.
 
 ## Ambition (as stated by the owner)
 
-1. **Every surface, user's choice.** The TUI, the web page, the REPL and
-   headless `run` — same brain, multiple faces; the IDE arrives as a thin ACP
-   client (the third build target). Users pick their flavor; sessions roam
-   across a machine's surfaces. Desktop and CI are not product surfaces
-   (ADR-0009).
+1. **Every surface, user's choice.** The TUI, the web page and the IDE (as a
+   thin ACP client, the third build target) are the product surfaces (ADR-0009);
+   the REPL and headless `run` are the same brain in two more modes. Users pick
+   their flavor; sessions roam across a machine's surfaces. Desktop and CI are
+   not product surfaces (ADR-0009).
 2. **Every engineering role.** Not just "software developer": frontend, backend,
    DevOps/SRE, QA/test, data engineering, and more. The agent should have
    role-appropriate tools, context sources, and workflows.

@@ -3,7 +3,7 @@
 - **Status:** Living document — append ideas as they come; promote to numbered
   design docs or ADRs when discussed.
 - **Last updated:** 2026-10-16 (statuses brought up to the decisions the ADRs
-  record: T-01…T-21 re-marked `Promoted →` or `Wanted`; T-26 added — cross-crate
+  record: T-01…T-21 revisited; T-26 added — cross-crate
   helper duplication recorded, not consolidated. Previously 2026-10-05: E1–E4
   applied: compaction heuristic §ADR-0006, hook kinds+events §ADR-0007, commands
   merged into skills §T-18, `ignorable` envelope §ADR-0003; T-22…T-25 added from
@@ -70,7 +70,7 @@ Research hooks:
 - Open question: cascading = fallback chains on failure? escalation when a
   cheap model's output fails verification? budget-aware routing?
 
-## T-02 · Audit & statistics & implicit feedback loop — `Promoted → ADR-0003, ADR-0012`
+## T-02 · Audit & statistics & implicit feedback loop — `Promoted → ADR-0003, ADR-0005, ADR-0012`
 
 Seeded 2026-09-26. **Substrate decided 2026-09-30 (ADR-0003):** audit events
 and session events are one JSONL stream, and the derived SQLite index serves
@@ -122,7 +122,7 @@ Research hooks:
   already trust), Codex two-phase environments (setup with secrets/internet,
   agent phase locked down), governance defaults (requester can't approve PR).
 
-## T-04 · Cost governance (anti-waste by design) — `Promoted → ADR-0005, ADR-0006, ADR-0009`
+## T-04 · Cost governance (anti-waste by design) — `Promoted → ADR-0005, ADR-0006, ADR-0007, ADR-0009`
 
 Seeded 2026-09-26. **Mechanisms decided:** cheap-first escalation, with every
 escalation an auditable event with a reason (ADR-0005); per-category budgets and
@@ -589,12 +589,12 @@ specs, auto-triage when to spec at all (a bug fix ≠ 4 stories/16 criteria),
 requirement↔task traceability links; NEVER spec-as-source (Tessl's $125M
 lesson). Specs are the handoff protocol between personas (T-06/T-14).
 
-## T-21 · Layered approachability: junior-proof defaults, senior-proof depth — `Promoted → ADR-0007, ADR-0008, ADR-0009`
+## T-21 · Layered approachability: junior-proof defaults, senior-proof depth — `Promoted → ADR-0007, ADR-0008`
 
 Seeded 2026-09-30. **Decided:** junior-proof defaults come from the per-action
 autonomy ladder (ADR-0007 §4); every layer is openable through monotonic config
 layers that a lower layer cannot loosen (ADR-0008); and YOLO is a visible,
-recorded opt-out (ADR-0009 §6). Self-modification covers the extension surface —
+recorded opt-out (ADR-0007 §5). Self-modification covers the extension surface —
 skills, commands, rules, plugins — not the kernel (ADR-0013 §5).
 
 Owner: avoid Pi's steep learning curve. Pi converts experts but "has no

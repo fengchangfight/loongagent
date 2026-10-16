@@ -182,6 +182,7 @@ rows below are what "not losing" means concretely.
 | D7 | Editor fork; desktop app; CI surface | ADR-0009 |
 | D8 | Vector DB in v1 | Structural retrieval first (ADR-0006/T-15) |
 | D9 | Marketplace in v1 | Signed internal catalog later; git-URL installs at project/user layers |
+| D10 | Server-side live **routing** — and the model ceilings and task-class policy it would carry | The local brain decides every live call and the server never routes; the server learns and ships policy packs only (ADR-0005) |
 
 ---
 

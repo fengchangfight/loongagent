@@ -804,8 +804,10 @@ git commit -m "refactor(kernel): the turn loop, its events and its compaction we
 
 - [ ] **Step 1: Move the subcommand families, keeping the spine in `main.rs`**
 
-`main.rs` keeps the module doc, `USAGE`, `main`, `Args` and `impl Args` (43 uses of `args.cwd` and 16 cross-module calls to `settings_with_pack()` make it the free place to stay), `PackState` (its private fields are read from ten sites), `config_dir` and `run`. Everything else moves by the spec's §4.4 tree.
+`main.rs` keeps the module doc, `USAGE`, `main`, `Args` and `impl Args` (43 uses of `args.cwd` and 16 cross-module calls to `settings_with_pack()` make it the free place to stay), `PackState` (its private fields are read from ten sites), `ControlFile`, `config_dir` and `run`. Everything else moves by the spec's §4.4 tree.
 This is the only task with a large visibility budget (~61 items `pub(crate)`). It is a binary crate, so `pub(crate)` cannot leak: the `[bin]` target has no exported surface at all.
+
+*Corrected during execution (Task 23), on two counts.* **`ControlFile` stays in the crate root**, not `control.rs` as the tree implies: `tui.rs` and — the larger constraint — `local.rs`'s test module construct its three private fields from ten sites while `control.rs` reads them, and sibling modules cannot see another module's private fields. Field-level widening is unrepresentable in the evidence tool (see §4.4 and Ruling 54), so the root is the only home that costs nothing. The tree's per-topic file names describe where the *commands* go, not where every type they use must live. And the budget came out at **59** widenings rather than the predicted ~61 — a prediction, not a requirement, and the report gives the per-file counts.
 
 - [ ] **Step 2: The four inline test modules move with their hosts**
 

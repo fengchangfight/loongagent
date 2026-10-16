@@ -497,15 +497,15 @@ Remove the `- **Status:** …` and `- **Last updated:** …` lines from `docs/00
 
 - [ ] **Step 4: Verify and commit**
 
-Run: `grep -rln 'Last updated' docs/ | grep -v 'decisions/\|archive/'`
+Run: `grep -rln 'Last updated' docs/ | grep -v 'decisions/\|archive/\|superpowers/'`
 
-*Corrected during execution:* the original grep excluded only `decisions/`, but `docs/archive/` keeps its headers under Ruling 5 (archived material is history and is not maintained), so `docs/archive/01-landscape-synthesis.md` matched and the "no output" expectation could never hold. Excluding `archive/` is the whole correction; nothing else about the step changes.
+*Corrected during execution, twice.* The original grep excluded only `decisions/`, but `docs/archive/` keeps its headers under Ruling 5 (archived material is history and is not maintained). Then Task 13 found the second hole: the plan and the spec under `docs/superpowers/` both **quote** the phrase "Last updated" while specifying exactly this change, so the grep matched the requirement documents themselves. A quotation is not a header — the third exclusion is the whole remaining correction.
 Expected: no output.
 Run: `python3 scripts/check-docs.py && ./scripts/check.sh`. Expected: exit 0.
 
 ```bash
 git add docs/
-git commit -m "docs: 35 of 43 documents ignored the header rule; keep status where it is read"
+git commit -m "docs(index): most documents ignored the header rule, so keep status where it is read"
 ```
 
 ### Task 14: `DEVELOPMENT.md`'s status sections stop being a second verdict

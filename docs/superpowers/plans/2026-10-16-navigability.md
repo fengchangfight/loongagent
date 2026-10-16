@@ -677,7 +677,7 @@ Read the module trees, the visibility budgets and the "three facts that make thi
 
 **The four proofs, common to Tasks 19–23:**
 1. `python3 scripts/move_evidence.py items --rev HEAD --path <old files> --min <N>` and the same with `--worktree` produce identical output.
-2. The test inventory is unchanged. Capture `cargo test --workspace --locked -- --list`, then normalise every `Running … (target/debug/deps/<name>-<hash>)` line down to `<name>` (the hash changes when the code changes, so a raw comparison would fail for the wrong reason), sort, and require the result identical to the before capture. Keeping the normalised target name on each group is what stops two same-named tests in different targets from cancelling out.
+2. The test inventory is unchanged. Capture `cargo test --workspace --locked -- --list 2>&1`, pipe it through `scripts/normalise_test_list.py` — which reduces every `Running … (target/debug/deps/<name>-<hash>)` line to `<name>` and sorts with duplicates preserved — and require the result identical to the before capture. The hash changes when the code changes, so a raw comparison would fail for the wrong reason; and keeping the normalised target name on each group is what stops two same-named tests in different targets from cancelling out. *Corrected during execution (Task 19):* this paragraph originally described the normalisation in prose, which would have had Tasks 20–23 re-derive it four times; the script is the single implementation.
 3. `git diff -- '**/Cargo.toml'` is empty.
 4. `./scripts/check.sh` is green, including the 8 integration tests under `crates/cli/tests/`.
 
@@ -695,7 +695,7 @@ Read the module trees, the visibility budgets and the "three facts that make thi
 
 - [ ] **Step 1: Write the extractor, and make it refuse to pass vacuously**
 
-Brace-matching extraction of every `fn` and `impl` body, hashed. `--min N` is mandatory so that an extractor which matches nothing fails instead of reporting two empty sets as equal (Review Focus 2). Skip braces inside string, char and raw-string literals and inside comments, or a body containing `'}'` will truncate silently.
+Brace-matching extraction of every **item** — `fn`, `impl`, `struct`, `enum`, `union`, `trait`, `type`, `const`, `static`, `mod`, `use`, `macro_rules!` — with its attributes, visibility and signature hashed together, printing `sha256<TAB>kind<TAB>name<TAB>vis<TAB>path<TAB>vis-stripped-sha256`. `--min N` is mandatory so that an extractor which matches nothing fails instead of reporting two empty sets as equal (Review Focus 2). Skip braces inside string, char and raw-string literals and inside comments, or a body containing `'}'` will truncate silently. *Corrected during execution (Task 19):* this step said "every `fn` and `impl` body", which is the hole the interface paragraph explains — a signature, a visibility, an attribute or any non-`fn` item could change while every body hash stayed identical.
 
 - [ ] **Step 2: Prove the extractor fails when it should**
 

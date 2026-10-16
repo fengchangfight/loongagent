@@ -24,10 +24,12 @@ Order:
 
 1. Implement `Tool` beside the existing ones — `crates/tools/src/lib.rs`, or
    `crates/tools/src/search.rs` when it wants the shared search helpers.
-2. Register it in `Registry::with_builtins`. That is the one list a built-in is added
-   to: `Kernel::build` (`crates/kernel/src/turn.rs`) starts from `with_builtins` and
-   then adds the tools that are not built in (`McpTool`, the skills tool), so a new
-   built-in belongs in the registry and nowhere else.
+2. Register it in `Registry::with_builtins`. For a tool that acts on the workspace or
+   the shell, that is the one list it is added to: `Kernel::build`
+   (`crates/kernel/src/turn.rs`) starts from `with_builtins` and then adds the tools
+   that come from elsewhere (`McpTool`, the skills tool). `recall` is the exception, and
+   the roughness paragraph below says why it is a real second path rather than a
+   workaround.
 3. Choose the `ActionClass` it declares. `Kernel::dispatch` reads that declaration and
    asks `Pdp::decide` (`crates/sandbox/src/lib.rs`) for a verdict; the classes
    themselves are declared in `crates/schema/protocol.toml`.
@@ -38,16 +40,27 @@ Order:
 The proof: `cargo test -p loong-tools registry_exposes_specs_for_the_model`. That test
 pins the catalogue's names, so a new tool fails it until the expectation is updated; the
 failure is the reminder that the catalogue is a fixed surface rather than an accident.
-`Kernel::tool_specs` is then what carries the catalogue into the request — a tool that is
-registered but never advertised and a tool that is advertised but not registered are
-different bugs, and this is where both are decided.
+`Kernel::tool_specs` is then what carries the catalogue into the request, which is the
+point at which a registered tool becomes one the model can call.
 
-Rougher than a recipe suggests: the action class is code, not a declaration, so nothing
-checks that it matches what the tool can do. A read-only tool classified as a workspace
-write costs an approval it does not need; a write tool classified as an investigation
-runs without one, and only a test or a live turn catches either. `classify_command` in
-the same file is the precedent to read before writing one — it is an autonomy heuristic,
-never a security boundary.
+Rougher than a recipe suggests. The first snag is the action class: it is code, not a
+declaration, so nothing checks that it matches what the tool can do. A read-only tool
+classified as a workspace write costs an approval it does not need; a write tool
+classified as an investigation runs without one, and only a test or a live turn catches
+either. `classify_command` in the same file is the precedent to read before writing one —
+it is an autonomy heuristic, never a security boundary.
+
+The second snag is `recall`, which lives outside the registry entirely. It needs session
+state — a `Tool` impl gets only the workspace and the confinement in `ExecContext` — so
+the kernel owns it: `tool_specs` appends its spec when a context engine exists, and
+`dispatch` answers `RECALL_TOOL` *before* the registry lookup and *without asking the
+PDP*. That bypass is deliberate, not an oversight: a recall is read-only over the
+session's own record, which the model has already been given in full, so there is nothing
+to gate. A tool that needs state the trait cannot carry is built the same way — answered
+in `dispatch`, with its own `tool.call` and `tool.result` written by hand and a comment
+saying why the registry and the PDP are the wrong gates. It is the wrong gate only for a
+read-only view of data the session already holds; anything that touches the workspace, the
+shell or the network still belongs in the registry and behind `Pdp::decide`.
 
 ## Adding an event
 
@@ -89,8 +102,13 @@ Rougher than a recipe suggests: the record's `data` is `Json`, opaque to the typ
 system, so the declared struct and what `append` serialises can disagree with no compiler
 error. `model.selected` is the standing example — the struct in `protocol.toml` carries
 the model, the rule and the estimate, and the kernel also writes `step`, which the schema
-does not declare. A field added to the struct and never written is caught by a test that
-reads it back and by nothing else. The event set is also not the display set: a new event
+does not declare. Whether anything notices depends on the kind. For one the kernel
+replays — `message.appended`, `tool.call`, `tool.result`, `compaction.applied` — replay
+reads the data back into the generated struct, so an omitted required field surfaces as a
+session that will not reopen; the generator's own round-trip test cannot see it, because
+it is generated in lockstep with the struct and never looks at what the kernel writes.
+For `model.selected`, which replay ignores, nothing deserialises it back into its struct
+at all, and the note above is the only warning there is. The event set is also not the display set: a new event
 is not rendered specially until a surface handles its kind — `loong_tui::render_event`
 (`crates/tui/src/lib.rs`) and the web client's switch in `crates/web/src/index.html`. An
 unhandled kind is not dropped, which is the forward-compatibility envelope working; it is
@@ -135,8 +153,8 @@ Rougher than a recipe suggests: only the manifest and the shell scripts it names
 fingerprinted (`sources_of`). An `http` or `mcp` hook has no local bytes to pin, so
 "trusted" covers the configuration that points at the behaviour, not the behaviour.
 Verdicts combine monotonically — deny over ask over allow (`strictest`) — and can only
-tighten the PDP's ruling (`tighten`), so a hook can hold work up but cannot grant what
-policy denied ([ADR-0008](decisions/0008-configuration-layering.md)).
+tighten the PDP's ruling (`tighten`), so a hook may advise or veto but never *be* the PDP
+([ADR-0007 §1](decisions/0007-permission-sandbox-engine.md)).
 
 ## How routing picks a model
 
@@ -181,3 +199,10 @@ and loading names the kinds that exist; update the constructor alone and the
 configuration is refused before the adapter is ever built. And a person's `/model` choice
 rewrites `router.default` (`Kernel::select_model`), so it becomes the model a later turn
 starts from, while rules still outrank it.
+
+One inspection does not work, and it is worth knowing before reaching for it:
+`loongagent config explain router.rules` fails with `unknown key "router"`, because
+`config_explain` (`crates/cli/src/main.rs`) reduces a key to its first path segment while
+`kind_of` (`crates/config/src/lib.rs`) knows only the dotted keys. Read the effective
+rules with `loongagent config show`, which prints `router.default` and `router.rules` with
+their layer and source, and read what actually fired with the `model.selected` grep above.

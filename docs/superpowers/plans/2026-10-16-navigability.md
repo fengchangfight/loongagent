@@ -309,7 +309,11 @@ Delete the sentence "Response streaming is not implemented, so the answer appear
 
 - [ ] **Step 3: Correct the "not started" list**
 
-`:1039-1040` lists session export/import, WASM extensions, the web client, compaction and the control plane as not started. Session export/import is ADR-0014 and `loongagent export`/`import` exist; the web client is `crates/web` and `loongagent web`; compaction is ADR-0006 §4; the control plane is ADR-0012 with a runbook. Rewrite item 12 to what is actually outstanding (WASM extensions are), moving the rest out.
+`DEVELOPMENT.md:1025-1026` lists five things as "Not started": session export/import, WASM extensions, the web client, compaction and the control plane. **Verify each of the five against the code before removing anything** — do not trust this paragraph's summary of them, which was wrong when it was written.
+
+Verified during execution (Ruling 19): the web client (`crates/web`, the `web` dispatch arm at `crates/cli/src/main.rs:2271`), compaction (`Kernel::compact_if_needed` in `crates/kernel/src/turn.rs`) and the control plane (`crates/control/src/bin/loongagent-control.rs`, ADR-0012, a runbook) all exist, so listing them as not started is false. **Session export/import and WASM extensions genuinely do not exist**: ADR-0014 is `Status: Accepted` — a decision, not an implementation — and the CLI's dispatch arms are `config context control delete fork hooks local loongagent mcp plugin profiles repl resume run sandbox server sessions setup skills tui use --version web`, with no `export`, `import` or `acp` anywhere and every `export` token in the file concerning environment variables.
+
+So the correct fix is not "delete the list" and not "keep the list" but "split it": remove the three that exist, keep the two that do not, and say plainly which is which. A list that mixes both is worse than either, because the reader cannot tell which half to trust.
 
 - [ ] **Step 4: Verify by reading**
 

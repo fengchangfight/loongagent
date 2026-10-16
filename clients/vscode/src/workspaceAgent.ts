@@ -1,10 +1,10 @@
 import * as vscode from "vscode";
 import { spawnAgent } from "./agentSession.ts";
 import { LoongSession } from "./session.ts";
-import { TurnController } from "./turn.ts";
+import { TurnController, TurnGate } from "./turn.ts";
 import { EVENTS } from "../../ts/protocol.generated.ts";
 import type { AgentSession } from "./agentSession.ts";
-import type { Decider } from "./turn.ts";
+import type { TurnSink } from "./turn.ts";
 import type { EventEnvelope } from "../../ts/protocol.generated.ts";
 
 /** Where this workspace's session id is remembered between windows. */
@@ -24,6 +24,9 @@ export class WorkspaceAgent {
   private readonly folder: vscode.WorkspaceFolder;
   private readonly output: vscode.OutputChannel;
   private readonly context: vscode.ExtensionContext;
+  private gateInstance: TurnGate | undefined;
+  private opening: Promise<LoongSession> | undefined;
+  private resumed = false;
   private agent: AgentSession | undefined;
   private live: LoongSession | undefined;
   private announced = false;
@@ -71,6 +74,18 @@ export class WorkspaceAgent {
    */
   async ensure(): Promise<LoongSession> {
     if (this.live !== undefined) return this.live;
+    // One child per cold start: two chat tabs opened at once would otherwise each
+    // spawn a server, attach to its own new session, and orphan one of them.
+    if (this.opening !== undefined) return this.opening;
+    this.opening = this.resumeOrStart();
+    try {
+      return await this.opening;
+    } finally {
+      this.opening = undefined;
+    }
+  }
+
+  private async resumeOrStart(): Promise<LoongSession> {
     const stored = this.storedSessionId();
     try {
       return await this.open(stored);
@@ -92,44 +107,45 @@ export class WorkspaceAgent {
     return id;
   }
 
-  /**
-   * The replayed events a reopened session should show, once per activation.
-   *
-   * Once, because the card says where you were: repeating it on every turn
-   * would be the surface narrating the same history forever.
-   */
-  /**
-   * How the previous child died, once, so the next reply can say why it started
-   * a new one instead of leaving it to the output channel alone.
-   */
+  /** How the previous child died, once, so the next reply can say why it restarted. */
   takeLastExit(): { code: number | null; signal: string | null } | undefined {
     const exit = this.lastExit;
     this.lastExit = undefined;
     return exit;
   }
 
-  takeResumeEvents(): EventEnvelope[] | undefined {
-    if (this.announced) return undefined;
+  /**
+   * Where a *reopened* session was, once per activation.
+   *
+   * Gated on having actually resumed (`--session`), not on the log being
+   * non-empty: a brand-new session already carries its own first event, so
+   * "resumed" would be a false claim on the first prompt of every session.
+   */
+  takeResume(): { sessionId: string; events: EventEnvelope[] } | undefined {
+    if (this.announced || !this.resumed) return undefined;
     this.announced = true;
+    const sessionId = this.live?.sessionId;
     const events = this.live?.events ?? [];
-    return events.length === 0 ? undefined : events;
+    if (sessionId === undefined || events.length === 0) return undefined;
+    return { sessionId, events };
   }
 
-  /** A controller bound to this agent's session and the caller's hooks. */
-  async controller(hooks: {
-    onEvent: (event: EventEnvelope) => void;
-    onDelta: (text: string) => void;
-    decide: Decider;
-  }): Promise<TurnController> {
+  /**
+   * Take the session's turn for this request, or throw `TurnBusyError`.
+   *
+   * One gate per session, so the busy check is about the session and not about
+   * this call: two chat tabs cannot both hold the turn.
+   */
+  async beginTurn(sink: TurnSink): Promise<TurnController> {
     const session = await this.ensure();
-    return new TurnController(session, {
-      onEvent: (event) => {
-        if (event.kind === EVENTS.approvalRequested) this.output.appendLine("awaiting approval");
-        hooks.onEvent(event);
-      },
-      onDelta: hooks.onDelta,
-      decide: hooks.decide,
-    });
+    if (this.gateInstance === undefined) this.gateInstance = new TurnGate(session);
+    this.output.appendLine("turn running");
+    return this.gateInstance.begin(sink);
+  }
+
+  /** Give the turn back. */
+  endTurn(): void {
+    this.gateInstance?.end();
   }
 
   dispose(): void {
@@ -160,6 +176,7 @@ export class WorkspaceAgent {
     args.push(...extra);
     if (stored === undefined) args.push("--new");
     else args.push("--session", stored);
+    this.resumed = stored !== undefined;
 
     this.output.appendLine(`spawning: ${command} ${args.join(" ")}`);
     const agent = spawnAgent(command, args, cwd, {

@@ -4,10 +4,14 @@ import type { ChildLike } from "../src/agentSession.ts";
 export class FakeChild implements ChildLike {
   readonly written: string[] = [];
   readonly signals: (NodeJS.Signals | undefined)[] = [];
+  readonly ended: boolean[] = [];
   readonly stdout = new EventEmitter();
   readonly stderr = new EventEmitter();
   private readonly events = new EventEmitter();
-  readonly stdin = { write: (chunk: string) => { this.written.push(chunk); return true; } };
+  readonly stdin = {
+    write: (chunk: string) => { this.written.push(chunk); return true; },
+    end: () => { this.ended.push(true); },
+  };
   on(event: "exit" | "error", listener: (...args: never[]) => void): this {
     this.events.on(event, listener as (...args: unknown[]) => void); return this;
   }

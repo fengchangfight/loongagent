@@ -1,5 +1,5 @@
 import { JsonRpcError } from "./agentSession.ts";
-import type { AgentSession } from "./agentSession.ts";
+import type { AgentSession, AgentSessionOptions } from "./agentSession.ts";
 import { METHODS, NOTIFICATIONS } from "../../ts/protocol.generated.ts";
 import type {
   ApprovalScope,
@@ -58,7 +58,13 @@ export class LoongSession {
     return this.current;
   }
 
-  /** Everything heard so far: what `replay` returned, plus what arrived since. */
+  /**
+   * Everything heard so far.
+   *
+   * The server drains the session's log as events *before* it answers
+   * `session.attach`, so this is already the history at attach time; `replay()`
+   * would add it a second time and is deliberately not called on the live path.
+   */
   get events(): EventEnvelope[] {
     return this.seen;
   }
@@ -95,6 +101,7 @@ export class LoongSession {
     return this.call<{ turn_id: number; accepted: boolean }>(
       METHODS.promptSubmit,
       this.mine({ text }),
+      { idle: true },
     );
   }
 
@@ -143,6 +150,7 @@ export class LoongSession {
         scope,
         ...(reason === undefined ? {} : { reason }),
       }),
+      { idle: true },
     );
     return result.accepted;
   }
@@ -166,9 +174,13 @@ export class LoongSession {
     }
   }
 
-  private async call<T>(method: string, params: Record<string, unknown>): Promise<T> {
+  private async call<T>(
+    method: string,
+    params: Record<string, unknown>,
+    options: AgentSessionOptions = {},
+  ): Promise<T> {
     try {
-      return await this.agent.request<T>(method, params);
+      return await this.agent.request<T>(method, params, options);
     } catch (error) {
       // The server says which session it is on; that is a refusal, not a failure
       // of the request itself, and it is the caller's cue to start over.

@@ -47,6 +47,17 @@ export function pathsInArgs(args: JsonValue): string[] {
   return [...new Set(found)];
 }
 
+/** The longest run of `character` in `text`: how long a fence has to be. */
+function longestRunOf(text: string, character: string): number {
+  let longest = 0;
+  let current = 0;
+  for (const letter of text) {
+    current = letter === character ? current + 1 : 0;
+    if (current > longest) longest = current;
+  }
+  return longest;
+}
+
 function looksLikeAPath(value: string): boolean {
   if (value.includes("://")) return false;
   if (value.startsWith("/")) return value.length > 1;
@@ -155,9 +166,9 @@ export class Renderer {
    * The chat's transcript belongs to the window; the session belongs to the log
    * (spec §4.6). So this is a card, not a replay.
    */
-  resumed(events: EventEnvelope[]): UiPart[] {
+  resumed(events: EventEnvelope[], sessionId: string): UiPart[] {
     if (events.length === 0) {
-      return [{ kind: "markdown", text: "Resumed session — the log has no events yet." }];
+      return [{ kind: "markdown", text: `Resumed session \`${sessionId}\` — the log has no events yet.` }];
     }
     const newest = (role: string): string | undefined => {
       for (let index = events.length - 1; index >= 0; index--) {
@@ -168,7 +179,7 @@ export class Renderer {
       }
       return undefined;
     };
-    const lines = [`Resumed session — ${events.length} events in the log.`];
+    const lines = [`Resumed session \`${sessionId}\` — ${events.length} events in the log.`];
     const asked = newest("user");
     const answered = newest("assistant");
     if (asked !== undefined) lines.push(`\n**You last said:** ${asked}`);
@@ -198,16 +209,17 @@ export class Renderer {
   private toolResult(result: ToolResult): UiPart[] {
     const output = result.output ?? "";
     const outcome = result.ok ? "" : "failed — ";
-    if (output.length <= MAX_TOOL_OUTPUT_CHARS) {
-      return [{ kind: "markdown", text: `\n~~~\n${outcome}${output}\n~~~\n` }];
-    }
+    const truncated = output.slice(0, MAX_TOOL_OUTPUT_CHARS);
+    // A fence inside the output would close the block early and spill the rest of
+    // the transcript into it, so the fence is made longer than anything inside.
+    const fence = "~".repeat(Math.max(3, longestRunOf(output, "~") + 1));
+    const body = `\n${fence}\n${outcome}${truncated}\n${fence}\n`;
+    if (output.length <= MAX_TOOL_OUTPUT_CHARS) return [{ kind: "markdown", text: body }];
     const dropped = output.length - MAX_TOOL_OUTPUT_CHARS;
     return [
       {
         kind: "markdown",
-        text:
-          `\n~~~\n${outcome}${output.slice(0, MAX_TOOL_OUTPUT_CHARS)}\n~~~\n` +
-          `… truncated ${dropped} of ${output.length} characters\n`,
+        text: body + `… truncated ${dropped} of ${output.length} characters\n`,
       },
     ];
   }

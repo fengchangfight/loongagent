@@ -2,7 +2,15 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { AgentSession } from "../src/agentSession.ts";
 import { LoongSession } from "../src/session.ts";
-import { TurnBusyError, TurnController } from "../src/turn.ts";
+import {
+  ALLOW_ALWAYS,
+  ALLOW_ONCE,
+  answerFor,
+  DENY,
+  TurnBusyError,
+  TurnController,
+  TurnGate,
+} from "../src/turn.ts";
 import { FakeChild } from "./fakeChild.ts";
 import type {
   ActionClass,
@@ -216,4 +224,92 @@ test("the controller forwards events and deltas to its hooks", async () => {
   assert.deepEqual(events.map((e) => e.kind), ["message.appended"]);
   answer(child, 1, { turn_id: 1, accepted: true });
   await running;
+});
+
+function makeGate() {
+  const child = new FakeChild();
+  const agent = new AgentSession(child, {
+    onNotification: () => {},
+    onLog: () => {},
+    onExit: () => {},
+  });
+  const session = new LoongSession(agent);
+  return { child, session, gate: new TurnGate(session) };
+}
+
+function sinkInto(deltas: string[]): {
+  onEvent: () => void;
+  onDelta: (text: string) => void;
+  decide: () => Promise<{ granted: boolean; scope: "once" }>;
+} {
+  return {
+    onEvent: () => {},
+    onDelta: (text) => { deltas.push(text); },
+    decide: async () => ({ granted: true, scope: "once" }),
+  };
+}
+
+// The two-tab failure the plan's Review Focus #1 names: with a controller per
+// request, the second request both escaped the busy guard and stole the first
+// turn's stream, because a LoongSession keeps one event and one delta observer.
+test("a second request cannot take the running turn", async () => {
+  const { child, session, gate } = makeGate();
+  await attach(child, session);
+
+  const controller = gate.begin(sinkInto([]));
+  const running = controller.run("first");
+
+  assert.throws(() => gate.begin(sinkInto([])), TurnBusyError);
+
+  answer(child, 1, { turn_id: 1, accepted: true });
+  await running;
+  gate.end();
+  assert.equal(gate.busy, false);
+});
+
+test("a refused request cannot steal the running turn's stream", async () => {
+  const { child, session, gate } = makeGate();
+  await attach(child, session);
+
+  const first: string[] = [];
+  const second: string[] = [];
+  const controller = gate.begin(sinkInto(first));
+  const running = controller.run("first");
+
+  assert.throws(() => gate.begin(sinkInto(second)), TurnBusyError);
+  child.emitStdout(`{"jsonrpc":"2.0","method":"model.delta","params":{"turn_id":1,"text":"answer-for-the-first"}}\n`);
+
+  assert.deepEqual(first, ["answer-for-the-first"]);
+  assert.deepEqual(second, [], "the refused request hears nothing of the running turn");
+
+  answer(child, 1, { turn_id: 1, accepted: true });
+  await running;
+  gate.end();
+});
+
+test("the turn is available again once it ends", async () => {
+  const { child, session, gate } = makeGate();
+  await attach(child, session);
+
+  const running = gate.begin(sinkInto([])).run("first");
+  answer(child, 1, { turn_id: 1, accepted: true });
+  await running;
+  gate.end();
+
+  const next = gate.begin(sinkInto([]));
+  assert.equal(next.busy, false);
+  const second = next.run("second");
+  answer(child, 2, { turn_id: 2, accepted: true });
+  assert.deepEqual(await second, { turn_id: 2, accepted: true });
+});
+
+test("allow once and allow always map to the protocol's scopes", () => {
+  assert.deepEqual(answerFor(ALLOW_ONCE), { granted: true, scope: "once" });
+  assert.deepEqual(answerFor(ALLOW_ALWAYS), { granted: true, scope: "action_class" });
+});
+
+test("a dismissed dialog is a denial, never an allow", () => {
+  const denied = { granted: false, scope: "once", reason: "denied in VS Code" };
+  assert.deepEqual(answerFor(undefined), denied);
+  assert.deepEqual(answerFor(DENY), denied);
 });

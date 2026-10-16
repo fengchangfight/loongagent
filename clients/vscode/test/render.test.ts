@@ -133,16 +133,17 @@ test("a resumed session is summarised, not replayed in full", () => {
   }
   events.push(event("approval.decided", { request_id: "appr-1", granted: true, scope: "once" }, 21));
 
-  const parts = renderer.resumed(events);
+  const parts = renderer.resumed(events, "s7");
   const text = textOf(parts);
   assert.match(parts[0].text, /21/, "the first part names the event count");
+  assert.match(parts[0].text, /s7/, "the card names the session it resumed");
   assert.match(text, /message 18/, "the newest question is shown");
   assert.match(text, /message 19/, "the newest answer is shown");
   assert.doesNotMatch(text, /message 0\b/, "the whole history is not replayed");
 });
 
 test("an empty replay says so instead of rendering nothing", () => {
-  const parts = new Renderer({ cwd: CWD }).resumed([]);
+  const parts = new Renderer({ cwd: CWD }).resumed([], "s7");
   assert.equal(parts.length, 1);
   assert.match(parts[0].text, /no events/);
 });
@@ -213,9 +214,10 @@ test("the model list names every model and marks the current one", () => {
     ],
     selected: "b",
   }));
-  assert.match(text, /a/);
-  assert.match(text, /b/);
-  assert.match(text, /current/, "the current model is marked, not inferred");
+  assert.match(text, /`a` \(a-model\)/);
+  assert.match(text, /`b` \(b-model\)/);
+  assert.match(text, /`b` \(b-model\) — current/, "the selected model is the one marked");
+  assert.doesNotMatch(text, /`a` \(a-model\) — current/, "and no other");
 });
 
 test("the context table quotes the numbers it was given and computes nothing", () => {
@@ -225,4 +227,15 @@ test("the context table quotes the numbers it was given and computes nothing", (
     assert.match(text, new RegExp(`\\b${number}\\b`), `${number} appears as it was given`);
   }
   assert.doesNotMatch(text, /%/, "no percentage of our own invention");
+});
+
+test("a tool result containing a fence does not break the transcript", () => {
+  const renderer = new Renderer({ cwd: CWD });
+  const text = textOf(renderer.event(event("tool.result", {
+    call_id: "c1",
+    ok: true,
+    output: "before\n~~~\nafter",
+  })));
+  const opening = text.trimStart().match(/^~+/)?.[0] ?? "";
+  assert.ok(opening.length > 3, `the fence must outrun any run inside the output, got ${opening}`);
 });

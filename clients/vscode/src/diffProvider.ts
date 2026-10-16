@@ -8,8 +8,10 @@ export interface UriLike {
 
 /** How to make and read the surface's URI type, so this file needs no `vscode`. */
 export interface DiffUris<U extends UriLike> {
-  make(path: string, label: string): U;
+  /** The token identifies the turn whose "before" this URI serves. */
+  make(token: string, path: string, label: string): U;
   pathOf(uri: U): string;
+  tokenOf(uri: U): string;
 }
 
 /** Marks text that is about the diff rather than part of the file. */
@@ -19,33 +21,34 @@ const MARKER = "[loongagent] ";
  * The left-hand side of a `vscode.diff`: what a path held when the turn first
  * mentioned it.
  *
- * The path travels inside the URI, so nothing has to be remembered between
- * "open this diff" and "what do I put in the left pane" — a diff tab outlives
- * the turn that opened it.
+ * The turn **and** the path travel inside the URI, so a diff tab opened from an
+ * older reply keeps showing that turn's "before" rather than whatever the newest
+ * turn recorded. A turn nobody holds any more falls back to git and says so —
+ * it never silently serves a different turn's snapshot.
  */
 export class DiffProvider<U extends UriLike> {
-  private readonly snapshots: FileSnapshots;
+  private readonly turnOf: (token: string) => FileSnapshots | undefined;
   private readonly gitShow: (path: string) => string | undefined;
   private readonly uris: DiffUris<U>;
 
   constructor(
-    snapshots: FileSnapshots,
+    turnOf: (token: string) => FileSnapshots | undefined,
     gitShow: (path: string) => string | undefined,
     uris: DiffUris<U>,
   ) {
-    this.snapshots = snapshots;
+    this.turnOf = turnOf;
     this.gitShow = gitShow;
     this.uris = uris;
   }
 
-  /** A URI carrying the absolute path whose left side this document serves. */
-  uriFor(path: string, label: string): U {
-    return this.uris.make(path, label);
+  /** A URI carrying the turn and the absolute path whose left side it serves. */
+  uriFor(token: string, path: string, label: string): U {
+    return this.uris.make(token, path, label);
   }
 
   provideTextDocumentContent(uri: U): string {
     const path = this.uris.pathOf(uri);
-    const snapshot = this.snapshots.left(path);
+    const snapshot = this.turnOf(this.uris.tokenOf(uri))?.left(path);
     if (snapshot !== undefined && snapshot.source === "snapshot") {
       // No marker: this pane is the file, and a marker would be a lie about its
       // contents. The other answers below are about the diff, so they say so.
@@ -70,9 +73,10 @@ export class DiffProvider<U extends UriLike> {
    * A path with no left side is listed rather than assumed unchanged: not being
    * able to prove a file is untouched is not the same as knowing it is.
    */
-  changedAmong(paths: string[], read: (path: string) => string | undefined): string[] {
+  changedAmong(token: string, paths: string[], read: (path: string) => string | undefined): string[] {
+    const turn = this.turnOf(token);
     return paths.filter((path) => {
-      const left = this.snapshots.left(path);
+      const left = turn?.left(path);
       if (left === undefined || left.source !== "snapshot") return true;
       return read(path) !== left.content;
     });

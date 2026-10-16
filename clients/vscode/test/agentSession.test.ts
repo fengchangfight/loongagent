@@ -124,10 +124,57 @@ test("a request that is never answered gives up and names the method", async () 
   );
 });
 
-test("an answer arriving in time leaves no timer behind", async () => {
+test("a request answered within its timeout resolves with the result", async () => {
   const { child, session } = makeSession();
   const pending = session.request("model.list", { session_id: "s1" }, { requestTimeoutMs: 60_000 });
   const id = child.sent()[0].id;
   child.emitStdout(`{"jsonrpc":"2.0","id":${id},"result":{"models":[]}}\n`);
   assert.deepEqual(await pending, { models: [] });
+});
+
+function bareSession(requestTimeoutMs: number): { child: FakeChild; session: AgentSession } {
+  const child = new FakeChild();
+  const session = new AgentSession(child, {
+    onNotification: () => {},
+    onLog: () => {},
+    onExit: () => {},
+  }, { requestTimeoutMs });
+  return { child, session };
+}
+
+// A turn is not answered until it ends or pauses, so a flat deadline would call a
+// healthy three-minute investigation a failure while its deltas are still arriving.
+test("progress keeps a turn alive past the flat timeout", async () => {
+  const { child, session } = bareSession(200);
+  const pending = session.request("prompt.submit", { session_id: "s1" }, { idle: true });
+  const id = child.sent()[0].id;
+  for (let tick = 0; tick < 6; tick++) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    child.emitStdout(`{"jsonrpc":"2.0","method":"model.delta","params":{"turn_id":1,"text":"x"}}\n`);
+  }
+  child.emitStdout(`{"jsonrpc":"2.0","id":${id},"result":{"turn_id":1,"accepted":true}}\n`);
+  assert.deepEqual(await pending, { turn_id: 1, accepted: true });
+});
+
+test("a turn the server never speaks about gives up as stalled", async () => {
+  const { session } = bareSession(20);
+  await assert.rejects(
+    session.request("prompt.submit", { session_id: "s1" }, { idle: true }),
+    /no word from the loongagent server/,
+  );
+});
+
+test("a request that is not idle still has a flat deadline", async () => {
+  const { session } = bareSession(20);
+  await assert.rejects(
+    session.request("model.list", { session_id: "s1" }),
+    /no response to model\.list after/,
+  );
+});
+
+test("dispose closes the child's input before killing it", async () => {
+  const { child, session } = makeSession();
+  await session.dispose();
+  assert.deepEqual(child.ended, [true], "stdin is closed, so the server sees end-of-input");
+  assert.deepEqual(child.signals, [undefined], "and the kill is the backstop, not the first move");
 });

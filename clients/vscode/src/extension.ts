@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { basename, relative } from "node:path";
 import { DiffProvider } from "./diffProvider.ts";
+import { refusalToStart } from "./guards.ts";
 import { promptText } from "./prompt.ts";
 import { pathsInArgs, Renderer } from "./render.ts";
 import { FileSnapshots } from "./snapshots.ts";
@@ -13,43 +14,58 @@ import type { DiffUris } from "./diffProvider.ts";
 import type { UiPart } from "./render.ts";
 import type { JsonValue } from "../../ts/protocol.generated.ts";
 import type { ApprovalAnswer, ApprovalRequest } from "./turn.ts";
+import type { EventEnvelope } from "../../ts/protocol.generated.ts";
 import type { LoongSession } from "./session.ts";
 import type { TurnController } from "./turn.ts";
 
 const PARTICIPANT_ID = "loongagent.chat";
 const SMOKE_PROMPT = "Say hello in one sentence, then stop.";
-const NOT_YET = "not implemented yet";
 /** The private URI scheme whose documents are a turn's "before" side. */
 const LEFT_SCHEME = "loongagent-left";
 
-interface Review {
-  workspace: string;
+/** One turn's left sides, keyed by a token that travels in the diff's URI. */
+interface TurnReview {
+  token: string;
   snapshots: FileSnapshots;
-  provider: DiffProvider<vscode.Uri>;
 }
 
+/** How many recent turns keep their "before" sides: enough to review a few replies. */
+const RECENT_TURNS = 8;
+
+const turns = new Map<string, FileSnapshots>();
+let nextTurn = 1;
+let provider: DiffProvider<vscode.Uri> | undefined;
+
 /**
- * The window's turn-review state.
+ * The window's diff provider.
  *
  * One per window rather than one per folder: the participant works on the first
- * workspace folder (spec §4.6), and the path inside the URI is what identifies a
- * left side, so there is nothing to keep per folder.
+ * workspace folder (spec §4.6), and the turn token and path inside the URI are
+ * what identify a left side.
  */
-let review: Review | undefined;
-
-function reviewFor(folder: vscode.WorkspaceFolder): Review {
-  if (review !== undefined && review.workspace === folder.uri.fsPath) return review;
-  const snapshots = new FileSnapshots({ workspace: folder.uri.fsPath });
+function reviewProvider(folder: vscode.WorkspaceFolder): DiffProvider<vscode.Uri> {
+  if (provider !== undefined) return provider;
   const uris: DiffUris<vscode.Uri> = {
-    make: (path, label) => vscode.Uri.from({ scheme: LEFT_SCHEME, path, query: label }),
+    make: (token, path, label) =>
+      vscode.Uri.from({ scheme: LEFT_SCHEME, path, query: `${token}|${label}` }),
     pathOf: (uri) => uri.path,
+    tokenOf: (uri) => uri.query.split("|")[0] ?? "",
   };
-  review = {
-    workspace: folder.uri.fsPath,
-    snapshots,
-    provider: new DiffProvider(snapshots, gitShowIn(folder), uris),
-  };
-  return review;
+  provider = new DiffProvider((token) => turns.get(token), gitShowIn(folder), uris);
+  return provider;
+}
+
+/** Start recording a turn's left sides, and forget the ones too old to revisit. */
+function beginReview(folder: vscode.WorkspaceFolder): TurnReview {
+  const token = String(nextTurn++);
+  const snapshots = new FileSnapshots({ workspace: folder.uri.fsPath });
+  turns.set(token, snapshots);
+  while (turns.size > RECENT_TURNS) {
+    const oldest = turns.keys().next();
+    if (oldest.done === true) break;
+    turns.delete(oldest.value);
+  }
+  return { token, snapshots };
 }
 
 /** `git show HEAD:<path>`, or nothing at all — no git, no HEAD or untracked are all fine. */
@@ -77,13 +93,19 @@ function readNow(path: string): string | undefined {
   }
 }
 
-async function openDiffs(paths: string[] | undefined, output: vscode.OutputChannel): Promise<void> {
-  if (paths === undefined || paths.length === 0) {
+async function openDiffs(
+  token: string | undefined,
+  paths: string[] | undefined,
+  output: vscode.OutputChannel,
+): Promise<void> {
+  if (token === undefined || paths === undefined || paths.length === 0) {
     output.appendLine("review: nothing to review — ask for a change first, then use the button in the reply");
     return;
   }
   for (const path of paths) {
-    const left = review === undefined ? vscode.Uri.file(path) : review.provider.uriFor(path, "before");
+    const left = provider === undefined
+      ? vscode.Uri.file(path)
+      : provider.uriFor(token, path, "before");
     await vscode.commands.executeCommand(
       "vscode.diff",
       left,
@@ -131,7 +153,20 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("loongagent.smoke", () => runSmoke(output, context)),
+    vscode.commands.registerCommand("loongagent.smoke", () => {
+      const folder = vscode.workspace.workspaceFolders?.[0];
+      const refusal = refusalToStart({
+        hasFolder: folder !== undefined,
+        isTrusted: vscode.workspace.isTrusted,
+      });
+      if (refusal !== undefined || folder === undefined) {
+        output.appendLine(`smoke: ${refusal ?? "open a folder first"}`);
+        return undefined;
+      }
+      // The participant's own agent: a second server on the same log would write
+      // two sets of sequence numbers into the one record that is the truth.
+      return runSmoke(folder, output, agentFor);
+    }),
   );
 
   // The left pane of every diff this window opens. Registered once; the path in
@@ -139,15 +174,15 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.workspace.registerTextDocumentContentProvider(LEFT_SCHEME, {
       provideTextDocumentContent: (uri) =>
-        review === undefined
+        provider === undefined
           ? "[loongagent] no turn has run in this window yet\n"
-          : review.provider.provideTextDocumentContent(uri),
+          : provider.provideTextDocumentContent(uri),
     }),
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("loongagent.reviewChanges", (paths?: string[]) =>
-      openDiffs(paths, output)),
+    vscode.commands.registerCommand("loongagent.reviewChanges", (token?: string, paths?: string[]) =>
+      openDiffs(token, paths, output)),
   );
 }
 
@@ -163,15 +198,12 @@ async function handleRequest(
   agentFor: (folder: vscode.WorkspaceFolder) => WorkspaceAgent,
 ): Promise<void> {
   const folder = vscode.workspace.workspaceFolders?.[0];
-  if (folder === undefined) {
-    stream.markdown("Open a folder first — the agent works on a workspace.");
-    return;
-  }
-  if (!vscode.workspace.isTrusted) {
-    stream.markdown(
-      "This workspace is not trusted, so I will not start the agent here. " +
-      "Trust the folder (Workspaces: Manage Workspace Trust) and ask again.",
-    );
+  const refusal = refusalToStart({
+    hasFolder: folder !== undefined,
+    isTrusted: vscode.workspace.isTrusted,
+  });
+  if (refusal !== undefined || folder === undefined) {
+    stream.markdown(refusal ?? "Open a folder first — the agent works on a workspace.");
     return;
   }
 
@@ -181,7 +213,6 @@ async function handleRequest(
       return startFreshSession(agent, stream, output);
     case "yolo":
       return toggleAutoApprove(agent, stream, output, folder);
-    // eslint-disable-next-line no-fallthrough
     case "model":
       return chooseModel(agent, stream, output);
     case "context":
@@ -311,12 +342,12 @@ async function runTurn(
 
   const renderer = new Renderer({ cwd: folder.uri.fsPath });
   renderer.beginTurn();
-  const { snapshots, provider } = reviewFor(folder);
-  snapshots.clear();
+  const turn = beginReview(folder);
+  const provider = reviewProvider(folder);
   // A reopened session says where you were, once per activation: the chat's
   // transcript belongs to the window, the session belongs to the log.
-  const resume = agent.takeResumeEvents();
-  if (resume !== undefined) emit(stream, renderer.resumed(resume));
+  const resume = agent.takeResume();
+  if (resume !== undefined) emit(stream, renderer.resumed(resume.events, resume.sessionId));
   const previous = agent.takeLastExit();
   if (previous !== undefined) {
     stream.markdown(
@@ -327,21 +358,30 @@ async function runTurn(
   const from = session.events.length;
   let controller: TurnController;
   try {
-    controller = await agent.controller({
+    controller = await agent.beginTurn({
       onEvent: (event) => {
         // Before the tool runs: that timing is what makes the recorded left side
         // the pre-turn content even when the tree was already dirty (spec §4.5).
         if (event.kind === EVENTS.toolCall) {
           const args = (event.data as { args?: JsonValue }).args;
-          if (args !== undefined) snapshots.see(pathsInArgs(args));
+          if (args !== undefined) turn.snapshots.see(pathsInArgs(args));
         }
         emit(stream, renderer.event(event));
       },
       onDelta: (text) => emit(stream, renderer.delta(text)),
       // The person answers, in the editor, while the turn waits.
-      decide: decideFromModal,
+      decide: (asked) => {
+        output.appendLine(`awaiting approval: ${asked.action_class} — ${asked.reason}`);
+        return decideFromModal(asked);
+      },
     });
   } catch (error) {
+    if (error instanceof TurnBusyError) {
+      // The busy guard is per session now, so this is what a second chat tab gets.
+      stream.markdown("A turn is already running in this session. Wait for it to finish, or press Stop in the other chat.");
+      output.appendLine("refused: a turn is already running in this session");
+      return;
+    }
     stream.markdown(startupAdvice(explain(error)));
     output.appendLine(`failed: ${explain(error)}`);
     return;
@@ -353,15 +393,14 @@ async function runTurn(
     session.cancel();
   });
 
-  output.appendLine("turn running");
   try {
     await controller.run(promptText(request.prompt, request.references));
-    const changed = provider.changedAmong(renderer.touchedFiles(), readNow);
+    const changed = provider.changedAmong(turn.token, renderer.touchedFiles(), readNow);
     if (changed.length > 0) {
       stream.button({
         command: "loongagent.reviewChanges",
         title: `Review ${changed.length} changed file${changed.length === 1 ? "" : "s"}`,
-        arguments: [changed],
+        arguments: [turn.token, changed],
       });
     }
     const interrupted = session.events
@@ -373,13 +412,10 @@ async function runTurn(
       stream.markdown(`\nInterrupted — ${reason}.`);
     }
   } catch (error) {
-    if (error instanceof TurnBusyError) {
-      stream.markdown("A turn is already running. Wait for it to finish, or press Stop.");
-    } else {
-      stream.markdown(`The turn failed: ${explain(error)}\n\nSee the **loongagent** output channel for the detail.`);
-      output.appendLine(`failed: ${explain(error)}`);
-    }
+    stream.markdown(`The turn failed: ${explain(error)}\n\nSee the **loongagent** output channel for the detail.`);
+    output.appendLine(`failed: ${explain(error)}`);
   } finally {
+    agent.endTurn();
     cancellation.dispose();
   }
 }
@@ -412,28 +448,32 @@ function explain(error: unknown): string {
  * throwaway turn that denies everything, and prints the stream. When the link
  * is broken, the output channel says where.
  */
-async function runSmoke(output: vscode.OutputChannel, context: vscode.ExtensionContext): Promise<void> {
-  const folder = vscode.workspace.workspaceFolders?.[0];
-  if (folder === undefined) {
-    output.appendLine("smoke: open a folder first — the agent works on a workspace");
-    return;
-  }
-  const agent = new WorkspaceAgent({ folder, output, context });
+async function runSmoke(
+  folder: vscode.WorkspaceFolder,
+  output: vscode.OutputChannel,
+  agentFor: (folder: vscode.WorkspaceFolder) => WorkspaceAgent,
+): Promise<void> {
+  const agent = agentFor(folder);
+  let controller: TurnController;
   try {
-    const session = await agent.ensure();
-    const controller = await agent.controller({
-      onEvent: (event) => output.appendLine(`event: ${event.kind}`),
-      onDelta: (text) => output.append(text),
-      decide: async (asked) => {
+    controller = await agent.beginTurn({
+      onEvent: (event: EventEnvelope) => output.appendLine(`event: ${event.kind}`),
+      onDelta: (text: string) => output.append(text),
+      decide: async (asked: ApprovalRequest) => {
         output.appendLine(`smoke: the policy asked about ${asked.action_class} — ${asked.reason} (denied)`);
         return { granted: false, scope: "once", reason: "the smoke test denies everything" };
       },
     });
+  } catch (error) {
+    output.appendLine(`smoke failed: ${explain(error)}`);
+    return;
+  }
+  try {
     const result = await controller.run(SMOKE_PROMPT);
     output.appendLine(`\nsmoke: turn ${result.turn_id} finished (accepted: ${result.accepted})`);
   } catch (error) {
     output.appendLine(`smoke failed: ${explain(error)}`);
   } finally {
-    agent.dispose();
+    agent.endTurn();
   }
 }

@@ -9,7 +9,7 @@ import { StringDecoder } from "node:string_decoder";
  * tested by feeding bytes rather than by spawning something.
  */
 export interface ChildLike {
-  stdin: { write(chunk: string): unknown } | null;
+  stdin: { write(chunk: string): unknown; end?(): unknown } | null;
   stdout: { on(event: "data", listener: (chunk: Buffer | string) => void): unknown } | null;
   stderr: { on(event: "data", listener: (chunk: Buffer | string) => void): unknown } | null;
   on(event: "exit", listener: (code: number | null, signal: string | null) => void): unknown;
@@ -31,6 +31,12 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
 export interface AgentSessionOptions {
   /** Override the wait for one request. 0 waits forever. */
   requestTimeoutMs?: number;
+  /**
+   * Measure silence rather than the total wait. A turn is not answered until it
+   * ends or pauses, so a flat deadline would report a healthy long turn as a
+   * failure while its deltas are still arriving (spec §4.9 wants a *stall*).
+   */
+  idle?: boolean;
 }
 
 /** A JSON-RPC error response. The code is the server's, never one we invented. */
@@ -52,6 +58,15 @@ interface Pending {
   resolve(value: unknown): void;
   reject(error: Error): void;
   timer: NodeJS.Timeout | undefined;
+  /** The method, so a stall can say which one went quiet. */
+  method: string;
+  timeoutMs: number;
+  /**
+   * True for a request whose answer legitimately takes as long as the work
+   * does (`prompt.submit`, `approval.respond`): its clock measures *silence*,
+   * not the total wait, and every message from the server re-arms it.
+   */
+  idle: boolean;
 }
 
 interface Incoming {
@@ -122,13 +137,16 @@ export class AgentSession {
     const id = this.nextId++;
     const timeoutMs = options.requestTimeoutMs ?? this.requestTimeoutMs;
     return new Promise<T>((resolve, reject) => {
-      const timer = timeoutMs > 0
-        ? setTimeout(() => {
-            this.pending.delete(id);
-            reject(new Error(`no response to ${method} after ${Math.round(timeoutMs / 1000)}s`));
-          }, timeoutMs)
-        : undefined;
-      this.pending.set(id, { resolve: resolve as (value: unknown) => void, reject, timer });
+      const entry: Pending = {
+        resolve: resolve as (value: unknown) => void,
+        reject,
+        timer: undefined,
+        method,
+        timeoutMs,
+        idle: options.idle === true,
+      };
+      this.pending.set(id, entry);
+      this.armTimer(id, entry);
       this.write({ jsonrpc: "2.0", id, method, params });
     });
   }
@@ -138,10 +156,16 @@ export class AgentSession {
     this.child.kill("SIGINT");
   }
 
-  /** Stop reading and end the child. Pending requests are rejected, not left hanging. */
+  /**
+   * Stop reading and end the child.
+   *
+   * Closing its input comes first: the server's read loop ends at end-of-input
+   * and it exits on its own. The kill is the backstop for a child that does not.
+   */
   async dispose(): Promise<void> {
     this.disposed = true;
     this.rejectAll(new Error("the session was disposed"));
+    this.child.stdin?.end?.();
     if (!this.exited) {
       this.exited = true;
       this.child.kill();
@@ -175,6 +199,9 @@ export class AgentSession {
   }
 
   private receive(line: string): void {
+    // Any well-formed message is the server being alive; a request that is being
+    // kept alive by progress is not stalled.
+    this.touch();
     let parsed: unknown;
     try {
       parsed = JSON.parse(line);
@@ -237,6 +264,28 @@ export class AgentSession {
     this.hooks.onLog(error.message);
     this.rejectAll(error);
     this.hooks.onExit(null, null);
+  }
+
+  /** (Re-)start one request's clock, if it has one. */
+  private armTimer(id: number, entry: Pending): void {
+    if (entry.timer !== undefined) clearTimeout(entry.timer);
+    entry.timer = undefined;
+    if (entry.timeoutMs <= 0) return;
+    entry.timer = setTimeout(() => {
+      if (this.pending.get(id) !== entry) return;
+      this.pending.delete(id);
+      entry.reject(new Error(entry.idle
+        ? `no word from the loongagent server for ${Math.round(entry.timeoutMs / 1000)}s ` +
+          `while ${entry.method} was running`
+        : `no response to ${entry.method} after ${Math.round(entry.timeoutMs / 1000)}s`));
+    }, entry.timeoutMs);
+  }
+
+  /** The server said something: restart the clock of every waiting idle request. */
+  private touch(): void {
+    for (const [id, entry] of this.pending) {
+      if (entry.idle) this.armTimer(id, entry);
+    }
   }
 
   /** Remove one waiting request and stop its clock. */

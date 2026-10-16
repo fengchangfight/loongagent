@@ -32,6 +32,23 @@ export class TurnBusyError extends Error {
   }
 }
 
+/** The button labels, in one place, so the mapping below cannot drift from them. */
+export const ALLOW_ONCE = "Allow once";
+export const ALLOW_ALWAYS = "Allow always";
+export const DENY = "Deny";
+
+/**
+ * What a person's answer means in the protocol's terms.
+ *
+ * A dismissed dialog is a **denial**, never an allow: closing a box is not
+ * consent, and reading it as consent is how a guard becomes decorative.
+ */
+export function answerFor(choice: string | undefined): ApprovalAnswer {
+  if (choice === ALLOW_ONCE) return { granted: true, scope: "once" };
+  if (choice === ALLOW_ALWAYS) return { granted: true, scope: "action_class" };
+  return { granted: false, scope: "once", reason: "denied in VS Code" };
+}
+
 export interface TurnHooks {
   onEvent(event: EventEnvelope): void;
   onDelta(text: string): void;
@@ -50,6 +67,67 @@ export interface TurnHooks {
  * It also holds the one-writer rule: two turns on one session would interleave
  * two streams into one conversation.
  */
+/** Where one running turn's parts and questions go. */
+export type TurnSink = TurnHooks;
+
+/**
+ * One writer per session.
+ *
+ * A `TurnController`'s `running` flag only means anything if the *same*
+ * controller is reused, so this owns the one instance and lends it to whoever
+ * holds the turn. It also owns the sink, because the controller's hooks are
+ * fixed when it is built — a controller per request cannot refuse the second
+ * request (its flag is always false) and it *replaces* the session's observers,
+ * which delivers the running turn's stream to the wrong chat.
+ */
+export class TurnGate {
+  private readonly controller: TurnController;
+  private sink: TurnSink | undefined;
+
+  constructor(session: LoongSession) {
+    this.controller = new TurnController(session, {
+      onEvent: (event) => this.sink?.onEvent(event),
+      onDelta: (text) => this.sink?.onDelta(text),
+      decide: (request) => this.ask(request),
+    });
+  }
+
+  get busy(): boolean {
+    return this.controller.busy;
+  }
+
+  get pendingApproval(): ApprovalRequest | null {
+    return this.controller.pendingApproval;
+  }
+
+  /** Take the turn, or refuse without touching the sink the running turn owns. */
+  begin(sink: TurnSink): TurnController {
+    if (this.controller.busy) {
+      throw new TurnBusyError("a turn is already running; wait for it to finish or stop it");
+    }
+    this.sink = sink;
+    return this.controller;
+  }
+
+  /** Give the turn back, whoever had it. */
+  end(): void {
+    this.sink = undefined;
+  }
+
+  private ask(request: ApprovalRequest): Promise<ApprovalAnswer> {
+    const sink = this.sink;
+    if (sink === undefined) {
+      // Nothing is holding the turn: the safe answer to a policy question is no.
+      return Promise.resolve({
+        granted: false,
+        scope: "once",
+        reason: "no surface is holding this turn",
+      });
+    }
+    return sink.decide(request);
+  }
+}
+
 export class TurnController {
   private readonly session: LoongSession;
   private readonly hooks: TurnHooks;

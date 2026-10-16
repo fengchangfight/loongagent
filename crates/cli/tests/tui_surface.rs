@@ -1,19 +1,9 @@
 //! The two terminal surfaces: a full-screen one that needs a TTY, and a line-mode
 //! one that does not. Both must say what they are instead of failing obscurely.
 
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
-/// A command that cannot see the developer's configuration. Without this a control
-/// plane configured on this machine supplies the endpoints under test — and spends
-/// real tokens while doing it.
-fn isolated_command() -> Command {
-    let base = std::env::temp_dir().join(format!("loongagent-testenv-{}", std::process::id()));
-    let mut command = Command::new(env!("CARGO_BIN_EXE_loongagent"));
-    command
-        .env("LOONGAGENT_HOME", base.join("loongagent"))
-        .env("HOME", base.join("home"));
-    command
-}
+mod common;
 
 #[test]
 fn the_full_screen_surface_refuses_a_pipe_and_points_at_the_line_mode() {
@@ -24,7 +14,7 @@ fn the_full_screen_surface_refuses_a_pipe_and_points_at_the_line_mode() {
     // another test's mystery.
     let dir = std::env::temp_dir().join(format!("loongagent-tui-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let out = isolated_command()
+    let out = common::isolated_command()
         .arg("tui")
         .arg("--session")
         .arg(dir.join("s.jsonl"))
@@ -52,7 +42,7 @@ fn the_full_screen_surface_refuses_a_pipe_and_points_at_the_line_mode() {
 fn the_line_mode_surface_works_under_a_pipe() {
     let dir = std::env::temp_dir().join(format!("loongagent-repl-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let mut child = isolated_command()
+    let mut child = common::isolated_command()
         .arg("repl")
         .arg("--session")
         .arg(dir.join("s.jsonl"))

@@ -6,20 +6,10 @@
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// A command that cannot see the developer's configuration. Without this a control
-/// plane configured on this machine supplies the endpoints under test — and spends
-/// real tokens while doing it.
-fn isolated_command() -> Command {
-    let base = std::env::temp_dir().join(format!("loongagent-testenv-{}", std::process::id()));
-    let mut command = Command::new(env!("CARGO_BIN_EXE_loongagent"));
-    command
-        .env("LOONGAGENT_HOME", base.join("loongagent"))
-        .env("HOME", base.join("home"));
-    command
-}
+mod common;
 
 static N: AtomicU64 = AtomicU64::new(0);
 
@@ -63,7 +53,7 @@ struct Session {
 
 impl Session {
     fn start(dir: &Path, model: &str) -> Self {
-        let mut child = isolated_command()
+        let mut child = common::isolated_command()
             .arg("server")
             .arg("--stdio")
             .arg("--session")
@@ -259,7 +249,7 @@ fn an_out_of_bounds_write_asks_before_it_touches_anything() {
 #[test]
 fn the_tui_client_drives_a_real_server() {
     let t = Temp::new();
-    let out = isolated_command()
+    let out = common::isolated_command()
         .env("LOONGAGENT_SERVER_BIN", env!("CARGO_BIN_EXE_loongagent"))
         .arg("run")
         .arg("hello from the client")

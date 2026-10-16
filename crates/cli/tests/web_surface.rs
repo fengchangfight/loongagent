@@ -5,23 +5,13 @@
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tungstenite::client::IntoClientRequest;
 use tungstenite::Message;
 
-/// A command that cannot see the developer's configuration. Without this a control
-/// plane configured on this machine supplies the endpoints under test — and spends
-/// real tokens while doing it.
-fn isolated_command() -> Command {
-    let base = std::env::temp_dir().join(format!("loongagent-testenv-{}", std::process::id()));
-    let mut command = Command::new(env!("CARGO_BIN_EXE_loongagent"));
-    command
-        .env("LOONGAGENT_HOME", base.join("loongagent"))
-        .env("HOME", base.join("home"));
-    command
-}
+mod common;
 
 static N: AtomicU64 = AtomicU64::new(0);
 
@@ -101,7 +91,7 @@ struct Web {
 
 impl Web {
     fn start(dir: &std::path::Path, base_url: &str) -> Self {
-        let mut child = isolated_command()
+        let mut child = common::isolated_command()
             .arg("web")
             .arg("--session")
             .arg(dir.join("s.jsonl"))

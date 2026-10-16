@@ -1393,9 +1393,10 @@ pub fn system_config_dir() -> PathBuf {
 
 /// Where each layer's file lives on this machine.
 ///
-/// The org layer is a file an administrator owns. ADR-0008 §6 delivers it as a
-/// **signed pack**; that is not implemented, so this path is a placeholder for it
-/// and nothing here should be called tamper-resistant.
+/// The org layer is a file an administrator owns. The signed pack envelope
+/// exists and is verified against a pinned key *before* it can occupy this layer
+/// (ADR-0016); what this path is, is the **local** org file, a plain
+/// `profile.toml` and the thing that must not be called tamper-resistant.
 pub fn layer_paths(workspace: &Path, session: Option<&Path>) -> Vec<(Layer, PathBuf)> {
     let mut layers = Vec::new();
     layers.push((Layer::Org, system_config_dir().join("profile.toml")));

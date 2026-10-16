@@ -291,6 +291,12 @@ pieces of evidence, because "it compiles and the tests pass" does not prove noth
    `cli/main.rs`, 133 in `tui-app/lib.rs`), none lost and none renamed. Normalise the
    `Running … (target/debug/deps/<name>-<hash>)` lines down to `<name>` **before** comparing: the
    hash changes whenever the code changes, so a raw comparison fails for the wrong reason.
+   *Corrected during execution (Task 23):* the output cannot be byte-identical when a **root-level**
+   test module moves into a host submodule, because every qualified test name then gains the host
+   path — Task 23's 49 CLI tests all survive with identical leaf names while `tests::x` becomes
+   `local::tests::x`. The rule is the leaf-name multiset, per target and workspace-wide, plus an
+   enumeration of every path relocation. Task 22's tests moved too and needed no such allowance,
+   because they stayed at the same module path.
 3. **No dependency or manifest change.** `git diff -- '**/Cargo.toml'` is empty for the split
    commits, and `cargo tree -p loongagent` is unchanged.
 4. **The real binary still works.** The 8 integration tests under `crates/cli/tests/`, which launch

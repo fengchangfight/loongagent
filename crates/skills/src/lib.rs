@@ -380,7 +380,18 @@ fn scan_root(root: &Path) -> Result<Vec<Skill>, SkillError> {
     }
     // `<name>.md` — the older "commands" spelling of the same concept. Accepted at
     // a root directly as well, so an extra profile root can be flat.
-    for dir in [root.join(COMMANDS_DIR), root.to_path_buf()] {
+    //
+    // A root that carries the workspace shape (`skills/`) is read in that shape only:
+    // `skills/` and `commands/`. Otherwise the README, AGENTS.md and release notes of
+    // any repository laid out the way the plugin ecosystem lays one out would each be
+    // read as a command — and, having no frontmatter, fail the whole load. The cost is
+    // named rather than hidden: a stray `<name>.md` beside a `skills/` directory is no
+    // longer a skill, and `commands/<name>.md` is where it belongs.
+    let mut command_dirs = vec![root.join(COMMANDS_DIR)];
+    if !root.join(SKILLS_DIR).is_dir() {
+        command_dirs.push(root.to_path_buf());
+    }
+    for dir in command_dirs {
         if !dir.is_dir() {
             continue;
         }
@@ -997,6 +1008,53 @@ mod tests {
             "and from the catalogue, so /help cannot advertise it: {}",
             set.catalogue()
         );
+    }
+
+    #[test]
+    fn a_root_that_carries_the_workspace_shape_is_read_in_that_shape() {
+        // What a plugin checkout looks like: `skills/` beside a repository's own
+        // markdown. Reading `README.md` as a command would fail the whole load, and
+        // "point skill_dirs at the plugin" is the natural thing to write by hand.
+        let ws = workspace();
+        let plugin = ws.join("superpowers");
+        std::fs::create_dir_all(plugin.join("skills/brainstorming")).unwrap();
+        std::fs::write(
+            plugin.join("skills/brainstorming/SKILL.md"),
+            "---\ndescription: Ask before building\n---\nbody\n",
+        )
+        .unwrap();
+        std::fs::write(
+            plugin.join("README.md"),
+            "# Superpowers\n\nno frontmatter\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(plugin.join("commands")).unwrap();
+        std::fs::write(
+            plugin.join("commands/ship.md"),
+            "---\ndescription: Ship it\n---\nbody\n",
+        )
+        .unwrap();
+
+        let set = SkillSet::load_in(&ws, &[plugin.clone()], &[]).unwrap();
+        assert!(set.names().contains(&"brainstorming"), "{:?}", set.names());
+        assert!(set.names().contains(&"ship"), "commands/ still counts");
+        assert!(
+            !set.names().contains(&"README"),
+            "a repository's README is not a command: {:?}",
+            set.names()
+        );
+
+        // A root that *is* a directory of skills keeps reading flat markdown: that is
+        // the `skill_dirs = ["~/team-skills"]` shape, and it has no `skills/`.
+        let team = ws.join("team");
+        std::fs::create_dir_all(&team).unwrap();
+        std::fs::write(
+            team.join("flat.md"),
+            "---\ndescription: A flat one\n---\nbody\n",
+        )
+        .unwrap();
+        let set = SkillSet::load_in(&ws, &[team], &[]).unwrap();
+        assert!(set.names().contains(&"flat"), "{:?}", set.names());
     }
 
     #[test]

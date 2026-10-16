@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { spawnAgent } from "./agentSession.ts";
+import { withStoredSession } from "./resume.ts";
 import { LoongSession } from "./session.ts";
 import { TurnController, TurnGate } from "./turn.ts";
 import { EVENTS } from "../../ts/protocol.generated.ts";
@@ -86,17 +87,16 @@ export class WorkspaceAgent {
   }
 
   private async resumeOrStart(): Promise<LoongSession> {
-    const stored = this.storedSessionId();
-    try {
-      return await this.open(stored);
-    } catch (error) {
-      if (stored === undefined) throw error;
-      this.output.appendLine(
-        `the stored session ${stored} could not be resumed (${explain(error)}); starting a new one`,
-      );
-      await this.context.workspaceState.update(SESSION_KEY, undefined);
-      return this.open(undefined);
-    }
+    return withStoredSession(
+      this.storedSessionId(),
+      (id) => this.open(id),
+      async (id, error) => {
+        this.output.appendLine(
+          `the stored session ${id} could not be resumed (${explain(error)}); starting a new one`,
+        );
+        await this.context.workspaceState.update(SESSION_KEY, undefined);
+      },
+    );
   }
 
   /** A brand new session, remembered so the next window resumes it. */

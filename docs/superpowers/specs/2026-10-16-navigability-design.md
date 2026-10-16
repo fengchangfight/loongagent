@@ -236,16 +236,22 @@ Every phase ends with `./scripts/check.sh` green. The splits additionally requir
 pieces of evidence, because "it compiles and the tests pass" does not prove nothing moved:
 
 1. **Every moved item is token-identical.** A script extracts each whole item — `fn`, `impl`,
-   `struct`, `enum`, `trait`, `type`, `const`, `static`, `mod`, `macro_rules!`, with its attributes,
-   visibility and signature included — from `git show HEAD:<old path>` and from the new files, hashes
-   each item's canonical token stream, and compares `(sha256, kind, name, visibility)` multisets; they
-   must be equal. The script must be shown to fail both when an item's body is edited and when only a
-   **signature** or visibility is edited. *Corrected during execution (Task 19):* this originally said
-   "function bodies are byte-identical", which is unachievable — rustfmt dedents and reflows moved text
-   and `cargo fmt --check` is a gate — and which left signatures, visibility, attributes and every
-   non-`fn` item outside the evidence. Alongside the multiset, each split shows that the committed file
-   equals rustfmt's output applied to a byte-preserving dedent of the original, so that the only
-   difference between the two is rustfmt's own reflow.
+   `struct`, `enum`, `trait`, `type`, `const`, `static`, `mod`, `use`, `macro_rules!`, with its
+   attributes, visibility and signature included — from `git show HEAD:<old path>` and from the new
+   files, hashes each item's canonical token stream, and compares `(sha256, kind, name, visibility)`
+   tuples; they must be equal. The script must be shown to fail both when an item's body is edited and
+   when only a **signature** or visibility is edited. *Corrected during execution (Task 19):* this
+   originally said "function bodies are byte-identical", which is unachievable — rustfmt dedents and
+   reflows moved text and `cargo fmt --check` is a gate — and which left signatures, visibility,
+   attributes and every non-`fn` item outside the evidence. Alongside the comparison, each split shows
+   that the committed file equals rustfmt's output applied to a byte-preserving dedent of the original,
+   so that the only difference between the two is rustfmt's own reflow.
+   **Strict equality is Task 19's case only.** Tasks 20–23 split a file into submodules, which
+   legitimately adds `mod` / `use` / `pub use` lines and may widen an item to `pub(crate)` or
+   `pub(super)` so a sibling module can reach it. Their rule is directional: every before-item still
+   present on `(kind, name)`; its hash unchanged, *or* differing only by a visibility widening —
+   demonstrated by a further **visibility-stripped hash** that must match; every other extra item
+   listed explicitly in the report with its reason. An unexplained extra is a finding.
 2. **The test set is unchanged.** `cargo test --workspace -- --list` sorted, before and after, must
    be identical — including the tests defined inside the two library files being split (49 in
    `cli/main.rs`, 133 in `tui-app/lib.rs`), none lost and none renamed. Normalise the

@@ -22,7 +22,15 @@ Copied from the spec. Every task's requirements include these.
 *Corrected during execution (Task 19).* This read "function bodies are byte-identical", which is **unachievable** and was wrong in two independent ways:
 
 1. **Byte-identity is impossible for any move that changes indentation depth.** rustfmt dedents and reflows the moved text, and `cargo fmt --check` is a gate, so the moved copy *cannot* be byte-equal to the original. Task 19's move (a nested `mod tests` becoming a sibling file) showed exactly this: of 266 bodies, 265 are byte-identical and all 266 are token-identical, the difference being two whitespace-only hunks — one of them a signature's optional trailing comma, which rustfmt removed. The achievable and meaningful standard is that the moved text equals rustfmt's output applied to a byte-preserving dedent of the original; Tasks 19–23 each demonstrate that directly rather than by argument.
-2. **Hashing bodies left the things that matter uncovered.** A signature change, a visibility change, an added or removed attribute, or a change to any non-`fn` item would all have passed a body-hash comparison while breaking the plan's "zero `pub` API change" constraint — and a signature change shipped with updated callers compiles and passes every test. The evidence therefore hashes whole items, and compares `(sha256, kind, name, visibility)` multisets, so a visibility or kind change is visible in the comparison rather than merely implied by a hash.
+2. **Hashing bodies left the things that matter uncovered.** A signature change, a visibility change, an added or removed attribute, or a change to any non-`fn` item would all have passed a body-hash comparison while breaking the plan's "zero `pub` API change" constraint — and a signature change shipped with updated callers compiles and passes every test. The evidence therefore hashes whole items — `fn`, `impl`, `struct`, `enum`, `union`, `trait`, `type`, `const`, `static`, `mod`, `use` and `macro_rules!`, with attributes, visibility and signature — and compares `(sha256, kind, name, visibility)` tuples, so a visibility or kind change is visible in the comparison rather than merely implied by a hash.
+
+**The comparison is directional, and strict equality is only Task 19's case.** Task 19 moved an entire `mod tests` into a sibling file, adding nothing, so its before and after item sets are equal and can be compared as multisets. Tasks 20–23 cannot be: splitting a file into submodules legitimately **adds** `mod X;` declarations, `use` / `pub use` lines, and sometimes a `pub(crate)` / `pub(super)` widening on an item that a sibling module now has to reach. Requiring set equality there would either fail a correct split or, worse, pressure an implementer into avoiding a widening the code needs. The rule for those tasks is:
+
+- **Every item present before is still present**, matched on `(kind, name)`.
+- **Its hash is unchanged**, *or* the only difference is a visibility widening — which must be demonstrated, not asserted: the script also emits a **visibility-stripped hash**, and a widened item matches its original on that hash. A visibility change that alters anything else fails this and is a finding, not a widening.
+- **Every item present after but not before is on an explicit list** in the task's report, one line each, saying what it is (`mod`, `use`, `pub use`) and why the split needed it. An unexplained extra is a finding.
+
+Cost if wrong: a widening whose vis-token rewrite accidentally took a `&mut` with it would match on `(kind, name)` and pass on the stripped hash only if the signature were otherwise identical — which is exactly what the stripped hash checks, so the residual risk is a change *inside* the visible-signature text, which the full hash covers for all non-widened items.
 - **No `Cargo.toml` diff in any split commit** (`git diff -- '**/Cargo.toml'` is empty for Phase F).
 - **Every new gate check must be shown failing on a seeded defect before it is trusted.** A check that has never failed has not been shown to work.
 - **`./scripts/check.sh` is green at every commit.** It gates formatting, `gen-schema.py --check`, `check-layering.sh`, `cargo test --workspace --locked`, and a release build.
@@ -649,7 +657,7 @@ git commit -m "chore: pack_of was called by nothing, and the allow(dead_code) ke
 
 Run: `cargo test -p loongagent --test tui_surface --test web_surface --test vertical_slice`
 Expected: all pass, same count as before (record it first).
-Re-run the body-hash extractor from Task 19 if it already exists, or `grep -rn 'fn isolated_command' crates/`
+Re-run the item-hash extractor from Task 19 if it already exists, or `grep -rn 'fn isolated_command' crates/`
 Expected: exactly one definition.
 
 - [ ] **Step 3: Gate and commit**
@@ -668,7 +676,7 @@ git commit -m "test: one isolated_command instead of three byte-identical copies
 Read the module trees, the visibility budgets and the "three facts that make this mechanical" from the spec's §4.4; they are not repeated here. Each task below is one commit and must produce all four proofs.
 
 **The four proofs, common to Tasks 19–23:**
-1. `python3 scripts/move_evidence.py bodies --rev HEAD --path <old files> --min <N>` and the same with `--worktree` produce identical output.
+1. `python3 scripts/move_evidence.py items --rev HEAD --path <old files> --min <N>` and the same with `--worktree` produce identical output.
 2. The test inventory is unchanged. Capture `cargo test --workspace --locked -- --list`, then normalise every `Running … (target/debug/deps/<name>-<hash>)` line down to `<name>` (the hash changes when the code changes, so a raw comparison would fail for the wrong reason), sort, and require the result identical to the before capture. Keeping the normalised target name on each group is what stops two same-named tests in different targets from cancelling out.
 3. `git diff -- '**/Cargo.toml'` is empty.
 4. `./scripts/check.sh` is green, including the 8 integration tests under `crates/cli/tests/`.
@@ -680,7 +688,9 @@ Read the module trees, the visibility budgets and the "three facts that make thi
 - Modify: `crates/tui-app/src/lib.rs`
 
 **Interfaces:**
-- Produces: `scripts/move_evidence.py bodies (--rev REV | --worktree) --path PATH [--path PATH ...] --min N`, printing one line per function body as `sha256<TAB>name<TAB>path` sorted, and exiting 1 if fewer than `N` bodies were extracted or if the two modes disagree. Tasks 20–23 consume it.
+- Produces: `scripts/move_evidence.py`, with two subcommands that Tasks 20–23 consume:
+  - `items (--rev REV | --worktree) --path PATH [--path PATH ...] --min N`, printing one line per **item** as `sha256<TAB>kind<TAB>name<TAB>vis<TAB>path` sorted, and exiting 1 if fewer than `N` items were extracted or if the two modes disagree. *Corrected during execution (Task 19):* this was `bodies … sha256<TAB>name<TAB>path`, hashing only the text between a function's braces. The implementer showed what that missed — a seeded `width: u16` → `u32` signature change altered one item while every body hash stayed identical — so `items` covers whole items with attributes, visibility and signature, and the visibility column makes a widening visible rather than implied.
+  - `reflow --rev REV --from-path OLD --start A --end B --dedent N --to-path NEW [--edition ED]`, asserting `rustfmt(dedent(old block)) == committed new file` byte-for-byte. This is how each split shows that rustfmt's own reflow is the *whole* of the difference between the moved text and its original, instead of arguing it hunk by hunk.
 
 - [ ] **Step 1: Write the extractor, and make it refuse to pass vacuously**
 
@@ -688,13 +698,13 @@ Brace-matching extraction of every `fn` and `impl` body, hashed. `--min N` is ma
 
 - [ ] **Step 2: Prove the extractor fails when it should**
 
-Run: `python3 scripts/move_evidence.py bodies --worktree --path crates/tui-app/src/lib.rs --min 999999`
+Run: `python3 scripts/move_evidence.py items --worktree --path crates/tui-app/src/lib.rs --min 999999`
 Expected: exit 1 saying it found fewer bodies than `--min`. Then run it with the real count as `--min` and expected exit 0.
 
 - [ ] **Step 3: Capture the before state**
 
 Run: `cargo test --workspace --locked -- --list > /tmp/before-tests-raw`, then normalise it exactly as proof 2 describes and save the result as `/tmp/before-tests`. Sanity-check that it contains 747 `: test` lines as of 2026-10-16.
-Run: `python3 scripts/move_evidence.py bodies --rev HEAD --path crates/tui-app/src/lib.rs --min 1 > /tmp/before-bodies` and note how many bodies it found; that number becomes `--min` for this task.
+Run: `python3 scripts/move_evidence.py items --rev HEAD --path crates/tui-app/src/lib.rs --min 1 > /tmp/before-items` and note how many items it found; that number becomes `--min` for this task.
 
 - [ ] **Step 4: Move the tests**
 

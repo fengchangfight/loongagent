@@ -17,7 +17,11 @@ last** — it is a consequence of the architecture, not a precondition. *(Done
 
 ---
 
-## Part 2 — The decision map (AQ-1 … AQ-12)
+## The decision map (AQ-1 … AQ-12)
+
+The pre-AQ historical framing and the discussion log this document used to carry
+beside the map are kept as history, not guidance, in
+[archive/03-architecture-history.md](archive/03-architecture-history.md).
 
 Ordered by dependency. Each AQ: the question, options, lean, what it constrains.
 
@@ -383,7 +387,7 @@ discovery paths, importer normalization.
 **Constrains:** T-07, T-21 (what seniors can open), enterprise managed-config
 story (Codex `requirements.toml` precedent).
 
-### AQ-10 · Team/async runtime — `Decided` → [ADR-0011](decisions/0011-local-parallelism.md) (local parallelism only; **cloud/cross-user/scheduled orchestration dropped 2026-10-04 — owner: no use case**, see discussion log)
+### AQ-10 · Team/async runtime — `Decided` → [ADR-0011](decisions/0011-local-parallelism.md) (local parallelism only; **cloud/cross-user/scheduled orchestration dropped 2026-10-04 — owner: no use case**, see [the discussion log](archive/03-architecture-history.md))
 
 **Question:** how do parallel agents and worktrees compose locally?
 

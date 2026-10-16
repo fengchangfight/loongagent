@@ -8,11 +8,18 @@ supposed to reorder text, never to change it.  This script extracts every item
 each item's entire canonical token stream (attributes, visibility, signature and
 body together), and prints one line per item as
 
-    sha256<TAB>kind<TAB>name<TAB>vis<TAB>path
+    sha256<TAB>kind<TAB>name<TAB>vis<TAB>path<TAB>vis-stripped-sha256
 
 sorted.  Comparing the sorted multisets of two revisions is the evidence that
 the move changed nothing: every item that existed before still exists, with the
 same code, whether it stayed in the parent file or left for a new one.
+
+The last column is the same canonical token stream with the visibility token
+removed.  It exists so that a *visibility widening* -- the one change a split is
+allowed to make to an existing item -- can be demonstrated instead of asserted:
+when `fn f` becomes `pub(crate) fn f`, the full hash changes but the stripped
+hash does not, and the only difference is the visibility keyword.  A widening
+that also altered a token of the signature or body fails that comparison.
 
     move_evidence.py items (--rev REV | --worktree) --path PATH [--path PATH ...] --min N
 
@@ -544,6 +551,14 @@ def _visibility(segment: str) -> str:
     return "pub"
 
 
+def _visibility_span(segment: str) -> tuple[int, int] | None:
+    """The span of the visibility token inside a head-to-keyword segment."""
+    match = _PUB.search(segment)
+    if not match:
+        return None
+    return (match.start(), match.end())
+
+
 def _find_body(sanitized: str, start: int) -> tuple[str | None, int | None]:
     """Find `{` or `;` at depth zero after an item header."""
     parens = 0
@@ -623,10 +638,10 @@ def _match_delimiter(sanitized: str, opening: int) -> int | None:
     return None
 
 
-def extract_items(text: str) -> list[tuple[str, str, str, str]]:
-    """Return (sha256, kind, name, vis) for every item in `text`."""
+def extract_items(text: str) -> list[tuple[str, str, str, str, str]]:
+    """Return (sha256, kind, name, vis, vis-stripped sha256) for every item."""
     sanitized = sanitize(text)
-    items: list[tuple[str, str, str, str]] = []
+    items: list[tuple[str, str, str, str, str]] = []
     for match in _KEYWORD_RE.finditer(sanitized):
         keyword = match.group(1)
         if not _at_item_position(sanitized, match.start()):
@@ -634,6 +649,7 @@ def extract_items(text: str) -> list[tuple[str, str, str, str]]:
         head = _head_start(sanitized, match.start())
         item_start = _attribute_start(sanitized, head)
         visibility = _visibility(text[head:match.start()])
+        visibility_span = _visibility_span(text[head:match.start()])
         after = _skip_ws(sanitized, match.end())
 
         if keyword == "macro_rules":
@@ -705,10 +721,17 @@ def extract_items(text: str) -> list[tuple[str, str, str, str]]:
                 end = body + 1
             kind = keyword
 
-        digest = hashlib.sha256(
-            _canonical(text[item_start:end]).encode("utf-8")
+        item_text = text[item_start:end]
+        digest = hashlib.sha256(_canonical(item_text).encode("utf-8")).hexdigest()
+        if visibility_span is None:
+            stripped_text = item_text
+        else:
+            start, stop = visibility_span
+            stripped_text = text[item_start:head + start] + text[head + stop:end]
+        stripped = hashlib.sha256(
+            _canonical(stripped_text).encode("utf-8")
         ).hexdigest()
-        items.append((digest, kind, name, visibility))
+        items.append((digest, kind, name, visibility, stripped))
     return items
 
 
@@ -746,8 +769,8 @@ def _collect(root: str, rev: str | None, paths: list[str], minimum: int) -> list
     lines: list[str] = []
     for path in paths:
         text = _read_source(root, rev, path)
-        for digest, kind, name, visibility in extract_items(text):
-            lines.append(f"{digest}\t{kind}\t{name}\t{visibility}\t{path}")
+        for digest, kind, name, visibility, stripped in extract_items(text):
+            lines.append(f"{digest}\t{kind}\t{name}\t{visibility}\t{path}\t{stripped}")
     if len(lines) < minimum:
         source = f"--rev {rev}" if rev is not None else "--worktree"
         raise SystemExit(

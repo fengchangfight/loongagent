@@ -696,7 +696,7 @@ the better end state.
 
 ```bash
 cargo build --workspace            # ~1 min cold, seconds warm
-cargo test  --workspace            # 69 tests
+cargo test  --workspace            # the totals are in README.md, where the counts check verifies them
 ./scripts/check-layering.sh        # asserts crate dependencies point down only
 ./scripts/gen-schema.py            # regenerate from crates/schema/protocol.toml
 ./scripts/gen-schema.py --check    # CI gate: generated files must be current
@@ -740,8 +740,7 @@ LOONGAGENT_API_KEY=sk-… ./target/debug/loongagent web --cwd .
 ```
 
 TLS is rustls with the `ring` backend and the webpki root store; a certificate that
-does not match the host is refused. Response streaming is not implemented, so the
-answer appears when the turn completes.
+does not match the host is refused.
 
 `README.md` is the short version for someone trying it, and `scripts/demo.sh`
 runs a scripted model with no API key at all (`./scripts/demo.sh [web|tui|run]`).
@@ -1010,11 +1009,7 @@ binary the TUI spawns as its server (used by the end-to-end test).
 9. **The TUI has no in-app control-plane address form**: it prints the exact command
    (`loongagent setup --url …`) instead of asking for the address inside the UI. The
    remaining half of the earlier TUI request list.
-10. **The TUI has no debug pane yet**: the context/ledger view (what the model is
-   actually being sent, entry by entry, with its token categories) is requested and
-   not built. `loongagent config show` and `cat .loongagent/session.jsonl` are the
-   current substitutes.
-11. **`cargo clippy` is not a gate yet**: the code has never had a lint sweep, and
+10. **`cargo clippy` is not a gate yet**: the code has never had a lint sweep, and
    adding a gate that fails on the first run is worse than not having it. It is the
    next hygiene step after the formatter sweep.
 11. **Configuration is layered but not yet distributed**: ADR-0008's signed pack
@@ -1022,8 +1017,12 @@ binary the TUI spawns as its server (used by the end-to-end test).
    owns and nothing is tamper-resistant; `keychain:` and `gateway:` credential
    references are recognised and refused (no credential store is wired), and there
    is no `--set key=value` for ad-hoc session overrides.
-12. **Not started**: session
-   export/import, WASM extensions, the web client, compaction, the control plane.
+12. **Not started**: session export/import and WASM extensions — and only those
+   two. Both are decisions rather than code: ADR-0014 is `Status: Accepted` while
+   the CLI has no `export`, `import` or `acp` arm, and the WASM host of
+   ADR-0004/0013 is a future tier with no `wasmtime` dependency in the workspace.
+   The web client, compaction and the control plane are shipped, not unstarted,
+   and are described under "What works today" above.
 
 ## After changing code
 

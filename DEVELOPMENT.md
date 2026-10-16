@@ -52,7 +52,7 @@ table and the gaps that are *not* closed yet are in
 One command runs exactly what CI runs, so "it passed here" means one thing:
 
 ```bash
-./scripts/check.sh          # formatting, schema, layering, tests, release build
+./scripts/check.sh          # formatting, schema, layering, documents, tests, release build
 FAST=1 ./scripts/check.sh   # skip the release build (the slow one)
 ```
 
@@ -61,6 +61,8 @@ FAST=1 ./scripts/check.sh   # skip the release build (the slow one)
 | `cargo fmt --check` | style drift; note that generated Rust is formatted **by the generator**, or the two would fight over the same bytes |
 | `gen-schema.py --check` | generated types drifting from `crates/schema/protocol.toml` |
 | `check-layering.sh` | a crate dependency pointing the wrong way (ADR-0004) |
+| `check-docs.py` | a relative link that no longer resolves, a crate map drifted from `scripts/layering_rules.py`, a document the index does not list, or an impossible ADR/topic citation |
+| `check-docs.py --check counts` | a test count `README.md` claims that the suite does not report |
 | `cargo test --workspace --locked` | behaviour, including end-to-end tests against the real binary |
 | `cargo build --release --locked` | code that compiles in debug and not with optimisations |
 
@@ -988,9 +990,9 @@ binary the TUI spawns as its server (used by the end-to-end test).
 3. **Compaction does not summarize yet** — it clears and drops, but a
    model-made summary of what it drops is the other half of ADR-0006 §4, and a
    session that must shrink a lot currently loses the oldest turns instead.
-4. **The TUI is single-session and minimal** — no mouse, no copy mode, no split
-   panes, no session picker, no syntax highlighting. `--budget` and friends are
-   flags, not profiles.
+4. **The TUI is single-session and minimal** — the mouse wheel scrolls, but
+   nothing else answers to the mouse: no copy mode, no split panes, no session
+   picker, no syntax highlighting. `--budget` and friends are flags, not profiles.
 5. **`grep`/`glob` do not honour `.gitignore` yet** — they use a small explicit
    skip list instead. Web tools (`web_fetch`, `web_search`) are not built, and
    `grep` reads whole files (no streaming) under a 4 MiB per-file cap.
@@ -1012,11 +1014,15 @@ binary the TUI spawns as its server (used by the end-to-end test).
 10. **`cargo clippy` is not a gate yet**: the code has never had a lint sweep, and
    adding a gate that fails on the first run is worse than not having it. It is the
    next hygiene step after the formatter sweep.
-11. **Configuration is layered but not yet distributed**: ADR-0008's signed pack
-   envelope is not implemented, so the org layer is a plain file an administrator
-   owns and nothing is tamper-resistant; `keychain:` and `gateway:` credential
-   references are recognised and refused (no credential store is wired), and there
-   is no `--set key=value` for ad-hoc session overrides.
+11. **A signed pack and an unsigned local org file are two different things**:
+   the signed envelope ships — `loong-pack` holds it and the client verifies a
+   pack against a pinned key *before* it can occupy the org layer (ADR-0016) —
+   while the *local* org layer is a plain `/etc/loongagent/profile.toml` with no
+   signature, owned by a machine administrator, and that is the file that must
+   not be called tamper-resistant. Two smaller gaps remain in the same layer:
+   `keychain:` and `gateway:` credential references are recognised and refused
+   (no credential store is wired), and there is no `--set key=value` for ad-hoc
+   session overrides.
 12. **Not started**: session export/import and WASM extensions — and only those
    two. Both are decisions rather than code: ADR-0014 is `Status: Accepted` while
    the CLI has no `export`, `import` or `acp` arm, and the WASM host of

@@ -59,10 +59,15 @@ Create `scripts/check-docs.py` with one check, `links`: walk `--root` for tracke
 
 - [ ] **Step 2: Prove it catches a real defect**
 
-Temporarily change `docs/runbooks/windows-build.md`'s first relative link to point at a non-existent file.
+Temporarily change the first relative link in `DEVELOPMENT.md` to point at a non-existent file.
 Run: `python3 scripts/check-docs.py --check links`
-Expected: exit 1, one line naming `docs/runbooks/windows-build.md` and the missing target.
-Then restore the file with `git checkout -- docs/runbooks/windows-build.md`.
+Expected: exit 1, one line naming `DEVELOPMENT.md` and the missing target.
+Then restore the file with `git checkout -- DEVELOPMENT.md`.
+
+*Corrected during execution (Ruling 9): the first draft named `docs/runbooks/windows-build.md`, which
+contains zero markdown links — its paths are code spans and table cells — so the seed was impossible
+there. `DEVELOPMENT.md` is the file the spec's §4.3 says this check was designed around, and it is
+the file whose one broken link started this work.*
 
 - [ ] **Step 3: Prove it passes on the real tree**
 
@@ -86,8 +91,13 @@ git commit -m "docs: a gate for the documents, because nothing checked 10 700 li
 ### Task 2: the crate map is generated, not hand-copied
 
 **Files:**
-- Modify: `scripts/layering_rules.py`, `scripts/check-docs.py`, `DEVELOPMENT.md:705-722`
+- Modify: `scripts/layering_rules.py`, `scripts/check-docs.py`, `DEVELOPMENT.md` (the `## Layout` table), `docs/README.md` (one index row)
 - Create: `docs/crate-map.md`
+
+*Corrected during execution (Ruling 12): the file list omitted `docs/README.md`. This task creates a
+new direct child of `docs/`, which Task 3's forthcoming orphan check requires to be indexed, so the
+task that creates a document adds its own index row — the same rule as Task 15's `docs/07-extending.md`
+(Ruling 6). Without it, Task 3's Step 2 and Step 4 predictions would both have been false.*
 
 **Interfaces:**
 - Consumes: `--check` dispatch from Task 1.
@@ -132,14 +142,36 @@ git commit -m "docs: generate the crate map from the layering rules, which are t
 
 - [ ] **Step 1: Add the check**
 
-An `.md` under `docs/` is indexed when either its repository-relative path appears in a markdown link target in `docs/README.md`, or it lives in a direct subdirectory of `docs/` whose name appears in a link target in `docs/README.md`. Fail listing every unindexed document.
+An `.md` under `docs/` is indexed when the index names either its repository-relative path or its
+**first path segment below `docs/`**. "Names" means a markdown link target *or* a table row's first
+cell. Fail listing every unindexed document.
+
+*Corrected during execution (Rulings 13–15).* Three things the first draft got wrong, each of which
+would have made the check either unusable or vacuous:
+
+- **Ruling 13:** the draft said "appears in a markdown link target". Two of the index's directory rows
+  (`decisions/`, `research/`) are **bare table cells, not links**, so that literal reading left all 18
+  ADRs and all 15 research notes failing. Table-row first cells count.
+- **Ruling 14:** the check enumerates the **working tree** (`git ls-files --cached --others
+  --exclude-standard -- docs`) while `links` and `crate-map` read tracked files only. Without that, the
+  untracked probe in Step 2 would pass when it must fail, making the red proof vacuous. The consequence
+  is a behaviour change for people, not programs: a stray unindexed `.md` under `docs/` fails the gate
+  until it is indexed or deleted.
+- **Ruling 15:** "direct subdirectory" means the **first** segment below `docs/`, not the immediate
+  parent. Under the immediate-parent reading a single `superpowers/` row could not cover
+  `superpowers/plans/`, and Step 3's one-row fix would have been impossible.
 
 - [ ] **Step 2: Prove it fails**
 
 Temporarily create `docs/orphan-probe.md`.
 Run: `python3 scripts/check-docs.py --check orphans`
 Expected: exit 1 naming `docs/orphan-probe.md`.
-Delete the probe and re-run. Expected: exit 1 naming `docs/superpowers/specs/2026-10-16-navigability-design.md`, because the `superpowers/` subtree is not yet indexed — which is the real defect this task fixes.
+Delete the probe and re-run. Expected: exit 1 naming **both** files under `docs/superpowers/` — the
+spec and the plan — because the `superpowers/` subtree is not yet indexed, which is the real defect
+this task fixes.
+
+*Corrected during execution:* the first draft predicted only the spec file. Both are unindexed without
+the row, and naming both is the rule working as designed rather than a deviation.
 
 - [ ] **Step 3: Index the subtree**
 
@@ -170,7 +202,17 @@ Derive the highest ADR number from the `docs/decisions/NNNN-*.md` filenames and 
 
 - [ ] **Step 2: Prove it fails, then gate and commit**
 
-Write `ADR-0099` into a scratch line of `docs/README.md`, run `python3 scripts/check-docs.py --check citations`, expected exit 1 naming the file; remove the line, re-run, expected exit 0. Then `./scripts/check.sh` and commit.
+Write `ADR-0099` into a scratch line of `docs/README.md` **as bare prose, not inside backticks**, run
+`python3 scripts/check-docs.py --check citations`, expected exit 1 naming the file; remove the line,
+re-run, expected exit 0. Then `./scripts/check.sh` and commit.
+
+*Corrected during execution (Rulings 16–17).* This plan file itself contains the literal `ADR-0099`
+at this very line, inside backticks, as the seed the step asks for. A check that scanned raw text
+would therefore fail on the plan that specifies it. The check masks fenced blocks and inline code
+spans exactly as the `links` check does — a document may *show* something without owning it — so the
+seed must be bare prose or the red run is vacuous. Proving both halves is the point: bare prose fails,
+and this line's backticked occurrence is tolerated. Exempting `docs/superpowers/` was considered and
+rejected, because it would put the plan and spec outside a rule every other document obeys.
 
 ```bash
 git add scripts/check-docs.py
@@ -234,8 +276,15 @@ Rewrite §10 (`:223-236`) from "**Design: complete.** … **Implementation: not 
 
 - [ ] **Step 4: Verify by reading**
 
-Run: `grep -n 'not started\|0014\|T-21\|14 cited\|fourteen' docs/04-system-overview.md`
+Assert the *stale phrasings* are gone, not that the bare number is:
+
+Run: `grep -n 'not started\|T-21\|14 cited\|fourteen\|ADR-0001…ADR-0014\|ADRs 0001–0014' docs/04-system-overview.md`
 Expected: no output.
+Run: `grep -c 'ADR-0014\|0014' docs/04-system-overview.md`
+Expected: several — `0014` is a real ADR with a row in §4's table and six legitimate prose references. A fix that removed them all would be the over-deletion this step exists to catch.
+
+*Corrected during execution:* the first draft of this step ran a single grep for `not started\|0014\|T-21\|14 cited\|fourteen` and expected no output. It could never produce none — `:129`, `:143`, `:156`, `:168`, `:180` and `:197` all cite ADR-0014 correctly — so the step would have failed a correct fix, and an implementer trying to satisfy it would have deleted real content.
+
 Run: `python3 scripts/check-docs.py` and `./scripts/check.sh`. Expected: exit 0.
 
 - [ ] **Step 5: Commit**
@@ -732,3 +781,33 @@ git commit -m "refactor(cli): fourteen subcommand families, each in its own file
 - **One spec line the plan interprets rather than transcribes:** Task 14, stated in the task so it can be rejected during review.
 - **Task ordering:** `cli/tests/common/mod.rs` in Task 18 and the four splits in Phase F are independent of Phase B; Phase A must come first because it protects the rest.
 - **The split order is deliberate:** cheapest and highest-value first (`tui-app`'s tests), hardest and largest last (the CLI), so the evidence machinery is exercised before it carries the biggest move.
+
+---
+
+## Execution rulings
+
+Recorded here so the plan and the execution ledger tell the same story. Each was made during
+execution, against the spec as the binding authority, and each names what it costs if it is wrong.
+The inline corrections above cite the relevant one.
+
+| # | Task | Ruling | Cost if wrong |
+|---|---|---|---|
+| 9 | 1 | Seed the broken link in `DEVELOPMENT.md`, not `docs/runbooks/windows-build.md`, which has no links | A reader of the uncorrected draft retries an impossible seed |
+| 10 | 1 (fix) | Two Minors joined the fix round: closing-fence and unclosed-fence handling, and the traceback past `except OSError`. Both are the same silent-masking seam as the Important finding | The round was two small edits larger than the review required |
+| 11 | 1 | Ledger correction: the missing-`--test-counts` case exits 1, not 2. (The "exit 2" was the ledger's own wording, not the plan's) | A reader trusts a wrong exit code, which no caller branches on |
+| 12 | 2 | The task that creates a document adds its index row, following Ruling 6 | An unindexed generated map, which Task 3's own check would report |
+| 13 | 3 | The index "names" a document in a link target **or** a table row's first cell | 33 documents would fail on a literal reading |
+| 14 | 3 | `orphans` reads the working tree; `links` and `crate-map` read tracked files | A stray uncommitted draft in `docs/` fails the gate until indexed or deleted |
+| 15 | 3 | "Direct subdirectory" means the first segment below `docs/` | Documents two levels deep need their own row instead of their top segment's |
+| 16 | 4 | The citation check masks code spans and fences rather than exempting `docs/superpowers/` | An impossible citation written inside backticks goes unnoticed — the tolerance the `links` check already extends |
+| 17 | 4 | The seed is bare prose, and the same task proves the backticked plan occurrence is tolerated | A vacuous red proof, or a check that silently ignores real citations |
+| 18 | 4 (fix) | The empty-walk guard joined the fix round, because the Important finding opened that exact seam | Two lines more than the review asked for; a markdown-free `--root` now errors instead of reporting a vacuous OK |
+
+One correction to the ledger itself, recorded because the rulings list is what the human reads: the
+first version of Ruling 11 attributed an "exit 2" to the plan's Task 5 text. `grep -n 'exit 2'` over
+this plan returns nothing — the phrase was the ledger's own Ruling 2 wording, misattributed. No plan
+correction was owed for it.
+
+**Deferred Minors.** Every task's Minor findings are listed in the execution ledger with a one-line
+description, for the final whole-branch review to triage. They are not reproduced here: the ledger is
+their single home, and duplicating them is the drift this plan exists to remove.

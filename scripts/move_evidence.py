@@ -28,13 +28,31 @@ byte difference a split may introduce is rustfmt's own reflow of the moved
 block:
 
     move_evidence.py reflow --rev REV --from-path OLD --start A --end B \
-        --dedent N --to-path NEW [--to-rev REV] [--edition ED]
+        --dedent N --to-path NEW [--to-rev REV] [--edition ED] \
+        [--header-file FILE] [--allow-widening NAME ...]
 
 It takes lines A-B of OLD at REV, removes the N columns of indentation they had
 where they lived, formats the result with rustfmt, and requires the output to be
 byte-for-byte what NEW contains -- NEW in the worktree, or at `--to-rev REV` when
 that is given.  If it is, then every difference between the original block and the
 new file is rustfmt's output, which is the whole of what this standard accepts.
+
+A split into submodules needs exactly two bounded allowances, and they are
+explicit flags rather than silent tolerances:
+
+* `--header-file FILE` -- lines prepended to the rustfmt'd dedent before the
+  comparison.  This is where a new submodule's `use super::*;` / `use crate::...`
+  / `mod` header goes: a submodule does not inherit the parent's `use`
+  declarations, and no contiguous range of the old file contains the header, so
+  without this flag the assertion could never pass for a real split.
+* `--allow-widening NAME` (repeatable) -- permits the line defining NAME to
+  differ by its visibility keyword only, and only in the widening direction.
+  The check is the one `items` already makes with its sixth column: the
+  visibility token is stripped from both lines and their canonical token streams
+  must be equal.  A narrowing, a swap between two restricted keywords, a retyped
+  parameter or any other edit on that line still fails.
+
+With neither flag the assertion is exactly what it was before them.
 
 Hashing whole items rather than bodies is the point.  A moved signature (a
 parameter renamed or retyped, a `&mut` added), a dropped `pub`, a lost
@@ -629,6 +647,79 @@ def _visibility_span(segment: str) -> tuple[int, int] | None:
     return (match.start(), match.end())
 
 
+def _line_visibility(line: str) -> str:
+    """The visibility keyword on an item's definition line, or `private`."""
+    match = _PUB.search(line)
+    if not match:
+        return "private"
+    if match.group(1):
+        return "pub(" + " ".join(match.group(2).split()) + ")"
+    return "pub"
+
+
+def _visibility_rank(visibility: str) -> int:
+    """Order visibility so that only a *widening* is accepted.
+
+    `pub(super)`, `pub(crate)` and `pub(in ...)` all reach the whole crate when
+    the item's parent is the crate root, so they share a rank; `private` is
+    below them and `pub` above.  Moving between two restricted keywords is a
+    different keyword, not a widening, and fails.
+    """
+    if visibility == "private":
+        return 0
+    if visibility == "pub":
+        return 2
+    return 1
+
+
+def _without_visibility(line: str) -> str:
+    """The line with its visibility token cut out, byte-for-byte otherwise."""
+    match = _PUB.search(line)
+    if not match:
+        return line
+    return line[: match.start()] + line[match.end():]
+
+
+def _defines_item(line: str, name: str) -> bool:
+    """Whether `line` is the definition line of the item called `name`."""
+    return (
+        re.search(
+            r"\b(?:fn|struct|enum|union|trait|type|const|static|mod)\s+"
+            + re.escape(name)
+            + r"\b",
+            line,
+        )
+        is not None
+    )
+
+
+def _allowed_widening(old_line: str, new_line: str, names: list[str]) -> str | None:
+    """Return the item name when the change is only a visibility widening.
+
+    The demonstration is the one `items` makes with its sixth column: with the
+    visibility token removed from both lines, their canonical token streams must
+    be equal, so a retyped parameter, a changed keyword or any other edit fails.
+    The change must also be a widening -- a narrowing or a swap between two
+    restricted keywords returns None -- and the line must be the definition line
+    of one of the names the caller allowed.
+    """
+    old_visibility = _line_visibility(old_line)
+    new_visibility = _line_visibility(new_line)
+    if old_visibility == new_visibility:
+        return None
+    if _visibility_rank(new_visibility) <= _visibility_rank(old_visibility):
+        return None
+    if _canonical(_without_visibility(old_line)) != _canonical(
+        _without_visibility(new_line)
+    ):
+        return None
+    stripped = _without_visibility(old_line).strip()
+    for name in names:
+        if _defines_item(stripped, name):
+            return name
+    return None
+
+
 def _find_body(sanitized: str, start: int) -> tuple[str | None, int | None]:
     """Find `{` or `;` at depth zero after an item header."""
     parens = 0
@@ -883,6 +974,8 @@ def _reflow(
     to_path: str,
     to_rev: str | None,
     edition: str,
+    header_path: str | None = None,
+    allowed_widenings: list[str] | None = None,
 ) -> int:
     """Assert `rustfmt(dedent(old block))` equals the new file.
 
@@ -891,7 +984,23 @@ def _reflow(
     what a split is allowed to change: if the new file is exactly what rustfmt
     makes of the old block with its old indentation removed, then every
     difference between the two is rustfmt's own reflow.
+
+    A split into submodules needs two bounded allowances, and they are explicit
+    flags rather than silent tolerances:
+
+    * `--header-file FILE` prepends FILE's lines to rustfmt's output before the
+      comparison.  That is where a new submodule's `use super::*;` /
+      `use crate::...` / `mod` header goes -- lines no contiguous range of the
+      old file contains.
+    * `--allow-widening NAME` permits the line defining NAME to differ by its
+      visibility keyword only, and only in the widening direction.  The check is
+      the one `items` already makes: the visibility token is stripped from both
+      lines and their canonical token streams must be equal, so a retyped
+      parameter, a different keyword or any other edit on that line fails.
+
+    With neither flag the assertion is exactly what it was before them.
     """
+    allowed_widenings = list(allowed_widenings or [])
     old_lines = _read_source(root, rev, from_path).split("\n")
     if not 1 <= start <= end <= len(old_lines):
         sys.stderr.write(
@@ -923,17 +1032,59 @@ def _reflow(
 
     where = to_path if to_rev is None else f"{to_rev}:{to_path}"
     actual = _read_source(root, to_rev, to_path)
-    if formatted == actual:
-        print(f"reflow: rustfmt(dedent({from_path}:{start}-{end})) == {where}")
+
+    header = ""
+    if header_path:
+        full_header = (
+            header_path
+            if os.path.isabs(header_path)
+            else os.path.join(root, header_path)
+        )
+        try:
+            with open(full_header, "r", encoding="utf-8") as header_handle:
+                header = header_handle.read()
+        except OSError as error:
+            sys.stderr.write(
+                f"move_evidence: cannot read header file {header_path}: {error}\n"
+            )
+            return 1
+    expected = header + formatted
+
+    label = f"rustfmt(dedent({from_path}:{start}-{end}))"
+    if header_path:
+        label += f" + header {header_path}"
+
+    applied: list[str] = []
+    matched = expected == actual
+    expected_lines = expected.split("\n")
+    actual_lines = actual.split("\n")
+    if not matched and len(expected_lines) == len(actual_lines):
+        pending = list(allowed_widenings)
+        matched = True
+        for old_line, new_line in zip(expected_lines, actual_lines):
+            if old_line == new_line:
+                continue
+            name = _allowed_widening(old_line, new_line, pending)
+            if name is None:
+                matched = False
+                break
+            pending.remove(name)
+            applied.append(name)
+    if matched:
+        message = f"reflow: rustfmt(dedent({from_path}:{start}-{end})) == {where}"
+        if header_path:
+            message += f" (header: {header_path})"
+        if applied:
+            message += f" (allowed widening: {', '.join(sorted(set(applied)))})"
+        print(message)
         return 0
     sys.stderr.write(
-        f"move_evidence: reflow check failed: rustfmt(dedent({from_path}:"
-        f"{start}-{end})) is not {where}\n"
+        f"move_evidence: reflow check failed: {label} is not {where}\n"
     )
     diff = difflib.unified_diff(
-        formatted.split("\n"),
-        actual.split("\n"),
-        fromfile=f"rustfmt(dedent({from_path}:{start}-{end}))",
+        expected_lines,
+        actual_lines,
+        fromfile=label,
         tofile=where,
         lineterm="",
     )
@@ -988,6 +1139,20 @@ def main(argv: list[str] | None = None) -> int:
         help="read the new file from this revision instead of the worktree",
     )
     reflow.add_argument("--edition", metavar="ED", default="2021")
+    reflow.add_argument(
+        "--header-file",
+        metavar="PATH",
+        help="prepend this file's lines to rustfmt's output before comparing: "
+        "a new submodule's use/mod header, which no old range contains",
+    )
+    reflow.add_argument(
+        "--allow-widening",
+        metavar="NAME",
+        action="append",
+        default=[],
+        help="permit the line defining NAME to differ by a visibility widening "
+        "only (repeatable); any other edit on that line still fails",
+    )
 
     args = parser.parse_args(argv)
 
@@ -1033,6 +1198,8 @@ def main(argv: list[str] | None = None) -> int:
             args.to_path,
             args.to_rev,
             args.edition,
+            args.header_file,
+            args.allow_widening,
         )
     return 2
 

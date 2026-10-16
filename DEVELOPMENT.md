@@ -79,7 +79,7 @@ Two binaries, one shared crate, and a deliberate division of labour:
 | `loongagent-control` | a **profile administrator** | `keygen`, `serve`, `publish`, `show`, `health` — distributes packs, and nothing else. `sign` exists for an air-gapped administrator |
 
 Bringing one up (layout, key, tokens, systemd, troubleshooting):
-**[docs/runbooks/control-plane.md](runbooks/control-plane.md)**, and
+**[docs/runbooks/control-plane.md](docs/runbooks/control-plane.md)**, and
 `scripts/control-plane-init.sh` writes the layout and prints the next commands.
 
 The two programs keep their files in two roots, and a **draft pack is neither**: it

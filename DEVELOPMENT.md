@@ -752,6 +752,9 @@ binary the TUI spawns as its server (used by the end-to-end test).
 
 ## What works today
 
+`README.md` §状态 is the verdict on what works and what does not; this section is the
+detail behind it, so a disagreement is a defect in this file rather than a second opinion.
+
 - **Schema-first protocol**: one IDL generates the Rust types, the TypeScript
   types, sample payloads, and a round-trip conformance test per struct.
 - **The event log is the truth**: append-only, sequence-checked, with the
@@ -969,6 +972,10 @@ binary the TUI spawns as its server (used by the end-to-end test).
   to the Chat Completions wire protocol (messages, tools, tool-call arguments as
   JSON strings, usage) and back. Six tests drive it against a local HTTP server,
   including the error paths.
+- **The control plane** (ADR-0012, ADR-0016): two binaries — the client that runs a
+  verified pack, and `loongagent-control`, which `keygen`s, `serve`s and `publish`es
+  them. The division of labour, the layout, the properties that are enforced rather
+  than documented, and what is deliberately not built are under **Gates** above.
 - **The vertical slice**, covered by three end-to-end tests against the real
   binary: a tool writes inside the workspace and the streamed events equal the
   log; an out-of-bounds write asks first and a denial is recorded without
@@ -977,6 +984,9 @@ binary the TUI spawns as its server (used by the end-to-end test).
   → adapter → HTTP → tool → PDP → back — and the log holds all eight events.
 
 ## What is not done yet (honest list)
+
+`README.md` §状态 is the verdict on what works and what does not; this section is the
+detail behind it, so a disagreement is a defect in this file rather than a second opinion.
 
 1. **Cost is not priced**: `usd_micros: 0` until pricing lands, and there is no
    tokenizer (the ledger estimates tokens at ~4 chars). Tool-call deltas are
@@ -1023,12 +1033,11 @@ binary the TUI spawns as its server (used by the end-to-end test).
    `keychain:` and `gateway:` credential references are recognised and refused
    (no credential store is wired), and there is no `--set key=value` for ad-hoc
    session overrides.
-12. **Not started**: session export/import and WASM extensions — and only those
-   two. Both are decisions rather than code: ADR-0014 is `Status: Accepted` while
-   the CLI has no `export`, `import` or `acp` arm, and the WASM host of
-   ADR-0004/0013 is a future tier with no `wasmtime` dependency in the workspace.
-   The web client, compaction and the control plane are shipped, not unstarted,
-   and are described under "What works today" above.
+12. **Session export/import and WASM extensions** are decided rather than built:
+   ADR-0014 is `Status: Accepted` while the CLI has no `export`, `import` or `acp`
+   arm, and the WASM host of ADR-0004/0013 is a future tier with no `wasmtime`
+   dependency in the workspace. Those two are the whole of this item; the rest of
+   what is not built is in `README.md` §状态.
 
 ## After changing code
 

@@ -973,9 +973,9 @@ detail behind it, so a disagreement is a defect in this file rather than a secon
   JSON strings, usage) and back. Six tests drive it against a local HTTP server,
   including the error paths.
 - **The control plane** (ADR-0012, ADR-0016): two binaries — the client that runs a
-  verified pack, and `loongagent-control`, which `keygen`s, `serve`s and `publish`es
-  them. The division of labour, the layout, the properties that are enforced rather
-  than documented, and what is deliberately not built are under **Gates** above.
+  verified pack, and `loongagent-control`, which runs `keygen`, `serve` and `publish`
+  and distributes packs. The layout, the properties that are enforced rather than
+  documented, and what is deliberately not built are under **Gates** above.
 - **The vertical slice**, covered by three end-to-end tests against the real
   binary: a tool writes inside the workspace and the streamed events equal the
   log; an out-of-bounds write asks first and a denial is recorded without
@@ -1036,8 +1036,9 @@ detail behind it, so a disagreement is a defect in this file rather than a secon
 12. **Session export/import and WASM extensions** are decided rather than built:
    ADR-0014 is `Status: Accepted` while the CLI has no `export`, `import` or `acp`
    arm, and the WASM host of ADR-0004/0013 is a future tier with no `wasmtime`
-   dependency in the workspace. Those two are the whole of this item; the rest of
-   what is not built is in `README.md` §状态.
+   dependency in the workspace. Those two are the whole of this item; the verdict on
+   everything else is `README.md` §状态, and the detail behind it is the rest of this
+   section's items.
 
 ## After changing code
 

@@ -1,7 +1,7 @@
 # 04 — System overview (the architecture as decided)
 
-- **Status:** Agreed (derived — reflects ADR-0001…ADR-0014)
-- **Last updated:** 2026-10-04
+- **Status:** Agreed (derived — reflects ADR-0001…ADR-0018)
+- **Last updated:** 2026-10-16
 
 This is the **one-read picture** of loongagent as it stands. It is *derived*
 from the decision record: [03-architecture.md](03-architecture.md) holds the
@@ -128,6 +128,8 @@ concept and one loader — and configuration packs (ADR-0004).
 | T-14 | Team collaboration = git-shared knowledge, **not** shared live sessions | [0010](decisions/0010-team-collaboration-knowledge-not-sessions.md) |
 | — | Session export/import: file-based continuity, never sync | [0014](decisions/0014-session-export-import.md) |
 | — | Two tree levels: a session contains an event tree; sessions have lineage | [0015](decisions/0015-two-tree-levels.md) |
+| T-07 | Pack distribution: one signed envelope (Ed25519), key pinned out of band; a verified pack is the locked `control` layer | [0016](decisions/0016-pack-distribution.md) |
+| — | Plugins: install content by name, seat what a plugin asks for, **execute nothing** — hooks stay a per-repository gate | [0018](decisions/0018-plugin-install-and-bootstrap.md) |
 
 ---
 
@@ -209,11 +211,11 @@ and avoidable by self-hosting (T-03).
 |---|---|
 | [00-vision.md](00-vision.md) | Mission, ambition, principles |
 | [01-landscape-synthesis.md](01-landscape-synthesis.md) | Cross-tool synthesis and the T1–T10 design tensions |
-| [02-topics.md](02-topics.md) | Idea backlog (T-01…T-21) and the owner's coverage map |
+| [02-topics.md](02-topics.md) | Idea backlog (T-01…T-25) and the owner's coverage map |
 | [03-architecture.md](03-architecture.md) | The question-by-question decision record (AQ-1…AQ-12) |
 | **04-system-overview.md** | **This document — the current picture** |
-| [`decisions/`](decisions/) | ADRs 0001–0014: the authoritative answers |
-| [`research/`](research/) | 14 cited deep dives on existing tools and categories |
+| [`decisions/`](decisions/) | ADRs 0001–0018: the authoritative answers |
+| [`research/`](research/) | 15 cited deep dives on existing tools and categories |
 
 **Rule of the docs:** they describe the *current* shared understanding; history
 lives in git. Nothing is "Agreed" until the owner signs off in conversation.
@@ -223,14 +225,20 @@ lives in git. Nothing is "Agreed" until the owner signs off in conversation.
 ## 10. Status and next step
 
 **Design: complete.** All twelve architecture questions are decided and recorded
-in fourteen ADRs; the topics backlog remains open as product-level work.
+in eighteen ADRs; the topics backlog remains open as product-level work.
 
-**Implementation: not started.** The natural first slice, in build order
-(ADR-0009), is:
+**Implementation: built.** The build order this document used to state as a plan
+is now history — all three steps are behind us:
 
-1. **Scaffolding** — cargo workspace; the protocol schema (source of truth for
-   both Rust and the generated TypeScript types, ADR-0002/0013).
+1. **Scaffolding** — the cargo workspace and the one protocol schema that
+   generates both the Rust and the TypeScript types (ADR-0002, ADR-0013).
 2. **Kernel skeleton** — the minimal model+tool loop, the JSONL event log with
-   its derived index, and the context ledger (ADR-0003/0004/0006).
-3. **The first vertical slice** — TUI + local server + one provider adapter +
-   the sandbox and PDP boundary (ADR-0007), end to end.
+   its derived index, and the context ledger (ADR-0003, ADR-0004, ADR-0006).
+3. **The first vertical slice** — TUI to local server to a provider adapter,
+   ending at the sandbox and PDP boundary (ADR-0007, ADR-0009).
+
+What stands on it: the six built-in tools, hooks (shell / HTTP / MCP), MCP over
+stdio, skills, commands and plugins, four surfaces (`tui`, `web`, `repl`,
+`run`), streaming answers, and optional layered memory — on Linux and Windows,
+with the same command surface. What is still missing is named in the README's
+status section, and the topics backlog is where the product-level work remains.

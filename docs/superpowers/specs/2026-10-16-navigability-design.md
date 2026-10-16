@@ -261,13 +261,16 @@ pieces of evidence, because "it compiles and the tests pass" does not prove noth
    named them **without their type**, so two same-named methods in different `impl` blocks were
    indistinguishable in a `(kind, name)` comparison; and it hashed an `impl` **container** over its
    whole body, so distributing one `impl Kernel` across files re-formed it into several items whose
-   hashes all differ — the units Tasks 21–23 move are 183 methods in `crates/kernel/src/turn.rs`, 79 in
-   `crates/cli/src/main.rs` and 68 in `crates/config/src/lib.rs`, and a container is now a third thing,
-   hashed over its attributes and header only, so that re-creating `impl Kernel` in each new file yields
+   hashes all differ — the splits move methods as well as free functions, and `crates/kernel/src/turn.rs`
+   carries 86 methods across 16 `impl` blocks (its `impl Kernel` alone holds 68), `crates/cli/src/main.rs`
+   19 across 9, `crates/config/src/lib.rs` 18 across 10 — and a container is now a third thing, hashed
+   over its attributes and header only, so that re-creating `impl Kernel` in each new file yields
    identical containers rather than a page of "changed" entries. A container is the only item allowed
    to become several; every copy must hash identically, and `compare` names each.
-   *An earlier revision of this paragraph claimed the tool "could not see a single" method. That was
-   false, and the controller's check for it was broken — `grep -E '\tname\t'` does not match a tab. The
+   *An earlier revision of this paragraph claimed the tool "could not see a single" method, and then
+   gave counts of 183/79/68 for the same three files. Both were wrong: the first came from
+   `grep -E '\tname\t'`, which does not match a tab, and the second from `grep -cE '^    (pub…)?fn '`,
+   which counts free functions inside inline `mod tests` as methods. The tool measures 86/19/18. The
    implementer recorded the measurement instead of the claim.*
    **Strict equality is Task 19's case only.** Tasks 20–23 split a file into submodules, which
    legitimately adds `mod` / `use` / `pub use` lines and may widen an item to `pub(crate)` or

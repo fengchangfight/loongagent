@@ -61,12 +61,17 @@ explicit flags rather than silent tolerances:
   / `mod` header goes: a submodule does not inherit the parent's `use`
   declarations, and no contiguous range of the old file contains the header, so
   without this flag the assertion could never pass for a real split.
-* `--allow-widening NAME` (repeatable) -- permits the line defining NAME to
+* `--allow-widening NAME` (repeatable) -- permits the definition of NAME to
   differ by its visibility keyword only, and only in the widening direction.
-  The check is the one `items` already makes with its sixth column: the
-  visibility token is stripped from both lines and their canonical token streams
-  must be equal.  A narrowing, a swap between two restricted keywords, a retyped
-  parameter or any other edit on that line still fails.
+  The definition -- its attributes and signature -- is compared as a *span*, not
+  as a line, because adding the keyword can push a signature past rustfmt's
+  width and make it re-wrap; the two spans may therefore differ in length.  The
+  check is the one `items` already makes with its sixth column: the visibility
+  token is stripped from both spans and their canonical token streams must be
+  equal.  Everything outside the named definitions must still be byte-for-byte
+  the header plus rustfmt's dedent, so a narrowing, a swap between two
+  restricted keywords, a retyped parameter, an added `&mut`, or any edit
+  anywhere else still fails.
 
 With neither flag the assertion is exactly what it was before them.
 
@@ -717,77 +722,12 @@ def _visibility_span(segment: str) -> tuple[int, int] | None:
     return (match.start(), match.end())
 
 
-def _line_visibility(line: str) -> str:
-    """The visibility keyword on an item's definition line, or `private`."""
-    match = _PUB.search(line)
-    if not match:
-        return "private"
-    if match.group(1):
-        return "pub(" + " ".join(match.group(2).split()) + ")"
-    return "pub"
-
-
-def _visibility_rank(visibility: str) -> int:
-    """Order visibility so that only a *widening* is accepted.
-
-    `pub(super)`, `pub(crate)` and `pub(in ...)` all reach the whole crate when
-    the item's parent is the crate root, so they share a rank; `private` is
-    below them and `pub` above.  Moving between two restricted keywords is a
-    different keyword, not a widening, and fails.
-    """
-    if visibility == "private":
-        return 0
-    if visibility == "pub":
-        return 2
-    return 1
-
-
 def _without_visibility(line: str) -> str:
     """The line with its visibility token cut out, byte-for-byte otherwise."""
     match = _PUB.search(line)
     if not match:
         return line
     return line[: match.start()] + line[match.end():]
-
-
-def _defines_item(line: str, name: str) -> bool:
-    """Whether `line` is the definition line of the item called `name`."""
-    return (
-        re.search(
-            r"\b(?:fn|struct|enum|union|trait|type|const|static|mod)\s+"
-            + re.escape(name)
-            + r"\b",
-            line,
-        )
-        is not None
-    )
-
-
-def _allowed_widening(old_line: str, new_line: str, names: list[str]) -> str | None:
-    """Return the item name when the change is only a visibility widening.
-
-    The demonstration is the one `items` makes with its sixth column: with the
-    visibility token removed from both lines, their canonical token streams must
-    be equal, so a retyped parameter, a changed keyword or any other edit fails.
-    The change must also be a widening -- a narrowing or a swap between two
-    restricted keywords returns None -- and the line must be the definition line
-    of one of the names the caller allowed.
-    """
-    old_visibility = _line_visibility(old_line)
-    new_visibility = _line_visibility(new_line)
-    if old_visibility == new_visibility:
-        return None
-    if _visibility_rank(new_visibility) <= _visibility_rank(old_visibility):
-        return None
-    if _canonical(_without_visibility(old_line)) != _canonical(
-        _without_visibility(new_line)
-    ):
-        return None
-    stripped = _without_visibility(old_line).strip()
-    for name in names:
-        if _defines_item(stripped, name):
-            return name
-    return None
 
 
 def _header_line_kind(line: str) -> str:
@@ -1017,12 +957,18 @@ def _fn_names(
     return resolved
 
 
-def extract_items(text: str) -> list[tuple[str, str, str, str, str]]:
-    """Return (sha256, kind, name, vis, vis-stripped sha256) for every item."""
+def _item_records(text: str) -> list[dict]:
+    """Every item, with the positions a definition-span comparison needs.
+
+    `extract_items` reduces these to the five columns it prints.  `reflow` also
+    needs `item_start` and `signature_end`, because a visibility keyword can
+    push a signature past rustfmt's width and make it re-wrap: the definition
+    is then a span of a different length, not a changed line.
+    """
     sanitized = sanitize(text)
     impl_blocks = _impl_blocks(sanitized, text)
     fn_names = _fn_names(sanitized, impl_blocks)
-    items: list[tuple[str, str, str, str, str]] = []
+    records: list[dict] = []
     for match in _KEYWORD_RE.finditer(sanitized):
         keyword = match.group(1)
         if not _at_item_position(sanitized, match.start()):
@@ -1032,6 +978,7 @@ def extract_items(text: str) -> list[tuple[str, str, str, str, str]]:
         visibility = _visibility(text[head:match.start()])
         visibility_span = _visibility_span(text[head:match.start()])
         after = _skip_ws(sanitized, match.end())
+        found, body = None, None
 
         if keyword == "macro_rules":
             if after >= len(sanitized) or sanitized[after] != "!":
@@ -1109,17 +1056,57 @@ def extract_items(text: str) -> list[tuple[str, str, str, str, str]]:
                 if resolved is not None:
                     kind, name = resolved
 
-        item_text = text[item_start:end]
+        # The definition is the item's attributes, visibility and signature:
+        # for a function everything through its opening brace (or its `;` when
+        # it has none), and for every other item the item's own text.
+        signature_end = end
+        if kind in (_METHOD_KIND, "fn") and found == "brace" and body is not None:
+            signature_end = body + 1
+
+        records.append(
+            {
+                "kind": kind,
+                "name": name,
+                "visibility": visibility,
+                "visibility_span": visibility_span,
+                "head": head,
+                "item_start": item_start,
+                "item_end": end,
+                "signature_end": signature_end,
+            }
+        )
+    return records
+
+
+def extract_items(text: str) -> list[tuple[str, str, str, str, str]]:
+    """Return (sha256, kind, name, vis, vis-stripped sha256) for every item."""
+    items: list[tuple[str, str, str, str, str]] = []
+    for record in _item_records(text):
+        item_start = record["item_start"]
+        item_end = record["item_end"]
+        item_text = text[item_start:item_end]
         digest = hashlib.sha256(_canonical(item_text).encode("utf-8")).hexdigest()
+        visibility_span = record["visibility_span"]
         if visibility_span is None:
             stripped_text = item_text
         else:
             start, stop = visibility_span
-            stripped_text = text[item_start:head + start] + text[head + stop:end]
+            head = record["head"]
+            stripped_text = (
+                text[item_start:head + start] + text[head + stop:item_end]
+            )
         stripped = hashlib.sha256(
             _canonical(stripped_text).encode("utf-8")
         ).hexdigest()
-        items.append((digest, kind, name, visibility, stripped))
+        items.append(
+            (
+                digest,
+                record["kind"],
+                record["name"],
+                record["visibility"],
+                stripped,
+            )
+        )
     return items
 
 
@@ -1377,6 +1364,91 @@ def _dedent(lines: list[str], amount: int) -> list[str]:
     return out
 
 
+def _definition_without_visibility(text: str, record: dict) -> str:
+    """An item's definition -- attributes and signature -- without its keyword.
+
+    This is `items`' sixth column applied to the definition span instead of the
+    whole item: only the item's own leading visibility token is cut out, so a
+    field-level `pub(super)` inside a struct body is still part of the text and
+    still fails the comparison.
+    """
+    start = record["item_start"]
+    end = record["signature_end"]
+    span = record["visibility_span"]
+    if span is None:
+        return text[start:end]
+    vis_start, vis_stop = span
+    head = record["head"]
+    return text[start:head + vis_start] + text[head + vis_stop:end]
+
+
+def _span_widening(expected: str, old: dict, actual: str, new: dict) -> bool:
+    """Whether one item's definition is the other's, widened by its keyword.
+
+    The direction is the one `compare` enforces: `private` becomes `pub(crate)`
+    or `pub(super)`, never `pub`, never a narrowing and never a swap between two
+    restricted keywords.  The demonstration is `items`' sixth column: strip the
+    visibility token from both definitions and their canonical token streams
+    must be equal, so a retyped parameter, an added `&mut` or any other edit
+    fails.  The definitions may differ in length, because adding the keyword can
+    push a signature past rustfmt's width and make it re-wrap.
+    """
+    if old["kind"] != new["kind"] or old["name"] != new["name"]:
+        return False
+    if old["visibility"] != "private":
+        return False
+    if new["visibility"] not in _ALLOWED_WIDENINGS:
+        return False
+    return _canonical(
+        _definition_without_visibility(expected, old)
+    ) == _canonical(_definition_without_visibility(actual, new))
+
+
+def _undo_widenings(
+    expected: str, actual: str, names: list[str]
+) -> tuple[str, list[str]]:
+    """`actual` with every named widening replaced by its expected definition.
+
+    The caller requires the result to equal `expected` byte for byte, so every
+    byte outside the named definitions is still compared exactly and the only
+    thing a widening can change is the definition it names.  A name that cannot
+    be paired with a permitted widening contributes nothing, so an allowance may
+    be declared and unused; the remaining difference is then the finding.
+    """
+    expected_records = _item_records(expected)
+    actual_records = _item_records(actual)
+    used: set[tuple[int, int]] = set()
+    edits: list[tuple[int, int, str]] = []
+    applied: list[str] = []
+    for name in names:
+        for old_index, old in enumerate(expected_records):
+            if old["name"] != name:
+                continue
+            for new_index, new in enumerate(actual_records):
+                if new["name"] != name:
+                    continue
+                if (old_index, new_index) in used:
+                    continue
+                if not _span_widening(expected, old, actual, new):
+                    continue
+                used.add((old_index, new_index))
+                edits.append(
+                    (
+                        new["item_start"],
+                        new["signature_end"],
+                        expected[old["item_start"]:old["signature_end"]],
+                    )
+                )
+                applied.append(name)
+                break
+    if not edits:
+        return actual, applied
+    undone = actual
+    for start, end, replacement in sorted(edits, reverse=True):
+        undone = undone[:start] + replacement + undone[end:]
+    return undone, applied
+
+
 def _reflow(
     root: str,
     rev: str,
@@ -1479,20 +1551,10 @@ def _reflow(
 
     applied: list[str] = []
     matched = expected == actual
-    expected_lines = expected.split("\n")
-    actual_lines = actual.split("\n")
-    if not matched and len(expected_lines) == len(actual_lines):
-        pending = list(allowed_widenings)
-        matched = True
-        for old_line, new_line in zip(expected_lines, actual_lines):
-            if old_line == new_line:
-                continue
-            name = _allowed_widening(old_line, new_line, pending)
-            if name is None:
-                matched = False
-                break
-            pending.remove(name)
-            applied.append(name)
+    compared = actual
+    if not matched:
+        compared, applied = _undo_widenings(expected, actual, allowed_widenings)
+        matched = compared == expected
     if matched:
         message = f"reflow: rustfmt(dedent({from_path}:{start}-{end})) == {where}"
         if header_path:
@@ -1504,9 +1566,15 @@ def _reflow(
     sys.stderr.write(
         f"move_evidence: reflow check failed: {label} is not {where}\n"
     )
+    if applied:
+        sys.stderr.write(
+            "move_evidence: after undoing the allowed widening(s) "
+            + ", ".join(sorted(set(applied)))
+            + "\n"
+        )
     diff = difflib.unified_diff(
-        expected_lines,
-        actual_lines,
+        expected.split("\n"),
+        compared.split("\n"),
         fromfile=label,
         tofile=where,
         lineterm="",

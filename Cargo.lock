@@ -877,6 +877,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "loong-plugin"
+version = "0.0.1"
+dependencies = [
+ "loong-config",
+ "loong-skills",
+ "serde",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
 name = "loong-proc"
 version = "0.0.1"
 
@@ -995,6 +1006,7 @@ dependencies = [
  "loong-kernel",
  "loong-mcp",
  "loong-pack",
+ "loong-plugin",
  "loong-protocol",
  "loong-providers",
  "loong-sandbox",

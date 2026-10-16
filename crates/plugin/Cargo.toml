@@ -1,0 +1,13 @@
+[package]
+name = "loong-plugin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Plugins: a bundle of skills you install by name, and the bootstrap a plugin may declare"
+
+[dependencies]
+loong-config.workspace = true
+loong-skills.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true

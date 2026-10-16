@@ -30,6 +30,9 @@ ALLOWED = {
     "loong-mcp": {"loong-schema", "loong-protocol", "loong-tools", "loong-manifest"},
     "loong-skills": {"loong-schema", "loong-tools"},
     "loong-config": {"loong-schema"},
+    # plugins are content bundles: they install a repository's skills and read the
+    # paths configuration defines, but know nothing about the kernel (ADR-0018)
+    "loong-plugin": {"loong-config", "loong-skills"},
     # the derived index reads the log; it is disposable and rebuildable
     "loong-index": {"loong-schema", "loong-eventlog"},
     # the layered context memory is derived from the log too, and is equally
@@ -45,7 +48,7 @@ ALLOWED = {
     # the one binary that ties faces together
     "loongagent": {
         "loong-schema", "loong-protocol", "loong-eventlog", "loong-http", "loong-proc", "loong-manifest", "loong-providers",
-        "loong-sandbox", "loong-tools", "loong-hooks", "loong-mcp", "loong-skills", "loong-config", "loong-index", "loong-context", "loong-kernel", "loong-server", "loong-tui", "loong-tui-app", "loong-web", "loong-control", "loong-pack",
+        "loong-sandbox", "loong-tools", "loong-hooks", "loong-mcp", "loong-skills", "loong-plugin", "loong-config", "loong-index", "loong-context", "loong-kernel", "loong-server", "loong-tui", "loong-tui-app", "loong-web", "loong-control", "loong-pack",
     },
 }
 

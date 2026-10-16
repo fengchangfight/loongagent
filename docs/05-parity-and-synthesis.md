@@ -86,7 +86,7 @@ rows below are what "not losing" means concretely.
 | **Commands merged into skills** (one concept) | ✅ | both spellings ship: `.loongagent/skills/<name>/SKILL.md` and `.loongagent/commands/<name>.md`; `/name args` expands `$ARGUMENTS` and `$1`…`$9`, and arguments are appended if the body uses no placeholder. Invocation is parsed strictly, so `/etc/hosts is wrong` stays a sentence | — |
 | Bundled workflow skills (`/code-review`, `/batch` fan-out to worktree agents opening PRs, `/verify`, `/run`) | ⚠️ | ADR-0011 + T-20 + T-17 | define the `/batch`-style workflow explicitly |
 | Plugins = bundles of skills + hooks + subagents + MCP servers | ✅ | ADR-0004 + ADR-0008 packs | same shape; content bundles |
-| Git-based plugin marketplaces | ⏸ | ADR-0008 signed packs | internal catalog later (not v1) |
+| Git-based plugin marketplaces | ⚠️ | ADR-0018 (2026-10-15): `loongagent plugin add superpowers` — a built-in catalogue, `owner/repo`, a git URL or a local directory; `list`/`update`/`remove`. **Skills only**: hooks, subagents and MCP servers are left behind their own trust gates, and a plugin that ships hooks is labelled. A plugin may declare `bootstrap` skills, whose bodies are seated in the system prompt — the native form of a `SessionStart` context injection | a browsable index, per-plugin enable/disable, signatures/trust tiers, subagent definitions |
 
 ### A7 · MCP
 

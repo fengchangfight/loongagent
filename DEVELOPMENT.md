@@ -884,6 +884,33 @@ binary the TUI spawns as its server (used by the end-to-end test).
   Every load and every invocation is an event naming its source file, so a
   surprising instruction is traceable to a path rather than being anonymous prompt.
   `loongagent skills list` shows the catalogue and each body's token cost.
+- **Plugins** (`loong-plugin`, ADR-0018): `loongagent plugin add superpowers` is the
+  one-word case — a built-in catalogue entry, a shallow clone, and the skills are in every
+  session's catalogue. `owner/repo`, a git URL and a local directory all work, as do
+  `@branch-or-tag`, `--project` (this repository rather than this user), and `list` /
+  `update` / `remove`. `update` and `remove` take `--project|--user` too, because a name
+  installed in both scopes is ambiguous: without the flag they refuse and print both paths
+  rather than quietly acting on the copy that shadows the other. A plugin is a checkout
+  plus a manifest
+  (`.loongagent-plugin.toml`), and a directory without one is *not* installed: cloning into
+  the plugins root is not an install, so putting skills into everyone's context stays an
+  act somebody performed. **Only skills are installed.** A plugin's hooks, subagents and MCP
+  servers are left alone, because hooks and servers execute and both sit behind an explicit
+  per-repository trust gate — an install must not be a route around one — and `plugin list`
+  says when a plugin ships hooks so the omission is visible rather than mysterious. A plugin
+  may declare `bootstrap = ["using-superpowers"]`: those skills' **bodies** are seated in
+  the pinned system prompt of every session. That is the native form of the `SessionStart`
+  context injection this class of plugin performs on other harnesses — the same instruction,
+  carried by the loader that already exists, with no third-party script running and nothing
+  to trust per repository. Measured: Superpowers' 15 skills load unchanged, at ~1.1 k tokens
+  of descriptions per session plus ~0.75 k for the always-on bootstrap. An install that
+  would break the catalogue (a skill name the workspace already defines) is rolled back
+  rather than left for the next session to discover; installs are staged and renamed, a
+  plugin's own skills are parsed before its manifest is written, and a declared bootstrap
+  skill that the plugin does not have is refused at install time. One loader change made the
+  ecosystem's layout work directly: a root that carries `skills/` is read in the workspace
+  shape (`skills/` and `commands/`), not as a flat pile of markdown — otherwise a
+  repository's `README.md` would be read as a command and fail the whole load.
 - **A system prompt slot**: the first message is now a short frame plus the skill
   catalogue. It is a pinned `SystemPrompt` ledger entry, it never counts as
   compactable history, and compaction refuses to drop it.

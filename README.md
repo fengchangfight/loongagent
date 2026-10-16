@@ -291,7 +291,8 @@ model = "qwen2.5:7b-instruct"
 | `PgUp/PgDn`、滚轮、`ctrl-PgUp/PgDn`、`tab` | 滚动 / 翻折叠 |
 
 `/name args` 形式（不是上面这些内置命令的）会当作 **skill / 命令**发给服务端，
-它们来自仓库的 `.loongagent/skills/`、`.loongagent/commands/`、profile 的 `skill_dirs` 和 MCP prompt。
+它们来自仓库的 `.loongagent/skills/`、`.loongagent/commands/`、profile 的 `skill_dirs`、
+**已安装的插件**（见下一节）和 MCP prompt。
 
 > 中断这件事在 Linux 上是给 server 子进程发 `SIGINT`；Windows 上没有 `kill`，改成给
 > 子进程组发 `CTRL_BREAK_EVENT`。用户看到的行为一致：这一轮停下，会话还在。
@@ -305,7 +306,8 @@ model = "qwen2.5:7b-instruct"
 | `~/.loongagent/local.toml` | **本地模式**的唯一配置（含 `[context_engine]`/`[summarizer]`）；`$LOONGAGENT_HOME` 可整体挪走 |
 | `~/.loongagent/env` | 密钥（Unix 上 `0600`），或直接用环境变量 |
 | `~/.loongagent/projects/<工程>/<会话 id>.jsonl` | 会话原文：一行一个事件，**这是真相**（最早那个会话固定叫 `session.jsonl`） |
-| `<工程>/.loongagent/` | 工程层：`profile.toml`（只能收紧权限，不能放宽）、`hooks.toml`、`mcp.toml`、`skills/`、`commands/` |
+| `~/.loongagent/plugins/<名字>/` | 用户级插件：一份 checkout + `.loongagent-plugin.toml`（见下一节） |
+| `<工程>/.loongagent/` | 工程层：`profile.toml`（只能收紧权限，不能放宽）、`hooks.toml`、`mcp.toml`、`skills/`、`commands/`、`plugins/` |
 | `<会话>.sqlite` / `<会话>.context.db` | 事件索引 / 分层记忆，都是派生物：可丢弃、可从日志重建（`loongagent context rebuild`） |
 | Windows 上 | `~` 是 `%USERPROFILE%`；机器级配置在 `%PROGRAMDATA%\loongagent\` |
 
@@ -314,6 +316,36 @@ loongagent sandbox self-test    # 让一个受约束的子进程去写工作区�
 loongagent context status       # 分层记忆：模式、摘要模型、L1–L4 计数、后台 worker 是否 degraded
 cat <session>.jsonl             # 全部真相
 ```
+
+---
+
+## 插件：一键装别人的 skills
+
+```bash
+loongagent plugin add superpowers      # 内置目录里的名字，不用记 URL
+loongagent plugin list                 # 装了什么、来自哪个 commit、占多少 context
+loongagent plugin update superpowers   # 拉最新 commit
+loongagent plugin remove superpowers   # 卸载（删掉那份 checkout）
+```
+
+也支持 `owner/repo`、完整 git URL、本地目录，以及 `@分支或tag`；默认装到用户级
+（`~/.loongagent/plugins/`，每个工程都生效），`--project` 装到本工程
+（`<工程>/.loongagent/plugins/`，同名时覆盖用户级并在 `plugin list` 里说明）。
+两层都装了同一个名字时，`update` / `remove` 要带 `--project` 或 `--user` 指明是哪一份，
+不带就把两处路径都打出来让你选 —— 否则那份被盖住的就再也删不掉了。
+
+**只装 skills。** 插件里的 hooks、subagents、MCP servers 一律不动：hooks 和 MCP server
+会执行代码，它们的开关是「每个仓库显式 trust」（`loongagent hooks trust` / `mcp trust`），
+装内容不该变成绕过它的路。插件带了 `hooks/` 时 `plugin list` 会明说。
+
+插件可以声明 `bootstrap`（superpowers 声明的是 `using-superpowers`）：这些 skill 的**正文**
+会进每次会话的 system prompt。这是它那个 `SessionStart` hook 在本地的原生替代 —— 同一件事，
+走已经存在的 skills 加载器，不跑任何第三方脚本、不需要按仓库 trust。实测 superpowers 的
+15 个 skill 原样可用：目录里的描述约 1.1k tokens，bootstrap 约 0.75k，`plugin add` /
+`plugin list` 会把这些数字打出来；单个 skill 可以用 `disable_skills` 关掉。装完发现会让
+catalogue 坏掉（比如和工程里的 skill 重名）会**自动回滚**，不会留给下一次会话去踩。
+
+> 只装一个目录、不装整个插件的场景：`loongagent plugin add ./my-skills`。
 
 ---
 
@@ -354,12 +386,14 @@ Windows 上的控制面布局。落地步骤见 [docs/runbooks/control-plane.md]
 
 **能用**：内核循环、分层配置、会话与 JSONL 日志（含派生 SQLite 索引）、上下文账本、
 压缩、权限 + Landlock 沙箱、hooks（shell/HTTP/MCP 三种）、MCP（工具与 prompt，stdio）、
-skills/commands、六个内置工具（`read_file` / `write_file` / `edit` / `glob` / `grep` / `shell`，
+skills/commands、**插件**（`plugin add superpowers` 一键装 skills，见上）、
+六个内置工具（`read_file` / `write_file` / `edit` / `glob` / `grep` / `shell`，
 记忆打开时再加一个 `recall`）、四个界面（tui / web / repl / run）、流式回答、
 以及可选的**分层记忆**（R 模式 + S 模式、后台增量、`recall`/`expand`、F2 可见性）。
-Linux 与 **Windows** 都能构建运行，命令面一致。707 个测试。
+Linux 与 **Windows** 都能构建运行，命令面一致。736 个测试。
 
-**没做完，也不假装**：签名 org pack、subagents、LSP 代码工具、`grep`/`glob` 的
+**没做完，也不假装**：签名 org pack、subagents、插件的索引/搜索与逐插件开关（现在用
+`disable_skills`）、LSP 代码工具、`grep`/`glob` 的
 `.gitignore` 感知、MCP 的 HTTP 传输、多用户会话（同一时刻一个浏览器驱动会话）、
 `memory.*` 事件回写日志、`recall` 在真实长会话上的验证，以及
 **Windows 上的 OS 强制边界** —— Landlock 是 Linux 的，那里 `sandbox self-test`

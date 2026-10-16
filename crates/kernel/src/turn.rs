@@ -176,6 +176,17 @@ pub struct KernelConfig {
     /// The layered context engine (ADR-0017). `None` means the kernel behaves
     /// exactly as it did before that decision — compaction included.
     pub context_engine: Option<crate::context_engine::ContextEngineConfig>,
+    /// Skills whose **bodies** are seated in the system prompt, by name.
+    ///
+    /// An installed plugin declares these (ADR-0018): it is the native form of the
+    /// `SessionStart` hook this class of plugin ships on other harnesses — "load this
+    /// instruction before the first turn" — carried by the loader that already
+    /// exists, instead of by a script nobody reviewed. Empty is the default, and the
+    /// rollback path.
+    pub bootstrap_skills: Vec<String>,
+    /// Adaptation lines seated above those bodies, for a plugin written for a harness
+    /// whose tools have different names.
+    pub bootstrap_notes: Vec<String>,
 }
 
 impl KernelConfig {
@@ -190,6 +201,8 @@ impl KernelConfig {
             max_steps: DEFAULT_MAX_STEPS,
             reserved_context_size: DEFAULT_RESERVED_CONTEXT,
             context_engine: None,
+            bootstrap_skills: Vec::new(),
+            bootstrap_notes: Vec::new(),
         }
     }
 
@@ -493,6 +506,11 @@ pub struct Kernel {
     skills: Arc<SkillSet>,
     /// Names config switched off, reported once at session start.
     disabled_skills: Vec<String>,
+    /// Rendered bodies of the skills an installed plugin seats at session start
+    /// (ADR-0018), in catalogue order. Empty unless a plugin asked for one.
+    bootstrap: Vec<String>,
+    /// Adaptation lines that travel above those bodies.
+    bootstrap_notes: Vec<String>,
     /// The bridge to this session's MCP servers, for `mcp` hooks and for prompts
     /// invoked as commands.
     mcp_caller: Option<Arc<KernelMcp>>,
@@ -660,6 +678,35 @@ impl Kernel {
         disabled.extend(skills.disabled.iter().cloned());
         disabled.sort();
         disabled.dedup();
+        // A plugin can ask for a skill's body to be seated at session start (ADR-0018).
+        // The name is resolved against the catalogue that was just built, so what the
+        // prompt carries and what `/help` lists cannot disagree.
+        let mut bootstrap = Vec::new();
+        for name in &config.bootstrap_skills {
+            // Config disabling the name is a deliberate "not here", not a broken
+            // declaration: the plugin is installed, this session turned it off.
+            if disabled_config.iter().any(|off| off == name) {
+                continue;
+            }
+            let skill = skills.get(name).ok_or_else(|| {
+                KernelError::Skills(format!(
+                    "{name:?} is declared as a plugin bootstrap skill but is not in this \
+                     session's catalogue — reinstall the plugin that declares it"
+                ))
+            })?;
+            let body = skill.body().ok_or_else(|| {
+                KernelError::Skills(format!(
+                    "{name:?} is declared as a plugin bootstrap skill but its body lives on an \
+                     MCP server, which cannot be seated before the session starts"
+                ))
+            })?;
+            bootstrap.push(format!(
+                "# Skill: {} (from {})\n\n{}",
+                skill.name,
+                skill.source_label(),
+                body
+            ));
+        }
         match &mcp_caller {
             Some(caller) => tools.register(SkillTool::with_fetcher(
                 Arc::clone(&skills),
@@ -667,6 +714,7 @@ impl Kernel {
             )),
             None => tools.register(SkillTool::new(Arc::clone(&skills))),
         }
+        let bootstrap_notes = config.bootstrap_notes.clone();
 
         // Configuration narrows the ladder before the first decision (ADR-0008 §2:
         // narrow-only keys, strictest wins — and the rule records which layer won).
@@ -732,6 +780,8 @@ impl Kernel {
             mcp_note,
             skills,
             disabled_skills: disabled,
+            bootstrap,
+            bootstrap_notes,
             mcp_caller,
             index,
             index_path,
@@ -820,8 +870,9 @@ impl Kernel {
         Ok((body.clone(), loong_skills::estimate_tokens(&body)))
     }
 
-    /// The one place the system prompt is built: a short frame plus the
-    /// description-only skill catalogue (ADR-0006 progressive disclosure).
+    /// The one place the system prompt is built: a short frame, the description-only
+    /// skill catalogue (ADR-0006 progressive disclosure), and the bodies of any skills
+    /// an installed plugin asked to have seated here (ADR-0018).
     fn seat_system_prompt(&mut self) -> Result<(), KernelError> {
         // The tool names are listed rather than left to the schema, and the last
         // paragraph is not politeness. Measured on this project's own sessions: when
@@ -832,7 +883,7 @@ impl Kernel {
         // what the prompt says about *how to work*; a prompt that never mentions
         // tools gets prose instead of actions.
         let tool_names: Vec<String> = self.tools.names().into_iter().map(String::from).collect();
-        let body = format!(
+        let mut body = format!(
             "You are loongagent, a coding agent working in a user's workspace. Prefer reading \
              over guessing, keep changes small, and say plainly when you are unsure.\n\n\
              You change the workspace only by calling tools. The tools available are: {}.\n\n\
@@ -850,6 +901,24 @@ impl Kernel {
             tool_names.join(", "),
             self.skills.catalogue()
         );
+        // The always-on half: a plugin can ask for a skill's body to be here from the
+        // first turn rather than behind a description (ADR-0018). It is appended to the
+        // same pinned entry, so it is as inspectable — and as un-evictable — as the
+        // catalogue it sits under.
+        if !self.bootstrap.is_empty() {
+            body.push_str(
+                "\n\nThe skills below are loaded in full because an installed plugin asks for \
+                 them at the start of every session. Their instructions apply from now on; the \
+                 skills listed above still load on demand.\n",
+            );
+            for note in &self.bootstrap_notes {
+                body.push_str(&format!("\n- {note}"));
+            }
+            for block in &self.bootstrap {
+                body.push_str("\n\n");
+                body.push_str(block);
+            }
+        }
         // Pinned and Persistent: system prompt tokens are never evicted, and
         // compaction must not touch them (ADR-0006).
         let entry = self.ledger.add(
@@ -4138,6 +4207,105 @@ SECRET-BODY-STEPS
         let events = loong_eventlog::replay(&t.log).unwrap().events;
         let loaded = events.iter().find(|e| e.kind == ev::SKILLS_LOADED).unwrap();
         assert!(loaded.data["names"].as_str().unwrap().contains("release"));
+    }
+
+    /// ADR-0018: the body of a skill a plugin names is in the prompt from the first
+    /// turn — the native form of the `SessionStart` injection this class of plugin
+    /// performs with a hook on other harnesses.
+    #[test]
+    fn a_plugin_bootstrap_skill_is_seated_in_full_and_named_by_its_source() {
+        let t = Temp::new();
+        install_command(
+            &t.dir,
+            "using-superpowers",
+            "---
+description: check for a skill before responding
+---
+
+ALWAYS-LOOK-FOR-A-SKILL-FIRST
+",
+        );
+        let (model, seen) = RecordingModel::new(vec![response(vec![], Some("ok"))]);
+        let mut config = KernelConfig::new(&t.dir);
+        config.bootstrap_skills = vec!["using-superpowers".to_string()];
+        config.bootstrap_notes = vec!["skills are written `superpowers:<name>` here".to_string()];
+        let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+        k.submit("say hi").unwrap();
+
+        let sent = seen.lock().unwrap();
+        let system = match sent[0].first() {
+            Some(ChatMessage::System { text }) => text.clone(),
+            other => panic!("the prompt starts with a system message, got {other:?}"),
+        };
+        assert!(
+            system.contains("ALWAYS-LOOK-FOR-A-SKILL-FIRST"),
+            "the body is seated in full: {system}"
+        );
+        assert!(
+            system.contains("superpowers:<name>"),
+            "the adaptation note travels with it: {system}"
+        );
+        assert!(
+            system.contains("using-superpowers/SKILL.md")
+                || system.contains("commands/using-superpowers.md"),
+            "the source is named, so a surprising instruction is traceable: {system}"
+        );
+        // It is still a skill: the catalogue advertises it and it can be re-loaded.
+        assert!(system.contains("/using-superpowers"), "{system}");
+        assert!(k.skills().get("using-superpowers").is_some());
+        // …and the session log names it, through the ordinary skills.loaded event.
+        let events = loong_eventlog::replay(&t.log).unwrap().events;
+        let loaded = events.iter().find(|e| e.kind == ev::SKILLS_LOADED).unwrap();
+        assert!(loaded.data["names"]
+            .as_str()
+            .unwrap()
+            .contains("using-superpowers"));
+    }
+
+    #[test]
+    fn a_bootstrap_name_that_is_not_a_skill_refuses_the_session() {
+        let t = Temp::new();
+        let mut config = KernelConfig::new(&t.dir);
+        config.bootstrap_skills = vec!["not-here".to_string()];
+        let err = match Kernel::create(&t.log, config, Box::new(ScriptedModel::saying("hi"))) {
+            Ok(_) => panic!("a bootstrap skill that does not exist must not open a session"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("not-here"), "{err}");
+        assert!(err.contains("reinstall the plugin"), "{err}");
+    }
+
+    #[test]
+    fn disabling_a_bootstrap_skill_turns_it_off_rather_than_refusing() {
+        let t = Temp::new();
+        install_command(
+            &t.dir,
+            "using-superpowers",
+            "---
+description: check for a skill before responding
+---
+
+ALWAYS-LOOK-FOR-A-SKILL-FIRST
+",
+        );
+        let (model, seen) = RecordingModel::new(vec![response(vec![], Some("ok"))]);
+        let mut config = KernelConfig::new(&t.dir);
+        config.settings = settings_from(&t.dir, "disable_skills = [\"using-superpowers\"]\n");
+        config.bootstrap_skills = vec!["using-superpowers".to_string()];
+        // A deliberate "not here" is not a broken declaration: the session opens, and
+        // the instruction is simply absent.
+        let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+        k.submit("say hi").unwrap();
+        let sent = seen.lock().unwrap();
+        let system = match sent[0].first() {
+            Some(ChatMessage::System { text }) => text.clone(),
+            other => panic!("the prompt starts with a system message, got {other:?}"),
+        };
+        assert!(
+            !system.contains("ALWAYS-LOOK-FOR-A-SKILL-FIRST"),
+            "{system}"
+        );
+        assert!(!system.contains("/using-superpowers"), "{system}");
     }
 
     #[test]

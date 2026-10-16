@@ -23,6 +23,7 @@ loong-sandbox.workspace = true
 loong-hooks.workspace = true
 loong-mcp.workspace = true
 loong-skills.workspace = true
+loong-plugin.workspace = true
 loong-config.workspace = true
 loong-control.workspace = true
 loong-pack.workspace = true

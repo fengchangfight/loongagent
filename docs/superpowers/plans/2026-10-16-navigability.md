@@ -17,7 +17,12 @@ Copied from the spec. Every task's requirements include these.
 - **Zero behaviour change.** No change to what any program computes, prints or writes.
 - **Zero `pub` API change.** The splits may add `pub(crate)` / `pub(super)` and `pub use` re-exports only. `pub(crate)` and `pub(super)` cannot reach a public surface.
 - **Zero crate boundary change.** No new crate, no removed crate, no new edge between crates.
-- **Inside moved code, the only lines that may be added are `mod`, `use`, `pub use`, `pub(crate)` and `pub(super)`.** Function bodies are byte-identical.
+- **Inside moved code, the only lines that may be added are `mod`, `use`, `pub use`, `pub(crate)` and `pub(super)`.** Every moved *item* — function, `impl`, `struct`, `enum`, `trait`, `const`, `static`, `type`, `mod`, `macro_rules!` — is token-identical, including its attributes, its visibility and its signature.
+
+*Corrected during execution (Task 19).* This read "function bodies are byte-identical", which is **unachievable** and was wrong in two independent ways:
+
+1. **Byte-identity is impossible for any move that changes indentation depth.** rustfmt dedents and reflows the moved text, and `cargo fmt --check` is a gate, so the moved copy *cannot* be byte-equal to the original. Task 19's move (a nested `mod tests` becoming a sibling file) showed exactly this: of 266 bodies, 265 are byte-identical and all 266 are token-identical, the difference being two whitespace-only hunks — one of them a signature's optional trailing comma, which rustfmt removed. The achievable and meaningful standard is that the moved text equals rustfmt's output applied to a byte-preserving dedent of the original; Tasks 19–23 each demonstrate that directly rather than by argument.
+2. **Hashing bodies left the things that matter uncovered.** A signature change, a visibility change, an added or removed attribute, or a change to any non-`fn` item would all have passed a body-hash comparison while breaking the plan's "zero `pub` API change" constraint — and a signature change shipped with updated callers compiles and passes every test. The evidence therefore hashes whole items, and compares `(sha256, kind, name, visibility)` multisets, so a visibility or kind change is visible in the comparison rather than merely implied by a hash.
 - **No `Cargo.toml` diff in any split commit** (`git diff -- '**/Cargo.toml'` is empty for Phase F).
 - **Every new gate check must be shown failing on a seeded defect before it is trusted.** A check that has never failed has not been shown to work.
 - **`./scripts/check.sh` is green at every commit.** It gates formatting, `gen-schema.py --check`, `check-layering.sh`, `cargo test --workspace --locked`, and a release build.
@@ -587,16 +592,17 @@ git commit -m "docs: nothing explained how to add a tool or how routing picks a 
 
 - [ ] **Step 1: Record the before state, per crate (Review Focus 4)**
 
-Run: `cargo tree -p loongagent -e normal | grep -c loong-protocol` and `cargo tree -p loong-eventlog -e normal | grep -c '^serde '`, repeated for `loong-sandbox`, `loong-skills`, `loong-tools`, `loong-tui-app`, `loong-control`.
-Expected: `loong-protocol` appears for `loongagent` via the dependency graph; `serde` appears for each of the six. Save the output — the compiler will *not* tell us if the removal is wrong, because cargo does not warn about unused declared dependencies.
+Run: `cargo tree -p loongagent -e normal --depth 1 --prefix none | grep -c '^loong-protocol$'` and the same shape for `serde` against each of `loong-eventlog`, `loong-sandbox`, `loong-skills`, `loong-tools`, `loong-tui-app` and `loong-control`. Save the output — the compiler will *not* tell us if the removal is wrong, because cargo does not warn about unused declared dependencies.
+
+*Corrected during execution (Task 16).* The first draft used `cargo tree -e normal | grep -c '^serde '`, which is unusable: `cargo tree` indents and glyph-prefixes its output, so an anchored `^serde ` matches nothing **before or after** the change — a verification step that cannot fail in either direction, and the sixth such step this plan produced. Two further corrections to this task's text: the proof is that the target stops being a **direct** dependency (`--depth 1`), because `serde` legitimately remains reachable transitively through `loong-schema` and `serde_json`; and "all six use `serde_json`" is false for `loong-sandbox`, which uses neither `serde` nor `serde_json` — its declaration was unused all the same, so the removal stands.
 
 - [ ] **Step 2: Remove them**
 
-Delete the `loong-protocol.workspace = true` line from `crates/cli/Cargo.toml` and the `serde.workspace = true` line from the six crates. Do not touch `serde_json` anywhere; it is a separate dependency and all six use it.
+Delete the `loong-protocol.workspace = true` line from `crates/cli/Cargo.toml` and the `serde.workspace = true` line from the six crates. Do not touch `serde_json` anywhere; it is a separate dependency — five of the six use it, and `loong-sandbox` uses neither.
 
 - [ ] **Step 3: Prove the removal took effect and broke nothing**
 
-Re-run the `cargo tree` lines from Step 1: `serde` must no longer appear for the six, and `cargo tree -p loongagent` must still resolve (the crate never referenced `loong_protocol`, so nothing loses a name it used).
+Re-run the `cargo tree --depth 1` checks from Step 1: the target must no longer be a **direct** dependency of any of the seven. Do not assert that `serde` has left the graph — it has not, and should not: `serde` remains reachable transitively, and `crates/cli` keeps its own declaration because `crates/cli/src/main.rs` derives `Serialize`.
 Run: `cargo check --workspace --all-targets` and confirm the same 0 warnings.
 Run: `./scripts/check.sh` with `FAST=1` first (skips the slow release build), expected `all gates passed`; then the full `./scripts/check.sh`.
 

@@ -51,7 +51,7 @@ answers cannot silently rot.
 | 1 | Exactly one authority per topic | One place each for: the current architecture, status, the "deliberate no"s, the crate map, the document index |
 | 2 | Every statically falsifiable statement is true | Every number, ADR range, link and status claim in §1 above verified after the change |
 | 3 | Document rot is caught by a gate | `scripts/check-docs.py` runs inside `scripts/check.sh` and each of its checks has been shown to fail on a seeded defect |
-| 4 | Four oversized files are split with zero API and behaviour change | Function bodies byte-identical; `cargo test -- --list` name set unchanged; no `Cargo.toml` diff; 736 tests still pass |
+| 4 | Four oversized files are split with zero API and behaviour change | Every moved item token-identical (whole items, not bare bodies — see §4.4); `cargo test -- --list` name set unchanged; no `Cargo.toml` diff; 736 tests still pass |
 | 5 | Redundancy that costs nothing to remove is gone | Zero declared-but-unused dependencies; zero dead functions |
 
 ## 3. Non-goals
@@ -179,7 +179,9 @@ seeded defect before it is trusted.** A gate that has never failed has not been 
 ### 4.4 Mechanical code splits
 
 Hard constraint: the only lines that may change inside the moved code are the addition of `mod`,
-`use`, `pub use`, `pub(crate)` and `pub(super)`. Function bodies are byte-identical.
+`use`, `pub use`, `pub(crate)` and `pub(super)`. Every moved item — signature, attributes and
+visibility included — is token-identical; byte-identity is unachievable because rustfmt reflows a
+dedented block and `cargo fmt --check` is a gate (§4.4 has the corrected standard).
 
 | File | Lines now | Target | Visibility cost |
 |---|---|---|---|
@@ -209,8 +211,13 @@ keep compiling untouched.
 
 - **Delete 7 declared-but-unused dependencies**: `loong-protocol` from `crates/cli/Cargo.toml`
   (`loong_protocol` appears zero times in the whole crate), and `serde` from `eventlog`, `sandbox`,
-  `skills`, `tools`, `tui-app` and `control` (each uses `serde_json`; `Serialize`, `Deserialize` and
-  `serde::` appear zero times in all six).
+  `skills`, `tools`, `tui-app` and `control` (`Serialize`, `Deserialize` and `serde::` appear zero
+  times in all six). *Corrected during execution (Task 16):* the first draft added "each uses
+  `serde_json`", which is false for `loong-sandbox` — it uses neither `serde` nor `serde_json`, and its
+  declaration was unused all the same, so the removal stands. `serde` must also **not** be expected to
+  leave the dependency graph: it stays reachable transitively, and `crates/cli` keeps its own
+  declaration because `crates/cli/src/main.rs` derives `Serialize`. The proof is that the target stops
+  being a *direct* dependency, which is why the plan's `cargo tree` check needs `--depth 1`.
 - **Delete one dead function**: `pack_of` and its `#[allow(dead_code)]` at
   `crates/control/src/bin/loongagent-control.rs:706`. It is the workspace's only `allow(dead_code)`,
   and the workspace compiles with zero warnings without it.
@@ -228,12 +235,22 @@ keep compiling untouched.
 Every phase ends with `./scripts/check.sh` green. The splits additionally require four independent
 pieces of evidence, because "it compiles and the tests pass" does not prove nothing moved:
 
-1. **Function bodies are byte-identical.** A script extracts every `fn` / `impl` body by brace
-   matching from `git show HEAD:<old path>` and from the new files and compares SHA-256 multisets.
-   They must be equal. The script itself must be shown to fail when one body is edited.
+1. **Every moved item is token-identical.** A script extracts each whole item — `fn`, `impl`,
+   `struct`, `enum`, `trait`, `type`, `const`, `static`, `mod`, `macro_rules!`, with its attributes,
+   visibility and signature included — from `git show HEAD:<old path>` and from the new files, hashes
+   each item's canonical token stream, and compares `(sha256, kind, name, visibility)` multisets; they
+   must be equal. The script must be shown to fail both when an item's body is edited and when only a
+   **signature** or visibility is edited. *Corrected during execution (Task 19):* this originally said
+   "function bodies are byte-identical", which is unachievable — rustfmt dedents and reflows moved text
+   and `cargo fmt --check` is a gate — and which left signatures, visibility, attributes and every
+   non-`fn` item outside the evidence. Alongside the multiset, each split shows that the committed file
+   equals rustfmt's output applied to a byte-preserving dedent of the original, so that the only
+   difference between the two is rustfmt's own reflow.
 2. **The test set is unchanged.** `cargo test --workspace -- --list` sorted, before and after, must
-   be identical — including the 182 tests defined inside the two library files being split (49 in
-   `cli/main.rs`, 133 in `tui-app/lib.rs`), none lost and none renamed.
+   be identical — including the tests defined inside the two library files being split (49 in
+   `cli/main.rs`, 133 in `tui-app/lib.rs`), none lost and none renamed. Normalise the
+   `Running … (target/debug/deps/<name>-<hash>)` lines down to `<name>` **before** comparing: the
+   hash changes whenever the code changes, so a raw comparison fails for the wrong reason.
 3. **No dependency or manifest change.** `git diff -- '**/Cargo.toml'` is empty for the split
    commits, and `cargo tree -p loongagent` is unchanged.
 4. **The real binary still works.** The 8 integration tests under `crates/cli/tests/`, which launch

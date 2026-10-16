@@ -1,8 +1,5 @@
 # 03 — Architecture (question-driven design)
 
-- **Status:** Agreed — AQ-1…AQ-12 all decided (see table below and `decisions/`)
-- **Last updated:** 2026-10-04
-
 This document designs the loongagent architecture **iteratively, through
 structured architecture questions, numbered `AQ-N`** — **AQ = architecture
 question** — discussed with the owner. Method: each AQ lists the decision, the

@@ -1,7 +1,5 @@
 # DSH plugin ecosystem — compatibility assessment for loongagent
 
-- **Status:** Research note (input to a future ADR-0004 revision)
-- **Last updated:** 2026-10-05
 - **Question:** can loongagent's extension model host plugins of the kind the
   DeepSeek Harness (DSH) ecosystem has? Where does it not, and what would we
   have to decide to close the gap?

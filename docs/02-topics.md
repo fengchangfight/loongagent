@@ -1,13 +1,5 @@
 # 02 — Topic List (idea backlog)
 
-- **Status:** Living document — append ideas as they come; promote to numbered
-  design docs or ADRs when discussed.
-- **Last updated:** 2026-10-16 (statuses brought up to the decisions the ADRs
-  record: T-01…T-21 revisited; T-26 added — cross-crate
-  helper duplication recorded, not consolidated. Previously 2026-10-05: E1–E4
-  applied: compaction heuristic §ADR-0006, hook kinds+events §ADR-0007, commands
-  merged into skills §T-18, `ignorable` envelope §ADR-0003; T-22…T-25 added from
-  [05-parity-and-synthesis](05-parity-and-synthesis.md))
 How this works: the owner drops raw ideas in conversation; they land here as
 topics with a one-line seed connecting them to what the research already knows
 (`research/`, `05-parity-and-synthesis.md`). When a topic gets discussed in

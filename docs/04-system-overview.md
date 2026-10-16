@@ -1,8 +1,5 @@
 # 04 — System overview (the architecture as decided)
 
-- **Status:** Agreed (derived — reflects ADR-0001…ADR-0018)
-- **Last updated:** 2026-10-16
-
 This is the **one-read picture** of loongagent as it stands. It is *derived*
 from the decision record: [03-architecture.md](03-architecture.md) holds the
 question-by-question Q&A, and [`decisions/`](decisions/) holds the ADRs. If this

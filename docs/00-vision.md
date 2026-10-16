@@ -1,8 +1,5 @@
 # 00 — Vision
 
-- **Status:** Draft
-- **Last updated:** 2026-10-16
-
 ## Name
 
 **loongagent** — after the Chinese 龙 (loong), a mythical creature composed of

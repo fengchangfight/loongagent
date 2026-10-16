@@ -1,7 +1,5 @@
 # 05 — Parity and synthesis: matching Claude Code, absorbing the field
 
-- **Status:** Living checklist (design input — not an ADR)
-- **Last updated:** 2026-10-05
 - **Purpose:** turn two goals into checkable items — **"feature-wise, don't lose
   to Claude Code"** and **"absorb the best of the field (Pi, DeepSeek Harness,
   Codex, OpenCode, Amp, Cursor, Aider, Goose, Kiro)"**.

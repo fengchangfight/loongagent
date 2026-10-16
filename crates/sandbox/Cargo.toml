@@ -7,4 +7,3 @@ description = "Policy decision point and enforcement boundary (ADR-0007)"
 
 [dependencies]
 loong-schema.workspace = true
-serde.workspace = true

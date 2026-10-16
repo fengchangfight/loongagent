@@ -8,7 +8,6 @@ description = "The full-screen terminal surface: a ratatui view over the protoco
 [dependencies]
 loong-tui.workspace = true
 loong-schema.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 unicode-width = "0.2"
 ratatui = "0.30.2"

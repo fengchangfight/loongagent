@@ -7,5 +7,4 @@ description = "Append-only JSONL event log with the ignorable envelope, plus a d
 
 [dependencies]
 loong-schema.workspace = true
-serde.workspace = true
 serde_json.workspace = true

@@ -787,7 +787,6 @@ dependencies = [
  "loong-config",
  "loong-http",
  "loong-pack",
- "serde",
  "serde_json",
 ]
 
@@ -796,7 +795,6 @@ name = "loong-eventlog"
 version = "0.0.1"
 dependencies = [
  "loong-schema",
- "serde",
  "serde_json",
 ]
 
@@ -915,7 +913,6 @@ name = "loong-sandbox"
 version = "0.0.1"
 dependencies = [
  "loong-schema",
- "serde",
 ]
 
 [[package]]
@@ -947,7 +944,6 @@ version = "0.0.1"
 dependencies = [
  "loong-schema",
  "loong-tools",
- "serde",
  "serde_json",
 ]
 
@@ -959,7 +955,6 @@ dependencies = [
  "loong-proc",
  "loong-schema",
  "regex",
- "serde",
  "serde_json",
 ]
 
@@ -981,7 +976,6 @@ dependencies = [
  "loong-schema",
  "loong-tui",
  "ratatui",
- "serde",
  "serde_json",
  "unicode-width",
 ]
@@ -1007,7 +1001,6 @@ dependencies = [
  "loong-mcp",
  "loong-pack",
  "loong-plugin",
- "loong-protocol",
  "loong-providers",
  "loong-sandbox",
  "loong-schema",

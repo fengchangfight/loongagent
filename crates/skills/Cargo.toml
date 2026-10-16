@@ -8,5 +8,4 @@ description = "Skills and commands as one concept: description in context, body 
 [dependencies]
 loong-schema.workspace = true
 loong-tools.workspace = true
-serde.workspace = true
 serde_json.workspace = true

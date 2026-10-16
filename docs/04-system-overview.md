@@ -210,9 +210,9 @@ and avoidable by self-hosting (T-03).
 
 ## 9. Where to read what
 
-The index for every document is [docs/README.md](README.md). The two entries
-into the project outside `docs/` are the root [loongagent
-README.md](../README.md) and [DEVELOPMENT.md](../DEVELOPMENT.md).
+The index for every document is [docs/README.md](README.md). For the project
+outside `docs/`, start from the root [loongagent README.md](../README.md) and
+[DEVELOPMENT.md](../DEVELOPMENT.md).
 
 **Rule of the docs:** they describe the *current* shared understanding; history
 lives in git. Nothing is "Agreed" until the owner signs off in conversation.
@@ -222,7 +222,7 @@ lives in git. Nothing is "Agreed" until the owner signs off in conversation.
 ## 10. Status and next step
 
 **Design: complete.** All twelve architecture questions are decided and recorded
-in eighteen ADRs; the topics backlog remains open as product-level work.
+in the ADRs; the topics backlog remains open as product-level work.
 
 **Implementation: built.** The build order this document used to state as a plan
 is now history — all three steps are behind us:

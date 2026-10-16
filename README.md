@@ -375,8 +375,8 @@ loongagent use default       # 选一个
 
 ## 文档
 
-全部设计文档都在 **[docs/README.md](docs/README.md)** 里按主题列好了；下面是索引不覆盖的
-一项——索引只收 `docs/` 下的文档。
+全部设计文档都在 **[docs/README.md](docs/README.md)** 里按主题列好了；下面的表格只留索引
+收不到的东西——它只管 `docs/` 下的文档。
 
 | 想了解 | 看 |
 |---|---|

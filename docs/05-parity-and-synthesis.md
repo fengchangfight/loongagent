@@ -186,6 +186,7 @@ rows below are what "not losing" means concretely.
 | D13 | Automatic cross-session **memory sharing** — one session's memory reaching another without an explicit act | Sessions, their trees and personal memory are the never-auto-shared side of ADR-0010's hard boundary; sharing is an explicit human act and reuse is an explicit import (ADR-0010, ADR-0014) |
 | D14 | Session **summaries as training data**, or written to the control plane | Summaries derive from session content, and the uplink is an allow-list with session bodies and transcripts outside the contract, so there is no channel that collects or trains on them (ADR-0012) |
 | D15 | Using the **main model** for synthesis — summaries and decision extraction | The understanding layer is the optionally-installable part and the retrieval layer is model-free, so synthesis may not ride on the model the session already has (ADR-0017 §1, *Proposed*) |
+| D16 | **Vector retrieval as the main path** — permanently, not only in v1. Keyword and entity retrieval stay the main path; semantic/vector retrieval is only ever an enhancement | The main path must be explainable and verifiable with `grep`-like deterministic behaviour; a vector index answers "can I find it", not "what should the foreground carry". D8 defers a vector DB for v1 alone — this one is permanent (ADR-0017) |
 
 ---
 

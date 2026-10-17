@@ -16,7 +16,7 @@ is tracked here so decisions survive context windows and sessions.
   ADR keeps its `Status:` line (`Proposed` / `Accepted` / `Superseded`), because
   a decision's status is part of the record rather than metadata about the file;
   `archive/` keeps its headers, because archived material is history and is not
-  maintained; and the `superpowers/` spec keeps its `Date:` and `Status:`.
+  maintained; and specs under `superpowers/` keep their `Date:` and `Status:`.
 - A document under `docs/` whose body is not English carries a `Language: <code>`
   line immediately below its title, so a reader who cannot read the language is
   warned before the first paragraph. `docs/06-context-engineering.md` and
@@ -45,7 +45,7 @@ is tracked here so decisions survive context windows and sessions.
 | decisions/ | ADRs — one per locked decision (0001: runtime topology; 0002: wire protocol; 0003: session/event storage; 0004: extension model; 0005: routing philosophy; 0006: context engine; 0007: permission & sandbox engine; 0008: configuration & profile layering; 0009: surfaces; 0010: team collaboration as shared knowledge; 0011: local parallelism; 0012: control plane; 0013: implementation language; 0014: session export/import; 0015: session vs event tree; 0016: pack distribution; 0017: layered context, *Proposed*; 0018: plugins — install by name, seat what a plugin asks for) | — |
 | runbooks/ | Doing, not deciding — [control-plane.md](runbooks/control-plane.md) stands the control plane up; [windows-build.md](runbooks/windows-build.md) builds and runs the agent on Windows | — |
 | research/ | Per-tool deep dives (round 1: major agents; round 2: categories) | — |
-| superpowers/ | Design specs and implementation plans produced while working, one dated pair per plan — [2026-10-16-navigability-design.md](superpowers/specs/2026-10-16-navigability-design.md) | — |
+| superpowers/ | Design specs and implementation plans produced while working, each dated and named after the work it belongs to — [2026-10-16-navigability-design.md](superpowers/specs/2026-10-16-navigability-design.md) | — |
 
 **Round 1:** claude-code, codex, opencode, cursor, pi, deepseek-harness, other-agents
 **Round 2:** kiro-spec-driven, role-specialized, multi-agent-orchestration,

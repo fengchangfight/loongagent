@@ -226,9 +226,12 @@ keep compiling untouched.
   leave the dependency graph: it stays reachable transitively, and `crates/cli` keeps its own
   declaration because `crates/cli/src/main.rs` derives `Serialize`. The proof is that the target stops
   being a *direct* dependency, which is why the plan's `cargo tree` check needs `--depth 1`.
-- **Delete one dead function**: `pack_of` and its `#[allow(dead_code)]` at
-  `crates/control/src/bin/loongagent-control.rs:706`. It is the workspace's only `allow(dead_code)`,
-  and the workspace compiles with zero warnings without it.
+- **Delete one dead function**: `pack_of` and its `#[allow(dead_code)]` in
+  `crates/control/src/bin/loongagent-control.rs`. It was the workspace's only
+  **unconditional** `allow(dead_code)`: the base tree had one other, a
+  `#[cfg_attr(not(unix), allow(dead_code))]` on a Linux-only field in
+  `crates/kernel/src/turn.rs`, which stays. The workspace compiles with zero
+  warnings without the deleted one.
 - **Collapse one duplicated test helper**: `isolated_command`, three byte-identical copies in
   `crates/cli/tests/{tui_surface,web_surface,vertical_slice}.rs`, moves to
   `crates/cli/tests/common/mod.rs`.

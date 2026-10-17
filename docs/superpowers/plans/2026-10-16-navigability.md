@@ -636,11 +636,11 @@ git commit -m "chore: seven dependencies nobody referenced, including serde in s
 ### Task 17: one dead function
 
 **Files:**
-- Modify: `crates/control/src/bin/loongagent-control.rs:706-710`
+- Modify: `crates/control/src/bin/loongagent-control.rs`
 
 - [ ] **Step 1: Delete `pack_of` and its `#[allow(dead_code)]`**
 
-`pack_of` is defined once and called nowhere (`grep -rn pack_of crates/` returns only the definition), and its `#[allow(dead_code)]` is the workspace's only one.
+`pack_of` is defined once and called nowhere (`grep -rn pack_of crates/` returns only the definition), and its `#[allow(dead_code)]` is the workspace's only **unconditional** one — the base tree's other `allow(dead_code)` is a `#[cfg_attr(not(unix), allow(dead_code))]` in `crates/kernel/src/turn.rs`, which stays.
 
 - [ ] **Step 2: Prove the workspace still compiles warning-free**
 

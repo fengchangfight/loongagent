@@ -26,13 +26,13 @@ Order:
    `crates/tools/src/search.rs` when it wants the shared search helpers.
 2. Register it in `Registry::with_builtins`. For a tool that acts on the workspace or
    the shell, that is the one list it is added to: `Kernel::build`
-   (`crates/kernel/src/turn.rs`) starts from `with_builtins` and then adds the tools
+   (`crates/kernel/src/turn/build.rs`) starts from `with_builtins` and then adds the tools
    that come from elsewhere (`McpTool`, the skills tool). `recall` is the exception, and
    the roughness paragraph below says why it is a real second path rather than a
    workaround.
-3. Choose the `ActionClass` it declares. `Kernel::dispatch` reads that declaration and
-   asks `Pdp::decide` (`crates/sandbox/src/lib.rs`) for a verdict; the classes
-   themselves are declared in `crates/schema/protocol.toml`.
+3. Choose the `ActionClass` it declares. `Kernel::dispatch` (`crates/kernel/src/turn/loop.rs`)
+   reads that declaration and asks `Pdp::decide` (`crates/sandbox/src/lib.rs`) for a
+   verdict; the classes themselves are declared in `crates/schema/protocol.toml`.
 4. If it writes, refuse an out-of-workspace target inside `execute` as well — see
    `WriteFile::execute`. The PDP decides and the tool refuses; neither replaces the
    other.
@@ -158,19 +158,20 @@ tighten the PDP's ruling (`tighten`), so a hook may advise or veto but never *be
 
 ## How routing picks a model
 
-Routing happens once per model call, inside the turn loop in `crates/kernel/src/turn.rs`:
+Routing happens once per model call, inside the turn loop in
+`crates/kernel/src/turn/loop.rs`:
 the kernel builds `loong_config::Facts` from the ledger's token estimate and the step
 number, asks `Router::select`, and switches — and records — only when the answer differs
 from the model already selected. The philosophy is
 [ADR-0005](decisions/0005-routing-philosophy.md); the mechanism is in
-`crates/config/src/lib.rs`:
+`crates/config/src/profile.rs`:
 
 - `Facts` is the whole input to a decision, and `Fact` plus `parse_condition` is the
   whole grammar a rule may use, so a condition is parsed and validated where it is
   written rather than when it first fires;
 - `Router::select` is first-match-wins over `rules`, then `default`;
 - the models a profile declares are built into adapters by `build_models`
-  (`crates/cli/src/main.rs`), each one an implementation of `loong_providers::Model`
+  (`crates/cli/src/server.rs`), each one an implementation of `loong_providers::Model`
   (`crates/providers/src/lib.rs`); `OpenAiCompat` is the one real adapter, and the
   scripted models the demos use are doubles for the same trait;
 - the choice is an event (`model.selected`, written by `record_model_selected`), so a
@@ -180,9 +181,9 @@ What to touch depends on what is changing:
 
 | Change | Where |
 |---|---|
-| a model, the default, or a rule | the profile TOML only — `[[models]]` and `[router]`, the shape [DEVELOPMENT.md](../DEVELOPMENT.md) shows. A rule naming a model the profile does not define is refused where the profile is read (`profiles_from_payload` for a pack, `finish` for layered files, both in `crates/config/src/lib.rs`), so a rule that can never fire does not load |
-| a new adapter kind | implement `Model`, add the kind to `ADAPTER_KINDS` (`crates/config/src/lib.rs`), and build it in `build_models` **and** `build_model` (`crates/cli/src/main.rs`) |
-| a new fact a rule may read | `Fact`, `Facts`, `Condition::matches`, `Condition::render` and `parse_condition`, all in `crates/config/src/lib.rs` |
+| a model, the default, or a rule | the profile TOML only — `[[models]]` and `[router]`, the shape [DEVELOPMENT.md](../DEVELOPMENT.md) shows. A rule naming a model the profile does not define is refused where the profile is read (`profiles_from_payload` for a pack in `crates/config/src/layer.rs`, `finish` for layered files in `crates/config/src/merge.rs`), so a rule that can never fire does not load |
+| a new adapter kind | implement `Model`, add the kind to `ADAPTER_KINDS` (`crates/config/src/layer.rs`), and build it in `build_models` **and** `build_model` (`crates/cli/src/server.rs`) |
+| a new fact a rule may read | `Fact`, `Facts`, `Condition::matches`, `Condition::render` and `parse_condition`, all in `crates/config/src/profile.rs` |
 
 The proof: `cargo test -p loong-config the_router_takes_the_first_matching_rule`, and in
 a session with more than one model, `grep model.selected <session>.jsonl` prints the
@@ -202,7 +203,9 @@ starts from, while rules still outrank it.
 
 One inspection does not work, and it is worth knowing before reaching for it:
 `loongagent config explain router.rules` fails with `unknown key "router"`, because
-`config_explain` (`crates/cli/src/main.rs`) reduces a key to its first path segment while
-`kind_of` (`crates/config/src/lib.rs`) knows only the dotted keys. Read the effective
-rules with `loongagent config show`, which prints `router.default` and `router.rules` with
-their layer and source, and read what actually fired with the `model.selected` grep above.
+`config_explain` (`crates/cli/src/config_cmd.rs`) reduces a key to its first path segment
+while `kind_of` (`crates/config/src/layer.rs`) knows only the dotted keys. Read the
+effective rules with `loongagent config show`, whose row for `router.default` and
+`router.rules` prints the key, the value, its kind and the file that set it — the layer
+that file belongs to is the separate list of layer files printed above the table — and
+read what actually fired with the `model.selected` grep above.

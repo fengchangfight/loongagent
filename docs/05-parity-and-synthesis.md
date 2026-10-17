@@ -185,7 +185,7 @@ rows below are what "not losing" means concretely.
 | D12 | Session **merge** — reconciling two session logs into one | There is no sync, so there is nothing to merge; import keeps the original id when it is absent locally and records `importedFrom` on collision (ADR-0014 §5) |
 | D13 | Automatic cross-session **memory sharing** — one session's memory reaching another without an explicit act | Sessions, their trees and personal memory are the never-auto-shared side of ADR-0010's hard boundary; sharing is an explicit human act and reuse is an explicit import (ADR-0010, ADR-0014) |
 | D14 | Session **summaries as training data**, or written to the control plane | Summaries derive from session content, and the uplink is an allow-list with session bodies and transcripts outside the contract, so there is no channel that collects or trains on them (ADR-0012) |
-| D15 | Using the **main model** for synthesis — summaries and decision extraction | The understanding layer is the optionally-installable part and the retrieval layer is model-free, so synthesis may not ride on the model the session already has (ADR-0017 §1) |
+| D15 | Using the **main model** for synthesis — summaries and decision extraction | The understanding layer is the optionally-installable part and the retrieval layer is model-free, so synthesis may not ride on the model the session already has (ADR-0017 §1, *Proposed*) |
 
 ---
 

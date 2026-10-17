@@ -485,7 +485,7 @@ git commit -m "docs: three indexes drift apart; one of them is enough"
 
 - [ ] **Step 1: Replace `docs/04` §6 with a pointer**
 
-`docs/04` §6 ("What we deliberately do **not** do", `:149-171`) restates the list whose authority is `docs/05` §D (`:172-185` — D1–D10; D10 was added by Task 9's fix round, so any range you were given earlier that ends at 184 is one row short). Check each item is present in `docs/05` §D first — if any is not, add it there — then replace §6 with a two-sentence pointer. `docs/01` §D leaves with the archive in Task 10.
+`docs/04` §6 ("What we deliberately do **not** do") restates the list whose authority is `docs/05` §D (D1–D16; D10 was added by Task 9's fix round and D16 by the fix wave, so any list you were given earlier that stops short of D16 is incomplete). Check each item is present in `docs/05` §D first — if any is not, add it there — then replace §6 with a two-sentence pointer. `docs/01` §D leaves with the archive in Task 10.
 
 One item is known to be missing on the `docs/04` side: §6 has no bullet for **server-side live routing**, which §D's D10 now records as rejected. Reconciling the two lists is this task's job rather than a separate one, because §6 is about to be replaced by a pointer to §D and the pointer is only honest if §D is the complete list.
 

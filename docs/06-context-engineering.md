@@ -1,5 +1,7 @@
 # 06 · Context engineering — 分层可逆记忆
 
+Language: zh
+
 本文是设计文档，不是决策记录。一旦方向定下，其中的决策点落入
 ADR-0017（`docs/decisions/0017-layered-context.md`）。讨论中仍未定的问题见 §14。
 

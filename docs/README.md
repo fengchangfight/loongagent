@@ -17,6 +17,12 @@ is tracked here so decisions survive context windows and sessions.
   a decision's status is part of the record rather than metadata about the file;
   `archive/` keeps its headers, because archived material is history and is not
   maintained; and the `superpowers/` spec keeps its `Date:` and `Status:`.
+- A document under `docs/` whose body is not English carries a `Language: <code>`
+  line immediately below its title, so a reader who cannot read the language is
+  warned before the first paragraph. `docs/06-context-engineering.md` and
+  `docs/decisions/0017-layered-context.md` are the two marked exceptions, and
+  translating them is not in scope. (`README.md` is Chinese throughout and is
+  not marked: it is the entry document, not an exception inside `docs/`.)
 - Docs are updated in place whenever discussion changes the design — they reflect
   the *current* shared understanding, not a history. History lives in git.
 - Nothing is "Agreed" until the human explicitly signs off in conversation.

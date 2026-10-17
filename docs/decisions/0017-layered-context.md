@@ -1,5 +1,7 @@
 # ADR-0017 — Context engineering: layered, reversible memory instead of lossy compaction
 
+Language: zh
+
 - **Status:** Proposed（整体形态待 owner sign off；**§1 检索层/理解层分离、§2 分层、
   §5 两模式已获 owner 认可方向**；未定项见文末）
 - **Date:** 2026-10-13（同日更新：owner 选定 Ollama 小模型后端；字段归属规则见 Decision §4，

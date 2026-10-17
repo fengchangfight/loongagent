@@ -52,7 +52,7 @@ answers cannot silently rot.
 | 2 | Every statically falsifiable statement is true | Every number, ADR range, link and status claim in §1 above verified after the change |
 | 3 | Document rot is caught by a gate | `scripts/check-docs.py` runs inside `scripts/check.sh` and each of its checks has been shown to fail on a seeded defect |
 | 4 | Four oversized files are split with zero API and behaviour change | Every moved item token-identical (whole items, not bare bodies — see §4.4); `cargo test -- --list` name set unchanged; no `Cargo.toml` diff; 736 tests still pass |
-| 5 | Redundancy that costs nothing to remove is gone | Zero declared-but-unused dependencies; zero dead functions |
+| 5 | Redundancy that costs nothing to remove is gone | Zero declared-but-unused dependencies, measured with `cargo tree --depth 1`; the one known dead function (`pack_of`) and its `allow(dead_code)` are gone. "Zero dead functions" is not falsifiable — a never-called `pub fn` produces no warning — so the verified claim is the known one |
 
 ## 3. Non-goals
 

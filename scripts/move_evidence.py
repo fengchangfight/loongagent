@@ -16,14 +16,19 @@ sorted.  Comparing the sorted multisets of two revisions is the evidence that
 the move changed nothing: every item that existed before still exists, with the
 same code, whether it stayed in the parent file or left for a new one.
 
-Two granularities make a method distribution visible rather than a churn of
+Three granularities make a method distribution visible rather than a churn of
 giant blocks:
 
-* **A method is an item.**  A `fn` written inside an `impl` is printed with kind
-  `method` and a qualified name (`Kernel::build`, `App::handle_key`), hashed over
-  its attributes, visibility, signature and body exactly as a free `fn` is.  A
-  method that moves between files keeps the same `(kind, name, sha256)`; one
-  whose body, signature or visibility changes shows it.
+* **A free `fn` is an item.**  It is printed with kind `fn`, hashed over its
+  attributes, visibility, signature and body like every other item.
+* **A method is an item.**  A `fn` written at the top level of an `impl` body is
+  printed with kind `method` and a qualified name (`Kernel::build`,
+  `App::handle_key`), hashed over its attributes, visibility, signature and body
+  exactly as a free `fn` is.  A method that moves between files keeps the same
+  `(kind, name, sha256)`; one whose body, signature or visibility changes shows
+  it.  A `fn` nested deeper than the `impl` body -- inside a method -- is not a
+  method of that container: it keeps kind `fn` and is named after the function
+  that encloses it, so its nesting cannot be mistaken for a sibling method.
 * **A container is a header, not a body candidate.**  An `impl` item hashes only
   its attributes and header (`impl Kernel`, its generics and where-clause), never
   the methods inside it, and is named after that header.  Re-creating `impl
@@ -1477,11 +1482,15 @@ def _reflow(
       comparison.  That is where a new submodule's `use super::*;` /
       `use crate::...` / `mod` header goes -- lines no contiguous range of the
       old file contains.
-    * `--allow-widening NAME` permits the line defining NAME to differ by its
-      visibility keyword only, and only in the widening direction.  The check is
-      the one `items` already makes: the visibility token is stripped from both
-      lines and their canonical token streams must be equal, so a retyped
-      parameter, a different keyword or any other edit on that line fails.
+    * `--allow-widening NAME` permits the definition of NAME to differ by its
+      visibility keyword only, and only in the widening direction.  The
+      definition -- its attributes and signature -- is compared as a *span*, not
+      as a line, because adding the keyword can push a signature past rustfmt's
+      width and make it re-wrap; the two spans may therefore differ in length.
+      The check is the one `items` already makes: the visibility token is
+      stripped from both spans and their canonical token streams must be equal,
+      so a retyped parameter, a different keyword or any other edit in that
+      definition fails.
 
     With neither flag the assertion is exactly what it was before them.
     """
@@ -1641,8 +1650,9 @@ def main(argv: list[str] | None = None) -> int:
         metavar="NAME",
         action="append",
         default=[],
-        help="permit the line defining NAME to differ by a visibility widening "
-        "only (repeatable); any other edit on that line still fails",
+        help="permit the definition of NAME to differ by a visibility widening "
+        "only (repeatable); the definition is compared as a span, so rustfmt "
+        "re-wrapping it is allowed but any other edit still fails",
     )
 
     compare = subparsers.add_parser(

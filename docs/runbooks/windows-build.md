@@ -163,8 +163,8 @@ never be a scatter of `cfg` in unrelated code:
 | `loong-proc` | `src/lib.rs` (`Shell`, `prepare_process_group`, `kill_process_group`) | `sh` vs `cmd.exe`; `kill(-pgid)` vs `taskkill /T`; CRLF normalisation |
 | `loong-tui` | `src/lib.rs` (`interrupt`) | `SIGINT` to a pid vs `CTRL_BREAK_EVENT` to a process group |
 | `loong-server` | `src/lib.rs` (`handle_interrupt`, `install_interrupt_handler`) | signal handler vs console control routine |
-| `loong-config` | `src/lib.rs` (`home_dir`, `system_config_dir`) | `HOME`/`USERPROFILE`; `/etc` vs `%PROGRAMDATA%` |
-| `loong-tui-app` | `src/lib.rs` (`run`) | the console code page, once, before the alternate screen |
+| `loong-config` | `src/paths.rs` (`home_dir`, `system_config_dir`) | `HOME`/`USERPROFILE`; `/etc` vs `%PROGRAMDATA%` |
+| `loong-tui-app` | `src/surface.rs` (`run`) | the console code page, once, before the alternate screen |
 
 `loong-cli` sets the server child's creation flags and the demo's out-of-workspace
 path; `loong-mcp` gives an MCP server its own process group so its tree can be torn

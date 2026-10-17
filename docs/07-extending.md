@@ -206,6 +206,7 @@ One inspection does not work, and it is worth knowing before reaching for it:
 `config_explain` (`crates/cli/src/config_cmd.rs`) reduces a key to its first path segment
 while `kind_of` (`crates/config/src/layer.rs`) knows only the dotted keys. Read the
 effective rules with `loongagent config show`, whose row for `router.default` and
-`router.rules` prints the key, the value, its kind and the file that set it — the layer
-that file belongs to is the separate list of layer files printed above the table — and
+`router.rules` prints the key, the value, its kind and the `set by` source — the path of
+the file that set it, or `control plane: <issuer> <version>` for a value a signed pack
+set, since the layer-file list printed above the table names only the file layers — and
 read what actually fired with the `model.selected` grep above.

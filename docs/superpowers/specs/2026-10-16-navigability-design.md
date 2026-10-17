@@ -229,8 +229,9 @@ keep compiling untouched.
 - **Delete one dead function**: `pack_of` and its `#[allow(dead_code)]` in
   `crates/control/src/bin/loongagent-control.rs`. It was the workspace's only
   **unconditional** `allow(dead_code)`: the base tree had one other, a
-  `#[cfg_attr(not(unix), allow(dead_code))]` on a Linux-only field in
-  `crates/kernel/src/turn.rs`, which stays. The workspace compiles with zero
+  `#[cfg_attr(not(unix), allow(dead_code))]` on a field in
+  `crates/kernel/src/turn.rs` that exists on every platform and is read only in
+  the `#[cfg(unix)]` half of `confine`, which stays. The workspace compiles with zero
   warnings without the deleted one.
 - **Collapse one duplicated test helper**: `isolated_command`, three byte-identical copies in
   `crates/cli/tests/{tui_surface,web_surface,vertical_slice}.rs`, moves to

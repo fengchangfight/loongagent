@@ -16,7 +16,7 @@ ADR-0006 定下的机制是对的：上下文只能由内核组装，每个块�
 
 > 越预算 → 先清旧工具输出 → 再 `drop_oldest_exchange()` 丢掉最老的整轮对话。
 
-`drop_oldest_exchange()`（`crates/kernel/src/turn.rs:1954`）把消息从会话里 `drain`
+`drop_oldest_exchange()`（`crates/kernel/src/turn/compaction.rs`）把消息从会话里 `drain`
 掉、账本条目 `forget` 掉。前台从此只剩"更短但更模糊"的记忆，而"当时为什么这么设计 /
 那个 bug 是怎么查的 / 哪个方案被否决了"这类问题，答案被丢掉的正是最值钱的部分：
 **原因与被否决的方案**，恰恰不是可以重新运行命令再生成的东西。原文还在日志里，

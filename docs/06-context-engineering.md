@@ -33,7 +33,7 @@ ADR-0017（`docs/decisions/0017-layered-context.md`）。讨论中仍未定的�
 | 事件日志 | `crates/eventlog` | 每会话一个 append-only JSONL，`seq/id/parent_id/kind/time_ms/data`；**唯一真相**（ADR-0003） |
 | 派生索引 | `crates/index` | SQLite `events(seq,id,parent_id,kind,ignorable,time_ms,data)`；可丢弃重算 |
 | 上下文账本 | `crates/kernel/src/ledger.rs` | 每个进入模型的块是一条带 category/source/tokens/lifetime/pinned 的条目；**通往模型的唯一写路径**（ADR-0006） |
-| 压缩 | `crates/kernel/src/turn.rs:1884` | 越 `input_ceiling()`（预算 × `compact_at_percent`，或 模型窗口 − reserve）时：①清旧工具输出 ②丢弃最老的整轮对话 |
+| 压缩 | `crates/kernel/src/turn/compaction.rs` | 越 `input_ceiling()`（预算 × `compact_at_percent`，或 模型窗口 − reserve）时：①清旧工具输出 ②丢弃最老的整轮对话 |
 | 可见性 | `ContextExplain` | 分类 token 明细、条目来源、压缩次数 |
 
 现状的问题正是引言里那句：**替换原文**。`drop_oldest_exchange()` 把消息从
@@ -634,7 +634,7 @@ L4 必须**有 token 上限**：当前是常量 `L4_MAX_TOKENS = 400`（`synthes
 
 **owner 决定（2026-10-13）：小模型后端先用本机 Ollama。** 默认模型已按 2026-10-14 的
 忠实度重测改为 `qwen2.5:7b-instruct`（见 §14 未决项 2）。
-**真正被解析的键**（`crates/config/src/lib.rs`，2026-10-14 核对）：只有下面这些。
+**真正被解析的键**（`crates/config/src/layer.rs`，2026-10-14 核对）：只有下面这些。
 `RawContextEngine` / `RawSummarizer` 都是 `deny_unknown_fields`，所以写了未列出的键会
 **报错**，不会被静默忽略 —— 早期草案里的键照抄进配置会直接启动失败。
 
@@ -783,7 +783,7 @@ TUI 在 F2 面板渲染它们，并在降级时于状态栏常驻 `mem ⚠ degra
   （`crates/context/tests/two_writers.rs` 里有对照组：超时为 0 时同样的写在 300 ms
   的锁下**立即**报 `database is locked`）。
 - **线程归属：引擎（`crates/kernel/src/context_engine.rs`），不是 server 也不是 CLI。**
-  两者都通过同一个工厂建 kernel（`crates/cli/src/main.rs`），`session.new` 换掉的是
+  两者都通过同一个工厂建 kernel（`crates/cli/src/server.rs`），`session.new` 换掉的是
   整个 kernel，一次性 CLI 运行根本没有会话生命周期对象 —— 把生命周期放在任一面，
   另一面就会忘了启动或停止。引擎是唯一同时知道自己那份日志、那个库和那个前台信号的
   组件。`Drop` 有界等待 250 ms，等不到就放线程走：换会话不该等一次飞行中的模型调用。

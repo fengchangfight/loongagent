@@ -656,13 +656,13 @@ thirteen definitions in all:
 - `now_ms` — `crates/hooks/src/run.rs` (the `pub` one),
   `crates/eventlog/src/lib.rs` (`i64`), `crates/plugin/src/lib.rs` and
   `crates/control/src/lib.rs`;
-- `expand_home` — `crates/plugin/src/lib.rs` and `crates/config/src/lib.rs`;
-- `first_line` — `crates/cli/src/main.rs` and
+- `expand_home` — `crates/plugin/src/lib.rs` and `crates/config/src/paths.rs`;
+- `first_line` — `crates/cli/src/control.rs` and
   `crates/control/src/bin/loongagent-control.rs` (byte-identical), plus a
   different, length-bounded third in `crates/hooks/src/run.rs`;
 - `truncate` — `crates/context/src/store.rs` and `crates/tui/src/lib.rs`;
 - `clip` — `crates/tui-app/src/lib.rs` (columns, CJK-aware) and
-  `crates/cli/src/main.rs` (characters).
+  `crates/cli/src/session.rs` (characters).
 
 **Not consolidated now:** one home for these means a **new shared public
 surface** — a crate or a `pub` module that each of those crates depends on — and

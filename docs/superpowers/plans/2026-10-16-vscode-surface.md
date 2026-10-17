@@ -440,12 +440,12 @@ export class LoongSession {
 //   → session.cancel() → child.signals equals ["SIGINT"]
 ```
 
-- [ ] **Step 1: Run the tests to verify they fail**
+- [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `cd clients/vscode && npm test`
 Expected: FAIL — `Cannot find module '../src/session.ts'`.
 
-- [ ] **Step 2: Implement `LoongSession` in `src/session.ts`**
+- [ ] **Step 3: Implement `LoongSession` in `src/session.ts`**
 
 Determined by the tests and the generated schema:
 - Every request body carries the current `session_id` where the schema's params type has one (all of them except `session.attach`/`session.new`); a request sent before any id exists throws with a message saying to attach first.
@@ -453,19 +453,19 @@ Determined by the tests and the generated schema:
 - Map a refusal (`error.data` naming a different session, or a message containing `session`) onto `SessionRefusedError` so callers re-attach instead of retrying blindly (Review Focus #5).
 - Method names come from `METHODS.*`; event kinds are compared against `EVENTS.*`.
 
-- [ ] **Step 3: Widen the `client` doc string and regenerate**
+- [ ] **Step 4: Widen the `client` doc string and regenerate**
 
 In `crates/schema/protocol.toml`, `SessionAttachParams.client`'s doc currently reads `tui | web | acp`; it becomes `tui | web | vscode | acp`. This is a doc-only change: no field, type, or wire change.
 Run: `python3 scripts/gen-schema.py`
 Expected: four generated files rewritten; `python3 scripts/gen-schema.py --check` exits 0.
 
-- [ ] **Step 4: Run the tests, the typecheck, and the schema check**
+- [ ] **Step 5: Run the tests, the typecheck, and the schema check**
 
 Run: `cd clients/vscode && npm test && npm run typecheck`
 Run: `python3 scripts/gen-schema.py --check`
 Expected: PASS; schema check silent.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add clients/vscode/src/session.ts clients/vscode/test/session.test.ts crates/schema/protocol.toml crates/schema/src/generated.rs crates/schema/tests/generated_roundtrip.rs clients/ts/protocol.generated.ts clients/ts/protocol.samples.json
@@ -544,12 +544,12 @@ export class TurnController {
 //   after the rejection above, a new run() with an answered prompt.submit resolves
 ```
 
-- [ ] **Step 1: Run the tests to verify they fail**
+- [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `cd clients/vscode && npm test`
 Expected: FAIL — `Cannot find module '../src/turn.ts'`.
 
-- [ ] **Step 2: Implement `TurnController` in `src/turn.ts`**
+- [ ] **Step 3: Implement `TurnController` in `src/turn.ts`**
 
 The loop, exactly as the protocol forces it (spec §4.4):
 
@@ -560,12 +560,12 @@ The loop, exactly as the protocol forces it (spec §4.4):
 
 `model.delta` notifications go to `hooks.onDelta`; everything else goes through `session.events` to `hooks.onEvent`. `approval.decided` clears `pendingApproval` if it matches.
 
-- [ ] **Step 3: Run the tests to verify they pass**
+- [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd clients/vscode && npm test && npm run typecheck`
 Expected: PASS.
 
-- [ ] **Step 4: Register the smoke command and prove the link (spec step 0)**
+- [ ] **Step 5: Register the smoke command and prove the link (spec step 0)**
 
 Add `loongagent.smoke` to `package.json`'s `contributes.commands` and register it in `extension.ts`: resolve `loongagent.path`, spawn `server --stdio --cwd <first workspace folder>` plus `--model`/`extraArgs` when configured, `attach`, run one fixed prompt (`"Say hello in one sentence, then stop."`) with a decider that always denies, and print every delta and every event kind to the output channel. Pipe the child's stderr into the same channel.
 
@@ -580,7 +580,7 @@ ls -t ~/.loongagent/projects/*/<id>.jsonl | head -1
 ```
 Expected: the streamed text matches the `message.appended` in the log. This is the step-0 acceptance in the spec §5.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add clients/vscode/src/turn.ts clients/vscode/test/turn.test.ts clients/vscode/src/extension.ts clients/vscode/package.json
@@ -646,21 +646,21 @@ export function pathsInArgs(args: JsonValue): string[];
 // touchedFiles accumulates within a turn and resets on beginTurn
 ```
 
-- [ ] **Step 1: Run the tests to verify they fail**
+- [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `cd clients/vscode && npm test`
 Expected: FAIL — `Cannot find module '../src/render.ts'`.
 
-- [ ] **Step 2: Implement `Renderer` and `pathsInArgs` in `src/render.ts`**
+- [ ] **Step 3: Implement `Renderer` and `pathsInArgs` in `src/render.ts`**
 
 Rules: compare `envelope.kind` against `EVENTS.*`; never invent a verdict, rule, or scope value — quote what the event carries. The tool-call line prints each touched path relative to `options.cwd` when it is inside it, and absolute when it is not (a path outside the workspace must stay legible as outside). Truncation keeps the head and appends a marker naming how much was dropped. `pathsInArgs` walks the JSON, collects string values that start with `/` (and, on a non-POSIX path, with a drive letter), rejects values containing `://`, deduplicates, and does **not** touch the filesystem.
 
-- [ ] **Step 3: Run the tests to verify they pass**
+- [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd clients/vscode && npm test && npm run typecheck`
 Expected: PASS.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add clients/vscode/src/render.ts clients/vscode/test/render.test.ts
@@ -718,21 +718,21 @@ export class FileSnapshots {
 //   see then clear then left → undefined
 ```
 
-- [ ] **Step 1: Run the tests to verify they fail**
+- [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `cd clients/vscode && npm test`
 Expected: FAIL — `Cannot find module '../src/snapshots.ts'`.
 
-- [ ] **Step 2: Implement `FileSnapshots` in `src/snapshots.ts`**
+- [ ] **Step 3: Implement `FileSnapshots` in `src/snapshots.ts`**
 
 Containment check before any read: `path.resolve(candidate)` must equal the workspace or start with `workspace + path.sep`. Reads are `readFileSync(path, "utf8")` inside a try/catch; an `ENOENT` is `"new file"`, anything else is `"unreadable"` (with the error's code appended to the note). The class never writes.
 
-- [ ] **Step 3: Run the tests to verify they pass**
+- [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd clients/vscode && npm test && npm run typecheck`
 Expected: PASS.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add clients/vscode/src/snapshots.ts clients/vscode/test/snapshots.test.ts

@@ -468,18 +468,21 @@ class GateTest(unittest.TestCase):
     # -- citations -----------------------------------------------------------
 
     def test_citations_read_topic_headings_under_docs_topics(self) -> None:
+        # The second directory carries the higher number on purpose: with only
+        # docs/02-topics.md read, T-06 would exceed the limit and the check
+        # would fail. Both locations have to be read for T-06 to pass.
         self.write("docs/decisions/0001-fixture.md", document("ADR-0001"))
         self.write("docs/02-topics.md", "# Topics\n\n## T-05 · moved later\n")
-        self.write("docs/topics/open.md", "# Open topics\n\n## T-03 · open\n")
-        self.write("docs/notes.md", "# Notes\n\nSee T-03 and T-05.\n")
+        self.write("docs/topics/open.md", "# Open topics\n\n## T-07 · open\n")
+        self.write("docs/notes.md", "# Notes\n\nSee T-06.\n")
         self.init_git()
         self.assert_passes(self.run_gate("--check", "citations"))
 
-        self.write("docs/notes.md", "# Notes\n\nSee T-06.\n")
+        self.write("docs/notes.md", "# Notes\n\nSee T-08.\n")
         self.assert_fails(
             self.run_gate("--check", "citations"),
-            "T-06 does not exist",
-            "highest is 5",
+            "T-08 does not exist",
+            "highest is 7",
         )
 
 

@@ -113,9 +113,10 @@ set, crate by crate, is [`../crate-map.md`](../crate-map.md), generated from
 | [kernel-loop.md](kernel-loop.md) | A turn: the step loop, the model and tool calls, the approval seam, and the ways a turn ends. | `crates/kernel/src/turn.rs`, `crates/kernel/src/turn/loop.rs` |
 | [context-ledger.md](context-ledger.md) | What the model is shown: the ledger's categories and lifetimes, the budget, compaction, and `recall`. | `crates/kernel/src/ledger.rs`, `crates/kernel/src/turn/compaction.rs` |
 | [tools-permissions.md](tools-permissions.md) | The uniform tool interface, action classes, the PDP's allow/ask/deny, and the two enforcers. | `crates/tools/src/lib.rs`, `crates/sandbox/src/` |
+| [events-storage.md](events-storage.md) | The schema, the JSONL log as truth, the derived SQLite index, and the two tree levels. | `crates/schema/protocol.toml`, `crates/eventlog/src/lib.rs`, `crates/index/src/lib.rs` |
+| [config-routing.md](config-routing.md) | Layered configuration, signed packs and local trust, the model router, and the provider interface. | `crates/config/src/`, `crates/manifest/src/lib.rs`, `crates/providers/src/` |
 
-A row is added by the task that writes the document; a mechanism with no row has
-no page in this layer to own it yet.
+A row is added by the task that writes the document; a mechanism with no row has no page in this layer to own it yet.
 
 ## Reading paths
 

@@ -138,6 +138,9 @@ concept and one loader — and configuration packs (ADR-0004).
 | T-07 | Pack distribution: one signed envelope (Ed25519), key pinned out of band; a verified pack is the locked `control` layer | [0016](decisions/0016-pack-distribution.md) |
 | — | Plugins: install content by name, seat what a plugin asks for, **execute nothing** — hooks stay a per-repository gate | [0018](decisions/0018-plugin-install-and-bootstrap.md) |
 
+The detail behind AQ-2 and AQ-3 is in [events-storage.md](design/events-storage.md), and
+behind AQ-6 and AQ-9 in [config-routing.md](design/config-routing.md).
+
 ---
 
 ## 5. The guarantees, and what enforces them

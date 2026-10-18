@@ -4,7 +4,8 @@
 //!
 //! # Contract
 //! - **Serves:** a turn a person can follow and audit: every step is an event
-//!   (ADR-0003) and every tool call has a recorded verdict (ADR-0007).
+//!   (ADR-0003) and every gated registry tool call has a recorded verdict
+//!   (ADR-0007).
 //! - **Design:** `docs/design/kernel-loop.md`; ADR-0004 fixes this loop, and
 //!   ADR-0006 owns the ledger it feeds.
 //! - **Upstream:** `Server`'s `prompt.submit` and `approval.respond` handlers, and
@@ -38,7 +39,8 @@ impl Kernel {
     /// Serves: a caller that needs to know whether the session is waiting on a
     /// human before it may start another turn.
     /// Design: `docs/design/kernel-loop.md` §5.
-    /// Up: `Kernel::submit_with` consults it before starting a turn.
+    /// Up: a surface or status reader (no in-tree caller; `Kernel::submit_with`
+    /// checks `self.pending` directly).
     /// Down: `PendingCall`, `Kernel::respond_to_approval`.
     /// Verify: `cargo test -p loong-kernel turn::tests::an_out_of_bounds_write_asks_then_resumes_on_the_answer`.
     pub fn pending(&self) -> Option<&PendingCall> {
@@ -51,8 +53,8 @@ impl Kernel {
     /// Purpose: The no-preview entry point: one user turn, run to an ending.
     /// Serves: a caller that has nowhere to stream model deltas to.
     /// Design: `docs/design/kernel-loop.md` §2 and §6.
-    /// Up: `Kernel::submit_with` is the same path with a delta callback; surfaces
-    /// reach a kernel through the server's `prompt.submit`.
+    /// Up: callers that do not stream (in-tree `turn::tests`); the server's
+    /// `prompt.submit` uses `Kernel::submit_with`.
     /// Down: `Kernel::submit_with`.
     /// Verify: `cargo test -p loong-kernel turn::tests::a_tool_runs_and_the_turn_finishes`.
     pub fn submit(&mut self, text: &str) -> Result<TurnOutcome, KernelError> {
@@ -311,8 +313,9 @@ impl Kernel {
     /// Up: `Kernel::run`.
     /// Down: `Kernel::interrupted`, `Kernel::refresh_map`,
     /// `Kernel::compact_if_needed`, `Kernel::tool_specs`, `Router::select`,
-    /// `Model::complete_streaming`, `Kernel::record_cost`,
-    /// `Kernel::record_assistant`, `Kernel::dispatch`, and the nudge helpers.
+    /// `Model::complete_streaming`, `Kernel::record_model_selected`,
+    /// `Kernel::record_cost`, `Kernel::record_assistant`, `Kernel::dispatch`,
+    /// `leaked_tool_call`, `looks_like_pasted_file`.
     /// Verify: `cargo test -p loong-kernel turn::tests::the_step_limit_stops_a_spinning_model`.
     fn run_inner(
         &mut self,
@@ -727,7 +730,8 @@ impl Kernel {
     ///
     /// Serves: a status surface that must show the session is in `/yolo` mode.
     /// Design: `docs/design/kernel-loop.md` §5.
-    /// Up: `Kernel::dispatch`, on the `Verdict::Ask` arm.
+    /// Up: a surface or status reader (no in-tree caller; `Kernel::dispatch`
+    /// reads `self.auto_approve` directly).
     /// Down: `Kernel::set_auto_approve` is the only setter.
     /// Verify: `cargo test -p loong-kernel turn::tests::opting_out_of_prompts_allows_the_action_and_says_so_in_the_log`.
     pub fn auto_approve(&self) -> bool {

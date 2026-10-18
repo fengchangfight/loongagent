@@ -14,28 +14,35 @@ code that implements it, and links down rather than repeating detail.
 
 ```mermaid
 flowchart TD
+    BIN["loongagent<br/>one binary, many faces (ADR-0009)"]
+
     subgraph surfaces["Surfaces — thin clients (ADR-0009)"]
-        BIN["loongagent<br/>one binary, many faces"]
-        SERVER["loong-server<br/>sessions live here"]
         TUIAPP["loong-tui-app"]
         TUI["loong-tui"]
         WEB["loong-web"]
     end
 
-    subgraph kernel["Fixed kernel (ADR-0004)"]
-        KERNEL["loong-kernel<br/>turn loop · ledger · PDP"]
+    subgraph server["Local server (ADR-0001)"]
+        SERVER["loong-server<br/>sessions live here"]
+    end
+
+    subgraph fixed["Fixed kernel (ADR-0004)"]
+        KERNEL["loong-kernel<br/>model+tool loop · ledger · context assembly"]
+        EVENTLOG["loong-eventlog<br/>fixed event append — JSONL truth"]
+    end
+
+    subgraph edges["Kernel-side crates — in-process edges (ADR-0004)"]
         CTX["loong-context"]
         HOOKS["loong-hooks"]
         MCP["loong-mcp"]
         SKILLS["loong-skills"]
         TOOLS["loong-tools"]
         PROVIDERS["loong-providers"]
-        SANDBOX["loong-sandbox"]
+        SANDBOX["loong-sandbox<br/>PDP decision + OS PEP (ADR-0007)"]
         CONFIG["loong-config"]
     end
 
     subgraph shared["Shared services, storage and distribution"]
-        EVENTLOG["loong-eventlog<br/>JSONL truth"]
         INDEX["loong-index<br/>derived SQLite"]
         PROTOCOL["loong-protocol"]
         PLUGIN["loong-plugin"]
@@ -90,11 +97,13 @@ flowchart TD
     PROVIDERS --> SCHEMA
 ```
 
-The arrows are the dependency direction the layering check enforces: they point
-down, a client never reaches back into the kernel, and the schema is the bottom.
-Only the edges that show the layers are drawn; the complete allowed set, crate by
-crate, is [`../crate-map.md`](../crate-map.md), which is generated from
-`scripts/layering_rules.py`.
+The arrows point from a dependent crate to a crate it uses. Most point down the
+layers, but the allowed set is not a strict hierarchy: `loong-control` →
+`loong-config` and `loong-plugin` → `loong-skills` cross sideways, and both are in
+[`../crate-map.md`](../crate-map.md). The fixed kernel is the loop and ledger in
+`loong-kernel` plus the event append in `loong-eventlog`; the crates around it are
+in-process edges even where the kernel always calls one of them. The complete
+allowed set, crate by crate, is generated from `scripts/layering_rules.py`.
 
 ## Subsystem documents
 

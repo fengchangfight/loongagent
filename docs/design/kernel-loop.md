@@ -27,9 +27,6 @@ callback.
 | Capabilities | `Kernel.tools` (`Registry`), `Kernel.pdp`, `Kernel.models` + `Kernel.router`, `Kernel.hooks`, `Kernel.skills`. |
 | Preview stream | `on_delta`; the provider calls it, and it changes no record. |
 
-A turn leaves a `TurnOutcome` and a longer event log. The log is the durable
-record; the rest is derived from it or disappears with the process.
-
 | Output | Meaning |
 |---|---|
 | `TurnOutcome.events` | The sequence numbers this turn appended, in order. |
@@ -53,9 +50,9 @@ One iteration is **one model completion**, counted by
    return at once. The check is at the step boundary, not inside a tool, so a tool
    that has begun finishes.
 2. **Context preparation.** `Kernel::refresh_map` refreshes the layered L4 map in
-   place when that feature is on; `Kernel::compact_if_needed` clears stale tool
-   output and drops old exchanges if the request is over its ceiling, appending
-   `compaction.applied` only when something changed.
+   place when that feature is on. `Kernel::compact_if_needed` clears stale tool
+   output; when the layered engine is off it also drops the oldest exchanges. It
+   appends `compaction.applied` only when something changed.
 3. **Request.** `CompletionRequest { messages: self.messages.clone(), tools:
    self.tool_specs() }`. `Kernel::tool_specs` adds `recall` only when there is a
    memory behind it.
@@ -85,15 +82,18 @@ If the loop completes every step without an answer, it appends one assistant
 |---|---|---|
 | **Model call** | `Kernel::run_inner` → `Model::complete_streaming` | Sends `Kernel.messages` plus the tool specs. Streaming deltas are a preview: they are not logged, not ledgered, and do not change the outcome. |
 | **Tool call** | `Kernel::dispatch` → `Pdp::decide` → `Kernel::execute` | The PDP returns allow / ask / deny plus the rule. `Kernel::execute` is the PEP: it builds an `ExecContext` from `Kernel.config.cwd` and `Kernel.confinement`, then calls the `Tool` in `Kernel.tools`. |
-| **Ledger append** | `Kernel::record_user`, `Kernel::record_assistant`, `Kernel::record_tool_result` | Each adds a `Ledger` entry *and* pushes the matching `ChatMessage`. That lockstep is what makes `Kernel.messages` the ledger's view — with the one exception in §4. The system prompt and the L4 map are seated the same way by `Kernel::seat_system_prompt` and `Kernel::refresh_map`. `Kernel::compact_if_needed` is the only code that removes or clears them. |
+| **Ledger append** | `Kernel::record_user`, `Kernel::record_assistant`, `Kernel::record_tool_result` | Each adds a `Ledger` entry *and* pushes the matching `ChatMessage`. That lockstep is what makes `Kernel.messages` the ledger's view — with the one exception in §4. The system prompt and the L4 map are seated the same way by `Kernel::seat_system_prompt` and `Kernel::refresh_map`. `Kernel::compact_if_needed` is the only code that drops messages or clears tool output; the system prompt and the map are pinned, and the map is refreshed in place. |
 | **Event append** | `Kernel::append` | Writes to `SessionLog`, mirrors the event into the derived `Index` (a failure marks `index_stale` rather than failing the turn), and calls the live `event_sink`. Every event the loop emits goes through it. |
 
-The order inside one tool call is normally fixed: `tool.call`, any `hook.fired`
-from a `pre_tool` hook, `policy.decided`, then `tool.result` and any `post_tool`
-`hook.fired`; an ask writes `approval.requested` in place of the result, and a
-`/yolo` ask records the relaxation as a second `policy.decided` before it runs. A
-`recall` call is the exception: it is answered from the session's own record and
-skips both the registry and the PDP, so it writes `tool.call` then `tool.result`.
+Inside one registry tool call the events normally run: `tool.call`, any
+`hook.fired` from a `pre_tool` hook, `policy.decided`, then `tool.result` and any
+`post_tool` `hook.fired`. The PDP decides before `tool.call`; the hooks may tighten
+the verdict, so `policy.decided` records the stricter one. An ask fires the
+`permission_requested` hooks and then writes `approval.requested` in place of the
+result. A `/yolo` ask records the relaxation as a second `policy.decided` and a
+second `tool.call` before it executes. A `recall` call is the exception: it is
+answered from the session's own record and skips both the registry and the PDP, so
+it writes `tool.call` then `tool.result`.
 
 Hooks can tighten a ruling but never widen one (`tighten` in `turn/hooks.rs`), so
 the verdict in `policy.decided` is the stricter of the PDP's and the hooks'.
@@ -111,33 +111,35 @@ The **nudge** exists because a model sometimes answers with a file pasted into
 chat, or with a tool call printed as text. In the no-tool-call branch, before
 accepting the answer:
 
-- `leaked_tool_call` recognises a printed call and names the tool, but ignores a
-  tool that already ran this turn — quoting a call you made is a summary, not a
-  missed action.
-- `looks_like_pasted_file` recognises a fenced whole file, and only before any
-  tool has run, so later code quotes are safe.
+- `leaked_tool_call` recognises a printed call and names the tool. `run_inner`
+  drops a name that already ran this turn (`ran`): quoting a call you made is a
+  summary, not a missed action.
+- `looks_like_pasted_file` recognises a fenced whole file. `run_inner` only asks
+  it when `ran.is_empty()`: after real work, code quotes are safe.
 
 If either fires, once per turn, the loop pushes a `ChatMessage::User` correction
-into `Kernel.messages` and continues. Two details matter: the correction is not a
-`message.appended` event (the person did not say it), and it adds no ledger entry,
-so it is not counted against the context budget. It consumes a step. A second
-offence is accepted rather than argued with: the person sees what happened.
+into `Kernel.messages` and continues. The correction is not a `message.appended`
+event (the person did not say it) and adds no ledger entry. It consumes a step,
+and a second offence is accepted rather than argued with. Because the correction
+is in `Kernel.messages` but not the ledger, the next request carries it while
+`ledger.total_tokens()` does not count it: compaction can undercount the prompt
+by that message.
 
 ## 5. Interruption, approval and resume
 
 **Interruption.** `Kernel.interrupted` is an `AtomicBool`. `Kernel::interruptor`
-hands it to the server, which gives it to the process's signal handler;
-`Kernel::use_interruptor` lets the server adopt a process-wide flag again after
-`/new`. The loop reads it only at a step boundary. `Kernel::submit_with` clears it
-at the start of every new turn: a stop asked once belongs to that turn.
-`Kernel::respond_to_approval` deliberately does *not* clear it, because an
-approval resumes the same turn, so a stop asked while the question was open still
-stands. A stopped turn appends `turn.interrupted` and returns
-`interrupted: true` with no answer.
+hands it to the server's signal handler; `Kernel::use_interruptor` lets the server
+adopt a process-wide flag again after `/new`. The loop reads it only at a step
+boundary. `Kernel::submit_with` clears it at the start of every new turn: a stop
+asked once belongs to that turn. `Kernel::respond_to_approval` deliberately does
+*not* clear it, because an approval resumes the same turn, so a stop asked while
+the question was open still stands. A stopped turn appends `turn.interrupted` and
+returns `interrupted: true` with no answer.
 
 **Approval.** A `Verdict::Ask` parks the call instead of blocking: `dispatch`
-appends `approval.requested` with an id (`appr-N`), stores a `PendingCall`, and
-returns it in `TurnOutcome.pending_approval`. The surface asks the human.
+appends `approval.requested` with an id (`appr-N`) and returns `Dispatch::Pending`;
+`run_inner` stores the `PendingCall` in `self.pending` and puts it in
+`TurnOutcome.pending_approval`. The surface asks the human.
 `Kernel::respond_to_approval` checks the id, appends `approval.decided`, fires the
 `permission_decided` hooks, and then either runs the call and records `tool.result`
 (plus the `post_tool` hooks) or records a failed result saying the user denied it.
@@ -171,8 +173,7 @@ A tool that fails is not a failed turn: its `tool.result` has `ok: false`, the
 model reads the error, and the loop continues. A policy `Deny` is the same shape.
 `Kernel::append` treats an index write failure as a stale index, not as a lost
 event. What ends a turn with an error is the model transport, a log write, an
-encoding failure, or a caller using the API out of order (a second turn while an
-approval is pending, or an answer with nothing pending).
+encoding failure, or a caller using the API out of order.
 
 ## 7. One turn, in sequence
 
@@ -192,7 +193,6 @@ sequenceDiagram
     K->>L: message.appended (user)
     K->>H: user_prompt_submit
     H-->>K: allow, or tighten
-    Note over K: tightened -> TurnOutcome.refused, no model call
 
     loop each step, up to max_steps
         Note over K: interrupted? -> turn.interrupted and return
@@ -203,20 +203,28 @@ sequenceDiagram
         M-->>K: text and/or tool_calls
         K->>L: cost.recorded
         alt no tool calls
-            K->>L: message.appended (assistant answer)
-            K-->>S: TurnOutcome { final_text }
+            alt nudge fires (once)
+                K->>K: correction in messages; continue loop
+            else answer stands
+                K->>L: message.appended (assistant answer)
+                K-->>S: TurnOutcome { final_text }
+            end
         else tool calls
             K->>L: message.appended (assistant)
-            loop each call in order
-                K->>L: tool.call
+            loop each registry call in order
                 K->>P: decide(action_class)
                 P-->>K: allow / ask / deny
-                K->>L: policy.decided
+                K->>L: tool.call
+                K->>H: pre_tool
+                H-->>K: allow, or tighten
+                K->>L: policy.decided (the stricter verdict)
                 alt allow
                     K->>T: execute(args)
                     T-->>K: output
                     K->>L: tool.result
+                    K->>H: post_tool
                 else ask
+                    K->>H: permission_requested
                     K->>L: approval.requested
                     K-->>S: TurnOutcome { pending_approval }
                 else deny
@@ -237,7 +245,6 @@ gives the conditions around that resume.
   fixed and the edges are not.
 - [ADR-0006](../decisions/0006-context-engine.md) — why the ledger, not the
   messages, is the write path to the model.
-- [04 System overview](../04-system-overview.md) §3 — the four things the kernel
-  owns.
-- `crates/kernel/src/turn/tests.rs` — the tests that pin the behaviour described
-  here; run them with `cargo test -p loong-kernel`.
+- [04 System overview](../04-system-overview.md) §3 — the four kernel-owned things.
+- `crates/kernel/src/turn/tests.rs` — the behaviour pinned here; run
+  `cargo test -p loong-kernel`.

@@ -97,13 +97,14 @@ flowchart TD
     PROVIDERS --> SCHEMA
 ```
 
-The arrows point from a dependent crate to a crate it uses. Most point down the
-layers, but the allowed set is not a strict hierarchy: `loong-control` →
-`loong-config` and `loong-plugin` → `loong-skills` cross sideways, and both are in
-[`../crate-map.md`](../crate-map.md). The fixed kernel is the loop and ledger in
-`loong-kernel` plus the event append in `loong-eventlog`; the crates around it are
-in-process edges even where the kernel always calls one of them. The complete
-allowed set, crate by crate, is generated from `scripts/layering_rules.py`.
+The arrows point from a dependent crate to a crate it uses. The groups describe
+roles, not a strict order: `loong-control` → `loong-config` and `loong-plugin` →
+`loong-skills` cross between groups, and the kernel, context and index all read
+the event log. The fixed kernel is the loop and ledger in `loong-kernel` plus the
+event append in `loong-eventlog`; the crates around it are in-process edges even
+where the kernel always calls one of them. The complete allowed set, crate by
+crate, is [`../crate-map.md`](../crate-map.md), generated from
+`scripts/layering_rules.py`.
 
 ## Subsystem documents
 

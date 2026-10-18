@@ -31,7 +31,7 @@ flowchart TD
         EVENTLOG["loong-eventlog<br/>fixed event append — JSONL truth"]
     end
 
-    subgraph edges["Kernel-side crates — in-process edges (ADR-0004)"]
+    subgraph edges["Kernel-side crates — in-process"]
         CTX["loong-context"]
         HOOKS["loong-hooks"]
         MCP["loong-mcp"]
@@ -100,10 +100,10 @@ flowchart TD
 The arrows point from a dependent crate to a crate it uses. The groups describe
 roles, not a strict order: `loong-control` → `loong-config` and `loong-plugin` →
 `loong-skills` cross between groups, and the kernel, context and index all read
-the event log. The fixed kernel is the loop and ledger in `loong-kernel` plus the
-event append in `loong-eventlog`; the crates around it are in-process edges even
-where the kernel always calls one of them. The complete allowed set, crate by
-crate, is [`../crate-map.md`](../crate-map.md), generated from
+the event log. The fixed kernel is the loop, ledger and context assembly in
+`loong-kernel`, plus the event append in `loong-eventlog`; the crates around it are
+in-process even where the kernel always calls one of them. The complete allowed
+set, crate by crate, is [`../crate-map.md`](../crate-map.md), generated from
 `scripts/layering_rules.py`.
 
 ## Subsystem documents

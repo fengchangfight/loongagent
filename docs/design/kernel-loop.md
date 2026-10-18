@@ -193,7 +193,7 @@ sequenceDiagram
     K->>L: message.appended (user)
     K->>H: user_prompt_submit
     H-->>K: allow, or tighten
-
+    Note over K: tighten -> TurnOutcome.refused, no model call
     loop each step, up to max_steps
         Note over K: interrupted? -> turn.interrupted and return
         K->>K: refresh_map, compact_if_needed

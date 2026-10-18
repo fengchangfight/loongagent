@@ -129,7 +129,15 @@ class GateTest(unittest.TestCase):
         )
         self.write("docs/crate-map.md", generated.stdout)
 
-        self.write("README.md", document("Fixture", "A fixture repository.\n"))
+        self.write(
+            "README.md",
+            document(
+                "Fixture",
+                "- **Authority:** [ADR-0001](docs/decisions/0001-fixture.md)\n"
+                "- **Code:** `README.md`\n"
+                "- **Verify:** `python3 scripts/check-docs.py`\n",
+            ),
+        )
         self.write(
             "docs/README.md",
             document(
@@ -250,6 +258,15 @@ class GateTest(unittest.TestCase):
         self.init_git()
         self.assert_passes(self.run_gate("--check", "headers"))
 
+    def test_headerless_readme_fails(self) -> None:
+        self.write("README.md", document("Fixture", "A fixture repository.\n"))
+        self.init_git()
+        self.assert_fails(
+            self.run_gate("--check", "headers"),
+            "FAIL README.md",
+            "Authority",
+        )
+
     def test_verify_prose_without_a_command_fails(self) -> None:
         self.write(
             "docs/design/fixture.md",
@@ -270,6 +287,13 @@ class GateTest(unittest.TestCase):
         self.init_git()
         self.assert_passes(self.run_gate("--check", "lengths"))
 
+    def test_named_check_reports_only_its_own_failures(self) -> None:
+        body = header() + "".join(f"line {number}\n" for number in range(254))
+        self.write("docs/design/big.md", document("Big", body))
+        self.init_git()
+        self.assert_passes(self.run_gate("--check", "headers"))
+        self.assert_fails(self.run_gate("--check", "lengths"), "260 > 250")
+
     # -- code paths ----------------------------------------------------------
 
     def test_missing_code_path_fails(self) -> None:
@@ -281,6 +305,34 @@ class GateTest(unittest.TestCase):
         self.assert_fails(
             self.run_gate("--check", "code-paths"),
             "crates/schema/src/missing.rs",
+            "does not exist",
+        )
+
+    def test_code_fragment_is_not_part_of_the_filename(self) -> None:
+        self.write("docs/target.md", document("Target"))
+        self.write(
+            "docs/design/fixture.md",
+            document("Fixture", header(code="`docs/target.md#target`")),
+        )
+        self.init_git()
+        self.assert_passes(self.run_gate("--check", "code-paths"))
+
+    def test_code_paths_cover_non_prefixed_files(self) -> None:
+        self.write("README.md", document("Fixture"))
+        self.write(
+            "docs/design/fixture.md",
+            document("Fixture", header(code="`README.md`")),
+        )
+        self.init_git()
+        self.assert_passes(self.run_gate("--check", "code-paths"))
+
+        self.write(
+            "docs/design/fixture.md",
+            document("Fixture", header(code="`scripts/nope.sh`")),
+        )
+        self.assert_fails(
+            self.run_gate("--check", "code-paths"),
+            "scripts/nope.sh",
             "does not exist",
         )
 
@@ -305,6 +357,19 @@ class GateTest(unittest.TestCase):
         self.init_git()
         self.assert_passes(self.run_gate("--check", "reachable"))
 
+    def test_design_document_must_reach_the_design_root(self) -> None:
+        self.write("docs/04-system-overview.md", document("Overview"))
+        self.write(
+            "docs/design/fixture.md",
+            document("Fixture", header(up="[04](../04-system-overview.md)")),
+        )
+        self.init_git()
+        self.assert_fails(
+            self.run_gate("--check", "reachable"),
+            "FAIL docs/design/fixture.md",
+            "docs/design/README.md",
+        )
+
     def test_index_root_is_a_reachability_root(self) -> None:
         self.write("docs/README.md", document("Docs"))
         self.write("docs/04-system-overview.md", document("Overview"))
@@ -328,7 +393,15 @@ class GateTest(unittest.TestCase):
     # -- records and empty scope --------------------------------------------
 
     def test_research_notes_are_exempt(self) -> None:
-        self.write("README.md", document("Fixture"))
+        self.write(
+            "README.md",
+            document(
+                "Fixture",
+                "- **Authority:** [ADR-0001](docs/decisions/0001-fixture.md)\n"
+                "- **Code:** `README.md`\n"
+                "- **Verify:** `python3 scripts/check-docs.py`\n",
+            ),
+        )
         self.write("docs/research/note.md", sized("Note", 400))
         self.init_git()
         self.assert_passes(self.run_gate("--check", "headers"))
@@ -396,16 +469,17 @@ class GateTest(unittest.TestCase):
 
     def test_citations_read_topic_headings_under_docs_topics(self) -> None:
         self.write("docs/decisions/0001-fixture.md", document("ADR-0001"))
+        self.write("docs/02-topics.md", "# Topics\n\n## T-05 · moved later\n")
         self.write("docs/topics/open.md", "# Open topics\n\n## T-03 · open\n")
-        self.write("docs/notes.md", "# Notes\n\nSee T-03.\n")
+        self.write("docs/notes.md", "# Notes\n\nSee T-03 and T-05.\n")
         self.init_git()
         self.assert_passes(self.run_gate("--check", "citations"))
 
-        self.write("docs/notes.md", "# Notes\n\nSee T-04.\n")
+        self.write("docs/notes.md", "# Notes\n\nSee T-06.\n")
         self.assert_fails(
             self.run_gate("--check", "citations"),
-            "T-04 does not exist",
-            "highest is 3",
+            "T-06 does not exist",
+            "highest is 5",
         )
 
 

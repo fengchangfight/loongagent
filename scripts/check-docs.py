@@ -84,9 +84,12 @@ HEADER_FIELD = re.compile(r"^- \*\*(?P<name>[A-Za-z]+):\*\*\s*(?P<value>.*)$")
 TITLE = re.compile(r"^# +\S")
 
 # A backticked path is how Code names its anchors, so only that form is
-# resolved. Code paths are repository-relative, unlike Up's relative links.
+# resolved. A token is a path when it contains "/" or ends in one of the
+# repository's file extensions; that catches README.md, scripts/x.sh and
+# crates/y alike, while a bare label such as `cargo` or `ADR-0004` is not a
+# path claim. Commands, globs and prose with spaces are filtered out below.
 BACKTICKED = re.compile(r"`([^`\n]+)`")
-CODE_PREFIXES = ("crates/", "docs/")
+CODE_EXTENSIONS = (".md", ".rs", ".toml", ".sh", ".json", ".py", ".sql", ".yml", ".yaml")
 
 # The commands that prove something here. "test" alone is not a command: prose
 # such as "not tested" must not pass, so only a backticked span or one of these
@@ -495,17 +498,17 @@ def verify_resolves(value: str) -> bool:
     return any(match.group(1).strip() for match in BACKTICKED.finditer(value))
 
 
-def required_header_fields(name: str) -> tuple[str, ...] | None:
-    """The fields this class of document must carry, or None for README's rule.
+def required_header_fields(name: str) -> tuple[str, ...]:
+    """The fields this class of document must carry.
 
-    README.md is the one entry root: its Up may be absent, but once it has any
-    header field the other three become required, so a half-written header
-    cannot pass. docs/README.md is the index root: Code and Verify only. ADRs
-    are records of decisions and gain only Up; Status and the rest of their
-    body stay theirs.
+    README.md is the entry root: only its Up is optional, because the entry may
+    be the top; Authority, Code and Verify are still required, so a headerless
+    or half-written entry cannot pass once it leaves the baseline. docs/README.md
+    is the index root: Code and Verify only. ADRs are records of decisions and
+    gain only Up; Status and the rest of their body stay theirs.
     """
     if name == "README.md":
-        return None
+        return ("Authority", "Code", "Verify")
     if name == INDEX:
         return ("Code", "Verify")
     if name.startswith("docs/decisions/") and name.endswith(".md"):
@@ -535,13 +538,6 @@ def check_headers(root: str) -> list[tuple[str, str]]:
             continue
         title, fields = header
         required = required_header_fields(name)
-        if required is None:
-            # README.md may be the root and carry nothing. Once it opts into a
-            # header it must carry the complete one, except that Up stays
-            # optional: the entry may be the root.
-            if not fields:
-                continue
-            required = ("Authority", "Code", "Verify")
         for field in required:
             if field not in fields:
                 problems.append(
@@ -622,11 +618,15 @@ def check_lengths(root: str) -> list[tuple[str, str]]:
 def check_code_paths(root: str) -> list[tuple[str, str]]:
     """Every Code path a maintained document names must exist.
 
-    Only backticked `crates/...` and `docs/...` tokens are resolved. Prose in
-    the same field, a command such as `cargo test -p X crates/y`, and a glob or
-    an ellipsis are not a claim that one file exists, so they are not read as
-    paths. The check is separate from headers because a path can rot long after
-    the header was written and the failure should say which path.
+    A backticked token is a path claim when it contains "/" or ends in one of
+    the repository's file extensions, so `README.md`, `scripts/check.sh` and
+    `crates/kernel/src/lib.rs` are all resolved, not only the crates/ and docs/
+    prefixes. Prose in the same field, a command such as
+    `cargo test -p X crates/y`, and a glob or an ellipsis are not a claim that
+    one file exists, so they are not read as paths. A fragment is an anchor
+    inside the file the token already names, not part of the filename. The
+    check is separate from headers because a path can rot long after the
+    header was written and the failure should say which path.
     """
     problems: list[tuple[str, str]] = []
     for name in maintained_documents(root):
@@ -643,13 +643,15 @@ def check_code_paths(root: str) -> list[tuple[str, str]]:
         line, value = fields["Code"]
         for token in BACKTICKED.findall(value):
             token = token.strip()
-            if not token.startswith(CODE_PREFIXES):
-                continue
             if " " in token or any(character in token for character in "*?[]"):
                 continue
             if token.endswith("...") or "/..." in token:
                 continue
-            candidate = token.rstrip("/")
+            candidate = token.split("#", 1)[0].rstrip("/")
+            if not candidate:
+                continue
+            if "/" not in candidate and not candidate.lower().endswith(CODE_EXTENSIONS):
+                continue
             if os.path.exists(os.path.join(root, *candidate.split("/"))):
                 continue
             problems.append(

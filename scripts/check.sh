@@ -13,8 +13,10 @@
 #   code contracts  a Rust file with no design anchor, or an item with no doc block
 #   human-written   the human's notebook: an agent edit there is a failure, not a
 #                   formatting nit (AGENTS.md, scripts/check-human-written.sh)
-#   documents       a relative link to a file that no longer exists (the documents
-#                   are also what nothing else in this list reads)
+#   documents       a relative link that rotted, a document without its header,
+#                   one over its line budget, or one with no checked path back
+#                   to the design (the documents are also what nothing else in
+#                   this list reads)
 #   tests           including three end-to-end tests against the real binary
 #   release build   code that compiles in debug and not with optimisations
 set -euo pipefail

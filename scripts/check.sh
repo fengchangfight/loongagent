@@ -10,6 +10,9 @@
 #                   why the generator now writes formatted Rust
 #   schema check    generated types drifting from crates/schema/protocol.toml
 #   layering        a crate dependency pointing the wrong way (ADR-0004)
+#   code contracts  a Rust file with no design anchor, or an item with no doc block
+#   human-written   the human's notebook: an agent edit there is a failure, not a
+#                   formatting nit (AGENTS.md, scripts/check-human-written.sh)
 #   documents       a relative link to a file that no longer exists (the documents
 #                   are also what nothing else in this list reads)
 #   tests           including three end-to-end tests against the real binary
@@ -28,6 +31,12 @@ bold "generated schema is current"
 
 bold "crate dependencies point down (ADR-0004)"
 ./scripts/check-layering.sh
+
+bold "code contracts"
+python3 scripts/check-modules.py
+
+bold "the human's notebook is untouched"
+./scripts/check-human-written.sh
 
 bold "documents"
 python3 scripts/check-docs.py

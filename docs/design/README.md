@@ -114,7 +114,8 @@ set, crate by crate, is [`../crate-map.md`](../crate-map.md), generated from
 | [context-ledger.md](context-ledger.md) | What the model is shown: the ledger's categories and lifetimes, the budget, compaction, and `recall`. | `crates/kernel/src/ledger.rs`, `crates/kernel/src/turn/compaction.rs` |
 | [tools-permissions.md](tools-permissions.md) | The uniform tool interface, action classes, the PDP's allow/ask/deny, and the two enforcers. | `crates/tools/src/lib.rs`, `crates/sandbox/src/` |
 
-A row is added by the task that writes the document.
+A row is added by the task that writes the document; a mechanism with no row has
+no page in this layer to own it yet.
 
 ## Reading paths
 
@@ -130,8 +131,8 @@ is fixed and everything else is an edge.
 may depend on which. Read [kernel-loop.md](kernel-loop.md),
 [context-ledger.md](context-ledger.md) or
 [tools-permissions.md](tools-permissions.md) before changing the code it names,
-then run `cargo test -p loong-kernel`. A change to a mechanism's behaviour means
-updating its document in the same change.
+then run that document's `Verify` command. A change to a mechanism's behaviour
+means updating its document in the same change.
 
 **Debugger.** Take the ending from the turn's outcome, then read
 [kernel-loop.md](kernel-loop.md) §"How a turn ends". A stopped turn leaves a

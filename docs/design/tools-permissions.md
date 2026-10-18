@@ -34,8 +34,7 @@ reports `ToolError::Refused` (bad arguments, outside its remit) or
 `ToolError::Failed` (it ran and failed); both become a `tool.result` with
 `ok: false`, never a failed turn.
 
-The point of one trait rather than a built-in fast path: a plugin tool, an MCP
-tool and `write_file` are gated and recorded by the same code.
+One trait, not a built-in fast path: the same code gates and records every tool.
 
 ## 2. The action class comes from the arguments
 
@@ -66,12 +65,11 @@ makes "investigate free, write gated" true rather than nominal:
 
 The shell classifier is a **heuristic for allocating autonomy, never a security
 boundary** — the boundary is the PDP plus the confinement. `ReadFile`,
-`WriteFile`, `Edit` and `Shell` return `OutOfBounds` when the argument that
-would decide the class is missing, rather than guessing; `Grep` and `Glob`
-default to the workspace and are `Investigate` when no path is given. MCP tools
-are the exception with no argument analysis: their class is declared in
-`.loongagent/mcp.toml` per server, with per-tool overrides, defaulting to
-`out_of_bounds` because the kernel cannot know what an external tool does.
+`WriteFile`, `Edit` and `Shell` return `OutOfBounds` when the deciding argument
+is missing, rather than guessing; `Grep` and `Glob` default to the workspace and
+are `Investigate` when no path is given. MCP tools declare their class in
+`.loongagent/mcp.toml` instead: a per-server default with per-tool overrides,
+defaulting to `out_of_bounds` because the kernel cannot know what a tool does.
 
 ## 3. The decision: allow, ask, deny — plus the rule
 
@@ -151,8 +149,8 @@ Every child a built-in spawns from a tool call goes through `loong_proc`:
 `RunSpec` carries the program, cwd, timeout, output limit and a `confine`
 callback, and `run` applies that callback to the `Command` after setting up
 scratch files and its own process group, just before `spawn`. The shell tool
-passes `ctx.confinement.confine` straight through, so the policy the kernel
-chose is the policy on the child. `sandbox self-test`
+passes `ctx.confinement.confine` through, so the kernel's policy is the child's.
+`sandbox self-test`
 (`crates/sandbox/src/sandbox.rs`) proves the mechanism by having a confined
 child attempt one allowed and one forbidden write; a mechanism that cannot
 demonstrate denial is reported as `Broken`, not as present. `bubblewrap` is
@@ -176,9 +174,9 @@ confinement. The PDP is not in `ExecContext` at all. So:
   policy-bearing thing it is given is the one the kernel chose.
 - A tool can make a cheaper *claim*, not a cheaper *gate*: `action_class` is the
   tool's own return value and `Kernel::dispatch` passes it straight to
-  `pdp.decide`, so a too-cheap class gets an allow. What the tool cannot change
-  is the confinement; what catches a wrong claim is the built-in write guard (for
-  the built-ins) and the OS sandbox (for writes outside the workspace).
+  `pdp.decide`, so a too-cheap class gets an allow. What catches a wrong claim is
+  the built-in write guard (for the built-ins), or the OS sandbox on a *child*
+  that writes outside the workspace.
 - A granted approval does not buy a different policy: `respond_to_approval`
   runs the same `Kernel::execute`, with the same `ExecContext`.
 - `/yolo` relaxes only the ask arm. The sandbox is a different axis and still
@@ -189,7 +187,10 @@ The honest limit: the kernel hands a tool the confinement and the built-ins use
 `loong_proc` so it is applied, but nothing in the type system stops a tool from
 calling `Command::spawn` itself. A tool that ignores `ExecContext` is a trust
 failure and a bug, not a supported shape; that is why the tool contract is to
-spawn children through `loong_proc` with `ctx.confinement`.
+spawn children through `loong_proc` with `ctx.confinement`. The same goes for the
+tool's own I/O: `Kernel::execute` runs `Tool::execute` in the unconfined server
+process, so a custom tool that writes outside the workspace in-process is caught
+by neither the sandbox nor the built-in guards.
 
 ## 6. The built-in tools, and the one exception
 
@@ -227,8 +228,7 @@ context side of it is [context-ledger.md](context-ledger.md) §5.
   results. Output should say where it was truncated, because a silently short
   answer reads as "that is all there was".
 - **Confinement on every child.** Spawn through `loong_proc::RunSpec` and pass
-  `ctx.confinement`; never spawn a child that runs repository content without
-  it.
+  `ctx.confinement`; never run repository content without it.
 - **No side channels.** A tool returns a string; the kernel records the
   `tool.result` and its ledger entry. It does not append events, write ledger
   entries or talk to the model.

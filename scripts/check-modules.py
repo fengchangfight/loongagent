@@ -19,7 +19,7 @@ Usage:
                         scripts/code-contract-baseline.txt)
     --emit-baseline FILE
                         write the currently failing paths there, one per line,
-                        and exit 0
+                        and exit 0; refuses to write when nothing fails
     --list              print each in-scope file, its item count and status; the
                         extra output does not change the exit code
 
@@ -33,8 +33,8 @@ Exemptions are different from the baseline. A file that cannot carry a contract
 is listed in scripts/contract-exemptions.txt as `path | reason`; a single item
 may be exempted as `path#item | reason` or with a `// Contract-exempt: <reason>`
 line above it. The reason must be at least 10 characters, and a stale exemption
-fails. The three file exemptions are generated code and the two crate-root Cargo
-build scripts.
+fails. The file-level list is closed to generated code and the two crate-root
+Cargo build scripts; item-level exemptions are not limited by that set.
 
 The scanner masks line comments, nested block comments, string literals, char
 literals and raw strings before it looks for items, preserving newlines so the
@@ -67,8 +67,17 @@ TRIVIAL_SPAN = 12
 # A reason shorter than this says nothing, so it does not exempt anything.
 MIN_REASON = 10
 
-# Items in a trait declaration end in `;` and have no body to measure.
-ITEM_KINDS = ("fn", "struct", "enum", "trait", "union", "type")
+# The file-level exemption list is closed. Only code that cannot carry a
+# contract belongs here; a fourth entry means either a real contract is being
+# avoided or a generated file appeared without a rule, and both need a person.
+# Item-level `path#item` exemptions are not limited by this set.
+ALLOWED_FILE_EXEMPTIONS = frozenset(
+    {
+        "crates/schema/src/generated.rs",
+        "crates/cli/build.rs",
+        "crates/control/build.rs",
+    }
+)
 
 # Indentation, visibility, modifiers, the keyword and the name. The masked text
 # has already lost comments and strings, so a `fn` in either cannot match. `mod`
@@ -101,9 +110,10 @@ TEST_ATTRIBUTE = re.compile(r"#\[\s*(?:tokio::)?test\b")
 BACKTICKED = re.compile(r"`([^`\n]+)`")
 ADR = re.compile(r"ADR-(\d{4})")
 
-# The commands that prove something in this repository. A `Verify:` line that
-# names none of them is not a proof, just a sentence.
-VERIFY_TOKENS = ("cargo", "test", "./scripts/", "python3")
+# The commands that prove something in this repository. "test" alone is not a
+# command: prose such as "not tested" must not pass the Verify check, so only a
+# backticked command or one of these bare tokens counts.
+VERIFY_TOKENS = ("cargo", "./scripts/", "python3")
 
 BASELINE_COMMENT = """\
 # Files whose code contract is not complete yet. The gate skips these and fails
@@ -123,7 +133,6 @@ class Item:
         "kind",
         "name",
         "line",
-        "index",
         "public",
         "declaration",
         "span",
@@ -137,7 +146,6 @@ class Item:
         kind: str,
         name: str,
         line: int,
-        index: int,
         public: bool,
         declaration: bool,
         span: int | None,
@@ -148,7 +156,6 @@ class Item:
         self.kind = kind
         self.name = name
         self.line = line
-        self.index = index
         self.public = public
         self.declaration = declaration
         self.span = span
@@ -213,8 +220,16 @@ def design_resolves(value: str, root: str) -> bool:
 
 
 def verify_resolves(value: str) -> bool:
-    """True when a `Verify:` value names a command this repository can run."""
-    return any(token in value for token in VERIFY_TOKENS)
+    """True when a `Verify:` value names a command this repository can run.
+
+    A backticked span is the reliable form, and a bare `cargo`, `./scripts/` or
+    `python3` is accepted for the contracts that write the command without
+    marking it up. A prose sentence containing the word "test" is not a
+    command and deliberately does not pass.
+    """
+    if any(token in value for token in VERIFY_TOKENS):
+        return True
+    return any(match.group(1).strip() for match in BACKTICKED.finditer(value))
 
 
 # -- masking ---------------------------------------------------------------
@@ -504,7 +519,6 @@ def find_items(raw_lines: list[str], masked_lines: list[str], masked: str) -> li
                 kind=match.group("kind"),
                 name=match.group("name"),
                 line=index + 1,
-                index=index,
                 public=match.group("vis") is not None,
                 declaration=span is None,
                 span=span,
@@ -635,9 +649,10 @@ def check_item(relative: str, item: Item, root: str) -> list[str]:
     if field_value(text, "Purpose") is None:
         problems.append(f"{prefix} missing Purpose:")
 
-    # A test function's target is named by the file contract, and a trait method
-    # declaration is covered by the trait's own five labels, so each needs only
-    # its Purpose line.
+    # A test function's target is named by the file contract. A declaration has
+    # no body on which to hang Up/Down, so one Purpose line is enough; that
+    # ruling covers trait methods and also body-less functions outside a trait,
+    # such as a signature in an `extern "C"` block.
     if item.kind == "fn" and (item.is_test or item.declaration):
         return problems
 
@@ -721,6 +736,12 @@ def read_exemptions(root: str) -> tuple[dict[str, str], dict[str, dict[str, str]
                     )
                     continue
                 item_level.setdefault(item_path, {})[item_name] = reason
+            elif key not in ALLOWED_FILE_EXEMPTIONS:
+                problems.append(
+                    f"{relative}:{number}: file exemption is not allowed: "
+                    f"{key} (the list is closed to generated.rs and the two "
+                    "crate-root build scripts)"
+                )
             else:
                 file_level[key] = reason
     return file_level, item_level, problems
@@ -837,7 +858,13 @@ def main() -> int:
             baseline_read = False
         else:
             files = tracked_rust(root)
+            if not files:
+                raise CheckError(
+                    f"no tracked `crates/**/*.rs` files under {root}; "
+                    "nothing was checked"
+                )
             baseline_read = True
+            baseline_label = DEFAULT_BASELINE
             if args.emit_baseline is not None:
                 baseline_entries = set()
             else:
@@ -846,6 +873,15 @@ def main() -> int:
                     if args.baseline is not None
                     else os.path.join(root, *DEFAULT_BASELINE.split("/"))
                 )
+                # Name the file that was actually read, not the default, when
+                # --baseline points somewhere else.
+                relative_baseline = os.path.relpath(baseline_path, root)
+                if relative_baseline != ".." and not relative_baseline.startswith(
+                    ".." + os.sep
+                ):
+                    baseline_label = relative_baseline.replace(os.sep, "/")
+                else:
+                    baseline_label = baseline_path
                 baseline_entries = {
                     entry.replace(os.sep, "/") for entry in _read_paths(baseline_path)
                 }
@@ -868,7 +904,7 @@ def main() -> int:
             try:
                 with open(path, encoding="utf-8") as handle:
                     source = handle.read()
-            except OSError as error:
+            except (OSError, UnicodeDecodeError) as error:
                 results.append((relative, [f"{relative}: cannot read: {error}"], [], False))
                 continue
             masked = mask(source)
@@ -892,12 +928,20 @@ def main() -> int:
                 issues.extend(check_item(relative, item, root))
             results.append((relative, issues, items, False))
 
-        # Stale item exemptions: the file was parsed, so an item name that is
-        # not there is drift. Files outside --paths are left alone rather than
-        # reported as stale for not having been read.
+        # Stale item exemptions: in the default run the tracked set is the
+        # scope, so a path that is not in it names a missing file. Under
+        # --paths the scope is deliberately smaller, so an out-of-scope entry is
+        # skipped rather than called stale for not having been read.
+        default_scope = args.paths is None
         parsed = {relative for relative, _, _, _ in results}
         for relative, names in sorted(item_exemptions.items()):
             if relative not in parsed:
+                if default_scope:
+                    for name in sorted(names):
+                        problems.append(
+                            f"scripts/contract-exemptions.txt: stale exemption: "
+                            f"{relative}#{name} (file is missing)"
+                        )
                 continue
             known: set[str] = set()
             for checked, _, items, _ in results:
@@ -923,12 +967,19 @@ def main() -> int:
             for entry in sorted(baseline_entries):
                 if entry not in failing:
                     problems.append(
-                        f"{DEFAULT_BASELINE}: stale baseline entry: {entry} "
+                        f"{baseline_label}: stale baseline entry: {entry} "
                         "(file is missing or now passes)"
                     )
 
         if args.emit_baseline is not None:
             target = resolve_file_arg(args.emit_baseline)
+            if not failing:
+                # A comment-only baseline would silently turn every future
+                # failure into a green run; refuse to write one.
+                raise CheckError(
+                    f"refusing to write an empty baseline to {target}: "
+                    "no in-scope file fails"
+                )
             os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
             with open(target, "w", encoding="utf-8") as handle:
                 handle.write(BASELINE_COMMENT)

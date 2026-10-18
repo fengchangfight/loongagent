@@ -5,10 +5,8 @@
 - **Code:** `crates/kernel/src/lib.rs`
 - **Verify:** `./scripts/check.sh`
 
-[`04-system-overview.md`](../04-system-overview.md) is the one-read picture of the
-architecture. This directory is the layer between that picture and the code: one
-document per mechanism, one per flow. Each document owns its topic, names the
-code that implements it, and links down rather than repeating detail.
+[`04-system-overview.md`](../04-system-overview.md) is the one-read picture; this
+directory is one document per mechanism or flow, each owning its topic and linking down.
 
 ## The workspace in layers
 
@@ -115,6 +113,8 @@ set, crate by crate, is [`../crate-map.md`](../crate-map.md), generated from
 | [tools-permissions.md](tools-permissions.md) | The uniform tool interface, action classes, the PDP's allow/ask/deny, and the two enforcers. | `crates/tools/src/lib.rs`, `crates/sandbox/src/` |
 | [events-storage.md](events-storage.md) | The schema, the JSONL log as truth, the derived SQLite index, and the two tree levels. | `crates/schema/protocol.toml`, `crates/eventlog/src/lib.rs`, `crates/index/src/lib.rs` |
 | [config-routing.md](config-routing.md) | Layered configuration, signed packs and local trust, the model router, and the provider interface. | `crates/config/src/`, `crates/manifest/src/lib.rs`, `crates/providers/src/` |
+| [extension-model.md](extension-model.md) | The four extension kinds, where each is loaded, the trust gate in front of each, and the kernel/edge boundary. | `crates/hooks/src/`, `crates/skills/src/`, `crates/mcp/src/`, `crates/plugin/src/`, `crates/pack/src/lib.rs` |
+| [sessions-lineage.md](sessions-lineage.md) | A session's event tree, lineage between sessions, resume/retry/steer, and the fork and export boundaries. | `crates/server/src/lib.rs`, `crates/kernel/src/turn/session.rs`, `crates/eventlog/src/lib.rs` |
 
 A row is added by the task that writes the document; a mechanism with no row has no page in this layer to own it yet.
 

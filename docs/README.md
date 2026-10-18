@@ -109,6 +109,7 @@ file that does not exist yet.
 | [05-parity-and-synthesis.md](05-parity-and-synthesis.md) | Parity vs Claude Code + absorption backlog from the field + deliberate "no"s | Living |
 | [06-context-engineering.md](06-context-engineering.md) | Context engineering — layered reversible memory (L1–L4 + raw archive, background increment, `recall`) | Discussing (P1–P5.5 implemented) |
 | [07-extending.md](07-extending.md) | Changing the machinery — a new built-in tool, a new event, a hook, how routing picks a model | Living |
+| [design/](design/) | Subsystem design: one document per mechanism, one per flow; the layer between the overview and the code. | Living |
 | human-written/ | The human's own notes — input, never edited by an agent (`AGENTS.md`, `scripts/check-human-written.sh`) | — |
 | [crate-map.md](crate-map.md) | The workspace's crates and the dependency edges allowed between them — generated from `scripts/layering_rules.py`, so it must never be hand-edited | Generated |
 | [dsh-plugin-ecosystem.md](research/dsh-plugin-ecosystem.md) | DSH plugin ecosystem — can our extension model host DSH-style plugins? | Research note (input to a future ADR-0004 revision) |

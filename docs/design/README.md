@@ -1,0 +1,135 @@
+# Subsystem design
+
+- **Up:** [04 System overview](../04-system-overview.md)
+- **Authority:** [ADR-0004](../decisions/0004-microkernel-extension-model.md)
+- **Code:** `crates/kernel/src/lib.rs`
+- **Verify:** `./scripts/check.sh`
+
+[`04-system-overview.md`](../04-system-overview.md) is the one-read picture of the
+architecture. This directory is the layer between that picture and the code: one
+document per mechanism, one per flow. Each document owns its topic, names the
+code that implements it, and links down rather than repeating detail.
+
+## The workspace in layers
+
+```mermaid
+flowchart TD
+    subgraph surfaces["Surfaces — thin clients (ADR-0009)"]
+        BIN["loongagent<br/>one binary, many faces"]
+        SERVER["loong-server<br/>sessions live here"]
+        TUIAPP["loong-tui-app"]
+        TUI["loong-tui"]
+        WEB["loong-web"]
+    end
+
+    subgraph kernel["Fixed kernel (ADR-0004)"]
+        KERNEL["loong-kernel<br/>turn loop · ledger · PDP"]
+        CTX["loong-context"]
+        HOOKS["loong-hooks"]
+        MCP["loong-mcp"]
+        SKILLS["loong-skills"]
+        TOOLS["loong-tools"]
+        PROVIDERS["loong-providers"]
+        SANDBOX["loong-sandbox"]
+        CONFIG["loong-config"]
+    end
+
+    subgraph shared["Shared services, storage and distribution"]
+        EVENTLOG["loong-eventlog<br/>JSONL truth"]
+        INDEX["loong-index<br/>derived SQLite"]
+        PROTOCOL["loong-protocol"]
+        PLUGIN["loong-plugin"]
+        CONTROL["loong-control"]
+        HTTP["loong-http"]
+        PROC["loong-proc"]
+        MANIFEST["loong-manifest"]
+        PACK["loong-pack"]
+    end
+
+    SCHEMA["loong-schema<br/>the wire, and nothing below it"]
+
+    BIN --> SERVER
+    BIN --> TUIAPP
+    BIN --> WEB
+    TUIAPP --> TUI
+    TUI --> PROTOCOL
+    SERVER --> KERNEL
+    SERVER --> EVENTLOG
+    KERNEL --> CONFIG
+    KERNEL --> CTX
+    KERNEL --> EVENTLOG
+    KERNEL --> HOOKS
+    KERNEL --> INDEX
+    KERNEL --> MCP
+    KERNEL --> PROVIDERS
+    KERNEL --> SANDBOX
+    KERNEL --> SKILLS
+    KERNEL --> TOOLS
+    CTX --> EVENTLOG
+    INDEX --> EVENTLOG
+    MCP --> TOOLS
+    TOOLS --> PROC
+    HOOKS --> MANIFEST
+    HOOKS --> PROC
+    SKILLS --> TOOLS
+    PLUGIN --> SKILLS
+    PROVIDERS --> HTTP
+    CONTROL --> CONFIG
+    CONTROL --> HTTP
+    CONTROL --> PACK
+    PROTOCOL --> SCHEMA
+    EVENTLOG --> SCHEMA
+    INDEX --> SCHEMA
+    CONFIG --> SCHEMA
+    CTX --> SCHEMA
+    HOOKS --> SCHEMA
+    MCP --> SCHEMA
+    SANDBOX --> SCHEMA
+    SKILLS --> SCHEMA
+    TOOLS --> SCHEMA
+    PROVIDERS --> SCHEMA
+```
+
+The arrows are the dependency direction the layering check enforces: they point
+down, a client never reaches back into the kernel, and the schema is the bottom.
+Only the edges that show the layers are drawn; the complete allowed set, crate by
+crate, is [`../crate-map.md`](../crate-map.md), which is generated from
+`scripts/layering_rules.py`.
+
+## Subsystem documents
+
+| Document | Owns | Code |
+|---|---|---|
+| [kernel-loop.md](kernel-loop.md) | A turn: the step loop, the model and tool calls, the approval seam, and the ways a turn ends. | `crates/kernel/src/turn.rs`, `crates/kernel/src/turn/loop.rs` |
+
+A row is added by the task that writes the document. A mechanism with no row has
+no subsystem document yet; the overview summarises it and `crate-map.md` names the
+code, but there is no page in this layer to own it.
+
+## Reading paths
+
+**Newcomer.** Read §2 and §3 of [04 System overview](../04-system-overview.md)
+for the shape and the four things the kernel owns. Then read
+[kernel-loop.md](kernel-loop.md) for what one turn actually does, and
+[ADR-0004](../decisions/0004-microkernel-extension-model.md) for why the kernel
+is fixed and everything else is an edge.
+
+**Maintainer.** Start at [`../crate-map.md`](../crate-map.md) to see which crate
+may depend on which. Read [kernel-loop.md](kernel-loop.md) before changing
+`crates/kernel/src/turn.rs` or `crates/kernel/src/turn/loop.rs`, then run
+`cargo test -p loong-kernel`. A change to a mechanism's behaviour means updating
+its document in the same change.
+
+**Debugger.** Take the ending from the turn's outcome, then read
+[kernel-loop.md](kernel-loop.md) §"How a turn ends". A stopped turn leaves a
+`turn.interrupted` event; a parked one leaves `approval.requested`; a refused one
+leaves a `hook.fired` or `skill.invoked` error. The test that pins the behaviour
+is in `crates/kernel/src/turn/tests.rs`, and the event names are defined in
+`crates/schema/protocol.toml`.
+
+## The one rule
+
+One document is the authority for a topic. A subsystem document owns a mechanism;
+an ADR owns a decision; `04-system-overview.md` owns the current architecture.
+When another document needs the same fact, it links here or to the document that
+owns it rather than restating it.

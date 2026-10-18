@@ -1,21 +1,60 @@
+//! Purpose: Run one turn: record the prompt, call the model, dispatch tools
+//! through the PDP, and stop at an answer, an approval question, a stop, or the
+//! step budget.
+//!
+//! # Contract
+//! - **Serves:** a turn a person can follow and audit: every step is an event
+//!   (ADR-0003) and every tool call has a recorded verdict (ADR-0007).
+//! - **Design:** `docs/design/kernel-loop.md`; ADR-0004 fixes this loop, and
+//!   ADR-0006 owns the ledger it feeds.
+//! - **Upstream:** `Server`'s `prompt.submit` and `approval.respond` handlers, and
+//!   `Kernel::submit` for callers that do not stream.
+//! - **Downstream:** `Kernel::append`, `Kernel::record_*`, `Ledger`, `Pdp`,
+//!   `Registry`, `Model`, `HookRunner`, and the `Kernel::execute` PEP.
+//! - **Verify:** `cargo test -p loong-kernel turn::` · `./scripts/check.sh`
+
 use super::*;
 
 use super::hooks::tighten;
 use super::nudge::{leaked_tool_call, looks_like_pasted_file};
 use super::recall::RECALL_TOOL;
 
+/// Purpose: What a dispatched tool call did: finish, or park the turn for a human.
+///
+/// Serves: one assistant message whose every call gets an answer, either by
+/// running it or by saying it did not run.
+/// Design: `docs/design/kernel-loop.md` (the approval seam).
+/// Up: `Kernel::dispatch` returns it; `Kernel::run_inner` matches it.
+/// Down: `PendingCall`, `Kernel::respond_to_approval`.
+/// Verify: `cargo test -p loong-kernel turn::tests::an_out_of_bounds_write_asks_then_resumes_on_the_answer`.
 enum Dispatch {
     /// The call finished; every sequence it appended is already in `events`.
     Done,
     Pending(PendingCall),
 }
 impl Kernel {
+    /// Purpose: The approval a surface must answer, if the last turn parked one.
+    ///
+    /// Serves: a caller that needs to know whether the session is waiting on a
+    /// human before it may start another turn.
+    /// Design: `docs/design/kernel-loop.md` §5.
+    /// Up: `Kernel::submit_with` consults it before starting a turn.
+    /// Down: `PendingCall`, `Kernel::respond_to_approval`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::an_out_of_bounds_write_asks_then_resumes_on_the_answer`.
     pub fn pending(&self) -> Option<&PendingCall> {
         self.pending.as_ref()
     }
 
     /// Submit a user turn and run the loop until it finishes, asks, or hits the
     /// step limit.
+    ///
+    /// Purpose: The no-preview entry point: one user turn, run to an ending.
+    /// Serves: a caller that has nowhere to stream model deltas to.
+    /// Design: `docs/design/kernel-loop.md` §2 and §6.
+    /// Up: `Kernel::submit_with` is the same path with a delta callback; surfaces
+    /// reach a kernel through the server's `prompt.submit`.
+    /// Down: `Kernel::submit_with`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_tool_runs_and_the_turn_finishes`.
     pub fn submit(&mut self, text: &str) -> Result<TurnOutcome, KernelError> {
         self.submit_with(text, &mut |_| {})
     }
@@ -25,6 +64,15 @@ impl Kernel {
     /// Deltas are a preview, never the record: they are not logged, not added to the
     /// ledger, and do not change the outcome. The final `message.appended` is the
     /// answer, which is why a client that misses every delta has missed nothing.
+    ///
+    /// Purpose: Run one user turn, forward preview deltas, and return its ending.
+    /// Serves: the interactive surface: it can show the answer forming without
+    /// turning a preview into a second source of truth.
+    /// Design: `docs/design/kernel-loop.md` §1–§3.
+    /// Up: `Server`'s `prompt.submit` handler and `Kernel::submit`.
+    /// Down: `Kernel::record_user`, `Kernel::fire_hooks`, `Kernel::run`,
+    /// `Kernel::append`, and `Kernel::fetch_mcp_prompt` on the command path.
+    /// Verify: `cargo test -p loong-kernel turn::tests::deltas_are_a_preview_and_never_the_record`.
     pub fn submit_with(
         &mut self,
         text: &str,
@@ -149,6 +197,18 @@ impl Kernel {
     }
 
     /// Answer a pending approval; the decision is an event either way.
+    ///
+    /// Purpose: Record the human's decision on the parked call and resume the same
+    /// turn.
+    /// Serves: a turn that stopped instead of blocking, now able to finish after the
+    /// person answers.
+    /// Design: `docs/design/kernel-loop.md` §5.
+    /// Up: `Server`'s `approval.respond` handler; `Kernel::pending` is the state it
+    /// consumes.
+    /// Down: `Kernel::append` (`approval.decided`), `Kernel::fire_hooks` for
+    /// `permission_decided`, `Kernel::execute`, `Kernel::record_tool_result`, and
+    /// `Kernel::run`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_granted_approval_still_cannot_escape_the_workspace`.
     pub fn respond_to_approval(
         &mut self,
         request_id: &str,
@@ -218,6 +278,14 @@ impl Kernel {
     /// while a turn is running. Every path through [`Kernel::run_inner`] — an
     /// answer, a stop, an approval question — clears it, including the error paths,
     /// because a flag left set would starve the background for the session's life.
+    ///
+    /// Purpose: Run one turn with the context engine told the foreground is busy.
+    /// Serves: a background worker that must not enrich context in the middle of a
+    /// turn.
+    /// Design: `docs/design/kernel-loop.md` §2.
+    /// Up: `Kernel::submit_with` and `Kernel::respond_to_approval`.
+    /// Down: `Kernel::run_inner`, `ContextEngine::set_foreground_busy`.
+    /// Verify: `cargo test -p loong-kernel turn::`.
     fn run(
         &mut self,
         events: Vec<u64>,
@@ -234,6 +302,18 @@ impl Kernel {
         result
     }
 
+    /// Purpose: The step loop: stop check, context preparation, routing, one model
+    /// call, and the tool fan-out.
+    ///
+    /// Serves: one turn that advances only by complete steps, so a stop or an
+    /// approval leaves no half-executed state.
+    /// Design: `docs/design/kernel-loop.md` §2, §4 and §6.
+    /// Up: `Kernel::run`.
+    /// Down: `Kernel::interrupted`, `Kernel::refresh_map`,
+    /// `Kernel::compact_if_needed`, `Kernel::tool_specs`, `Router::select`,
+    /// `Model::complete_streaming`, `Kernel::record_cost`,
+    /// `Kernel::record_assistant`, `Kernel::dispatch`, and the nudge helpers.
+    /// Verify: `cargo test -p loong-kernel turn::tests::the_step_limit_stops_a_spinning_model`.
     fn run_inner(
         &mut self,
         mut events: Vec<u64>,
@@ -409,6 +489,18 @@ impl Kernel {
         })
     }
 
+    /// Purpose: Turn one model tool call into a recorded verdict and, unless it
+    /// asks or is denied, an execution.
+    ///
+    /// Serves: the single tool chokepoint: the PDP decides here, and the decision
+    /// plus the rule that produced it become events.
+    /// Design: `docs/design/kernel-loop.md` §3; ADR-0007 owns the allow/ask/deny
+    /// ladder.
+    /// Up: `Kernel::run_inner`, once per call in the assistant message.
+    /// Down: `Kernel::recall_tool`, `Pdp::decide`, `tighten`,
+    /// `Kernel::fire_hooks`, `Kernel::append`, `Kernel::execute`,
+    /// `Kernel::record_tool_result`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_tightened_policy_denies_without_asking`.
     fn dispatch(
         &mut self,
         call: &ToolCallRequest,
@@ -569,6 +661,17 @@ impl Kernel {
 
     /// The PEPs: the tool runner (which refuses to write outside the workspace)
     /// and whatever confinement the kernel was given, applied to each child.
+    ///
+    /// Purpose: Run a tool through the registry and the confinement policy, and
+    /// report success or the tool's error.
+    /// Serves: a tool call that has been allowed, or granted after asking, actually
+    /// runs with the same PEP on both paths.
+    /// Design: `docs/design/kernel-loop.md` §3; ADR-0007 owns enforcement.
+    /// Up: `Kernel::dispatch` (allow and `/yolo` arms) and
+    /// `Kernel::respond_to_approval` (granted).
+    /// Down: `Registry::get`, `Tool::execute`, `ExecContext::new`,
+    /// `Kernel::recall_tool`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_granted_approval_still_cannot_escape_the_workspace`.
     fn execute(&self, tool: &str, args: &Json) -> (bool, String) {
         // `recall` is not in the registry: it answers from this session's derived
         // memory rather than from the filesystem, so it needs state the registry
@@ -597,6 +700,14 @@ impl Kernel {
 
     /// Turn approval prompts off or on. Recorded, because a session that never asks is a
     /// session whose log has to say why (ADR-0007 §5).
+    ///
+    /// Purpose: Set the session's auto-approve flag and keep the log honest about it.
+    /// Serves: a person who asks for `/yolo` and can still see afterwards that the
+    /// ask step was relaxed.
+    /// Design: `docs/design/kernel-loop.md` §5.
+    /// Up: `Server`'s `permissions.set` handler.
+    /// Down: `Kernel::append` (`permissions.relaxed`), `Kernel::auto_approve`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::opting_out_of_prompts_allows_the_action_and_says_so_in_the_log`.
     pub fn set_auto_approve(&mut self, on: bool) -> Result<(), KernelError> {
         if self.auto_approve == on {
             return Ok(());
@@ -612,6 +723,13 @@ impl Kernel {
         Ok(())
     }
 
+    /// Purpose: Whether an `ask` ruling is being treated as an allow.
+    ///
+    /// Serves: a status surface that must show the session is in `/yolo` mode.
+    /// Design: `docs/design/kernel-loop.md` §5.
+    /// Up: `Kernel::dispatch`, on the `Verdict::Ask` arm.
+    /// Down: `Kernel::set_auto_approve` is the only setter.
+    /// Verify: `cargo test -p loong-kernel turn::tests::opting_out_of_prompts_allows_the_action_and_says_so_in_the_log`.
     pub fn auto_approve(&self) -> bool {
         self.auto_approve
     }
@@ -619,6 +737,14 @@ impl Kernel {
     /// The flag a signal handler sets to stop the running turn. Handing it out is how the
     /// server lets a person interrupt without a protocol message: the process is ours, and
     /// Ctrl-C already means "stop what you are doing".
+    ///
+    /// Purpose: Hand out the stop flag so a process-wide signal handler can set it.
+    /// Serves: Ctrl-C stopping the turn without a protocol message or a second
+    /// thread inside the kernel.
+    /// Design: `docs/design/kernel-loop.md` §5.
+    /// Up: `Server::catch_interrupts`.
+    /// Down: `Kernel::interrupted`, `std::sync::atomic::AtomicBool`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_turn_stops_at_the_next_boundary_and_the_log_says_who_stopped_it`.
     pub fn interruptor(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
         std::sync::Arc::clone(&self.interrupted)
     }
@@ -626,10 +752,26 @@ impl Kernel {
     /// Use a flag someone else made. The server needs this: a signal handler can only
     /// reach a value that lives for the process, so the process owns it and the kernel
     /// borrows it.
+    ///
+    /// Purpose: Adopt a process-owned stop flag, so `/new` does not leave the session
+    /// with an unreachable one.
+    /// Serves: a server that owns one interrupt flag for every kernel it installs.
+    /// Design: `docs/design/kernel-loop.md` §5.
+    /// Up: `Server::catch_interrupts` and the server's `session.new` handler.
+    /// Down: `Kernel::interrupted`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_turn_stops_at_the_next_boundary_and_the_log_says_who_stopped_it`.
     pub fn use_interruptor(&mut self, flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {
         self.interrupted = flag;
     }
 
+    /// Purpose: Whether a stop has been asked for.
+    ///
+    /// Serves: the loop's only interruption check, at a step boundary.
+    /// Design: `docs/design/kernel-loop.md` §5.
+    /// Up: `Kernel::run_inner` reads it once per step.
+    /// Down: `Kernel.interrupted`, set through `Kernel::interruptor` or
+    /// `Kernel::use_interruptor`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_turn_stops_at_the_next_boundary_and_the_log_says_who_stopped_it`.
     pub(super) fn interrupted(&self) -> bool {
         self.interrupted.load(std::sync::atomic::Ordering::SeqCst)
     }

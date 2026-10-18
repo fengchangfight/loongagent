@@ -69,7 +69,6 @@ crates/kernel/src/turn/compaction.rs
 crates/kernel/src/turn/confinement.rs
 crates/kernel/src/turn/events.rs
 crates/kernel/src/turn/hooks.rs
-crates/kernel/src/turn/loop.rs
 crates/kernel/src/turn/model.rs
 crates/kernel/src/turn/nudge.rs
 crates/kernel/src/turn/recall.rs

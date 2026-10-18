@@ -111,6 +111,8 @@ set, crate by crate, is [`../crate-map.md`](../crate-map.md), generated from
 | Document | Owns | Code |
 |---|---|---|
 | [kernel-loop.md](kernel-loop.md) | A turn: the step loop, the model and tool calls, the approval seam, and the ways a turn ends. | `crates/kernel/src/turn.rs`, `crates/kernel/src/turn/loop.rs` |
+| [context-ledger.md](context-ledger.md) | What the model is shown: the ledger's categories and lifetimes, the budget, compaction, and `recall`. | `crates/kernel/src/ledger.rs`, `crates/kernel/src/turn/compaction.rs` |
+| [tools-permissions.md](tools-permissions.md) | The uniform tool interface, action classes, the PDP's allow/ask/deny, and the two enforcers. | `crates/tools/src/lib.rs`, `crates/sandbox/src/` |
 
 A row is added by the task that writes the document. A mechanism with no row has
 no subsystem document yet; the overview summarises it and `crate-map.md` names the

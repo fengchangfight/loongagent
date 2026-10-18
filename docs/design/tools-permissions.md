@@ -5,13 +5,13 @@
 - **Code:** `crates/tools/src/lib.rs`, `crates/sandbox/src/`, `crates/kernel/src/turn/confinement.rs`, `crates/proc/src/lib.rs`
 - **Verify:** `cargo test -p loong-tools -p loong-sandbox` · `./scripts/check.sh`
 
-Every capability the model has is a **tool**, built-ins included, behind one
-interface. That is what gives permissions, hooks and cost metering a single
-chokepoint: the kernel computes an action class for each call, asks one policy
-decision point (PDP) for allow / ask / deny plus the rule that fired, and only
-then runs the tool. Enforcement does not trust that decision alone — a write
-guard inside the tool and an OS sandbox on its children are the enforcers. This
-is the "prompts are not permissions" promise of [04](../04-system-overview.md)
+Every **registry** tool — all built-ins included — is behind one interface; §6
+names the one exception. That is what gives permissions, hooks and cost metering
+a single chokepoint: the kernel computes an action class for each call, asks one
+policy decision point (PDP) for allow / ask / deny plus the rule that fired, and
+only then runs the tool. Enforcement does not trust that decision alone — a
+write guard inside the tool and an OS sandbox on its children are the enforcers.
+This is the "prompts are not permissions" promise of [04](../04-system-overview.md)
 §5 in code.
 
 ## 1. One interface, built-ins included
@@ -57,10 +57,12 @@ makes "investigate free, write gated" true rather than nominal:
   write target may not exist yet); inside is `WriteWorkspace`, outside is
   `OutOfBounds`.
 - `classify_command` — a shell tool has no single class, so the command string
-  is read: known read-only verbs with no redirection are `Investigate`, known
-  network / privilege / destructive patterns are `OutOfBounds`, known mutating
-  verbs aimed outside the workspace are `OutOfBounds`, and anything unknown or
-  mutating is the conservative `WriteWorkspace`.
+  is read: known read-only verbs with no redirection are `Investigate`, but
+  their arguments are not resolved (`cat /etc/passwd` is `Investigate`); network,
+  privilege and destructive patterns are `OutOfBounds`; a mutating verb whose
+  *absolute* path tokens leave the workspace is `OutOfBounds`; anything else,
+  unknown or mutating, is `WriteWorkspace` — including `touch ../x`, which only
+  the OS sandbox stops.
 
 The shell classifier is a **heuristic for allocating autonomy, never a security
 boundary** — the boundary is the PDP plus the confinement. `ReadFile`,
@@ -77,21 +79,22 @@ are the exception with no argument analysis: their class is declared in
 flowchart TD
     CALL["model call: tool name + arguments"] --> CLS["Tool::action_class(args, cwd)"]
     CLS --> PDP["Pdp::decide(class, tool) returns a Ruling: verdict, rule, reason"]
-    PDP --> HOOKS{"pre_tool hooks report a stricter verdict?"}
+    PDP --> TC["tool.call (action_class)"]
+    TC --> HOOKS{"pre_tool hooks report a stricter verdict?"}
     HOOKS -- yes --> STRICT["ruling = the hook's: rule = hook:id"]
     HOOKS -- no --> KEEP["ruling stays the PDP's"]
-    STRICT --> DECIDED["tool.call, then policy.decided: verdict + rule"]
+    STRICT --> DECIDED["policy.decided: verdict + rule"]
     KEEP --> DECIDED
     DECIDED --> V{"verdict"}
     EXEC["Kernel::execute: Tool::execute(args, ExecContext)"]
     V -- allow --> EXEC
-    V -- "ask with /yolo" --> YOLO["policy.decided again (yolo), tool.call again"]
+    V -- "ask with /yolo" --> YOLO["policy.decided (yolo), tool.call again"]
     YOLO --> EXEC
     V -- ask --> ASK["permission_requested hooks, approval.requested, turn parks"]
     ASK --> HUMAN{"respond_to_approval"}
     HUMAN -- granted --> EXEC
-    HUMAN -- denied --> DENY["tool.result ok = false: denied by policy (rule)"]
-    V -- deny --> DENY
+    HUMAN -- denied --> UDENY["tool.result ok = false: denied by the user"]
+    V -- deny --> PDENY["tool.result ok = false: denied by policy (rule, reason)"]
     EXEC --> PEP["write guard inside the tool + Confinement on every child it spawns"]
     PEP --> RESULT["tool.result, then post_tool hooks"]
 ```
@@ -139,8 +142,10 @@ whose `confine` installs a `pre_exec` hook. In the forked child, before exec,
 workspace, sets `PR_SET_NO_NEW_PRIVS`, and restricts itself. The restriction is
 irreversible and inherited — it lands on the child and never on the server.
 When Landlock is unavailable the kernel falls back to `NoConfinement` and
-carries the reason as `confinement_note` (`unconfined: …`), which the startup
-log reports rather than hiding.
+records why in `Kernel::confinement_note()` (`unconfined: …`) for diagnostics
+and tests. The startup log does not read that string; it reports the sandbox
+self-test's own result — `[sandbox] WARNING: unconfined — …` when no mechanism
+exists.
 
 Every child a built-in spawns from a tool call goes through `loong_proc`:
 `RunSpec` carries the program, cwd, timeout, output limit and a `confine`
@@ -153,14 +158,15 @@ child attempt one allowed and one forbidden write; a mechanism that cannot
 demonstrate denial is reported as `Broken`, not as present. `bubblewrap` is
 detected and named, not applied.
 
-The boundary has one seam worth stating: an **MCP server process** is started by
+The process-level seam is worth stating: an **MCP server process** is started by
 `McpClient::start` when the kernel is built, not from a tool call, so the
 `ExecContext` confinement does not cover it. Its gate is the declared action
 class plus the trust gate on `.loongagent/mcp.toml`, and its tool calls still go
-through `Kernel::dispatch`; only the process itself is outside the Landlock
-policy.
+through `Kernel::dispatch`; but the server and every process it spawns (an
+`npx` → `node` tree, for example) are outside the Landlock policy. The
+direct-spawn case is §5; the `recall` bypass is §6.
 
-## 5. Why a tool cannot widen it
+## 5. Why a tool cannot widen the confinement
 
 A tool receives `&dyn Confinement`; it can call `confine` on a child, and there
 is no method that replaces the policy, changes `cwd`, or returns a different
@@ -168,8 +174,11 @@ confinement. The PDP is not in `ExecContext` at all. So:
 
 - A tool cannot run a child unconfined *through the interface*: the only
   policy-bearing thing it is given is the one the kernel chose.
-- A tool cannot re-classify itself into a cheaper gate. `action_class` is a
-  claim the PDP rules on; the write guard and the OS sandbox do not consult it.
+- A tool can make a cheaper *claim*, not a cheaper *gate*: `action_class` is the
+  tool's own return value and `Kernel::dispatch` passes it straight to
+  `pdp.decide`, so a too-cheap class gets an allow. What the tool cannot change
+  is the confinement; what catches a wrong claim is the built-in write guard (for
+  the built-ins) and the OS sandbox (for writes outside the workspace).
 - A granted approval does not buy a different policy: `respond_to_approval`
   runs the same `Kernel::execute`, with the same `ExecContext`.
 - `/yolo` relaxes only the ask arm. The sandbox is a different axis and still
@@ -210,8 +219,9 @@ context side of it is [context-ledger.md](context-ledger.md) §5.
   reads to decide whether to call it; the schema is what a provider validates.
 - **`action_class`, computed from the arguments.** Conservative by default:
   when the arguments do not settle the question, `OutOfBounds`. A tool that
-  claims `Investigate` for a write is a policy bug even though the write guard
-  still refuses it.
+  claims `Investigate` for a write is a policy bug: the built-in `write_file`
+  and `edit` re-check the path and refuse, but a custom tool carries no such
+  guard, so it must refuse what it should not do itself.
 - **`execute`, and its refusals.** Bad arguments are `ToolError::Refused`, not
   a panic; a failed command is `ToolError::Failed`; both are recorded as
   results. Output should say where it was truncated, because a silently short
@@ -235,4 +245,5 @@ context side of it is [context-ledger.md](context-ledger.md) §5.
 - `crates/kernel/src/turn/tests.rs` —
   `a_granted_approval_still_cannot_escape_the_workspace`,
   `the_pep_still_allows_a_workspace_write_through_the_shell`,
+  `the_pep_stops_an_escape_the_classifier_cannot_see`,
   `opting_out_of_prompts_allows_the_action_and_says_so_in_the_log`.

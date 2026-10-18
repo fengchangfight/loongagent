@@ -114,23 +114,24 @@ set, crate by crate, is [`../crate-map.md`](../crate-map.md), generated from
 | [context-ledger.md](context-ledger.md) | What the model is shown: the ledger's categories and lifetimes, the budget, compaction, and `recall`. | `crates/kernel/src/ledger.rs`, `crates/kernel/src/turn/compaction.rs` |
 | [tools-permissions.md](tools-permissions.md) | The uniform tool interface, action classes, the PDP's allow/ask/deny, and the two enforcers. | `crates/tools/src/lib.rs`, `crates/sandbox/src/` |
 
-A row is added by the task that writes the document. A mechanism with no row has
-no subsystem document yet; the overview summarises it and `crate-map.md` names the
-code, but there is no page in this layer to own it.
+A row is added by the task that writes the document.
 
 ## Reading paths
 
 **Newcomer.** Read §2 and §3 of [04 System overview](../04-system-overview.md)
 for the shape and the four things the kernel owns. Then read
-[kernel-loop.md](kernel-loop.md) for what one turn actually does, and
+[kernel-loop.md](kernel-loop.md) for one turn,
+[context-ledger.md](context-ledger.md) for what the model is shown,
+[tools-permissions.md](tools-permissions.md) for what may run, then
 [ADR-0004](../decisions/0004-microkernel-extension-model.md) for why the kernel
 is fixed and everything else is an edge.
 
 **Maintainer.** Start at [`../crate-map.md`](../crate-map.md) to see which crate
-may depend on which. Read [kernel-loop.md](kernel-loop.md) before changing
-`crates/kernel/src/turn.rs` or `crates/kernel/src/turn/loop.rs`, then run
-`cargo test -p loong-kernel`. A change to a mechanism's behaviour means updating
-its document in the same change.
+may depend on which. Read [kernel-loop.md](kernel-loop.md),
+[context-ledger.md](context-ledger.md) or
+[tools-permissions.md](tools-permissions.md) before changing the code it names,
+then run `cargo test -p loong-kernel`. A change to a mechanism's behaviour means
+updating its document in the same change.
 
 **Debugger.** Take the ending from the turn's outcome, then read
 [kernel-loop.md](kernel-loop.md) §"How a turn ends". A stopped turn leaves a

@@ -82,8 +82,8 @@ place; `retrieval_is_evicted_before_rules` pins it.
 
 `Lifetime` is `Turn`, `Session` or `Persistent`. Today the system prompt is
 `Persistent`, user and assistant messages and the map are `Session`, and tool
-results are `Turn`. It is reported by `context.explain` and by the wire
-`ContextExplain`, but no code branches on it: clearing is decided by category
+results are `Turn`. It is mapped to a string for `context.explain` and the wire
+`ContextExplain`, but no behaviour depends on it: clearing is decided by category
 and source, dropping by the exchange boundary. Treat a tool result's `Turn`
 lifetime as the stated intent, not as the switch that clears it.
 
@@ -104,9 +104,10 @@ Two ceilings bound one request, and the stricter wins (`Kernel::input_ceiling`):
 
 With both absent, nothing bounds the context and compaction never runs; the CLI
 says so rather than leaving a silent `None`. What is measured is
-`ledger.total_tokens()` — the size of the prompt about to be sent. It is not a
-cumulative spend: twenty calls in one turn are twenty measurements, not twenty
-terms in a sum.
+`ledger.total_tokens()` — the ledger's share of the prompt about to be sent,
+not the whole request (§6 names what it does not count). It is not a cumulative
+spend: twenty calls in one turn are twenty measurements, not twenty terms in a
+sum.
 
 `Ledger::evict_to_budget` drops whole non-pinned entries by that priority order
 and sets `still_over_budget` when only pinned entries remain. No kernel path
@@ -150,16 +151,18 @@ flowchart TD
     B -- yes --> K["keep = keep_newest_tokens.min(ceiling / 2)"]
     K --> C["clear tool output older than the newest keep tokens<br/>History + tool: only · pinned and the newest entry stay"]
     C --> D{"still over the ceiling?"}
-    D -- no --> E["compaction.applied"]
+    D -- no --> CHG{"anything cleared or dropped?"}
     D -- "yes, engine off" --> F["drop_oldest_exchange until under or nothing safe to drop"]
-    D -- "yes, engine on" --> G["stop: no exchange is dropped"]
-    F --> E
-    E --> Z2["event carries tokens_before, tokens_after, kept_tokens,<br/>cleared_tool_outputs, dropped_messages"]
+    D -- "yes, engine on" --> G["stop dropping: no exchange is dropped"]
+    F --> CHG
+    G --> CHG
+    CHG -- yes --> E["compaction.applied with the counts of what changed"]
+    CHG -- no --> Z2["no event: nothing changed"]
+    E --> Z3["tokens_before, tokens_after, kept_tokens,<br/>cleared_tool_outputs, dropped_messages"]
 ```
 
-`compaction.applied` is written only when something actually changed: a single
-long turn with nothing stale can leave the context over budget, and that is not
-an event that pretends otherwise.
+`compaction.applied` is written only when something actually changed; a single
+long turn with nothing stale can leave the context over budget without an event.
 
 ## 5. `recall`: the retrieval tool
 
@@ -170,9 +173,9 @@ useless. `Kernel::recall_tool` answers it:
 
 - `expand: <id>` returns one summary together with the original events it
   cites, so a derived index is never mistaken for the record.
-- Otherwise a `query` (all terms must appear), an `entity`, a `tool` and a
-  `level` search the derived store. Summaries come first, with `seq` citations;
-  only when there are none are raw events searched as the fallback.
+- Otherwise a `query` (all terms must appear) and a `level` select summaries;
+  only when none match are raw events searched, and only that fallback applies
+  the `entity` and `tool` filters. Summaries come first, with `seq` citations.
 - The reply is capped at `RECALL_MAX_CHARS` (4,800 characters), and a truncated
   reply says it was truncated.
 

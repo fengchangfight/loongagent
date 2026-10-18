@@ -49,8 +49,7 @@ carries the reasoning.
 ### Documents first
 
 Before you change code, name the design document that owns the behaviour. If
-none exists, write or split one first, then the module plan, then the code. A
-change with no owning document is not ready to start.
+none exists, write or split one first, then the module plan, then the code.
 
 ### Every code node has a contract
 
@@ -60,16 +59,19 @@ the owning document by a backticked `docs/...` path; `Verify` names the command
 that proves the file.
 
 Every `fn`, `struct`, `enum`, `trait`, `union` and `type` carries a doc block.
-`pub` items and non-trivial private items carry `Purpose:` plus the same five
-labels. A private function whose body is at most 12 lines may use `Purpose:`
-and `Contract:` in place of the five. Types always carry the full block, private
-or not. A test function carries one `Purpose` line; the file's module contract
-names the test target. `mod` declarations need nothing: the file contract covers
-them.
+`pub` items and non-trivial private items carry `Purpose:` plus `Serves`,
+`Design`, `Up`, `Down`, `Verify`; items say `Up`/`Down`, the file contract says
+`Upstream`/`Downstream`. A private function whose body is at most 12 lines may
+use `Purpose:` and `Contract:` in place of the five. Types always carry the full
+block, private or not. A test function carries one `Purpose` line; the file's
+module contract names the test target. `mod` declarations need nothing: the file
+contract covers them.
 
-A file that cannot carry a contract is listed in
-`scripts/contract-exemptions.txt` with a reason per entry. A single item may
-use `// Contract-exempt: <reason>` instead. A stale exemption fails the gate.
+A file that cannot carry a contract is listed, with a reason, in
+`scripts/contract-exemptions.txt`: `crates/schema/src/generated.rs` and the
+crate-root build scripts `crates/cli/build.rs` and `crates/control/build.rs`.
+`crates/kernel/src/turn/build.rs` is a module, not a build script. A single item
+may use `// Contract-exempt: <reason>`; a stale exemption fails the gate.
 
 ### Every document has a path up
 
@@ -78,9 +80,8 @@ edge), `Authority` (the ADR or higher document that decides the topic), `Code`
 (the files it describes) and `Verify` (the command that proves them).
 `research/`, `archive/`, `superpowers/` and `human-written/` are records and
 need no header; ADRs gain only `Up`; the index is the root and has no `Up`.
-Every document stays within the length budget for its class, stated with the
-other exceptions in [`docs/README.md`](docs/README.md); an over-run fails the
-gate.
+Every document stays within its class budget, stated with the other exceptions
+in [`docs/README.md`](docs/README.md); an over-run fails the gate.
 
 One document is the authority for a topic. Other documents link to it instead of
 restating it. Detail links down: a parent summarises and points.

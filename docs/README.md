@@ -1,5 +1,8 @@
 # Design Docs — loongagent
 
+- **Code:** `docs/README.md`, the maintained files under `docs/`, `README.md`, `DEVELOPMENT.md`
+- **Verify:** `python3 scripts/check-docs.py`
+
 This folder is the living memory of **loongagent** (龙 — the Chinese dragon,
 a creature assembled from the strongest parts of many animals: our product
 philosophy in one name). All design discussion between the human and the agent
@@ -64,8 +67,9 @@ Exceptions, each for a stated reason:
 - `README.md`, `DEVELOPMENT.md` and `docs/00-vision.md` are entry points; their
   `Up` may name `docs/04-system-overview.md`, and `README.md` may be the root.
 - `research/`, `archive/`, `superpowers/` and `human-written/` are records or
-  human input. They are indexed and link-checked but need no header and have no
-  length cap.
+  human input. They are indexed; `research/`, `archive/` and `superpowers/` are
+  link-checked, while `human-written/` is skipped by the docs checks. None needs
+  a header or a length cap.
 
 Length budgets, by class:
 

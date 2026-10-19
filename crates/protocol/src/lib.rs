@@ -7,9 +7,6 @@
 //! - **Downstream:** `Request`, `Response` and `Notification`, over `loong_schema::generated::RpcError`.
 //! - **Verify:** `cargo test -p loong-protocol` · `./scripts/check.sh`
 //!
-//! One line in, one line out — newline-delimited JSON over stdio or a unix
-//! socket. Clients are thin (ADR-0009): they send intents, they receive the
-//! event stream, and they hold no agent logic.
 //! JSON-RPC 2.0 envelopes and framing (ADR-0002).
 //!
 //! One line in, one line out — newline-delimited JSON over stdio or a unix

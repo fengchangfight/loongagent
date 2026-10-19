@@ -1,4 +1,4 @@
-//! Purpose: Re-export the generated wire schema and its version as the schema crate's public surface.
+//! Purpose: Own the single source of truth for every message on the wire, generated once for Rust and TypeScript.
 //!
 //! # Contract
 //! - **Serves:** a single source of truth for every message on the wire, generated once for Rust and TypeScript.

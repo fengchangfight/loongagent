@@ -68,7 +68,7 @@ TRIVIAL_SPAN = 12
 MIN_REASON = 10
 
 # The file-level exemption list is closed. Only code that cannot carry a
-# contract belongs here; a fourth entry means either a real contract is being
+# contract belongs here; an entry outside this list means either a real contract is being
 # avoided or a generated file appeared without a rule, and both need a person.
 # Item-level `path#item` exemptions are not limited by this set.
 ALLOWED_FILE_EXEMPTIONS = frozenset(

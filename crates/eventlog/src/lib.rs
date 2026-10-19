@@ -112,7 +112,7 @@ impl From<std::io::Error> for LogError {
 ///
 /// Serves: visibility into what a lenient replay dropped (events-storage.md §3).
 /// Design: `docs/design/events-storage.md` (ADR-0003).
-/// Up: `Replay::skipped`, read by a surface replaying a session.
+/// Up: `Replay::skipped`, read by tests; no in-tree reader yet.
 /// Down: the line number and kind of the skipped envelope.
 /// Verify: `cargo test -p loong-eventlog`.
 pub struct Skipped {

@@ -25,7 +25,7 @@ use std::path::Path;
 ///
 /// Serves: one error type at the index boundary (events-storage.md §4).
 /// Design: `docs/design/events-storage.md` (ADR-0003).
-/// Up: every `Index` method returns it to the kernel or a surface.
+/// Up: every `Index` method returns it to the kernel.
 /// Down: `rusqlite::Error`, `LogError` and `serde_json::Error`.
 /// Verify: `cargo test -p loong-index`.
 pub enum IndexError {
@@ -77,7 +77,7 @@ impl From<serde_json::Error> for IndexError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Purpose: One indexed event without its payload parsed: the row `search` and `children` return.
 ///
-/// Serves: a query result a surface can render without re-reading the log (events-storage.md §4).
+/// Serves: a query result the kernel can pass on without re-reading the log (events-storage.md §4).
 /// Design: `docs/design/events-storage.md` (ADR-0003).
 /// Up: `search` and `children`.
 /// Down: the `events` table columns and their row decoding.
@@ -107,7 +107,7 @@ pub struct KindCount {
 ///
 /// Serves: tree navigation, substring search and counts without becoming the truth (events-storage.md §4).
 /// Design: `docs/design/events-storage.md` (ADR-0003, ADR-0015).
-/// Up: the kernel when it builds, inserts and rebuilds; surfaces reading a session.
+/// Up: the kernel when it builds, inserts, searches and rebuilds.
 /// Down: the `events` table and the log that `fill` replays.
 /// Verify: `cargo test -p loong-index`.
 pub struct Index {
@@ -121,7 +121,7 @@ impl Index {
     ///
     /// Serves: a caller that may reuse or rebuild a stale index at any time (events-storage.md §4).
     /// Design: `docs/design/events-storage.md` (ADR-0003).
-    /// Up: `rebuild_into` and the kernel's index path.
+    /// Up: `rebuild_into`; the kernel reaches the index through it.
     /// Down: `Connection::open` and `Index::init`.
     /// Verify: `cargo test -p loong-index`.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, IndexError> {
@@ -293,7 +293,7 @@ impl Index {
     /// the convenience path the UI uses).
     /// Purpose: Substring-search event payloads and return matching rows in sequence order.
     ///
-    /// Serves: the convenience search a surface offers, while JSONL stays the truth (events-storage.md §4).
+    /// Serves: the convenience search the kernel offers, while JSONL stays the truth (events-storage.md §4).
     /// Design: `docs/design/events-storage.md` (ADR-0003).
     /// Up: `Kernel::search`.
     /// Down: the `LIKE` query and `row_from`.

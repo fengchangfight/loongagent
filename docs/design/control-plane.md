@@ -18,8 +18,8 @@ Three names appear in the ADRs, and they are not the same axis.
 
 | Mode | What runs | Where the provider key is | Built? |
 |---|---|---|---|
-| **Local** | no control plane; layers are project, `~/.loongagent/local.toml`, session; no pack and no org file | the person's file, env or keychain, resolved on the client | yes (`--local` or `mode = "local"`) |
-| **Managed, pre-gateway** | a `control.toml` names a control plane and a pinned key; a verified profile pack becomes the `control` layer; model calls still go directly to the provider | the client resolves the pack's `api_key` reference (`env:…`, `file:…`), so the key never reaches the control plane | yes |
+| **Local** | no control plane; layers are project, `~/.loongagent/local.toml`, session; no pack and no org file | an `env:` or `file:` reference, resolved on the client; `keychain:` is reserved and has no store | yes (`--local` or `mode = "local"`) |
+| **Managed, pre-gateway** | a `control.toml` names a control plane and a pinned key; a verified profile pack becomes the `control` layer; model calls still go directly to the provider | the client resolves the pack's `api_key` reference (`env:…`, `file:…`), so a referenced key never reaches the control plane; a literal in the pack does, and is warned about | yes |
 | **Gateway** | model calls go through a gateway that holds the provider key, meters spend, refuses over budget and chooses the route | the gateway | **no** — decided by ADR-0005, no service or client path |
 
 The middle row is the one to keep in mind when reading ADR-0005. The code implements routing
@@ -32,7 +32,7 @@ reserved spelling, not a gateway.
 ```mermaid
 flowchart TB
     subgraph local["local mode — no control plane"]
-        LKEY["provider key<br/>user file / env / keychain"]
+        LKEY["provider key<br/>env: / file: reference"]
         LPOL["policy in local layers<br/>project · local.toml · session"]
         LKERNEL["kernel · tools · sandbox<br/>session log"]
         LPROV["model provider"]
@@ -79,12 +79,13 @@ speaks plain HTTP/1.1 on three paths:
 | `GET /v1/pack/profiles` | client token | the signed envelope as JSON, or `409` when nothing is published |
 | `POST /v1/admin/publish` | admin token | accepts a draft (JSON or bare TOML) or an already-signed envelope, validates it, signs a draft with the key this plane holds, and stores it |
 
-The two tokens are separate strings compared for equality, so the token every install carries
-cannot change policy. Tokens come from an environment variable or a file
-(`--client-token-env` / `--client-token-file`, and the admin equivalents), never from the
-command line. `serve` requires `--key`: the deployed binary always holds the signing key, even
-though the `ControlPlane` type can be built without one. Passing `--public-key` too is a safety
-check — a key that does not derive it refuses to start.
+The server keeps a client token and an admin token and checks each on its own route. It does not
+check that the two strings differ; the runbook generates them separately. The token every install
+carries cannot publish, because the admin route compares against the admin field. Tokens come
+from an environment variable or a file (`--client-token-env` / `--client-token-file`, and the
+admin equivalents), never from the command line. `serve` requires `--key`: the deployed binary
+always holds the signing key, even though the `ControlPlane` type can be built without one.
+Passing `--public-key` too is a safety check — a key that does not derive it refuses to start.
 
 There is no listener for session data, audit batches, statistics or model traffic. A client
 only ever **reads** the pack, which is what keeps ADR-0012 §3's uplink allow-list easy to
@@ -104,22 +105,22 @@ refused before it is signed and again before it is applied. The only adapter kin
 and refuses an unknown choice rather than silently running another. `pack_layer` turns it into
 `models`, `router.default` and `router.rules` for the `control` layer; the one profile-related
 key the user owns is `control.profile`, which the pack deliberately does not set. The layer and
-its lock behaviour are owned by [config-routing.md](config-routing.md) §4.
+its lock behaviour are owned by [config-routing.md](config-routing.md) §2 and §5.
 
 **Policy and identity are not pack payloads today.** The envelope's schema space can hold them
-(ADR-0016 §8 names the deferred schemas), but only profiles are written. The org's policy that
-does exist is the local unsigned `profile.toml`; identity is not built at all — a shared client
-token is the whole authentication, and it identifies an install, not a person.
+(the Deferred bullet in ADR-0016's Consequences names the schemas), but only profiles are
+written. The org's policy that does exist is the local unsigned `profile.toml`; identity is not
+built at all — a shared client token is the whole authentication, and it identifies an install,
+not a person.
 
-## 4. The envelope, and the path from a draft to a verified layer
+## 4. The path from a draft to a verified layer
 
-The envelope is the one crate both binaries share (`crates/pack`). It carries `artifact`,
-`payload_schema`, `version`, `issuer`, `scope`, `issued_at_ms`, `key_id`, `payload` and
-`signature`. The signature is **Ed25519 over the canonical JSON of every field except
-`signature`** — so the version, issuer, scope and payload are all covered and a pack cannot be
-replayed as another artifact or version. `key_id` is the first eight bytes of the SHA-256 of the
-public key, so rotation is possible. On the normal path the private key is PKCS#8, mode `0600` on
-Unix, and stays on the control plane; `sign` is the air-gapped exception, where it does not.
+The envelope's fields, its Ed25519 signature and the verify order are owned by
+[config-routing.md](config-routing.md) §4–§5; `crates/pack` is the one crate both binaries share.
+This section keeps only what the control plane does with them. One code detail belongs here
+because the ADR is stale on it: `Envelope::signing_bytes` includes `key_id` as well as every
+other field except `signature`, so ADR-0016 §1's statement that `key_id` is excluded does not
+describe the code.
 
 The path has two halves:
 
@@ -127,27 +128,22 @@ The path has two halves:
    validates it with the same `profiles_from_payload` the client uses, signs it with the key it
    holds, and atomically replaces `profiles.json`. `publish --file` accepts an envelope signed
    elsewhere, for an air-gapped administrator, after verifying it under the same public key.
-2. **Control plane → client.** The client pins the org's public key in `control.toml`, fetches
-   the pack with `GET /v1/pack/profiles`, and calls `Envelope::verify`: the payload schema must
-   be one this build knows, `key_id` must match the pinned key's id, and the signature must
-   verify. The cache is written **only after** verification. An unreachable plane falls back to
-   the last verified cache; a pack that fails verification never falls back — a forgery is a
-   reason to stop, not to run yesterday's policy.
+2. **Control plane → client.** The client pins the org's public key in `control.toml` and fetches
+   the pack with `GET /v1/pack/profiles`; the verification and cache-after-verify rules are
+   [config-routing.md](config-routing.md) §4. An unreachable plane falls back to the last verified
+   cache; a pack that fails verification never falls back, because a forgery is a reason to stop.
 
-`control.toml` is machine configuration, not the layered profile: the machine-wide file decides
-the address and the key, and a user file may supply only the token. A key mismatch is a hard
-failure, never a silent re-pin. ADR-0016 §3's optional `--trust-server-key` convenience is not
-implemented; the pin is written by `loongagent setup --public-key`.
+The pin is machine configuration: the machine-wide file decides the address and key, and a user
+file may supply only the token. A key mismatch is a hard failure, never a silent re-pin (detail:
+[config-routing.md](config-routing.md) §4). `--trust-server-key` is not built.
 
 ## 5. The local org layer is not signed
 
 `Layer::Org` reads `/etc/loongagent/profile.toml` (`%PROGRAMDATA%\loongagent\profile.toml` on
 Windows). It is a plain file an administrator owns. It has **no signature**, its protection is
 file ownership and the machine setup, and it must not be called tamper-resistant. The verified
-`control` layer ranks immediately above it, so a stale local file cannot shadow a pack; lower
-layers may narrow a narrow-only key but not rewrite a free-override or reference key the pack
-set. The layer order and the four merge kinds are owned by [config-routing.md](config-routing.md)
-§1 and §5.
+`control` layer and the lock that keeps lower layers from rewriting it are owned by
+[config-routing.md](config-routing.md) §1–§2 and §5.
 
 Local mode does not read the org file at all: `local_layer_paths` returns project, `local.toml`
 and session, with no org and no pack. That is not the managed list with a flag; it is a separate

@@ -115,9 +115,9 @@ set, crate by crate, is [`../crate-map.md`](../crate-map.md), generated from
 | [config-routing.md](config-routing.md) | Layered configuration, signed packs and local trust, the model router, and the provider interface. | `crates/config/src/`, `crates/manifest/src/lib.rs`, `crates/providers/src/` |
 | [extension-model.md](extension-model.md) | The four extension kinds, their loaders, the hooks/MCP trust gates, and the kernel/edge boundary; pack trust detail lives in `config-routing.md`. | `crates/hooks/src/`, `crates/skills/src/`, `crates/mcp/src/`, `crates/plugin/src/`, `crates/pack/src/lib.rs` |
 | [sessions-lineage.md](sessions-lineage.md) | Session lifecycle: fork, delete, resume, retry, steer, and the export/import boundary; event-tree mechanics live in `events-storage.md`. | `crates/server/src/lib.rs`, `crates/kernel/src/turn/session.rs`, `crates/eventlog/src/lib.rs` |
-| [surfaces.md](surfaces.md) | The surfaces: the local server, the CLI as composition root, TUI and web, ACP decided not built, and the JSON-RPC they share. | `crates/cli/src/main.rs`, `crates/server/src/lib.rs`, `crates/web/src/lib.rs` |
-| [control-plane.md](control-plane.md) | The control plane: local, managed and unbuilt gateway modes; the pack endpoint; the pinned key; what is not built. | `crates/control/src/`, `crates/pack/src/lib.rs` |
-| [security-trust.md](security-trust.md) | The trust boundaries: what is trusted, who signs or owns it, what enforces it, and the honest gaps. | `crates/sandbox/src/`, `crates/manifest/src/lib.rs`, `crates/config/src/secret.rs` |
+| [surfaces.md](surfaces.md) | The surfaces: the local server, the CLI as composition root, TUI and web, ACP decided not built, and the JSON-RPC they share. | `crates/cli/src/main.rs`, `crates/server/src/lib.rs`, `crates/tui/src/lib.rs`, `crates/tui-app/src/lib.rs`, `crates/web/src/lib.rs` |
+| [control-plane.md](control-plane.md) | The control plane: local, managed and unbuilt gateway modes; the pack endpoint; the pinned key; what is not built. | `crates/control/src/`, `crates/pack/src/lib.rs`, `crates/config/src/lib.rs` |
+| [security-trust.md](security-trust.md) | The trust boundaries: what is trusted, who signs or owns it, what enforces it, and the honest gaps. | `crates/sandbox/`, `crates/manifest/`, `crates/pack/`, `crates/config/src/secret.rs`, `crates/hooks/src/config.rs` |
 
 A row is added by the task that writes the document; a mechanism with no row has no page in this layer to own it yet.
 

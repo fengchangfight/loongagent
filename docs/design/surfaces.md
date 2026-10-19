@@ -117,8 +117,8 @@ a divergent local implementation.
 
 Every surface speaks newline-delimited **JSON-RPC 2.0** from [`crates/protocol`](../../crates/protocol/src/lib.rs):
 
-- a **request** carries `id`, `method` and `params`; the server answers once with `result` or
-  a JSON-RPC `error`;
+- a **request** carries `jsonrpc: "2.0"`, `id`, `method` and `params`; the server answers once
+  with `result` or a JSON-RPC `error`;
 - an **event** is a server-to-client notification with `method: "event"` and one event
   envelope in `params`; it is written to the log first, then announced, so a surface cannot see
   a decision the record does not have;
@@ -142,7 +142,8 @@ flowchart LR
     CLICLIENT --> TUICLIENT
     PAGE --> WEB["loong-web<br/>page + WebSocket token"]
     TUICLIENT -->|"JSON-RPC · stdio"| SERVER["loong-server<br/>one session per process"]
-    WEB -->|"spawns one child<br/>bridges WebSocket ↔ stdio"| SERVER
+    WEB -->|"bridges WebSocket ↔ stdio"| SERVER
+    CLIWEB["loongagent web<br/>spawns the server child"] --> SERVER
     SERVER --> KERNEL["kernel · ledger · PDP · sandbox<br/>session JSONL + derived index"]
     ACP["ACP adapter"] -.->|"decided, not built"| SERVER
 ```

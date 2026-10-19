@@ -1,3 +1,12 @@
+//! Purpose: Answer tree, search and count queries from a disposable SQLite copy of the JSONL log.
+//!
+//! # Contract
+//! - **Serves:** fast navigation of a session without ever becoming the truth (events-storage.md §4).
+//! - **Design:** `docs/design/events-storage.md` (ADR-0003, ADR-0015).
+//! - **Upstream:** the kernel inserts each event after appending it, and rebuilds the index from the log.
+//! - **Downstream:** `loong_eventlog::replay`, `rusqlite`, and `loong_schema::generated::EventEnvelope`.
+//! - **Verify:** `cargo test -p loong-index` · `./scripts/check.sh`
+//!
 //! Derived, disposable SQLite index over the JSONL truth (ADR-0003).
 //!
 //! The index answers the questions JSONL is bad at — *tree navigation, search,
@@ -12,6 +21,13 @@ use rusqlite::{params, Connection};
 use std::path::Path;
 
 #[derive(Debug)]
+/// Purpose: Why an index query or rebuild failed: SQLite, the log, or payload encoding.
+///
+/// Serves: one error type at the index boundary (events-storage.md §4).
+/// Design: `docs/design/events-storage.md` (ADR-0003).
+/// Up: every `Index` method returns it to the kernel or a surface.
+/// Down: `rusqlite::Error`, `LogError` and `serde_json::Error`.
+/// Verify: `cargo test -p loong-index`.
 pub enum IndexError {
     Sql(rusqlite::Error),
     Log(LogError),
@@ -19,6 +35,9 @@ pub enum IndexError {
 }
 
 impl std::fmt::Display for IndexError {
+    /// Purpose: Render an index failure as one line.
+    ///
+    /// Contract: `crates/index/src/lib.rs`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             IndexError::Sql(e) => write!(f, "sqlite: {e}"),
@@ -31,22 +50,38 @@ impl std::fmt::Display for IndexError {
 impl std::error::Error for IndexError {}
 
 impl From<rusqlite::Error> for IndexError {
+    /// Purpose: Turn a SQLite failure into `IndexError::Sql`.
+    ///
+    /// Contract: `crates/index/src/lib.rs`.
     fn from(e: rusqlite::Error) -> Self {
         IndexError::Sql(e)
     }
 }
 impl From<LogError> for IndexError {
+    /// Purpose: Turn a log failure into `IndexError::Log`.
+    ///
+    /// Contract: `crates/index/src/lib.rs`.
     fn from(e: LogError) -> Self {
         IndexError::Log(e)
     }
 }
 impl From<serde_json::Error> for IndexError {
+    /// Purpose: Turn a payload encoding failure into `IndexError::Encode`.
+    ///
+    /// Contract: `crates/index/src/lib.rs`.
     fn from(e: serde_json::Error) -> Self {
         IndexError::Encode(e)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Purpose: One indexed event without its payload parsed: the row `search` and `children` return.
+///
+/// Serves: a query result a surface can render without re-reading the log (events-storage.md §4).
+/// Design: `docs/design/events-storage.md` (ADR-0003).
+/// Up: `search` and `children`.
+/// Down: the `events` table columns and their row decoding.
+/// Verify: `cargo test -p loong-index`.
 pub struct EventRow {
     pub seq: u64,
     pub kind: String,
@@ -56,11 +91,25 @@ pub struct EventRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Purpose: One event kind and how many events carry it.
+///
+/// Serves: the only aggregate the index offers today (events-storage.md §4).
+/// Design: `docs/design/events-storage.md` (ADR-0003).
+/// Up: `kinds`.
+/// Down: the `GROUP BY kind` query.
+/// Verify: `cargo test -p loong-index`.
 pub struct KindCount {
     pub kind: String,
     pub count: u64,
 }
 
+/// Purpose: A SQLite connection over one session's events, disposable by design.
+///
+/// Serves: tree navigation, substring search and counts without becoming the truth (events-storage.md §4).
+/// Design: `docs/design/events-storage.md` (ADR-0003, ADR-0015).
+/// Up: the kernel when it builds, inserts and rebuilds; surfaces reading a session.
+/// Down: the `events` table and the log that `fill` replays.
+/// Verify: `cargo test -p loong-index`.
 pub struct Index {
     conn: Connection,
 }
@@ -68,6 +117,13 @@ pub struct Index {
 impl Index {
     /// Open (or create) an index file. An existing, stale, or corrupt index is
     /// not a problem in principle — call [`Index::rebuild_into`] to replace it.
+    /// Purpose: Open or create an index file and ensure its table and indexes exist.
+    ///
+    /// Serves: a caller that may reuse or rebuild a stale index at any time (events-storage.md §4).
+    /// Design: `docs/design/events-storage.md` (ADR-0003).
+    /// Up: `rebuild_into` and the kernel's index path.
+    /// Down: `Connection::open` and `Index::init`.
+    /// Verify: `cargo test -p loong-index`.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, IndexError> {
         let conn = Connection::open(path)?;
         let index = Self { conn };
@@ -75,6 +131,13 @@ impl Index {
         Ok(index)
     }
 
+    /// Purpose: Open an index in memory, for a build that needs no file.
+    ///
+    /// Serves: a disposable index that needs no cleanup (events-storage.md §4).
+    /// Design: `docs/design/events-storage.md` (ADR-0003).
+    /// Up: `rebuild`.
+    /// Down: `Connection::open_in_memory` and `Index::init`.
+    /// Verify: `cargo test -p loong-index`.
     pub fn in_memory() -> Result<Self, IndexError> {
         let index = Self {
             conn: Connection::open_in_memory()?,
@@ -84,6 +147,13 @@ impl Index {
     }
 
     /// Build a fresh in-memory index from a log.
+    /// Purpose: Build a fresh in-memory index from a log.
+    ///
+    /// Serves: the proof that the index is disposable: delete it and replay the JSONL (events-storage.md §4).
+    /// Design: `docs/design/events-storage.md` (ADR-0003).
+    /// Up: tests and callers that need a read-only view.
+    /// Down: `in_memory` and `fill`.
+    /// Verify: `cargo test -p loong-index`.
     pub fn rebuild(log: impl AsRef<Path>) -> Result<Self, IndexError> {
         let mut index = Self::in_memory()?;
         index.fill(log)?;
@@ -91,6 +161,13 @@ impl Index {
     }
 
     /// Replace the contents of an on-disk index from a log.
+    /// Purpose: Replace an on-disk index's rows from a log.
+    ///
+    /// Serves: a rebuild after a stale index or a failed insert (events-storage.md §4).
+    /// Design: `docs/design/events-storage.md` (ADR-0003).
+    /// Up: the kernel's `rebuild_index` and its build path.
+    /// Down: `open`, `fill` and the `DELETE FROM events` statement.
+    /// Verify: `cargo test -p loong-index`.
     pub fn rebuild_into(path: impl AsRef<Path>, log: impl AsRef<Path>) -> Result<Self, IndexError> {
         let mut index = Self::open(path)?;
         index.conn.execute("DELETE FROM events", [])?;
@@ -98,6 +175,13 @@ impl Index {
         Ok(index)
     }
 
+    /// Purpose: Create the `events` table and the kind and parent indexes if they are absent.
+    ///
+    /// Serves: an index that can be created from nothing (events-storage.md §4).
+    /// Design: `docs/design/events-storage.md` (ADR-0003).
+    /// Up: `open` and `in_memory`.
+    /// Down: the `execute_batch` schema statement.
+    /// Verify: `cargo test -p loong-index`.
     fn init(&self) -> Result<(), IndexError> {
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS events (
@@ -115,6 +199,13 @@ impl Index {
         Ok(())
     }
 
+    /// Purpose: Replay a log strictly and insert every event inside one transaction.
+    ///
+    /// Serves: an index rebuilt from the record alone (events-storage.md §4).
+    /// Design: `docs/design/events-storage.md` (ADR-0003).
+    /// Up: `rebuild` and `rebuild_into`.
+    /// Down: `loong_eventlog::replay` and the `INSERT OR REPLACE` statement.
+    /// Verify: `cargo test -p loong-index`.
     fn fill(&mut self, log: impl AsRef<Path>) -> Result<(), IndexError> {
         let replayed = replay(log)?;
         let tx = self.conn.transaction()?;
@@ -140,6 +231,13 @@ impl Index {
     }
 
     /// Insert one event (the append path uses this alongside the JSONL write).
+    /// Purpose: Insert or replace one event after it was written to the JSONL.
+    ///
+    /// Serves: keeping the derived copy close to the truth on the append path (events-storage.md §4).
+    /// Design: `docs/design/events-storage.md` (ADR-0003).
+    /// Up: the kernel after `SessionLog::append`.
+    /// Down: the `INSERT OR REPLACE` statement.
+    /// Verify: `cargo test -p loong-index`.
     pub fn insert(&mut self, env: &EventEnvelope) -> Result<(), IndexError> {
         self.conn.execute(
             "INSERT OR REPLACE INTO events (seq, id, parent_id, kind, ignorable, time_ms, data)
@@ -157,6 +255,13 @@ impl Index {
         Ok(())
     }
 
+    /// Purpose: Count the indexed events.
+    ///
+    /// Serves: a status reader (no in-tree caller); tests use it to pin trailing behaviour.
+    /// Design: `docs/design/events-storage.md` (ADR-0003).
+    /// Up: a status reader (no in-tree caller).
+    /// Down: the `SELECT COUNT(*)` query.
+    /// Verify: `cargo test -p loong-index`.
     pub fn count(&self) -> Result<u64, IndexError> {
         let n: i64 = self
             .conn
@@ -164,6 +269,13 @@ impl Index {
         Ok(n as u64)
     }
 
+    /// Purpose: Count events grouped by kind, sorted by kind.
+    ///
+    /// Serves: the compaction check that asks what a session contains (events-storage.md §4).
+    /// Design: `docs/design/events-storage.md` (ADR-0003).
+    /// Up: `Kernel`'s compaction path.
+    /// Down: the `GROUP BY kind` query and `KindCount`.
+    /// Verify: `cargo test -p loong-index`.
     pub fn kinds(&self) -> Result<Vec<KindCount>, IndexError> {
         let mut stmt = self
             .conn
@@ -179,6 +291,13 @@ impl Index {
 
     /// Substring search over event payloads (the JSONL stays the truth; this is
     /// the convenience path the UI uses).
+    /// Purpose: Substring-search event payloads and return matching rows in sequence order.
+    ///
+    /// Serves: the convenience search a surface offers, while JSONL stays the truth (events-storage.md §4).
+    /// Design: `docs/design/events-storage.md` (ADR-0003).
+    /// Up: `Kernel::search`.
+    /// Down: the `LIKE` query and `row_from`.
+    /// Verify: `cargo test -p loong-index`.
     pub fn search(&self, needle: &str) -> Result<Vec<EventRow>, IndexError> {
         let mut stmt = self.conn.prepare(
             "SELECT seq, kind, ignorable, time_ms, data FROM events
@@ -190,6 +309,13 @@ impl Index {
     }
 
     /// Children of an event — the event tree inside a session (ADR-0015).
+    /// Purpose: List the events whose `parent_id` is the given id, in sequence order.
+    ///
+    /// Serves: the event tree inside a session (events-storage.md §5).
+    /// Design: `docs/design/events-storage.md` (ADR-0003, ADR-0015).
+    /// Up: `Kernel::event_children`.
+    /// Down: the `parent_id` query and `row_from`.
+    /// Verify: `cargo test -p loong-index`.
     pub fn children(&self, parent_id: &str) -> Result<Vec<EventRow>, IndexError> {
         let mut stmt = self.conn.prepare(
             "SELECT seq, kind, ignorable, time_ms, data FROM events
@@ -200,6 +326,9 @@ impl Index {
     }
 }
 
+/// Purpose: Decode one SQLite row into an `EventRow`.
+///
+/// Contract: `crates/index/src/lib.rs`.
 fn row_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<EventRow> {
     Ok(EventRow {
         seq: r.get::<_, i64>(0)? as u64,
@@ -220,6 +349,9 @@ mod tests {
 
     static N: AtomicU64 = AtomicU64::new(0);
 
+    /// Purpose: Reserve a unique temporary JSONL path for a test.
+    ///
+    /// Contract: `crates/index/src/lib.rs`.
     fn temp_log() -> PathBuf {
         let p = std::env::temp_dir().join(format!(
             "loong-index-{}-{}.jsonl",
@@ -230,6 +362,13 @@ mod tests {
         p
     }
 
+    /// Purpose: Write three sample events, including one parented event, and return the two ids.
+    ///
+    /// Serves: a shared fixture for the index tests.
+    /// Design: `docs/design/events-storage.md` (ADR-0003).
+    /// Up: the rebuild, search and disposable-index tests.
+    /// Down: `SessionLog::create`, `append` and `append_with_parent`.
+    /// Verify: `cargo test -p loong-index`.
     fn sample_log(path: &Path) -> (String, String) {
         let mut log = SessionLog::create(path).unwrap();
         let first = log
@@ -250,6 +389,7 @@ mod tests {
         (first.id, child.id)
     }
 
+    /// Purpose: Pins that a rebuild counts the log and aggregates the kinds.
     #[test]
     fn rebuild_counts_and_aggregates_kinds() {
         let path = temp_log();
@@ -274,6 +414,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// Purpose: Pins that substring search and the parent query work from the derived index.
     #[test]
     fn search_and_tree_navigation_work() {
         let path = temp_log();
@@ -293,6 +434,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// Purpose: Pins that deleting the index and rebuilding it from the log loses nothing.
     #[test]
     fn the_index_is_disposable() {
         let path = temp_log();
@@ -310,6 +452,7 @@ mod tests {
         let _ = std::fs::remove_file(&index_path);
     }
 
+    /// Purpose: Pins that an event appended after the build appears only after `insert`.
     #[test]
     fn the_index_trails_the_log_until_it_is_told() {
         let path = temp_log();

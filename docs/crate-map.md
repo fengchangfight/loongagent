@@ -17,10 +17,10 @@ listed is a violation. The middle column is each crate's own `//!` header.
 | `loong-config` | Configuration and profile layering (ADR-0008). | `loong-schema` |
 | `loong-context` | Layered, reversible context memory (ADR-0017). | `loong-eventlog`, `loong-http`, `loong-schema` |
 | `loong-control` | Talking to the control plane: fetching the signed profile pack, verifying it, | `loong-config`, `loong-http`, `loong-pack` |
-| `loong-eventlog` | Append-only JSONL event log — the source of truth (ADR-0003). | `loong-schema` |
+| `loong-eventlog` | Write and read the append-only JSONL event log that is one session's source of truth. | `loong-schema` |
 | `loong-hooks` | Lifecycle hooks: the deterministic enforcement layer (ADR-0007 §7). | `loong-http`, `loong-manifest`, `loong-proc`, `loong-schema` |
 | `loong-http` | The smallest HTTP/1.1 client that can carry a JSON POST — shared by the | — |
-| `loong-index` | Derived, disposable SQLite index over the JSONL truth (ADR-0003). | `loong-eventlog`, `loong-schema` |
+| `loong-index` | Answer tree, search and count queries from a disposable SQLite copy of the JSONL log. | `loong-eventlog`, `loong-schema` |
 | `loong-kernel` | The fixed kernel (ADR-0004): the model+tool loop, the context ledger that is | `loong-config`, `loong-context`, `loong-eventlog`, `loong-hooks`, `loong-index`, `loong-mcp`, `loong-providers`, `loong-sandbox`, `loong-schema`, `loong-skills`, `loong-tools` |
 | `loong-manifest` | Manifest trust: a repository's configuration is **content from that | — |
 | `loong-mcp` | MCP (T-15): external tools behind the same interface as the built-ins. | `loong-manifest`, `loong-protocol`, `loong-schema`, `loong-tools` |

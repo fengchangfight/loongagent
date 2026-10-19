@@ -54,12 +54,10 @@ crates/context/tests/worker.rs
 crates/control/src/bin/loongagent-control.rs
 crates/control/src/lib.rs
 crates/control/tests/key_material_never_lands_in_git.rs
-crates/eventlog/src/lib.rs
 crates/hooks/src/config.rs
 crates/hooks/src/lib.rs
 crates/hooks/src/run.rs
 crates/http/src/lib.rs
-crates/index/src/lib.rs
 crates/kernel/src/context_engine.rs
 crates/kernel/src/ledger.rs
 crates/kernel/src/lib.rs

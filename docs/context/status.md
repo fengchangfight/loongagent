@@ -21,7 +21,7 @@ Language: zh
 | **`recall` 的 `expand` 只用摘要 id** | 仍缺 | 模型要两步（先 recall 拿 id，再 expand）。可用，但多一轮往返 |
 | **一次性 headless 运行没有空闲窗口** | 已知取舍 | 前台"整轮 busy"信号最保守：一轮里后台绝不打模型，代价是 `loong run "…"` 这种一问即退的运行不会触发富化（digest 仍然完整，库仍可 `rebuild`）。要富化就多轮交互，或将来把窗口细到"工具等待" |
 | **`memory.*` 事件一个都没落地** | 仍缺（**2026-10-14 审计发现**） | [pipeline.md](pipeline.md) §9 的四类事件（`memory.l1.materialized` / `memory.summary.updated` / `memory.superseded` / `memory.worker.state`）在 `protocol.toml` 里不存在，引擎也从不写日志。摘要变更因此**不能从日志审计**，水位与 worker 统计只在 `meta`/进程内。ADR-0017 的 Consequences 曾把它写成已新增，现已在那边标注"尚未落地" |
-| **`superseded_by` 从未被写过** | 仍缺（**2026-10-14 审计发现**） | 列存在、读取路径存在，但 `replace_overlapping` 对过期摘要执行的是 `DELETE`，不是"标 `superseded_by` 保留"。ADR-0017 [pipeline.md](pipeline.md) §6 的"旧摘要标 superseded_by，不静默覆盖历史"**没有兑现**；当前语义是"重叠即重派生" |
+| **`superseded_by` 从未被写过** | 仍缺（**2026-10-14 审计发现**） | 列存在、读取路径存在，但 `replace_overlapping` 对过期摘要执行的是 `DELETE`，不是"标 `superseded_by` 保留"。ADR-0017 [§6](../decisions/0017-layered-context.md) 的"旧摘要标 superseded_by，不静默覆盖历史"**没有兑现**；当前语义是"重叠即重派生" |
 | **`l4_max_tokens` / `episode_events` 解析了但没人读** | 仍缺 | 两个键进配置后会合并进 `ContextEngineSettings`，但 L4 上限仍是常量 `L4_MAX_TOKENS = 400`、切段仍是 `SEGMENT_MIN_EVENTS = 4`。一个"接受但无效"的键比一个报错的键更危险，所以单列（[recall.md](recall.md) §7.1、[pipeline.md](pipeline.md) §6.3） |
 | **一批草案键根本没接线** | 仍缺 | `store` / `episode_gap_secs` / `domain_rollup_episodes` / `recall_limit` / `recall_max_tokens` / `model_fast` / `think` / `timeout_ms` / `on_error` —— `deny_unknown_fields` 下写入即报错（[config.md](config.md) §11） |
 | **L3 脏集合 / 上行最小间隔** | 仍缺 | [pipeline.md](pipeline.md) §6.4 的"按实体标脏 + 只重算脏模块 + 最小重算间隔"没有实现；`digest_domains()` 每轮遍历所有 domain 比较内容，L4 每轮从全部 L2 现算。规模上目前是毫秒级，但这是"新内容只处理一次"承诺里唯一没有做到 O(增量) 的部分 |

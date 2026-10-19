@@ -10,15 +10,14 @@ Routing happens once per model call, inside the turn loop in
 the kernel builds `loong_config::Facts` from the ledger's token estimate and the step
 number, asks `Router::select`, and switches — and records — only when the answer differs
 from the model already selected. The philosophy is
-[ADR-0005](../decisions/0005-routing-philosophy.md); its 2026-10-18 revision makes
-this local router the pre-gateway form (gateway mode routes server-side; local
-mode has no router). The mechanism is in
+[ADR-0005](../decisions/0005-routing-philosophy.md); the mechanism is in
 `crates/config/src/profile.rs`:
 
 - `Facts` is the whole input to a decision, and `Fact` plus `parse_condition` is the
   whole grammar a rule may use, so a condition is parsed and validated where it is
   written rather than when it first fires;
-- `Router::select` is first-match-wins over `rules`, then `default`;
+- `Router::select` is first-match-wins over its `rules` (each a `RouterRule`), then
+  `default`;
 - the models a profile declares are built into adapters by `build_models`
   (`crates/cli/src/server.rs`), each one an implementation of `loong_providers::Model`
   (`crates/providers/src/lib.rs`); `OpenAiCompat` is the one real adapter, and the
@@ -27,12 +26,6 @@ mode has no router). The mechanism is in
   change of model is never silent and "why this model?" is answerable from the log.
 
 What to touch depends on what is changing:
-
-**Mode note (ADR-0005).** The local `[router]` below is the pre-gateway form. In
-gateway mode the gateway chooses the model and its routing policy is server-side;
-in local mode there is no router at all — the user's pick is the policy. Until
-the gateway ships, `[router]` is how a profile expresses escalation, which is why
-this section still documents it.
 
 | Change | Where |
 |---|---|

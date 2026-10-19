@@ -8,7 +8,6 @@ docs/02-topics.md
 docs/03-architecture.md
 docs/04-system-overview.md
 docs/05-parity-and-synthesis.md
-docs/07-extending.md
 docs/decisions/0001-one-binary-client-server.md
 docs/decisions/0002-json-rpc-wire-protocol.md
 docs/decisions/0003-jsonl-truth-sqlite-index.md

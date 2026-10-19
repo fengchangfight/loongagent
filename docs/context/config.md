@@ -19,14 +19,14 @@ Language: zh
 [context_engine]
 enabled = true                 # narrow-only。关掉 = 改造前的行为
 mode    = "semantic"           # record | semantic
-episode_events = 32            # ← 被解析，但**当前无人读取**（切段仍用常量，[pipeline.md](pipeline.md) §6.3）
-l4_max_tokens = 400            # ← 被解析，但**当前无人读取**（L4 上限仍是常量，[recall.md](recall.md) §7.1）
+episode_events = 32            # ← 被解析，但**当前无人读取**（切段仍用常量，§6.3）
+l4_max_tokens = 400            # ← 被解析，但**当前无人读取**（L4 上限仍是常量，§7.1）
 
 [summarizer]                   # 仅 mode = "semantic" 时被读取
 enabled   = true               # narrow-only 开关：企业层可置 false，用户层不能放宽
 kind      = "ollama"           # ollama（原生 /api/chat）| off
 base_url  = "http://127.0.0.1:11434"   # 仓库层不得设置（ADR-0008）
-model     = "qwen2.5:7b-instruct"      # synthesis 的语义字段（默认模型，[rollout.md](rollout.md) §14 未决项 2）
+model     = "qwen2.5:7b-instruct"      # synthesis 的语义字段（默认模型，§14 未决项 2）
 window_calls = 4               # 每个空闲窗口最多几次归纳（narrow-only，取最小）
 window_tokens = 6000           # 每个空闲窗口最多多少 token（估算；narrow-only，取最小）
 ```
@@ -70,7 +70,7 @@ loongagent local semantic on [模型]        # 已实现：打开语义模式并
 loongagent local semantic on --record      # 已实现：只做确定性派生，不调用模型
 loongagent local semantic off              # 已实现：关闭
 loong context status               # 已实现：水位、实体、各层条数、producer 分布
-loong context verify               # 已实现：引用完整性校验（[principles.md](principles.md) §4.1）
+loong context verify               # 已实现：引用完整性校验（§4.1）
 loong context rebuild              # 已实现：丢弃并重建派生库
 F2 面板                            # 已实现：账本分类 + 记忆状态
 

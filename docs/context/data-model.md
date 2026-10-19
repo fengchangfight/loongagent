@@ -70,7 +70,7 @@ CREATE TABLE summary (               -- L2/L3；L4 不落库（见下）
   seq_from      INTEGER NOT NULL,
   seq_to        INTEGER NOT NULL,
   superseded_by TEXT,                -- 已定义、尚未被写过
-  domain        TEXT,                -- L3 的模块归属，确定性规则（[rollout.md](rollout.md) §14 未决项 6）
+  domain        TEXT,                -- L3 的模块归属，确定性规则（§14 未决项 6）
   tokens        INTEGER NOT NULL,
   created_at    INTEGER NOT NULL,
   updated_at    INTEGER NOT NULL
@@ -78,7 +78,7 @@ CREATE TABLE summary (               -- L2/L3；L4 不落库（见下）
 CREATE INDEX summary_level ON summary(level, scope);
 CREATE INDEX summary_range ON summary(seq_from, seq_to);
 
-CREATE TABLE summary_inputs (        -- 派生血缘：让 [principles.md](principles.md) §4.2.1"不许链式总结"可检查
+CREATE TABLE summary_inputs (        -- 派生血缘：让 §4.2.1"不许链式总结"可检查
   summary_id TEXT    NOT NULL,
   input_id   TEXT,                   -- 子层摘要；NULL 表示原始事件区间
   seq_from   INTEGER,

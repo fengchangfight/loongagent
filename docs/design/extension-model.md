@@ -231,4 +231,4 @@ A pack is not invoked at all: it resolves into configuration before the kernel i
 - [tools-permissions.md](tools-permissions.md) — the PDP and the two enforcers every
   model-facing MCP tool also passes through.
 - `crates/hooks/src/config.rs`, `crates/mcp/src/config.rs`, `crates/plugin/src/lib.rs` — the
-  three trust implementations, each with its own tests.
+  three trust implementations, each with its own tests; procedures: [extending/](../extending/README.md).

@@ -1,5 +1,10 @@
 # Windows build runbook
 
+- **Up:** [README.md](../../README.md)
+- **Authority:** [ADR-0013](../decisions/0013-implementation-language.md)
+- **Code:** `scripts/build-windows.ps1`, `scripts/build-windows.cmd`
+- **Verify:** `powershell -ExecutionPolicy Bypass -File scripts/build-windows.ps1`
+
 One command builds the agent for Windows, and the session you get is deliberately the
 same session Ubuntu gets — same CLI, same slash commands, same keys. This file is the
 doing: the prerequisites, the command, the parity table, and the differences that are

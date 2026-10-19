@@ -1,3 +1,12 @@
+//! Purpose: The enforcement probe: detect which OS mechanism exists and prove it denies an outside write.
+//!
+//! # Contract
+//! - **Serves:** `sandbox self-test`, the server's startup report and the kernel's confinement choice.
+//! - **Design:** `docs/design/tools-permissions.md` §4 (ADR-0007).
+//! - **Upstream:** the CLI's sandbox command, the server's startup and the CLI's `probe` subcommand.
+//! - **Downstream:** `landlock` and the probe child's exit-code contract.
+//! - **Verify:** `cargo test -p loong-sandbox` · `./scripts/check.sh`
+//!
 //! The enforcement layer (ADR-0007): detect what the OS offers, **prove** it
 //! works, and confine subprocesses with it.
 //!
@@ -19,6 +28,12 @@ pub const PROBE_WORKSPACE: &str = "LOONG_SANDBOX_WORKSPACE";
 pub const PROBE_OUTSIDE: &str = "LOONG_SANDBOX_OUTSIDE";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Purpose: What this platform offers for confinement: Landlock ABI, bubblewrap and a note.
+/// Serves: the server's startup line and the self-test's verdict.
+/// Design: `docs/design/tools-permissions.md` §4.
+/// Up: `Capabilities::detect`; held by `SelfTestReport`.
+/// Down: `strongest`, `which` and `landlock::abi_version`.
+/// Verify: `cargo test -p loong-sandbox`.
 pub struct Capabilities {
     pub os: &'static str,
     /// Landlock ABI version, when the kernel has it (>= 1).
@@ -29,6 +44,12 @@ pub struct Capabilities {
 }
 
 impl Capabilities {
+    /// Purpose: Detect the strongest confinement mechanism this machine actually has.
+    /// Serves: `self_test` and `loongagent sandbox self-test`.
+    /// Design: `docs/design/tools-permissions.md` §4.
+    /// Up: `self_test`; the CLI reads the report.
+    /// Down: `landlock::abi_version` and `which`.
+    /// Verify: `cargo test -p loong-sandbox`.
     pub fn detect() -> Self {
         let landlock_abi = landlock::abi_version();
         let bubblewrap = which("bwrap");
@@ -47,6 +68,12 @@ impl Capabilities {
         }
     }
 
+    /// Purpose: Name the strongest mechanism, or `"none"`.
+    /// Serves: the self-test's early exit, the startup warning and `interpret`.
+    /// Design: `docs/design/tools-permissions.md` §4.
+    /// Up: `self_test`, `interpret`, the CLI and tests.
+    /// Down: the `landlock_abi` and `bubblewrap` fields.
+    /// Verify: `cargo test -p loong-sandbox`.
     pub fn strongest(&self) -> &'static str {
         if self.landlock_abi.is_some() {
             "landlock"
@@ -58,6 +85,8 @@ impl Capabilities {
     }
 }
 
+/// Purpose: Find an executable on `PATH`.
+/// Contract: `crates/sandbox/src/sandbox.rs`.
 fn which(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
@@ -66,6 +95,12 @@ fn which(name: &str) -> Option<PathBuf> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Purpose: The three honest outcomes of a confinement probe.
+/// Serves: `SelfTestReport` and the server's warning.
+/// Design: `docs/design/tools-permissions.md` §4.
+/// Up: `self_test` and `interpret`.
+/// Down: `SelfTestReport::ok` and the CLI's match.
+/// Verify: `cargo test -p loong-sandbox`.
 pub enum SelfTest {
     /// The probe could not write outside the workspace and could write inside.
     Enforced { mechanism: String, detail: String },
@@ -76,12 +111,24 @@ pub enum SelfTest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Purpose: What the probe found: the capabilities and the outcome.
+/// Serves: `sandbox self-test` and the server's startup report.
+/// Design: `docs/design/tools-permissions.md` §4.
+/// Up: `self_test`.
+/// Down: `ok` and the CLI's printers.
+/// Verify: `cargo test -p loong-sandbox`.
 pub struct SelfTestReport {
     pub capabilities: Capabilities,
     pub result: SelfTest,
 }
 
 impl SelfTestReport {
+    /// Purpose: Whether the probe actually demonstrated enforcement.
+    /// Serves: a caller that must not treat unavailable or broken as present.
+    /// Design: `docs/design/tools-permissions.md` §4.
+    /// Up: its own unit test; the CLI matches on `result` directly.
+    /// Down: `SelfTest`.
+    /// Verify: `cargo test -p loong-sandbox`.
     pub fn ok(&self) -> bool {
         matches!(self.result, SelfTest::Enforced { .. })
     }
@@ -89,6 +136,12 @@ impl SelfTestReport {
 
 /// Run the self-test: a confined child attempts one allowed write and one
 /// forbidden write, and only the expected outcomes count as success.
+/// Purpose: Run the probe child and turn its exit code into an honest report.
+/// Serves: `sandbox self-test`, before the first tool call.
+/// Design: `docs/design/tools-permissions.md` §4.
+/// Up: the CLI's sandbox command and the server's startup.
+/// Down: `Capabilities::detect`, `outside_candidate`, `interpret` and the probe child.
+/// Verify: `cargo test -p loong-sandbox`.
 pub fn self_test(probe_exe: &Path, workspace: &Path) -> SelfTestReport {
     let capabilities = Capabilities::detect();
     if capabilities.strongest() == "none" {
@@ -142,6 +195,12 @@ pub fn self_test(probe_exe: &Path, workspace: &Path) -> SelfTestReport {
 }
 
 /// A probe target that is definitely not inside `workspace`.
+/// Purpose: A probe target that is definitely outside the workspace.
+/// Serves: `self_test`; a workspace at the temp root must not make an inside write look like an escape.
+/// Design: `docs/design/tools-permissions.md` §4.
+/// Up: `self_test` and the probe-target test.
+/// Down: `is_outside`.
+/// Verify: `cargo test -p loong-sandbox`.
 pub fn outside_candidate(workspace: &Path) -> Option<PathBuf> {
     let name = format!("loong-sandbox-probe-{}", std::process::id());
     let mut candidates = vec![
@@ -156,6 +215,12 @@ pub fn outside_candidate(workspace: &Path) -> Option<PathBuf> {
 
 /// Lexical containment on canonicalised ancestors: `/tmpfoo` is not inside
 /// `/tmp`, and a path whose parent does not exist yet still answers correctly.
+/// Purpose: Lexical containment on canonicalised ancestors, so `/tmpfoo` is not inside `/tmp`.
+/// Serves: `outside_candidate` and the probe target's safety.
+/// Design: `docs/design/tools-permissions.md` §4.
+/// Up: `outside_candidate` and tests.
+/// Down: `std::fs::canonicalize`.
+/// Verify: `cargo test -p loong-sandbox`.
 pub fn is_outside(workspace: &Path, candidate: &Path) -> bool {
     let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let ws = canonical(workspace);
@@ -168,6 +233,12 @@ pub fn is_outside(workspace: &Path, candidate: &Path) -> bool {
 }
 
 /// The exit-code contract, isolated so it can be tested without a child.
+/// Purpose: Turn the probe's exit code into enforced, unavailable or broken.
+/// Serves: `self_test`; it keeps "could not confine" distinct from "confined but leaked".
+/// Design: `docs/design/tools-permissions.md` §4.
+/// Up: `self_test` and the exit-code test.
+/// Down: `Capabilities::strongest`.
+/// Verify: `cargo test -p loong-sandbox`.
 pub fn interpret(
     capabilities: &Capabilities,
     code: Option<i32>,
@@ -204,6 +275,12 @@ pub fn interpret(
 /// The child side of the self-test: confine this process, then prove both
 /// directions. Exit codes: 0 enforced, 2 could not confine, 3 escaped,
 /// 4 over-restricted.
+/// Purpose: The child side of the self-test: confine this process, then prove both directions.
+/// Serves: `loongagent sandbox probe`.
+/// Design: `docs/design/tools-permissions.md` §4.
+/// Up: the CLI's `sandbox probe` subcommand.
+/// Down: `landlock::confine_workspace` and the two probe environment variables.
+/// Verify: `cargo test -p loong-sandbox`.
 pub fn probe_main() -> i32 {
     let (Some(workspace), Some(outside)) = (
         std::env::var_os(PROBE_WORKSPACE),
@@ -244,6 +321,8 @@ pub fn probe_main() -> i32 {
 mod tests {
     use super::*;
 
+    /// Purpose: Build a capability set for an exit-code test without detecting anything.
+    /// Contract: `crates/sandbox/src/sandbox.rs`.
     fn caps(abi: Option<u32>, bwrap: bool) -> Capabilities {
         Capabilities {
             os: "linux",
@@ -254,6 +333,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin the mechanism ranking: landlock, then bubblewrap, then none.
     fn landlock_wins_when_both_are_present() {
         assert_eq!(caps(Some(8), true).strongest(), "landlock");
         assert_eq!(caps(Some(1), false).strongest(), "landlock");
@@ -262,6 +342,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that detection reports a mechanism consistent with its own note and ABI.
     fn detection_reports_a_consistent_mechanism() {
         let detected = Capabilities::detect();
         assert!(!detected.note.is_empty());
@@ -274,6 +355,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin every probe exit code to its verdict, including a crash as broken.
     fn the_exit_codes_mean_what_the_self_test_says() {
         let c = caps(Some(8), false);
         let ws = Path::new("/work");
@@ -300,6 +382,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin the outside-target choice, including the `/tmpfoo` prefix trap.
     fn the_probe_target_is_chosen_outside_the_workspace() {
         let temp = std::env::temp_dir();
         // A workspace inside the temp directory: its own temp sibling is outside.
@@ -322,6 +405,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that unavailable and enforced are different answers.
     fn a_platform_without_a_mechanism_reports_unavailable_not_enforced() {
         let report = SelfTestReport {
             capabilities: caps(None, false),

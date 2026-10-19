@@ -1,3 +1,12 @@
+//! Purpose: Tools behind one interface, with autonomy allocated per action and every child confined (ADR-0004, ADR-0007).
+//!
+//! # Contract
+//! - **Serves:** the kernel's registry and dispatch, the MCP adapter and the skill tool.
+//! - **Design:** `docs/design/tools-permissions.md` §1–§6.
+//! - **Upstream:** the kernel's build step, `loong-mcp` and `loong-skills`.
+//! - **Downstream:** `loong_proc` for children, and the kernel's `ExecContext`.
+//! - **Verify:** `cargo test -p loong-tools` · `./scripts/check.sh`
+//!
 //! Tools behind one uniform, MCP-shaped interface — built-ins included
 //! (ADR-0004), so permissions, hooks and cost metering have exactly one
 //! chokepoint.
@@ -19,6 +28,12 @@ use std::process::Command;
 use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Purpose: Why a tool did not return output: it refused, or it ran and failed.
+/// Serves: every tool implementation and the kernel's `tool.result`.
+/// Design: `docs/design/tools-permissions.md` §1.
+/// Up: the built-ins, `loong-mcp` and `loong-skills`.
+/// Down: its `Display` impl and the kernel's recorded result.
+/// Verify: `cargo test -p loong-tools`.
 pub enum ToolError {
     /// The tool refused the call (bad arguments, or outside its remit).
     Refused(String),
@@ -26,6 +41,8 @@ pub enum ToolError {
 }
 
 impl std::fmt::Display for ToolError {
+    /// Purpose: Render a refusal or a failure with the prefix the model reads.
+    /// Contract: `crates/tools/src/lib.rs`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ToolError::Refused(m) => write!(f, "refused: {m}"),
@@ -41,27 +58,54 @@ impl std::error::Error for ToolError {}
 ///
 /// The implementation runs **in the child, after fork and before exec**, so an
 /// implementation must avoid allocation on its success path.
+/// Purpose: How a tool confines the processes it spawns.
+/// Serves: `ExecContext`; the policy comes from the kernel, never from the tool.
+/// Design: `docs/design/tools-permissions.md` §4–§5.
+/// Up: the kernel's `Kernel::execute` passes its implementation.
+/// Down: `NoConfinement`, `Shell::execute` and `loong_proc::RunSpec::confine`.
+/// Verify: `cargo test -p loong-tools`.
 pub trait Confinement: Send + Sync {
+    /// Purpose: Apply this policy to a child command, after fork and before exec.
     fn confine(&self, command: &mut Command);
 }
 
 /// The policy for platforms with nothing to enforce with. The kernel only uses
 /// this when `sandbox self-test` reported that no mechanism exists — and it says
 /// so loudly at startup.
+/// Purpose: The policy for a platform where the self-test found no mechanism.
+/// Serves: the kernel's honest unconfined fallback.
+/// Design: `docs/design/tools-permissions.md` §4.
+/// Up: the kernel's build step and tests.
+/// Down: its `Confinement` impl.
+/// Verify: `cargo test -p loong-tools`.
 pub struct NoConfinement;
 
 impl Confinement for NoConfinement {
+    /// Purpose: Do nothing, because there is nothing to enforce with.
+    /// Contract: `crates/tools/src/lib.rs`.
     fn confine(&self, _command: &mut Command) {}
 }
 
 /// What a tool is given to run with: where it runs, and how its children are
 /// confined.
+/// Purpose: What a tool is given: where it runs and how its children are confined.
+/// Serves: every `Tool::execute`; deliberately small so a tool cannot reach the PDP.
+/// Design: `docs/design/tools-permissions.md` §1 and §5.
+/// Up: `Kernel::execute`, `loong-mcp` and `loong-skills`.
+/// Down: `cwd` and `confinement`.
+/// Verify: `cargo test -p loong-tools`.
 pub struct ExecContext<'a> {
     pub cwd: &'a Path,
     pub confinement: &'a dyn Confinement,
 }
 
 impl<'a> ExecContext<'a> {
+    /// Purpose: Build the context from the kernel's working directory and confinement.
+    /// Serves: the kernel's execution path and tests.
+    /// Design: `docs/design/tools-permissions.md` §1.
+    /// Up: `Kernel::execute`; `loong-mcp` and `loong-skills` tests.
+    /// Down: the two fields.
+    /// Verify: `cargo test -p loong-tools`.
     pub fn new(cwd: &'a Path, confinement: &'a dyn Confinement) -> Self {
         Self { cwd, confinement }
     }
@@ -69,25 +113,54 @@ impl<'a> ExecContext<'a> {
 
 /// One tool. `action_class` is computed from the arguments, which is what makes
 /// "investigate free, write gated" expressible.
+/// Purpose: The one interface every registry tool implements, built-ins included.
+/// Serves: permissions, hooks and cost metering through one chokepoint.
+/// Design: `docs/design/tools-permissions.md` §1.
+/// Up: `Registry`, and the kernel's dispatch.
+/// Down: `action_class` before the PDP and `execute` after it.
+/// Verify: `cargo test -p loong-tools`.
 pub trait Tool: Send + Sync {
+    /// Purpose: The name the model calls and the registry files the tool under.
     fn name(&self) -> &str;
+    /// Purpose: The text the model reads when deciding whether to call the tool.
     fn description(&self) -> &str;
+    /// Purpose: The JSON schema a provider validates the arguments against.
     fn parameters(&self) -> Json;
+    /// Purpose: The class of this particular call, computed from its arguments.
     fn action_class(&self, args: &Json, cwd: &Path) -> ActionClass;
+    /// Purpose: Run the call, with the confinement and working directory the kernel supplied.
     fn execute(&self, args: &Json, ctx: &ExecContext<'_>) -> Result<String, ToolError>;
 }
 
 #[derive(Default)]
+/// Purpose: Every registered tool by name.
+/// Serves: the kernel's dispatch lookup and the model's tool specs.
+/// Design: `docs/design/tools-permissions.md` §1.
+/// Up: the kernel's build step and dispatch.
+/// Down: `with_builtins`, `register`, `get`, `names` and `specs`.
+/// Verify: `cargo test -p loong-tools`.
 pub struct Registry {
     tools: BTreeMap<String, Box<dyn Tool>>,
 }
 
 impl Registry {
+    /// Purpose: An empty registry; built-ins are added explicitly.
+    /// Serves: `with_builtins` and tests.
+    /// Design: `docs/design/tools-permissions.md` §1.
+    /// Up: `Registry::with_builtins` and tests.
+    /// Down: `Default`.
+    /// Verify: `cargo test -p loong-tools`.
     pub fn new() -> Self {
         Self::default()
     }
 
     /// The registry a fresh session starts with.
+    /// Purpose: The registry a fresh session starts with: read, write, edit, grep, glob and shell.
+    /// Serves: the kernel's build step before MCP and skill tools are added.
+    /// Design: `docs/design/tools-permissions.md` §6.
+    /// Up: the kernel's build step.
+    /// Down: `new`, `register` and the six built-in types.
+    /// Verify: `cargo test -p loong-tools`.
     pub fn with_builtins() -> Self {
         let mut r = Self::new();
         r.register(ReadFile);
@@ -99,20 +172,44 @@ impl Registry {
         r
     }
 
+    /// Purpose: Put a tool in the registry under its own name.
+    /// Serves: `with_builtins`, and the kernel adding MCP and skill tools.
+    /// Design: `docs/design/tools-permissions.md` §1.
+    /// Up: `with_builtins` and the kernel's build step.
+    /// Down: `Tool::name` and the map insert.
+    /// Verify: `cargo test -p loong-tools`.
     pub fn register(&mut self, tool: impl Tool + 'static) {
         self.tools.insert(tool.name().to_string(), Box::new(tool));
     }
 
+    /// Purpose: The tool registered under a name, if any.
+    /// Serves: the kernel's dispatch lookup before the PDP and execute path.
+    /// Design: `docs/design/tools-permissions.md` §1.
+    /// Up: `Kernel::dispatch`.
+    /// Down: the tools map.
+    /// Verify: `cargo test -p loong-tools`.
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
         self.tools.get(name).map(|t| t.as_ref())
     }
 
+    /// Purpose: Every registered tool name.
+    /// Serves: the kernel's tool specs and the registry test.
+    /// Design: `docs/design/tools-permissions.md` §1.
+    /// Up: the kernel's build step and tests.
+    /// Down: the tools map's keys.
+    /// Verify: `cargo test -p loong-tools`.
     pub fn names(&self) -> Vec<&str> {
         self.tools.keys().map(|s| s.as_str()).collect()
     }
 
     /// `(name, description, parameters)` — deliberately type-free so a model
     /// adapter can shape it however its wire protocol wants.
+    /// Purpose: Name, description and parameters for every tool, ready for a model adapter.
+    /// Serves: the kernel's `tool_specs`; deliberately type-free so each wire protocol can shape it.
+    /// Design: `docs/design/tools-permissions.md` §1.
+    /// Up: the kernel's tool-spec path.
+    /// Down: the three `Tool` methods.
+    /// Verify: `cargo test -p loong-tools`.
     pub fn specs(&self) -> Vec<(String, String, Json)> {
         self.tools
             .values()
@@ -130,6 +227,12 @@ impl Registry {
 /// Resolve `target` against `cwd` and decide whether it stays inside the
 /// workspace. Lexical only — no filesystem access, so it also works for paths
 /// that do not exist yet (a write target).
+/// Purpose: Resolve a target lexically against `cwd`, with no filesystem access.
+/// Serves: the built-in classifiers and executors, including a write target that does not exist yet.
+/// Design: `docs/design/tools-permissions.md` §2.
+/// Up: `classify_path`, `classify_read_path` and the built-ins.
+/// Down: `Path::components`.
+/// Verify: `cargo test -p loong-tools`.
 pub fn resolve(cwd: &Path, target: &str) -> PathBuf {
     let p = Path::new(target);
     let joined = if p.is_absolute() {
@@ -153,6 +256,12 @@ pub fn resolve(cwd: &Path, target: &str) -> PathBuf {
 /// The action class of **reading** `target`. A read inside the workspace is an
 /// investigate action — no side effects — which is what makes "investigate free,
 /// write gated" true for reads rather than nominal.
+/// Purpose: The class of reading a path: investigate inside the workspace, out of bounds outside.
+/// Serves: `ReadFile`, `Grep` and `Glob`.
+/// Design: `docs/design/tools-permissions.md` §2.
+/// Up: `ReadFile::action_class`, `Grep::action_class` and `Glob::action_class`.
+/// Down: `classify_path`.
+/// Verify: `cargo test -p loong-tools`.
 pub fn classify_read_path(cwd: &Path, target: &str) -> ActionClass {
     match classify_path(cwd, target) {
         ActionClass::OutOfBounds => ActionClass::OutOfBounds,
@@ -162,6 +271,12 @@ pub fn classify_read_path(cwd: &Path, target: &str) -> ActionClass {
 
 /// The action class of touching `target` (ADR-0007 §4: the *action*, not the
 /// tool, decides the autonomy).
+/// Purpose: The class of touching a path: workspace write inside, out of bounds outside.
+/// Serves: write and edit, and the shell's redirection and mutating-verb checks.
+/// Design: `docs/design/tools-permissions.md` §2.
+/// Up: `classify_read_path`, `WriteFile`, `Edit` and `classify_command`.
+/// Down: `resolve`.
+/// Verify: `cargo test -p loong-tools`.
 pub fn classify_path(cwd: &Path, target: &str) -> ActionClass {
     let resolved = resolve(cwd, target);
     let root = resolve(cwd, ".");
@@ -172,6 +287,13 @@ pub fn classify_path(cwd: &Path, target: &str) -> ActionClass {
     }
 }
 
+/// Purpose: A required string argument, or a refusal naming what is missing.
+///
+/// Serves: every built-in that reads a named string argument.
+/// Design: `docs/design/tools-permissions.md` §6.
+/// Up: `ReadFile`, `WriteFile`, `Edit`, `Grep` and `Glob`.
+/// Down: `ToolError::Refused`.
+/// Verify: `cargo test -p loong-tools`.
 pub(crate) fn arg_str(args: &Json, key: &str) -> Result<String, ToolError> {
     args.get(key)
         .and_then(|v| v.as_str())
@@ -181,24 +303,40 @@ pub(crate) fn arg_str(args: &Json, key: &str) -> Result<String, ToolError> {
 
 // ---------------------------------------------------------------- read/write
 
+/// Purpose: Read a UTF-8 text file.
+/// Serves: the default investigate surface.
+/// Design: `docs/design/tools-permissions.md` §6.
+/// Up: `Registry::with_builtins` and the kernel's dispatch.
+/// Down: `action_class` and `execute`.
+/// Verify: `cargo test -p loong-tools`.
 pub struct ReadFile;
 
 impl Tool for ReadFile {
+    /// Purpose: Register this tool as `read_file`.
+    /// Contract: `crates/tools/src/lib.rs`.
     fn name(&self) -> &str {
         "read_file"
     }
+    /// Purpose: Tell the model that reads inside the workspace are investigate actions.
+    /// Contract: `crates/tools/src/lib.rs`.
     fn description(&self) -> &str {
         "Read a UTF-8 text file. Reads inside the workspace are investigate actions."
     }
+    /// Purpose: Declare the one required `path` argument.
+    /// Contract: `crates/tools/src/lib.rs`.
     fn parameters(&self) -> Json {
         json!({"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]})
     }
+    /// Purpose: Classify the read from its `path`, with a missing path out of bounds.
+    /// Contract: `crates/tools/src/lib.rs`.
     fn action_class(&self, args: &Json, cwd: &Path) -> ActionClass {
         match args.get("path").and_then(|v| v.as_str()) {
             Some(p) => classify_read_path(cwd, p),
             None => ActionClass::OutOfBounds,
         }
     }
+    /// Purpose: Read the resolved path and report a failure with the path that failed.
+    /// Contract: `crates/tools/src/lib.rs`.
     fn execute(&self, args: &Json, ctx: &ExecContext<'_>) -> Result<String, ToolError> {
         let path = resolve(ctx.cwd, &arg_str(args, "path")?);
         std::fs::read_to_string(&path)
@@ -206,15 +344,27 @@ impl Tool for ReadFile {
     }
 }
 
+/// Purpose: Write a UTF-8 text file, but only inside the workspace.
+/// Serves: the write-workspace surface and the built-in write guard.
+/// Design: `docs/design/tools-permissions.md` §4 and §6.
+/// Up: `Registry::with_builtins` and the kernel's dispatch.
+/// Down: `classify_path`, `resolve` and `arg_str`.
+/// Verify: `cargo test -p loong-tools`.
 pub struct WriteFile;
 
 impl Tool for WriteFile {
+    /// Purpose: Register this tool as `write_file`.
+    /// Contract: `crates/tools/src/lib.rs`.
     fn name(&self) -> &str {
         "write_file"
     }
+    /// Purpose: Tell the model the tool writes inside the workspace.
+    /// Contract: `crates/tools/src/lib.rs`.
     fn description(&self) -> &str {
         "Write a UTF-8 text file inside the workspace."
     }
+    /// Purpose: Declare the required `path` and `content` arguments.
+    /// Contract: `crates/tools/src/lib.rs`.
     fn parameters(&self) -> Json {
         json!({
             "type": "object",
@@ -222,12 +372,20 @@ impl Tool for WriteFile {
             "required": ["path", "content"]
         })
     }
+    /// Purpose: Classify the write from its `path`, with a missing path out of bounds.
+    /// Contract: `crates/tools/src/lib.rs`.
     fn action_class(&self, args: &Json, cwd: &Path) -> ActionClass {
         match args.get("path").and_then(|v| v.as_str()) {
             Some(p) => classify_path(cwd, p),
             None => ActionClass::OutOfBounds,
         }
     }
+    /// Purpose: Write the file after re-checking the path and creating its parent.
+    /// Serves: the second enforcement point, independent of the classifier.
+    /// Design: `docs/design/tools-permissions.md` §4.
+    /// Up: `Kernel::execute` through the registry.
+    /// Down: `resolve`, `classify_path`, `arg_str`.
+    /// Verify: `cargo test -p loong-tools`.
     fn execute(&self, args: &Json, ctx: &ExecContext<'_>) -> Result<String, ToolError> {
         let path = resolve(ctx.cwd, &arg_str(args, "path")?);
         if classify_path(ctx.cwd, &path.to_string_lossy()) != ActionClass::WriteWorkspace {
@@ -255,15 +413,27 @@ impl Tool for WriteFile {
 /// Its refusals are the feature: a missing or ambiguous `old_string` must not be
 /// guessed at, because a wrong guess silently corrupts a file. So it fails with
 /// the counts and the line numbers and lets the model look again.
+/// Purpose: Replace an exact string in a workspace file instead of rewriting it.
+/// Serves: the write-workspace surface, with refusals that prevent silent corruption.
+/// Design: `docs/design/tools-permissions.md` §4 and §6.
+/// Up: `Registry::with_builtins` and the kernel's dispatch.
+/// Down: `action_class`, `execute`, `line_numbers`.
+/// Verify: `cargo test -p loong-tools`.
 pub struct Edit;
 
 impl Tool for Edit {
+    /// Purpose: Register this tool as `edit`.
+    /// Contract: `crates/tools/src/lib.rs`.
     fn name(&self) -> &str {
         "edit"
     }
+    /// Purpose: Tell the model that a unique match is required unless `replace_all` is set.
+    /// Contract: `crates/tools/src/lib.rs`.
     fn description(&self) -> &str {
         "Replace an exact string in a file inside the workspace. Fails unless          `old_string` occurs exactly once, so pass more context (or set          `replace_all`) rather than guessing. Returns a summary, not the file."
     }
+    /// Purpose: Declare the path, the old and new strings, and the optional `replace_all`.
+    /// Contract: `crates/tools/src/lib.rs`.
     fn parameters(&self) -> Json {
         json!({
             "type": "object",
@@ -276,12 +446,20 @@ impl Tool for Edit {
             "required": ["path", "old_string", "new_string"]
         })
     }
+    /// Purpose: Classify the edit from its `path`, with a missing path out of bounds.
+    /// Contract: `crates/tools/src/lib.rs`.
     fn action_class(&self, args: &Json, cwd: &Path) -> ActionClass {
         match args.get("path").and_then(|v| v.as_str()) {
             Some(p) => classify_path(cwd, p),
             None => ActionClass::OutOfBounds,
         }
     }
+    /// Purpose: Replace one exact occurrence, refusing a missing or ambiguous string and naming the lines.
+    /// Serves: the no-guessing rule that keeps an edit from corrupting a file.
+    /// Design: `docs/design/tools-permissions.md` §4 and §6.
+    /// Up: `Kernel::execute` through the registry.
+    /// Down: `resolve`, `classify_path`, `arg_str` and `line_numbers`.
+    /// Verify: `cargo test -p loong-tools`.
     fn execute(&self, args: &Json, ctx: &ExecContext<'_>) -> Result<String, ToolError> {
         let path = resolve(ctx.cwd, &arg_str(args, "path")?);
         if classify_path(ctx.cwd, &path.to_string_lossy()) != ActionClass::WriteWorkspace {
@@ -357,6 +535,8 @@ impl Tool for Edit {
 }
 
 /// 1-based line numbers where `needle` starts.
+/// Purpose: The 1-based lines where a needle starts.
+/// Contract: `crates/tools/src/lib.rs`.
 fn line_numbers(haystack: &str, needle: &str) -> Vec<usize> {
     let mut out = Vec::new();
     let mut offset = 0;
@@ -377,12 +557,20 @@ fn line_numbers(haystack: &str, needle: &str) -> Vec<usize> {
 /// bounds, even though both are the same tool. The classifier is a *heuristic
 /// for allocating autonomy*, never a security boundary — the boundary is the
 /// PDP plus the confinement the kernel hands in.
+/// Purpose: Run a command in the workspace and return bounded output.
+/// Serves: the one shell surface, with a timeout, an output cap and the kernel's confinement.
+/// Design: `docs/design/tools-permissions.md` §4 and §6.
+/// Up: `Registry::with_builtins` and the kernel's dispatch.
+/// Down: `loong_proc`, `classify_command` and the timeout/output-limit fields.
+/// Verify: `cargo test -p loong-tools`.
 pub struct Shell {
     pub timeout: Duration,
     pub output_limit: usize,
 }
 
 impl Default for Shell {
+    /// Purpose: The shipped timeout and output limit, so a caller has no unbounded default.
+    /// Contract: `crates/tools/src/lib.rs`.
     fn default() -> Self {
         Self {
             timeout: Duration::from_secs(120),
@@ -474,6 +662,12 @@ const MUTATING: &[&str] = &[
 
 /// Classify a shell command (ADR-0007 §4). Unknown commands are treated as
 /// workspace-mutating, which is the conservative default.
+/// Purpose: Classify a shell command string into one of the three action classes.
+/// Serves: `Shell::action_class`; a heuristic for allocating autonomy, never a security boundary.
+/// Design: `docs/design/tools-permissions.md` §2.
+/// Up: `Shell::action_class`.
+/// Down: `classify_path`, `redirections` and the three verb lists.
+/// Verify: `cargo test -p loong-tools`.
 pub fn classify_command(command: &str, cwd: &Path) -> ActionClass {
     let trimmed = command.trim();
     let lower = trimmed.to_lowercase();
@@ -540,6 +734,12 @@ pub fn classify_command(command: &str, cwd: &Path) -> ActionClass {
 /// The `>`/`>>` targets of a command line (naive but adequate: quotes are
 /// stripped, and the classifier never decides whether something is *allowed* —
 /// only how much autonomy it needs).
+/// Purpose: The `>` and `>>` targets of a command line.
+/// Serves: `classify_command`'s check for a write leaving the workspace.
+/// Design: `docs/design/tools-permissions.md` §2.
+/// Up: `classify_command`.
+/// Down: no callee; the token scan is the decision.
+/// Verify: `cargo test -p loong-tools`.
 fn redirections(command: &str) -> Vec<String> {
     let tokens: Vec<&str> = command.split_whitespace().collect();
     let mut targets = Vec::new();
@@ -563,14 +763,20 @@ fn redirections(command: &str) -> Vec<String> {
 }
 
 impl Tool for Shell {
+    /// Purpose: Register this tool as `shell`.
+    /// Contract: `crates/tools/src/lib.rs`.
     fn name(&self) -> &str {
         "shell"
     }
+    /// Purpose: Tell the model how a command's class is read.
+    /// Contract: `crates/tools/src/lib.rs`.
     fn description(&self) -> &str {
         "Run a shell command in the workspace and return its bounded output. \
          Read-only commands are investigate actions; anything reaching the network, \
          leaving the workspace, or destructive is out of bounds."
     }
+    /// Purpose: Declare the required `command` and optional `description` arguments.
+    /// Contract: `crates/tools/src/lib.rs`.
     fn parameters(&self) -> Json {
         json!({
             "type": "object",
@@ -581,12 +787,20 @@ impl Tool for Shell {
             "required": ["command"]
         })
     }
+    /// Purpose: Classify the command, with a missing command out of bounds.
+    /// Contract: `crates/tools/src/lib.rs`.
     fn action_class(&self, args: &Json, cwd: &Path) -> ActionClass {
         match args.get("command").and_then(|v| v.as_str()) {
             Some(command) => classify_command(command, cwd),
             None => ActionClass::OutOfBounds,
         }
     }
+    /// Purpose: Spawn the command through `loong_proc` with the kernel's confinement and report bounded output.
+    /// Serves: the shell tool's execution path, including a whole-tree kill on timeout.
+    /// Design: `docs/design/tools-permissions.md` §4–§5.
+    /// Up: `Kernel::execute` through the registry.
+    /// Down: `loong_proc::run`, `Shell::detect`, `ctx.confinement.confine`.
+    /// Verify: `cargo test -p loong-tools`.
     fn execute(&self, args: &Json, ctx: &ExecContext<'_>) -> Result<String, ToolError> {
         let command = arg_str(args, "command")?;
         // The shell the classifier assumes and the shell that runs it have to be the
@@ -638,6 +852,8 @@ mod tests {
     use std::time::Instant;
 
     static N: AtomicU64 = AtomicU64::new(0);
+    /// Purpose: A fresh temporary directory for one test.
+    /// Contract: `crates/tools/src/lib.rs`.
     fn tempdir() -> PathBuf {
         let d = std::env::temp_dir().join(format!(
             "loong-tools-{}-{}",
@@ -647,11 +863,14 @@ mod tests {
         std::fs::create_dir_all(&d).unwrap();
         d
     }
+    /// Purpose: Build an `ExecContext` for a test.
+    /// Contract: `crates/tools/src/lib.rs`.
     fn ctx<'a>(cwd: &'a Path, confinement: &'a dyn Confinement) -> ExecContext<'a> {
         ExecContext::new(cwd, confinement)
     }
 
     #[test]
+    /// Purpose: Pin the built-in write guard's two directions.
     fn writes_inside_the_workspace_are_allowed_and_outside_are_refused() {
         let cwd = tempdir();
         let c = NoConfinement;
@@ -679,6 +898,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that the action class comes from the path, including a missing argument.
     fn action_class_follows_the_path_not_the_tool() {
         let cwd = Path::new("/work");
         assert_eq!(
@@ -708,6 +928,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that every built-in refuses a missing argument instead of panicking.
     fn missing_arguments_are_refused_not_panicked() {
         let cwd = tempdir();
         let c = NoConfinement;
@@ -726,6 +947,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin a successful unique replacement and its line report.
     fn edit_replaces_a_unique_string_and_says_where() {
         let cwd = tempdir();
         std::fs::write(cwd.join("a.txt"), "one\ntwo\nthree\n").unwrap();
@@ -745,6 +967,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that a missing old string is refused and the file is untouched.
     fn edit_refuses_a_missing_string_and_leaves_the_file_alone() {
         let cwd = tempdir();
         std::fs::write(cwd.join("a.txt"), "content\n").unwrap();
@@ -763,6 +986,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that an ambiguous old string is refused with its occurrence lines.
     fn edit_refuses_an_ambiguous_string_and_names_the_lines() {
         let cwd = tempdir();
         std::fs::write(cwd.join("a.txt"), "dup\nmid\ndup\n").unwrap();
@@ -783,6 +1007,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that `replace_all` replaces every occurrence.
     fn edit_with_replace_all_touches_every_occurrence() {
         let cwd = tempdir();
         std::fs::write(cwd.join("a.txt"), "dup\nmid\ndup\n").unwrap();
@@ -801,6 +1026,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin the edit refusals for an outside path, an identical replacement and missing arguments.
     fn edit_refuses_outside_the_workspace_and_pointless_calls() {
         let cwd = tempdir();
         let c = NoConfinement;
@@ -826,6 +1052,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin a multiline exact replacement.
     fn edit_handles_multiline_replacements() {
         let cwd = tempdir();
         std::fs::write(cwd.join("a.rs"), "fn a() {\n    1\n}\n").unwrap();
@@ -842,6 +1069,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin the built-in registry's names and its model-facing specs.
     fn registry_exposes_specs_for_the_model() {
         let r = Registry::with_builtins();
         assert_eq!(
@@ -861,6 +1089,7 @@ mod tests {
     // ------------------------------------------------------- the classifier
 
     #[test]
+    /// Purpose: Pin the shell classifier's three classes and its conservative default.
     fn one_tool_gets_three_action_classes() {
         let cwd = Path::new("/work");
         // read-only → investigate (no prompt)
@@ -919,6 +1148,7 @@ mod tests {
     // ---------------------------------------------------------- the shell
 
     #[test]
+    /// Purpose: Pin a successful read-only command and its output report.
     fn a_read_only_command_runs_and_reports_its_output() {
         let cwd = tempdir();
         std::fs::write(cwd.join("a.txt"), "hello from a file").unwrap();
@@ -936,6 +1166,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that a failing command reports its exit code and stderr.
     fn a_failing_command_reports_the_exit_code_and_stderr() {
         let cwd = tempdir();
         let c = NoConfinement;
@@ -952,6 +1183,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that output is capped per stream and the truncation is visible.
     fn output_is_bounded_per_stream() {
         let cwd = tempdir();
         let c = NoConfinement;
@@ -974,6 +1206,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that a hung command is killed by the timeout rather than waiting forever.
     fn a_hung_command_is_killed_by_the_timeout() {
         let cwd = tempdir();
         let c = NoConfinement;
@@ -993,6 +1226,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that a command runs in the workspace directory.
     fn a_command_runs_in_the_workspace() {
         let cwd = tempdir();
         let c = NoConfinement;

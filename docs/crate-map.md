@@ -29,11 +29,11 @@ listed is a violation. The middle column is each crate's own `//!` header.
 | `loong-proc` | Run a child process with bounded output, a hard timeout and teardown of its whole tree. | — |
 | `loong-protocol` | Define the JSON-RPC 2.0 envelopes and one-line framing that carry schema messages between surfaces and the server. | `loong-schema` |
 | `loong-providers` | Model providers behind one `Model` interface (ADR-0004). | `loong-http`, `loong-schema` |
-| `loong-sandbox` | Policy decision point (ADR-0007): the kernel decides, the OS enforces. | `loong-schema` |
+| `loong-sandbox` | The policy decision point: allow, ask or deny plus the rule that fired, and never a widening. | `loong-schema` |
 | `loong-schema` | Own the single source of truth for every message on the wire, generated once for Rust and TypeScript. | — |
 | `loong-server` | The local agent server (ADR-0001): sessions live here, clients attach. | `loong-eventlog`, `loong-kernel`, `loong-protocol`, `loong-schema` |
 | `loong-skills` | Skills and commands — **one concept** (T-18, T-16 merged in 2026-10-05). | `loong-schema`, `loong-tools` |
-| `loong-tools` | Tools behind one uniform, MCP-shaped interface — built-ins included | `loong-proc`, `loong-schema` |
+| `loong-tools` | Tools behind one interface, with autonomy allocated per action and every child confined (ADR-0004, ADR-0007). | `loong-proc`, `loong-schema` |
 | `loong-tui` | Terminal client (ADR-0009): renders the event stream and sends intents. | `loong-protocol`, `loong-schema` |
 | `loong-tui-app` | The full-screen terminal surface (ADR-0009, ADR-0013): a ratatui view over a | `loong-schema`, `loong-tui` |
 | `loong-web` | Serve the embedded browser page and bridge WebSocket lines to the same JSON-RPC server. | — |

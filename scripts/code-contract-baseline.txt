@@ -70,14 +70,8 @@ crates/plugin/src/lib.rs
 crates/providers/src/lib.rs
 crates/providers/src/openai_compat.rs
 crates/providers/src/probe.rs
-crates/sandbox/src/landlock.rs
-crates/sandbox/src/landlock_unsupported.rs
-crates/sandbox/src/lib.rs
-crates/sandbox/src/sandbox.rs
 crates/server/src/lib.rs
 crates/skills/src/lib.rs
-crates/tools/src/lib.rs
-crates/tools/src/search.rs
 crates/tui-app/src/lib.rs
 crates/tui-app/src/mention.rs
 crates/tui-app/src/setup.rs

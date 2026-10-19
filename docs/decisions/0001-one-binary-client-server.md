@@ -1,6 +1,7 @@
 # ADR-0001 — One binary, always client/server
 
 - **Status:** Accepted
+- **Up:** [../design/README.md](../design/README.md)
 - **Date:** 2026-09-30
 - **Decides:** AQ-1 (docs/03-architecture.md)
 

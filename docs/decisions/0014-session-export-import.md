@@ -1,6 +1,7 @@
 # ADR-0014 — Session export/import: file-based continuity, not sync
 
 - **Status:** Accepted
+- **Up:** [../design/README.md](../design/README.md)
 - **Date:** 2026-10-04
 - **Decides:** session portability. Extends ADR-0003 (session storage), refines
   ADR-0012 §6 (no cross-device *sync*), and stays inside ADR-0007/0008

@@ -1,6 +1,7 @@
 # ADR-0002 — JSON-RPC 2.0 as the wire protocol
 
 - **Status:** Accepted
+- **Up:** [../design/README.md](../design/README.md)
 - **Date:** 2026-09-30
 - **Decides:** AQ-2 (docs/03-architecture.md)
 

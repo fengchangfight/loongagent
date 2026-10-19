@@ -1,12 +1,14 @@
 # ADR-0016 — Pack distribution: one envelope, verified before it can be policy
 
 - **Status:** Accepted
+- **Up:** [../design/README.md](../design/README.md)
 - **Date:** 2026-10-09
 - **Decides:** ADR-0008 §6's deferred items (signature algorithm, key
   distribution, pack transfer) and ADR-0012 §1's "share the envelope and its
   sign/verify path"; also the client half of T-07 (profiles as named bundles
   that arrive from the control plane)
-- **Builds on:** ADR-0005 (routing stays local), ADR-0008 (layers, merge kinds,
+- **Builds on:** ADR-0005 (routing follows the keys: local mode has no router,
+  gateway mode routes server-side), ADR-0008 (layers, merge kinds,
   signed packs), ADR-0012 (the control plane is small and pushes only packs)
 
 ## Context
@@ -108,9 +110,11 @@ Its keys are **locked**:
 
 This is what makes "engineers pick a profile, not a vendor" enforceable rather
 than advisory: the endpoint and the routing table come from the pack, and the one
-profile-related key the user owns is *which profile* they run. T-07's escape
-hatches therefore stay a profile-layer feature (an admin publishes a profile for
-it), not a config-layer loophole.
+profile-related key the user owns is *which profile* they run. This is the
+pre-gateway form; in gateway mode the gateway chooses the model and its routing
+policy stays server-side (ADR-0005). T-07's escape hatches therefore stay a
+profile-layer feature (an admin publishes a profile for it), not a config-layer
+loophole.
 
 ### 6. A profile is a named bundle, and the payload may carry several
 
@@ -123,7 +127,7 @@ default_profile = "default"
 name = "default"
 description = "Balanced: a cheap model for the loop, escalating past 150k tokens."
   [[profiles.models]] …      # endpoints and key references live here
-  [profiles.router] …        # the routing table travels with the profile
+  [profiles.router] …        # the routing table travels with the profile (pre-gateway form)
 
 [[profiles]]
 name = "supersmart"
@@ -141,20 +145,23 @@ reaches the control plane again keeps running the last pack it verified, for as 
 as it exists. The consequence is recorded rather than mitigated: revocation has no
 teeth against a machine that stays offline, and a rotated-out pack keeps working
 there. That is acceptable for a firm-internal tool whose failure mode is "an
-engineer's old laptop keeps using last quarter's profile", and it is the direct cost
-of "offline is degraded, not dead".
+engineer's old laptop keeps using last quarter's profile", and it is the cost of
+a pack that never expires — the machine that never reconnects is exactly the one
+revocation cannot reach.
 
 If that trade ever changes, the mechanism is already in the envelope (`issued_at_ms`,
 `version`) — the decision, not the plumbing, is what would have to change.
 
-### 8. Offline is degraded, not dead
+### 8. Offline policy keeps working
 
 The last verified pack is cached under the state directory and used when the
-control plane is unreachable, so a disconnected machine still runs. Because the
-cache is only ever written after verification, being offline cannot lower the
-policy standard. Every session records `control.synced` (issuer, version, key id,
-verified) as its first-class provenance, which is the local half of ADR-0012's
-"policy is auditable".
+control plane is unreachable, so a disconnected machine still runs against its
+last verified policy — in **gateway mode** the model call is the one thing that
+needs the gateway (ADR-0005 §4), and local mode never reads a pack at all.
+Because the cache is only ever written after verification, being offline cannot
+lower the policy standard. Every session records `control.synced` (issuer,
+version, key id, verified) as its first-class provenance, which is the local half
+of ADR-0012's "policy is auditable".
 
 ## Consequences
 

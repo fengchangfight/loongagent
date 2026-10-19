@@ -1,6 +1,7 @@
 # ADR-0011 — Local parallelism: isolated writers, artifact-returning branches, one orchestrator
 
 - **Status:** Accepted
+- **Up:** [../design/README.md](../design/README.md)
 - **Date:** 2026-10-04
 - **Decides:** AQ-10 (docs/03-architecture.md) — local parallelism. Also records
   the scope narrowing: cross-user, scheduled, and cloud-runner orchestration are
@@ -66,7 +67,8 @@ summary; the full record stays in the child session, inspectable (T-12/T-13) and
 lossless (ADR-0003). A child session **references** its parent's prefix rather
 than copying it (ADR-0015), so the parent is never duplicated.
 
-Subagents participate in routing like any other call site (ADR-0005): a read-only
+Subagents participate in routing like any other call site in gateway mode
+(ADR-0005); in local mode the user's configured pick applies. A read-only
 explore subagent may run on a cheap profile, a build subagent on a strong one —
 a visible routing decision, never a hidden one.
 

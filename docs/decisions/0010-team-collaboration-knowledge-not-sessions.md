@@ -1,6 +1,7 @@
 # ADR-0010 — Team collaboration: shared knowledge through git, not shared live sessions
 
 - **Status:** Accepted (scope direction; sharing mechanics deferred)
+- **Up:** [../design/README.md](../design/README.md)
 - **Date:** 2026-10-04
 - **Decides:** T-14 collaboration model (docs/02-topics.md); narrows AQ-5
   control-plane scope and removes the collaboration driver from AQ-10's cloud

@@ -1,6 +1,7 @@
 # ADR-0015 — Two levels of tree: sessions have lineage, a session contains an event tree
 
 - **Status:** Accepted
+- **Up:** [../design/README.md](../design/README.md)
 - **Date:** 2026-10-05
 - **Decides:** the vocabulary and the boundary between node-level and
   session-level branching. Clarifies ADR-0003 and fixes wording in ADR-0009,

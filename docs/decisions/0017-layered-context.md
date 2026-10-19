@@ -4,6 +4,7 @@ Language: zh
 
 - **Status:** Proposed（整体形态待 owner sign off；**§1 检索层/理解层分离、§2 分层、
   §5 两模式已获 owner 认可方向**；未定项见文末）
+- **Up:** [../design/README.md](../design/README.md)
 - **Date:** 2026-10-13（同日更新：owner 选定 Ollama 小模型后端；字段归属规则见 Decision §4，
   实测与决定见文末第 1 项。**2026-10-14 更新：P1–P5.5 已实现；空闲窗口调度、TUI 记忆状态落地，
   尚未落地的部分见文末"④ 的落地与证据"与设计文档 [§11.1](../context/status.md)**）

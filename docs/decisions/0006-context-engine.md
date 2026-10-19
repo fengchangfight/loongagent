@@ -1,6 +1,7 @@
 # ADR-0006 — Context engine: kernel-assembled, ledger-visible, budgeted
 
 - **Status:** Accepted
+- **Up:** [../design/README.md](../design/README.md)
 - **Date:** 2026-10-04
 - **Decides:** AQ-7 context-engine question (docs/03-architecture.md), including
   the memory write path (T-10)

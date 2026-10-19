@@ -66,7 +66,8 @@ Exceptions, each for a stated reason:
   record and does not change.
 - `docs/README.md` is the root: it carries `Code` and `Verify`, but no `Up`.
 - `README.md`, `DEVELOPMENT.md` and `docs/00-vision.md` are entry points; their
-  `Up` may name `docs/04-system-overview.md`, and `README.md` may be the root.
+  `Up` may name `docs/04-system-overview.md` or, for `docs/00-vision.md`, the
+  root `README.md`; `README.md` itself is the root.
 - `research/`, `archive/`, `superpowers/` and `human-written/` are records or
   human input. They are indexed; `research/`, `archive/` and `superpowers/` are
   link-checked, while `human-written/` is skipped by the docs checks. None needs
@@ -114,6 +115,7 @@ file that does not exist yet.
 | [07-extending.md](07-extending.md) | Changing the machinery — entry to the four extension procedures | Living |
 | [extending/](extending/) | The four procedures in detail — built-in tool, event, hook, routing — each with its proof command | Living |
 | [design/](design/) | Subsystem design: one document per mechanism, one per flow; the layer between the overview and the code. | Living |
+| [design/flows/](design/flows/) | End-to-end sequences: turn lifecycle, tool approval, resume/fork, context compaction, pack install — each names the functions and events, and links up to its subsystem. | Living |
 | human-written/ | The human's own notes — input, never edited by an agent (`AGENTS.md`, `scripts/check-human-written.sh`) | — |
 | [crate-map.md](crate-map.md) | The workspace's crates and the dependency edges allowed between them — generated from `scripts/layering_rules.py`, so it must never be hand-edited | Generated |
 | [dsh-plugin-ecosystem.md](research/dsh-plugin-ecosystem.md) | DSH plugin ecosystem — can our extension model host DSH-style plugins? | Research note (input to a future ADR-0004 revision) |

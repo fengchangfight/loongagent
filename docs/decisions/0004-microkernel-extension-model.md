@@ -1,6 +1,7 @@
 # ADR-0004 — Microkernel extension model: pluggable edges, fixed kernel
 
 - **Status:** Accepted
+- **Up:** [../design/README.md](../design/README.md)
 - **Date:** 2026-10-01
 - **Decides:** AQ-4 (docs/03-architecture.md)
 

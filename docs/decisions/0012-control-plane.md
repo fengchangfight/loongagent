@@ -1,6 +1,7 @@
 # ADR-0012 — Backend control plane: small, boring, and explicit about what it does not do
 
 - **Status:** Accepted
+- **Up:** [../design/README.md](../design/README.md)
 - **Date:** 2026-10-04
 - **Decides:** AQ-5 (docs/03-architecture.md) — backend control-plane shape and
   scope; also records that personal cross-device session sync is not built for
@@ -22,9 +23,10 @@ ADR was written:
 
 What remains is small, and the design principle is to **keep it small on
 purpose**: T-05's standing constraints are control-plane-not-data-plane, code
-never transits the backend, offline means degraded rather than dead, and every
-byte leaving the machine is visible and opt-in (T-02). A smaller backend is a
-smaller trust surface and a shorter security review.
+never transits the backend as files, offline is never dead — local mode runs with
+no control plane, gateway mode needs the gateway only for model calls (ADR-0005)
+— and every byte leaving the machine is visible and opt-in (T-02). A smaller
+backend is a smaller trust surface and a shorter security review.
 
 ## Decision
 
@@ -53,7 +55,7 @@ Why the sharing is not optional: the two sides are **deployed independently**
 (canary and stable channels, ADR-0009), so a duplicated implementation *will*
 diverge. A divergent pack verifier rejects valid packs or accepts invalid ones;
 divergent cost math makes the local meter disagree with the bill; a divergent
-policy resolver makes an org hard cap silently unenforced (ADR-0005). Sharing a
+policy resolver makes an org hard cap silently unenforced (ADR-0005, ADR-0007). Sharing a
 crate turns "client and server agree" into a compiler-enforced property instead
 of a test-suite hope. **"Same binary in another mode" is explicitly not
 required** — that reading of "same code" was an over-reach and is retired here.

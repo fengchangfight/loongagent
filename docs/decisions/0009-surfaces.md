@@ -1,6 +1,7 @@
 # ADR-0009 — Surfaces: one artifact, many faces, and no capability that lives in a face
 
 - **Status:** Accepted
+- **Up:** [../design/README.md](../design/README.md)
 - **Date:** 2026-10-04
 - **Decides:** AQ-11 surfaces question (docs/03-architecture.md) — thin-client
   rule, build order, installation/update story, multi-surface attach semantics
@@ -11,8 +12,8 @@ The owner's opening requirement was to support every surface (TUI, web, desktop,
 IDE) and every role, and AQ-1 already committed to one binary that is always
 client/server. AQ-2 made clients speak JSON-RPC 2.0 and made ACP a dialect of
 our own protocol rather than a second stack. ADR-0005…ADR-0008 pushed routing,
-context assembly, permission decisions, and configuration resolution all into
-the server — which means any agent logic that appears in a surface is by
+context assembly, permission decisions, and configuration resolution behind the
+client/server line — which means any agent logic that appears in a surface is by
 definition duplicated logic that can drift from the guarantees.
 
 Two owner decisions are already in force: **desktop and CI are dropped** as
@@ -45,7 +46,7 @@ wrappers, not parallel products.
 ### 2. Thin-client rule (hard)
 A surface renders the event stream and sends intents. It contains **zero agent
 logic** — no routing, no context assembly, no permission decisions, no policy
-evaluation (all server-side per ADR-0005…ADR-0008). Surface-local code is
+evaluation (all behind the server API per ADR-0005…ADR-0008). Surface-local code is
 presentation only: diff rendering, syntax highlighting, file pickers,
 keybindings, layout.
 

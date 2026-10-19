@@ -1,6 +1,7 @@
 # ADR-0007 — Permission & sandbox engine: the decision is in the kernel, the enforcement is at the OS
 
 - **Status:** Accepted
+- **Up:** [../design/README.md](../design/README.md)
 - **Date:** 2026-10-04
 - **Decides:** AQ-8 permission & sandbox question (docs/03-architecture.md),
   including the autonomy ladder (T-11) and the hook veto/trust gate (T-09)
@@ -54,12 +55,12 @@ must still leave a recorded decision showing what *should* have happened.
 
 ### 3. PIP: layered policy, org wins
 Policy inputs, lowest to highest precedence: built-in defaults < **org managed
-(server-distributed policy packs, ADR-0005)** < project (repo-committed) < user
+(server-distributed policy packs, ADR-0008)** < project (repo-committed) < user
 < session overrides. The org layer outranks project and user, which is what
-makes it tamper-resistant in practice. This is also where ADR-0005's open edge
-lands: **org hard caps are enforced as `deny` in the PDP**, because the local
-routing brain must not be able to route around a budget ceiling by ignoring a
-suggestion.
+makes it tamper-resistant in practice. Org hard caps are enforced twice: the
+gateway **refuses** model spend it will not pay for (ADR-0005 §2), and the PDP
+`deny`s the local actions a cap forbids — a local brain cannot route around a
+ceiling it does not hold the key for.
 
 ### 4. Autonomy is allocated per action class, not per tool
 The ladder (T-11) is about what an action *does*, so wrapping a dangerous

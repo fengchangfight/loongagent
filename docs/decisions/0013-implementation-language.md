@@ -1,6 +1,7 @@
 # ADR-0013 — Implementation language: Rust kernel and servers, TypeScript web client
 
 - **Status:** Accepted
+- **Up:** [../design/README.md](../design/README.md)
 - **Date:** 2026-10-04
 - **Decides:** AQ-12 (docs/03-architecture.md) — the implementation language
 

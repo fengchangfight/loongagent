@@ -1,20 +1,24 @@
 # ADR-0008 — Configuration & profile layering: monotonic layers, signed packs, explainable resolution
 
 - **Status:** Accepted
+- **Up:** [../design/README.md](../design/README.md)
 - **Date:** 2026-10-04
 - **Decides:** AQ-9 configuration & profile layering (docs/03-architecture.md);
-  fixes the distribution envelope for T-07 profiles, ADR-0005 policy packs, and
-  ADR-0006/ADR-0007 role and context packs
+  fixes the distribution envelope for T-07 profiles, policy packs (ADR-0007),
+  and ADR-0006/ADR-0007 role and context packs
 
 ## Context
 
 Configuration is where several earlier decisions either get teeth or quietly
-leak. ADR-0005 made the local brain authoritative for live routing while the
-server shapes future decisions through policy packs — that only holds if a
-local user cannot rewrite the pack. ADR-0007 put org hard caps in the PDP as
-`deny`, which only means something if the local layer cannot widen them.
-T-07 says engineers pick a *profile*, never a model — which requires the profile
-to be admin-maintained and non-tamperable. ADR-0006 made context auditable
+leak. ADR-0005 (revised 2026-10-18) puts routing where the keys are: gateway
+mode's route/cost policy is server-side, while the pack carries the local
+install's permissions, profile menu and PDP inputs — which only holds if a local
+user cannot rewrite the pack. ADR-0007 put org hard caps in the PDP as `deny`,
+which only means something if the local layer cannot widen them (and the
+gateway refuses model spend independently). T-07 says engineers pick a *profile*,
+never a model — true in gateway mode, with local mode the deliberate exception
+where the user is the picker — which requires the profile to be
+admin-maintained and non-tamperable. ADR-0006 made context auditable
 entry by entry, and the same "why is this here?" question applies to every
 config value.
 
@@ -41,12 +45,15 @@ Ownership follows the layer: the **org layer** lives in the firm control plane
 (T-05), is authored by admins, and reaches the local install as a **versioned
 pack**; the **project layer** is committed in the repository; the **user and
 session layers** stay local. A solo install is the same binary with an empty org
-layer — built-in defaults simply become the top.
+layer — built-in defaults simply become the top. **Local mode is a separate
+resolution path** (ADR-0005 §1): `local.toml` only, no org layer, no pack, so the
+two modes cannot inherit each other's policy.
 
-Distribution is **not** a live dependency: the local install caches the last
-synced pack and keeps working offline (offline = slightly older policy, not
-degraded function). ADR-0005's rule still holds unchanged — the pack shapes
-*future* decisions; **the local brain makes every live decision.**
+Distribution is **not** a live dependency for *policy*: the local install caches
+the last synced pack and keeps enforcing it offline. Gateway mode still needs the
+gateway for model calls — offline there means cached policy, working tools, and
+no models (ADR-0005 §4). The pack never decides a live route: routing follows
+the keys, and in local mode there is no pack at all (ADR-0005).
 
 ### 2. Merge kinds — the monotonicity rule
 
@@ -107,10 +114,13 @@ in plaintext in the control plane's `profiles.json` and in every install's cache
 (`~/.loongagent/control/<origin>/profiles.json`), and therefore in any backup of either.
 It does **not** reach the session log or the derived index. Replacing this with
 `env:`, `file:` or `gateway:` references is what ADR-0012 §4/§5 exist to enable.
+**Retired for gateway mode by ADR-0005 (2026-10-18):** a provider key in a pack
+is the leak that mode exists to remove; the remaining use is the pre-gateway
+interregnum.
 
 ### 6. Packs: one signed envelope for every distributed artifact
 
-Profiles (T-07), policy packs (ADR-0005), and role/context packs
+Profiles (T-07), policy packs (ADR-0007/0008), and role/context packs
 (ADR-0006/0007) share **one envelope format**: artifact id, semantic version,
 payload schema id, issuer, target scope, and a **signature**.
 
@@ -131,8 +141,8 @@ provenance. The **payload schemas** stay with their domains: profile contents
 ## Consequences
 
 - **The guarantees above this ADR stop being honor-system.** Org hard caps
-  (ADR-0005) and policy non-widening (ADR-0007) are enforced by merge kind plus
-  signature, not by convention.
+  (ADR-0005, ADR-0007) and policy non-widening (ADR-0007) are enforced by merge
+  kind plus signature, not by convention.
 - **The "can't turn it off" anti-pattern is avoided where it is safe and
   accepted where it is not.** Content entries can be disabled (visibly,
   audited); policy cannot — but policy is also not where annoyance lives.

@@ -1,6 +1,7 @@
 # ADR-0018 — Plugins: install content by name, seat what a plugin asks for, execute nothing
 
 - **Status:** Accepted, implemented 2026-10-15
+- **Up:** [../design/README.md](../design/README.md)
 - **Date:** 2026-10-15
 - **Decides:** the parity gap "Git-based plugin marketplaces" ([05-parity-and-synthesis.md](../05-parity-and-synthesis.md) §A6), which ADR-0004 called "content bundles" and ADR-0008 §6 left to signed packs; and what a Claude Code plugin's `SessionStart` hook becomes on this harness
 - **Builds on:** ADR-0004 (microkernel: edges are pluggable, the kernel is fixed), ADR-0006 (progressive disclosure), ADR-0007 §7 (hooks are advisory and gated), ADR-0008 (layered configuration), T-18 (skills and commands as one concept)

@@ -1,6 +1,7 @@
 # ADR-0003 — JSONL event log as source of truth, derived SQLite index
 
 - **Status:** Accepted
+- **Up:** [../design/README.md](../design/README.md)
 - **Date:** 2026-09-30
 - **Decides:** AQ-3 (docs/03-architecture.md)
 

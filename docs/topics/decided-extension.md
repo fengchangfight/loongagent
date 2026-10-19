@@ -191,4 +191,3 @@ raw config, self-modification à la Pi's `/reload`). The harness is pluggable
 with good defaults — "nobody knows the right shape yet," so both we and our
 users must be able to re-shape it cheaply. Onboarding is a designed
 progression, not a cliff.
-*Next topics go here. Just say the idea — capture is automatic.*

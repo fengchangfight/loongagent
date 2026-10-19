@@ -185,4 +185,3 @@ failure is the anti-pattern); Cursor-style context breakdown per category;
 every injected token surfaced in the UI; the event log (T-02) answers "why did
 it do that" — tool call, reasoning, cost, policy decision. Observability is
 also T-21's teaching tool: juniors learn by watching a legible agent.
-*Next topics go here. Just say the idea — capture is automatic.*

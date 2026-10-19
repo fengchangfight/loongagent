@@ -101,4 +101,3 @@ dependency:**
   prompts are the one code-bearing payload that transits the gateway, in gateway
   mode, because the provider sees them anyway; no other file does. There is no
   cloud runner to make an exception for (dropped, 2026-10-04).
-*Next topics go here. Just say the idea — capture is automatic.*

@@ -147,6 +147,8 @@ specs, auto-triage when to spec at all (a bug fix ≠ 4 stories/16 criteria),
 requirement↔task traceability links; NEVER spec-as-source (Tessl's $125M
 lesson). Specs are the handoff protocol between personas (T-06/T-14).
 
+---
+
 ## T-22 · LSP-backed code intelligence — `Seed`
 
 Seeded 2026-10-05 (from [05-parity-and-synthesis](../05-parity-and-synthesis.md)
@@ -192,6 +194,8 @@ hit rate** in usage, `/init` and `/doctor` (generate / trim instruction files),
 description token-budget warning for skills/subagents. Individually small;
 collectively the difference between "feature-complete" and "feels finished".
 
+---
+
 ## T-26 · Cross-crate helper duplication — `Seed`
 
 Seeded 2026-10-16 (navigability review §3 — **recorded, deliberately not
@@ -215,8 +219,3 @@ that is an API change, not a tidy-up. Thirteen definitions of five ten-line
 helpers do not justify one: the new dependency edge and its public commitment
 cost more than the copies do. Revisit when a sixth caller appears, or when one
 copy has to change in a way the others must follow.
-
----
-
-*Next topics go here. Just say the idea — capture is automatic.*
-*Next topics go here. Just say the idea — capture is automatic.*

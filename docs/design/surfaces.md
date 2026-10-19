@@ -74,6 +74,54 @@ presentation and intents: the model picker, the context panel, fold/expand of lo
 `/yolo`, `/new`, and interrupt. The interruption is a signal to the server process, not a
 protocol method.
 
+### The TUI's marks and colour
+
+The transcript is painted by classification rather than by the sender: `classify` reads the
+line's own vocabulary (the prefixes `loong-tui`'s renderer writes) and `style_for` turns that
+into a style, so there is one palette for the whole surface.
+
+| Line | Colour | Why |
+|---|---|---|
+| `you: …` | the label in cyan, the words plain | the label marks where a prompt began when scrolling back; the person's own words stay readable |
+| `→ tool …` | teal | the agent is doing something |
+| `← ok …` | green, dim | a result is evidence, not news |
+| `← failed …` | red | it did not work |
+| `! approval required …` | yellow, bold | the person has to answer |
+| `! …` | red, bold | something went wrong |
+| `· policy: …` | violet | a decision about permission, which is worth finding later |
+| `· …` | the terminal's own foreground, dimmed | bookkeeping: skills, tokens, compaction |
+| anything else | default | the model's own answer, left alone |
+
+The palette names colours and never invents RGB, because a fixed tone is picked for one
+background and unreadable on the other. The same rule is why the quiet lines are the
+**terminal's own foreground, dimmed**, and not `DarkGray`: bright black *is* the background
+on a dark theme, so the bookkeeping lines were drawn into the wall (`MARK_QUIET`). The
+answers that were not chosen in a decision menu are `default` too; the highlighted one is
+the one that is coloured and bold.
+
+The mark is the owner's, kept verbatim:
+
+```
+╭───────༺ ᛭ ༻────────────╮
+╞═══════【 龍 】════════════╡
+╰───────༻ ᛭ ༺────────────╯
+```
+
+When the terminal has room (at least 52 columns by 22 rows) the five-row frame is used
+instead, with the owner's ornaments and inscription:
+
+    ╔═══════════════༺ ᛭ ༻═══════════════╗
+    ║                                   ║     loongagent
+    ║               【 龍 】              ║
+    ║                                   ║     ⟬ ᛭ 兴云吐雾 ⋄ 隐介藏形 ᛭ ⟭
+    ╚═══════════════༻ ᛭ ༺═══════════════╝
+
+The rules are **built** from the interior width (`MARK_INNER`), so the sides line up even
+when a rune measures differently; `/logo` puts it away, and under 48 columns by 18 rows
+there is no mark. `龍` and the wordmark are the terminal's own foreground in bold, the frame
+is ANSI magenta, and the transcript's accents are ANSI cyan and magenta — nothing is an
+absolute RGB or a literal white, because the owner runs a light background.
+
 ## 4. The web: a bridge, not a second agent
 
 `loongagent web` spawns the same server child, then `loong-web` serves one embedded page and

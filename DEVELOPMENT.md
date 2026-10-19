@@ -74,7 +74,7 @@ FAST=1 ./scripts/check.sh   # skip the release build (the slow one)
 | `gen-schema.py --check` | generated types drifting from `crates/schema/protocol.toml` |
 | `check-layering.sh` | a crate dependency pointing the wrong way (ADR-0004) |
 | `check-human-written.sh` | a change under `docs/human-written/` — the human's notebook (`AGENTS.md`) |
-| `check-docs.py` | a broken relative link, a crate map drifted from `scripts/layering_rules.py`, a document the index does not list or that is over budget, or an impossible ADR/topic citation |
+| `check-docs.py` | a broken relative link, a [crate map](docs/crate-map.md) drifted from `scripts/layering_rules.py`, a document the index does not list or that is over budget, or an impossible ADR/topic citation |
 | `cargo test --workspace --locked` | behaviour, including end-to-end tests against the real binary |
 | `cargo build --release --locked` | code that compiles in debug and not with optimisations |
 
@@ -128,6 +128,8 @@ cargo build
 
 # headless, with a provider double (no keys, no network)
 ./target/debug/loongagent run "hello" --session /tmp/s.jsonl --cwd /tmp --model echo
+./target/debug/loongagent run "write it" --session /tmp/w.jsonl --cwd /tmp --model demo-write
+./target/debug/loongagent run "escape"  --session /tmp/e.jsonl --cwd /tmp --model demo-escape   # exits 3: needs a human
 ./target/debug/loongagent tui --session /tmp/s.jsonl --cwd /tmp --model demo-escape
 echo "hello" | ./target/debug/loongagent repl --session /tmp/s.jsonl --cwd /tmp --model echo
 
@@ -231,6 +233,7 @@ copy that part of the file too.
 | Hooks, skills/commands, MCP, plugins | [design/extension-model.md](docs/design/extension-model.md) |
 | Trust boundaries, signing key, what is trusted | [design/security-trust.md](docs/design/security-trust.md) |
 | Event log, JSONL, SQLite index, schema | [design/events-storage.md](docs/design/events-storage.md) |
+| Crate layout and the dependency edges allowed between crates | [docs/crate-map.md](docs/crate-map.md), generated from `scripts/layering_rules.py` |
 | Toolchain, gates, build, release | this file |
 | Status: what works and what does not | [`README.md`](README.md) §状态 |
 

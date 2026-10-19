@@ -406,3 +406,7 @@ LSP 代码工具、`grep`/`glob` 的
 `memory.*` 事件回写日志、`recall` 在真实长会话上的验证，以及
 **Windows 上的 OS 强制边界** —— Landlock 是 Linux 的，那里 `sandbox self-test`
 会如实报告自己不可用，边界退回策略而非内核。
+
+- **成本还没有计价**：`usd_micros` 目前恒为 0，也还没有 tokenizer（账本按约 4 字符估算 token）。
+- **`cargo clippy` 还不是 gate**：代码没有做过 lint sweep；加一个首次运行就会失败的 gate
+  比没有更糟，它是格式化之后的下一步。

@@ -1,7 +1,6 @@
 # Documents whose navigation contract is not complete yet. The gate skips these
 # and fails on an entry that is missing or now passes, so this list only shrinks.
 # Regenerate with: python3 scripts/check-docs.py --emit-baseline scripts/doc-contract-baseline.txt
-DEVELOPMENT.md
 README.md
 docs/00-vision.md
 docs/03-architecture.md

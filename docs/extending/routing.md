@@ -29,7 +29,7 @@ What to touch depends on what is changing:
 
 | Change | Where |
 |---|---|
-| a model, the default, or a rule | the profile TOML only — `[[models]]` and `[router]`, the shape [DEVELOPMENT.md](../../DEVELOPMENT.md) shows. A rule naming a model the profile does not define is refused where the profile is read (`profiles_from_payload` for a pack in `crates/config/src/layer.rs`, `finish` for layered files in `crates/config/src/merge.rs`), so a rule that can never fire does not load |
+| a model, the default, or a rule | the profile TOML only — `[[models]]` and `[router]`, the shape [config-routing.md](../design/config-routing.md) shows. A rule naming a model the profile does not define is refused where the profile is read (`profiles_from_payload` for a pack in `crates/config/src/layer.rs`, `finish` for layered files in `crates/config/src/merge.rs`), so a rule that can never fire does not load |
 | a new adapter kind | implement `Model`, add the kind to `ADAPTER_KINDS` (`crates/config/src/layer.rs`), and build it in `build_models` **and** `build_model` (`crates/cli/src/server.rs`) |
 | a new fact a rule may read | `Fact`, `Facts`, `Condition::matches`, `Condition::render` and `parse_condition`, all in `crates/config/src/profile.rs` |
 

@@ -7,7 +7,7 @@
 
 The repository explains itself in layers, and this is the layer that was missing.
 `README.md` is for someone installing it. [DEVELOPMENT.md](../../DEVELOPMENT.md) is for
-running it, and says what is built today. `docs/decisions/` is *why* it has this shape.
+building, gating, changing and releasing it. `docs/decisions/` is *why* it has this shape.
 This document is for changing it: each section names the file that owns a mechanism, the
 order to touch things in, and one command that proves the change took effect. Symbols
 are named rather than quoted, and the ADRs are linked rather than restated, for the same

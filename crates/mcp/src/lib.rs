@@ -1,3 +1,12 @@
+//! Purpose: MCP: external tools behind the same `Tool` interface as the built-ins.
+//!
+//! # Contract
+//! - **Serves:** the kernel's registry and the CLI's `mcp` command.
+//! - **Design:** `docs/design/extension-model.md` §3 and `docs/design/security-trust.md` §1.
+//! - **Upstream:** `crates/kernel/src/turn/build.rs` (`attach_mcp`) and `crates/cli/src/mcp.rs`.
+//! - **Downstream:** `client` (stdio JSON-RPC) and `config` (manifest and trust gate).
+//! - **Verify:** `cargo test -p loong-mcp` · `./scripts/check.sh`
+//!
 //! MCP (T-15): external tools behind the same interface as the built-ins.
 //!
 //! The point is not the protocol; it is that an integration becomes *just another

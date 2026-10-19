@@ -1,3 +1,12 @@
+//! Purpose: The OpenAI-compatible adapter that turns Chat Completions into the `Model` interface.
+//!
+//! # Contract
+//! - **Serves:** `Model`; the kernel never sees the protocol, only the trait.
+//! - **Design:** `docs/design/config-routing.md` §8.
+//! - **Upstream:** `crates/providers/src/lib.rs` re-exports it; `crates/cli/src/server.rs` constructs it.
+//! - **Downstream:** `loong_http` for transport, `loong_schema`'s JSON type for bodies.
+//! - **Verify:** `cargo test -p loong-providers` · `./scripts/check.sh`
+//!
 //! An OpenAI-compatible provider adapter (ADR-0004: adapter as an edge).
 //!
 //! This is the first *real* adapter: it speaks the Chat Completions wire
@@ -28,6 +37,12 @@ use std::time::Duration;
 
 const IO_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// Purpose: The one real adapter: Chat Completions over HTTP and HTTPS.
+/// Serves: `Model`; the kernel never sees the protocol.
+/// Design: `docs/design/config-routing.md` §8.
+/// Up: `crates/cli/src/server.rs` builds it and `lib.rs` re-exports it.
+/// Down: `Model::complete` and `Model::complete_streaming`.
+/// Verify: `cargo test -p loong-providers`.
 pub struct OpenAiCompat {
     base: String,
     model: String,
@@ -38,6 +53,12 @@ pub struct OpenAiCompat {
 
 impl OpenAiCompat {
     /// `base` is the API root, e.g. `http://127.0.0.1:8000/v1`.
+    /// Purpose: Build an adapter from the API root, the model id and an optional key.
+    /// Serves: the CLI's provider builder.
+    /// Design: `docs/design/config-routing.md` §8.
+    /// Up: `crates/cli/src/server.rs` and `OpenAiCompat::from_env`.
+    /// Down: the `base`, `model` and `api_key` fields.
+    /// Verify: `cargo test -p loong-providers`.
     pub fn new(base: impl Into<String>, model: impl Into<String>, api_key: Option<String>) -> Self {
         Self {
             base: base.into().trim_end_matches('/').to_string(),
@@ -49,6 +70,12 @@ impl OpenAiCompat {
 
     /// Declare how many tokens this model can hold in one request — prompt and answer
     /// together. The kernel compacts against it; see [`Model::context_window`].
+    /// Purpose: Declare how many tokens this model can hold in one request.
+    /// Serves: the kernel's compaction against a configured window.
+    /// Design: `docs/design/config-routing.md` §8.
+    /// Up: the CLI's provider builder.
+    /// Down: `Model::context_window`.
+    /// Verify: `cargo test -p loong-providers`.
     pub fn with_context_window(mut self, tokens: u64) -> Self {
         self.context_window = Some(tokens);
         self
@@ -56,6 +83,12 @@ impl OpenAiCompat {
 
     /// Convenience for the common local setup: `LOONGAGENT_BASE_URL`,
     /// `LOONGAGENT_MODEL`, optional `LOONGAGENT_API_KEY`.
+    /// Purpose: Read the base URL, model and key from the `LOONGAGENT_*` environment.
+    /// Serves: local first runs that have no profile yet.
+    /// Design: `docs/design/config-routing.md` §8.
+    /// Up: no in-tree caller; the CLI builds from profile values through `OpenAiCompat::new`.
+    /// Down: `std::env` and `OpenAiCompat::new`.
+    /// Verify: `cargo test -p loong-providers`.
     pub fn from_env() -> Result<Self, ModelError> {
         let base = std::env::var("LOONGAGENT_BASE_URL").map_err(|_| {
             ModelError::Transport(
@@ -70,6 +103,8 @@ impl OpenAiCompat {
         ))
     }
 
+    /// Purpose: Join the API root with the Chat Completions path.
+    /// Contract: `crates/providers/src/openai_compat.rs`.
     fn endpoint(&self) -> String {
         // Scheme, host, port and TLS policy belong to the shared client; this
         // adapter only knows the path its protocol lives at.
@@ -77,6 +112,12 @@ impl OpenAiCompat {
     }
 
     /// Our messages → the wire's messages.
+    /// Purpose: Map our messages onto the wire's role-tagged objects.
+    /// Serves: `body` and `body_streaming`.
+    /// Design: `docs/design/config-routing.md` §8.
+    /// Up: `body` and `body_streaming`.
+    /// Down: `serde_json::json!` and the `ChatMessage` variants.
+    /// Verify: `cargo test -p loong-providers`.
     fn wire_messages(messages: &[ChatMessage]) -> Vec<Value> {
         messages
             .iter()
@@ -113,6 +154,12 @@ impl OpenAiCompat {
     }
 
     /// Our tools → the wire's tools.
+    /// Purpose: Map our tool specs onto the wire's function objects.
+    /// Serves: `body`, which sends them only when the list is non-empty.
+    /// Design: `docs/design/config-routing.md` §8.
+    /// Up: `body`.
+    /// Down: the `ToolSpec` fields.
+    /// Verify: `cargo test -p loong-providers`.
     fn wire_tools(request: &CompletionRequest) -> Value {
         Value::Array(
             request
@@ -133,6 +180,8 @@ impl OpenAiCompat {
     }
 
     /// The body for a streamed call: the same shape, plus the two stream flags.
+    /// Purpose: The request body with `stream` and `include_usage` set.
+    /// Contract: `crates/providers/src/openai_compat.rs`.
     fn body_streaming(&self, request: &CompletionRequest) -> String {
         let mut body: Value = serde_json::from_str(&self.body(request)).expect("body() is JSON");
         body["stream"] = json!(true);
@@ -142,6 +191,12 @@ impl OpenAiCompat {
         body.to_string()
     }
 
+    /// Purpose: The non-streaming request body, omitting an empty tools array.
+    /// Serves: `complete`, and `body_streaming` which derives from it.
+    /// Design: `docs/design/config-routing.md` §8.
+    /// Up: `complete` and `body_streaming`.
+    /// Down: `wire_messages` and `wire_tools`.
+    /// Verify: `cargo test -p loong-providers`.
     fn body(&self, request: &CompletionRequest) -> String {
         let mut body = json!({
             "model": self.model,
@@ -157,6 +212,12 @@ impl OpenAiCompat {
     }
 
     /// The wire's answer → our response.
+    /// Purpose: Turn a non-streaming reply into a `CompletionResponse`.
+    /// Serves: `complete` and the protocol-error tests.
+    /// Design: `docs/design/config-routing.md` §8.
+    /// Up: `complete`.
+    /// Down: `ToolCallRequest`, `Usage` and `serde_json`.
+    /// Verify: `cargo test -p loong-providers`.
     fn parse_response(body: &str) -> Result<CompletionResponse, ModelError> {
         let value: Value = serde_json::from_str(body)
             .map_err(|e| ModelError::Protocol(format!("response is not JSON: {e}")))?;
@@ -228,6 +289,12 @@ impl OpenAiCompat {
     /// testable without a process-wide environment variable — the first version set
     /// `LOONGAGENT_DEBUG_MODEL` in a test, and a concurrently running test that also
     /// made a model call appended its own line to the same file.
+    /// Purpose: One exchange as the debug file records it.
+    /// Serves: `debug_exchange` and the debug-dump test.
+    /// Design: `docs/design/config-routing.md` §8.
+    /// Up: `debug_exchange`.
+    /// Down: the JSON the debug file appends.
+    /// Verify: `cargo test -p loong-providers`.
     fn debug_entry(
         &self,
         endpoint: &str,
@@ -262,6 +329,12 @@ impl OpenAiCompat {
     /// *did the server send `tool_calls`, or did the model print JSON into `content`
     /// and end with `finish_reason: "stop"`?* No credential is written: the API key
     /// travels in a header this never sees.
+    /// Purpose: Append one exchange when `LOONGAGENT_DEBUG_MODEL` names a file.
+    /// Serves: `complete` and `complete_streaming`, as diagnosis and never as the log.
+    /// Design: `docs/design/config-routing.md` §8.
+    /// Up: both model calls.
+    /// Down: `debug_entry` and `append_debug_line`.
+    /// Verify: `cargo test -p loong-providers`.
     fn debug_exchange(
         &self,
         endpoint: &str,
@@ -285,6 +358,8 @@ impl OpenAiCompat {
 
 /// Append one JSON object as a line. A file that cannot be opened is a debug facility
 /// that did not work, not a reason for a model call to fail: the error is dropped.
+/// Purpose: Append one JSON object as a line, dropping any write error.
+/// Contract: `crates/providers/src/openai_compat.rs`.
 fn append_debug_line(path: &str, entry: &Value) {
     use std::io::Write;
     if let Ok(mut file) = std::fs::OpenOptions::new()
@@ -297,6 +372,8 @@ fn append_debug_line(path: &str, entry: &Value) {
 }
 
 impl Model for OpenAiCompat {
+    /// Purpose: Report the window the adapter was built with.
+    /// Contract: `crates/providers/src/openai_compat.rs`.
     fn context_window(&self) -> Option<u64> {
         self.context_window
     }
@@ -305,6 +382,12 @@ impl Model for OpenAiCompat {
     /// response the non-streaming call would have produced. That equality is the
     /// point — a surface shows a preview, the kernel consumes the same answer
     /// either way.
+    /// Purpose: Stream an answer and reassemble exactly what a plain call would return.
+    /// Serves: surfaces that preview text; the returned response is the record.
+    /// Design: `docs/design/config-routing.md` §8.
+    /// Up: `Model::complete_streaming` callers.
+    /// Down: `loong_http::post_sse` and `parse_response`'s response shape.
+    /// Verify: `cargo test -p loong-providers`.
     fn complete_streaming(
         &mut self,
         request: &CompletionRequest,
@@ -461,6 +544,12 @@ impl Model for OpenAiCompat {
         Ok(response)
     }
 
+    /// Purpose: One HTTP exchange, with a non-200 mapped to a transport error.
+    /// Serves: `Model::complete`.
+    /// Design: `docs/design/config-routing.md` §8.
+    /// Up: `Model::complete`.
+    /// Down: `loong_http::post_json` and `parse_response`.
+    /// Verify: `cargo test -p loong-providers`.
     fn complete(&mut self, request: &CompletionRequest) -> Result<CompletionResponse, ModelError> {
         let endpoint = self.endpoint();
         let body = self.body(request);
@@ -495,6 +584,8 @@ mod tests {
     use crate::ToolSpec;
     use loong_http::testing::fake_server;
 
+    /// Purpose: Split a captured HTTP request into its headers and parsed JSON body.
+    /// Contract: `crates/providers/src/openai_compat.rs`.
     fn split(request: &str) -> (String, Value) {
         let (head, body) = request.split_once("\r\n\r\n").expect("headers and body");
         (
@@ -504,6 +595,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin the request and response mapping for a tool call, including auth and `tool_choice`.
     fn a_tool_call_round_trips_through_the_wire() {
         let (base, server) = fake_server(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n\
@@ -559,6 +651,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that an assistant tool call and its tool result round-trip with arguments as a JSON string.
     fn an_earlier_tool_result_is_mapped_back_onto_the_wire() {
         let (base, server) = fake_server(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n\
@@ -599,6 +692,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that a non-200 becomes a transport error naming the status and a body snippet.
     fn a_non_200_is_a_transport_error_with_the_status_and_a_snippet() {
         let (base, server) = fake_server(
             "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\n\r\n\
@@ -618,6 +712,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that HTTPS is accepted and a bad host is a transport error, not a scheme refusal.
     fn an_https_endpoint_is_accepted_and_a_bad_host_is_a_transport_error() {
         // The scheme is no longer a reason to refuse: TLS is wired. A host that does
         // not resolve proves the adapter got as far as the network.
@@ -637,6 +732,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin delta order, usage from the final chunk, and the stream flags on the request.
     fn a_streamed_answer_is_assembled_from_its_deltas() {
         let (base, server) = loong_http::testing::fake_sse_server(vec![
             "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n".to_string(),
@@ -677,6 +773,7 @@ mod tests {
         assert_eq!(body["stream_options"]["include_usage"], true);
     }
 
+    /// Purpose: Pin that tool arguments split across chunks are rejoined before parsing.
     #[test]
     fn streamed_tool_arguments_split_across_chunks_are_rejoined() {
         // Real providers send the name once and the arguments in pieces; a naive
@@ -706,6 +803,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that a whole `message` in a streaming reply is treated as one large fragment.
     fn a_server_that_ignores_the_stream_flag_is_still_understood() {
         // Some proxies strip streaming and answer with ordinary JSON. Returning an
         // empty answer there would look like the model said nothing.
@@ -739,6 +837,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin the trait default that reports a non-streaming model's whole answer in one delta.
     fn a_model_without_a_streaming_implementation_reports_its_answer_once() {
         // The trait's default: a provider double that only knows how to complete.
         use crate::ScriptedModel;
@@ -758,6 +857,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that no tools means no `tools` and no `tool_choice` keys on the wire.
     fn an_empty_tool_list_is_not_sent() {
         let model = OpenAiCompat::new("http://127.0.0.1:9/v1", "m", None);
         let body: Value = serde_json::from_str(&model.body(&CompletionRequest {
@@ -785,6 +885,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that malformed tool arguments are a protocol error.
     fn malformed_tool_arguments_are_a_protocol_error() {
         let body = "{\"choices\":[{\"message\":{\"tool_calls\":[{\"id\":\"c\",\"function\":\
                     {\"name\":\"t\",\"arguments\":\"not json\"}}]}}]}";
@@ -793,12 +894,14 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that a reply without `choices[0].message` is rejected.
     fn a_response_without_choices_is_rejected() {
         let err = OpenAiCompat::parse_response("{\"error\":\"nope\"}").unwrap_err();
         assert!(err.to_string().contains("no choices[0].message"), "{err}");
     }
 
     #[test]
+    /// Purpose: Pin the debug entry's fields and that appends stay one JSON object per line.
     fn the_debug_dump_records_what_the_server_sent() {
         // The question this exists for: was this a `tool_calls` response or prose that
         // merely *contains* JSON? `finish_reason` is what separates them, and it is not

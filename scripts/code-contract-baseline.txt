@@ -63,13 +63,7 @@ crates/kernel/src/turn/nudge.rs
 crates/kernel/src/turn/recall.rs
 crates/kernel/src/turn/session.rs
 crates/kernel/src/turn/tests.rs
-crates/mcp/src/client.rs
-crates/mcp/src/config.rs
-crates/mcp/src/lib.rs
 crates/plugin/src/lib.rs
-crates/providers/src/lib.rs
-crates/providers/src/openai_compat.rs
-crates/providers/src/probe.rs
 crates/server/src/lib.rs
 crates/skills/src/lib.rs
 crates/tui-app/src/lib.rs

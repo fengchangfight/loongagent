@@ -1,3 +1,12 @@
+//! Purpose: A stdio MCP client: JSON-RPC 2.0 with a deadline on every read and a child that dies with the client.
+//!
+//! # Contract
+//! - **Serves:** the kernel's registry through `McpTool`, and prompt fetching through its `PromptFetcher`.
+//! - **Design:** `docs/design/extension-model.md` §3 and `docs/design/security-trust.md` §1.
+//! - **Upstream:** `crates/kernel/src/turn/build.rs` (`attach_mcp`).
+//! - **Downstream:** `loong_protocol` for framing, `loong_tools` for the `Tool` seam, and the child process.
+//! - **Verify:** `cargo test -p loong-mcp` · `./scripts/check.sh`
+//!
 //! A stdio MCP client: JSON-RPC 2.0 over newline-delimited messages.
 //!
 //! Deliberately small. It does the handshake, lists tools, calls tools, and does
@@ -29,9 +38,17 @@ use std::time::{Duration, Instant};
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 
 #[derive(Debug)]
+/// Purpose: A client failure with the message the operator sees.
+/// Serves: every `McpClient` operation and `McpTool::execute`.
+/// Design: `docs/design/extension-model.md` §3.
+/// Up: `McpClient` methods construct it.
+/// Down: `ToolError::Failed`.
+/// Verify: `cargo test -p loong-mcp`.
 pub struct McpError(pub String);
 
 impl std::fmt::Display for McpError {
+    /// Purpose: Show the failure message.
+    /// Contract: `crates/mcp/src/client.rs`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
     }
@@ -39,6 +56,8 @@ impl std::fmt::Display for McpError {
 
 impl std::error::Error for McpError {}
 
+/// Purpose: Wrap a message in `McpError`.
+/// Contract: `crates/mcp/src/client.rs`.
 fn err(message: impl Into<String>) -> McpError {
     McpError(message.into())
 }
@@ -47,12 +66,24 @@ fn err(message: impl Into<String>) -> McpError {
 /// `prompts/list` sent to a server without prompts is an error the operator did
 /// not ask for.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// Purpose: What the server advertised during the handshake.
+/// Serves: `list_prompts`, which must not ask a server that has no prompts.
+/// Design: `docs/design/extension-model.md` §3.
+/// Up: `McpClient::start` sets it; `McpClient::capabilities` returns it.
+/// Down: the `prompts` check in `list_prompts`.
+/// Verify: `cargo test -p loong-mcp`.
 pub struct McpCapabilities {
     pub tools: bool,
     pub prompts: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Purpose: One argument a prompt declared.
+/// Serves: `McpPromptInfo` and the kernel's argument mapping.
+/// Design: `docs/design/extension-model.md` §2.
+/// Up: `list_prompts` parses it.
+/// Down: the kernel's `attach_mcp`, which maps `/name args` onto it.
+/// Verify: `cargo test -p loong-mcp`.
 pub struct McpPromptArgument {
     pub name: String,
     pub description: String,
@@ -60,6 +91,12 @@ pub struct McpPromptArgument {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Purpose: One prompt the server offers.
+/// Serves: the kernel's MCP prompt catalogue.
+/// Design: `docs/design/extension-model.md` §2 and §3.
+/// Up: `list_prompts`.
+/// Down: the kernel's `attach_mcp`.
+/// Verify: `cargo test -p loong-mcp`.
 pub struct McpPromptInfo {
     pub name: String,
     pub description: String,
@@ -67,12 +104,24 @@ pub struct McpPromptInfo {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// Purpose: One tool the server offers, with its input schema.
+/// Serves: `McpTool::new`.
+/// Design: `docs/design/extension-model.md` §3.
+/// Up: `list_tools`.
+/// Down: `McpTool::new`.
+/// Verify: `cargo test -p loong-mcp`.
 pub struct McpToolInfo {
     pub name: String,
     pub description: String,
     pub input_schema: Json,
 }
 
+/// Purpose: A live stdio server connection.
+/// Serves: `McpTool` and the kernel's prompt fetcher.
+/// Design: `docs/design/extension-model.md` §3 and `docs/design/security-trust.md` §1.
+/// Up: `McpClient::start` in `attach_mcp`.
+/// Down: `request`, `notify`, `send` and `Drop`.
+/// Verify: `cargo test -p loong-mcp`.
 pub struct McpClient {
     name: String,
     child: Child,
@@ -85,6 +134,12 @@ pub struct McpClient {
 
 impl McpClient {
     /// Start the server and complete the handshake.
+    /// Purpose: Spawn the server, complete the handshake and record its capabilities.
+    /// Serves: `attach_mcp` in the kernel build and the client's own tests.
+    /// Design: `docs/design/extension-model.md` §3.
+    /// Up: `crates/kernel/src/turn/build.rs`.
+    /// Down: `request`, `notify` and the reader thread.
+    /// Verify: `cargo test -p loong-mcp`.
     pub fn start(spec: &McpServerSpec) -> Result<Self, McpError> {
         let mut command = Command::new(&spec.command);
         command
@@ -167,16 +222,34 @@ impl McpClient {
         Ok(client)
     }
 
+    /// Purpose: The configured server name.
+    /// Serves: no in-tree caller outside the crate's tests and the `Debug` output.
+    /// Design: `docs/design/extension-model.md` §3.
+    /// Up: `KernelMcp` in `crates/kernel/src/turn/build.rs` matches a server by name.
+    /// Down: the `name` field.
+    /// Verify: `cargo test -p loong-mcp`.
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    /// Purpose: What the server advertised at handshake.
+    /// Serves: the client's tests; the kernel does not branch on it.
+    /// Design: `docs/design/extension-model.md` §3.
+    /// Up: tests only.
+    /// Down: the `capabilities` field.
+    /// Verify: `cargo test -p loong-mcp`.
     pub fn capabilities(&self) -> McpCapabilities {
         self.capabilities
     }
 
     /// The prompts the server offers. Empty when it never advertised any — that is
     /// an answer, not a failure.
+    /// Purpose: The prompts the server offers; empty when it advertised none.
+    /// Serves: `attach_mcp` in the kernel build.
+    /// Design: `docs/design/extension-model.md` §2 and §3.
+    /// Up: `crates/kernel/src/turn/build.rs`.
+    /// Down: `request("prompts/list")`.
+    /// Verify: `cargo test -p loong-mcp`.
     pub fn list_prompts(&mut self) -> Result<Vec<McpPromptInfo>, McpError> {
         if !self.capabilities.prompts {
             return Ok(Vec::new());
@@ -232,6 +305,12 @@ impl McpClient {
     /// Fetch a prompt's messages as text. A prompt is instructions the server
     /// author wrote, so the same rule as any other tool output applies: it is
     /// content, and which server it came from is recorded.
+    /// Purpose: Fetch a prompt's messages as one text body.
+    /// Serves: `KernelMcp` through `PromptFetcher`.
+    /// Design: `docs/design/extension-model.md` §2.
+    /// Up: the kernel's `PromptFetcher` impl.
+    /// Down: `request("prompts/get")`.
+    /// Verify: `cargo test -p loong-mcp`.
     pub fn get_prompt(
         &mut self,
         name: &str,
@@ -282,6 +361,12 @@ impl McpClient {
             .join("\n\n"))
     }
 
+    /// Purpose: The tools the server exposes.
+    /// Serves: `attach_mcp` in the kernel build.
+    /// Design: `docs/design/extension-model.md` §3.
+    /// Up: `crates/kernel/src/turn/build.rs`.
+    /// Down: `request("tools/list")` and `McpToolInfo`.
+    /// Verify: `cargo test -p loong-mcp`.
     pub fn list_tools(&mut self) -> Result<Vec<McpToolInfo>, McpError> {
         let result = self.request("tools/list", json!({}))?;
         let tools = result
@@ -313,6 +398,12 @@ impl McpClient {
 
     /// Call a tool and flatten its content to text. `isError` becomes an error so
     /// the model sees a failed call rather than a successful one with bad news.
+    /// Purpose: Call a tool and flatten its content, turning `isError` into an error.
+    /// Serves: `McpTool::execute`.
+    /// Design: `docs/design/extension-model.md` §3.
+    /// Up: `McpTool::execute`.
+    /// Down: `request("tools/call")` and `flatten`.
+    /// Verify: `cargo test -p loong-mcp`.
     pub fn call_tool(&mut self, tool: &str, args: &Json) -> Result<String, McpError> {
         let result = self.request("tools/call", json!({"name": tool, "arguments": args}))?;
         if result
@@ -333,6 +424,12 @@ impl McpClient {
         }
     }
 
+    /// Purpose: Send one JSON-RPC request and wait for its reply within the deadline.
+    /// Serves: every client operation.
+    /// Design: `docs/design/extension-model.md` §3.
+    /// Up: `start`, `list_prompts`, `get_prompt`, `list_tools` and `call_tool`.
+    /// Down: `send`, `Response::parse` and the reader channel.
+    /// Verify: `cargo test -p loong-mcp`.
     fn request(&mut self, method: &str, params: Json) -> Result<Json, McpError> {
         let id = self.next_id;
         self.next_id += 1;
@@ -385,11 +482,15 @@ impl McpClient {
         }
     }
 
+    /// Purpose: Send a JSON-RPC notification, which expects no reply.
+    /// Contract: `crates/mcp/src/client.rs`.
     fn notify(&mut self, method: &str, params: Json) -> Result<(), McpError> {
         let line = Notification::new(method, params).to_line();
         self.send(&line)
     }
 
+    /// Purpose: Write one newline-delimited message and flush the pipe.
+    /// Contract: `crates/mcp/src/client.rs`.
     fn send(&mut self, line: &str) -> Result<(), McpError> {
         writeln!(self.stdin, "{line}")
             .and_then(|_| self.stdin.flush())
@@ -400,6 +501,8 @@ impl McpClient {
 /// A client is a live child process, so it prints as a handle rather than as a
 /// value (and `unwrap_err()` in tests stays available).
 impl std::fmt::Debug for McpClient {
+    /// Purpose: Print the client as a handle (name and pid), not as a value.
+    /// Contract: `crates/mcp/src/client.rs`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("McpClient")
             .field("name", &self.name)
@@ -409,10 +512,17 @@ impl std::fmt::Debug for McpClient {
 }
 
 impl Drop for McpClient {
+    /// Purpose: Kill the server's whole process group and reap the child.
+    /// Serves: session shutdown, so a server cannot outlive the session that started it.
+    /// Design: `docs/design/extension-model.md` §3.
+    /// Up: Rust calls it when the last `Arc<Mutex<McpClient>>` drops.
+    /// Down: `kill(-pid)` on Unix and `taskkill /T` on Windows.
+    /// Verify: `cargo test -p loong-mcp`.
     fn drop(&mut self) {
         #[cfg(unix)]
         {
             extern "C" {
+                /// Purpose: The libc `syscall` declaration used to signal the whole process group.
                 fn syscall(num: std::ffi::c_long, ...) -> std::ffi::c_long;
             }
             const SYS_KILL: std::ffi::c_long = 62;
@@ -440,6 +550,12 @@ impl Drop for McpClient {
 
 /// Map a command's arguments onto the names a prompt declared: positionally first
 /// (`/review HEAD~1` → `ref=HEAD~1`), then `name=value` tokens override.
+/// Purpose: Map command arguments onto the names a prompt declared.
+/// Serves: the kernel's `attach_mcp`.
+/// Design: `docs/design/extension-model.md` §2.
+/// Up: `crates/kernel/src/turn/build.rs`.
+/// Down: the returned JSON argument map.
+/// Verify: `cargo test -p loong-mcp`.
 pub fn map_prompt_arguments(names: &[String], args: &str) -> serde_json::Map<String, Value> {
     let mut map = serde_json::Map::new();
     let mut positional = Vec::new();
@@ -461,6 +577,12 @@ pub fn map_prompt_arguments(names: &[String], args: &str) -> serde_json::Map<Str
 
 /// MCP content blocks → one string. Text passes through; anything else is
 /// described rather than dropped, so the model knows something was there.
+/// Purpose: Flatten MCP content blocks to text, describing non-text blocks rather than dropping them.
+/// Serves: `call_tool`.
+/// Design: `docs/design/extension-model.md` §3.
+/// Up: `call_tool`.
+/// Down: the model-facing tool result.
+/// Verify: `cargo test -p loong-mcp`.
 fn flatten(result: &Value) -> String {
     let Some(content) = result.get("content").and_then(|c| c.as_array()) else {
         return String::new();
@@ -482,6 +604,12 @@ fn flatten(result: &Value) -> String {
 
 /// An MCP tool as a kernel tool. The name is namespaced so two servers (or a
 /// server and a built-in) can never collide.
+/// Purpose: An MCP tool exposed through the kernel's `Tool` interface.
+/// Serves: the kernel's registry, so an external tool passes the same PDP as a built-in.
+/// Design: `docs/design/extension-model.md` §3.
+/// Up: `McpTool::new` in `attach_mcp`.
+/// Down: `Tool::execute` and `Tool::action_class`.
+/// Verify: `cargo test -p loong-mcp`.
 pub struct McpTool {
     name: String,
     server: String,
@@ -493,6 +621,12 @@ pub struct McpTool {
 }
 
 impl McpTool {
+    /// Purpose: Build the tool with its namespaced name and declared class.
+    /// Serves: `attach_mcp`.
+    /// Design: `docs/design/extension-model.md` §3.
+    /// Up: `crates/kernel/src/turn/build.rs`.
+    /// Down: the `name`, `tool` and `client` fields.
+    /// Verify: `cargo test -p loong-mcp`.
     pub fn new(
         server: &str,
         info: McpToolInfo,
@@ -510,22 +644,36 @@ impl McpTool {
         }
     }
 
+    /// Purpose: The server this tool came from.
+    /// Serves: the crate's tests; the kernel does not read it.
+    /// Design: `docs/design/extension-model.md` §3.
+    /// Up: tests only.
+    /// Down: the `server` field.
+    /// Verify: `cargo test -p loong-mcp`.
     pub fn server(&self) -> &str {
         &self.server
     }
 }
 
 impl Tool for McpTool {
+    /// Purpose: The namespaced name the registry files the tool under.
+    /// Contract: `crates/mcp/src/client.rs`.
     fn name(&self) -> &str {
         &self.name
     }
+    /// Purpose: The description the model reads.
+    /// Contract: `crates/mcp/src/client.rs`.
     fn description(&self) -> &str {
         &self.description
     }
+    /// Purpose: The input schema the server declared.
+    /// Contract: `crates/mcp/src/client.rs`.
     fn parameters(&self) -> Json {
         self.schema.clone()
     }
     /// Declared by configuration, never guessed (see `mcp::config`).
+    /// Purpose: The class from `mcp.toml`, never a guess from the arguments.
+    /// Contract: `crates/mcp/src/client.rs`.
     fn action_class(
         &self,
         _args: &Json,
@@ -533,6 +681,8 @@ impl Tool for McpTool {
     ) -> loong_schema::generated::ActionClass {
         self.action_class
     }
+    /// Purpose: Call the tool through the locked connection.
+    /// Contract: `crates/mcp/src/client.rs`.
     fn execute(&self, args: &Json, _ctx: &ExecContext<'_>) -> Result<String, ToolError> {
         let mut client = self
             .client
@@ -556,6 +706,12 @@ mod tests {
     /// The fake MCP server is a small Python script (see `tests/`): writing it in
     /// the target language would mean reimplementing the protocol in Rust just to
     /// test the client, and MCP servers are typically scripts anyway.
+    /// Purpose: Locate the Python fixture and an interpreter that can run it.
+    /// Serves: every integration-style test in this module.
+    /// Design: `docs/design/extension-model.md` §3.
+    /// Up: those tests.
+    /// Down: `crates/mcp/tests/fake_mcp_server.py`.
+    /// Verify: `cargo test -p loong-mcp`.
     fn fake_server() -> Option<PathBuf> {
         let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fake_mcp_server.py");
         let python = ["python3", "python"].into_iter().find(|p| {
@@ -571,6 +727,8 @@ mod tests {
         script.exists().then_some(script)
     }
 
+    /// Purpose: A server spec pointing at the fixture in one mode.
+    /// Contract: `crates/mcp/src/client.rs`.
     fn spec(script: &std::path::Path, mode: &str) -> McpServerSpec {
         McpServerSpec {
             name: "fake".to_string(),
@@ -585,6 +743,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin the handshake, tool listing and tool call round trip.
     fn handshake_list_and_call_round_trip() {
         let Some(script) = fake_server() else {
             eprintln!("skipping: no python3 or no fake server fixture");
@@ -608,6 +767,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin prompt listing, argument metadata and both prompt-body shapes.
     fn prompts_are_listed_and_fetched() {
         let Some(script) = fake_server() else { return };
         let mut client = McpClient::start(&spec(&script, "normal")).unwrap();
@@ -642,6 +802,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin positional and `name=value` prompt argument mapping, including an undeclared key.
     fn prompt_arguments_map_positionally_and_by_name() {
         let names = vec!["ref".to_string(), "focus".to_string()];
         let mapped = map_prompt_arguments(&names, "HEAD~1 security");
@@ -662,6 +823,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that a server without the prompts capability is never asked.
     fn a_server_without_the_prompts_capability_is_not_asked() {
         let Some(script) = fake_server() else { return };
         let mut client = McpClient::start(&spec(&script, "no-prompts")).unwrap();
@@ -674,6 +836,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that an `isError` tool result becomes an error carrying the message.
     fn a_tool_that_reports_an_error_is_an_error() {
         let Some(script) = fake_server() else { return };
         let mut client = McpClient::start(&spec(&script, "normal")).unwrap();
@@ -686,6 +849,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that an unknown method is a server error, not a hang.
     fn an_unknown_method_is_an_error_not_a_hang() {
         let Some(script) = fake_server() else { return };
         let mut client = McpClient::start(&spec(&script, "normal")).unwrap();
@@ -697,6 +861,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that a silent server fails the call on the deadline.
     fn a_wedged_server_fails_the_call_on_the_deadline() {
         let Some(script) = fake_server() else { return };
         let mut server = spec(&script, "silent");
@@ -708,6 +873,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that a server which exits is reported as a closed connection.
     fn a_server_that_dies_is_reported() {
         let Some(script) = fake_server() else { return };
         let err = McpClient::start(&spec(&script, "die"))
@@ -720,6 +886,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that a missing command is an error naming the server.
     fn a_missing_command_is_an_error() {
         let mut server = spec(std::path::Path::new("/nonexistent.py"), "normal");
         server.command = "definitely-not-a-program".to_string();
@@ -729,6 +896,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin namespacing, the declared action class and the execute path.
     fn tools_are_namespaced_and_keep_their_declared_class() {
         let Some(script) = fake_server() else { return };
         let client = Arc::new(Mutex::new(
@@ -759,6 +927,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that a trusted set yields startable specs with their declared class.
     fn a_trusted_set_produces_startable_specs() {
         let dir = std::env::temp_dir().join(format!(
             "loong-mcp-client-{}-{}",

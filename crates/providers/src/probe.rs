@@ -1,3 +1,12 @@
+//! Purpose: Ask a provider who it is, using nothing but the key a person pasted.
+//!
+//! # Contract
+//! - **Serves:** the first-run wizard and the CLI's provider checks.
+//! - **Design:** `docs/design/config-routing.md` §8.
+//! - **Upstream:** `crates/cli/src/local.rs` calls the probes; `crates/cli/tests/live_probe.rs` exercises them.
+//! - **Downstream:** `loong_http` for the two requests this makes.
+//! - **Verify:** `cargo test -p loong-providers` · `./scripts/check.sh`
+//!
 //! Asking a provider who it is, using nothing but the key the user pasted.
 //!
 //! This is the whole first-run experience in one function. A person types a key;
@@ -35,6 +44,12 @@ pub const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What one vendor said, and what it can be trusted to mean.
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Purpose: What one vendor answered: the key works, was refused, or nothing answered.
+/// Serves: the first-run wizard and the CLI's provider checks.
+/// Design: `docs/design/config-routing.md` §8.
+/// Up: `probe_models`, `probe_models_url` and `probe_with_completion`.
+/// Down: `render`, `model_ids` and the wizard's three outcomes.
+/// Verify: `cargo test -p loong-providers`.
 pub enum Probe {
     /// The key works. `models` is what the vendor listed, in its own order.
     Ok { models: Vec<ModelInfo> },
@@ -55,6 +70,12 @@ pub enum Probe {
 }
 
 impl Probe {
+    /// Purpose: Whether the probe got a working key.
+    /// Serves: `crates/cli/src/local.rs`, which branches on the outcome.
+    /// Design: `docs/design/config-routing.md` §8.
+    /// Up: the wizard's status line.
+    /// Down: the `Probe::Ok` variant.
+    /// Verify: `cargo test -p loong-providers`.
     pub fn is_ok(&self) -> bool {
         matches!(self, Probe::Ok { .. })
     }
@@ -62,6 +83,12 @@ impl Probe {
 
 /// What a vendor volunteers about one model.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// Purpose: What a vendor volunteers about one model.
+/// Serves: `Probe::Ok`, `parse_models` and the wizard's profile write.
+/// Design: `docs/design/config-routing.md` §8.
+/// Up: `parse_models` and `probe_with_completion`.
+/// Down: `model_ids` and `render`'s context-window line.
+/// Verify: `cargo test -p loong-providers`.
 pub struct ModelInfo {
     pub id: String,
     /// The vendor's own number for prompt + answer together, when it publishes one.
@@ -74,6 +101,12 @@ pub struct ModelInfo {
 /// Ask `GET {base_url}/models` with this key.
 ///
 /// `base_url` is the API root the catalog holds, without a trailing slash.
+/// Purpose: Ask `{base}/models` with this key.
+/// Serves: the live probe test; the wizard calls `probe_models_url` directly with the catalog's route.
+/// Design: `docs/design/config-routing.md` §8.
+/// Up: `crates/cli/tests/live_probe.rs`; no in-tree production caller yet.
+/// Down: `probe_models_url`.
+/// Verify: `cargo test -p loong-providers`.
 pub fn probe_models(base_url: &str, api_key: Option<&str>) -> Probe {
     let url = format!("{}/models", base_url.trim_end_matches('/'));
     probe_models_url(&url, api_key)
@@ -82,6 +115,12 @@ pub fn probe_models(base_url: &str, api_key: Option<&str>) -> Probe {
 /// As [`probe_models`], against a URL that is not `{base}/models` — DashScope's
 /// documented list route is on the native path (`/api/v1/models`), not the
 /// `compatible-mode` one its chat endpoint uses.
+/// Purpose: Probe an explicit list URL, for vendors whose route is not `{base}/models`.
+/// Serves: the wizard and DashScope's native list route.
+/// Design: `docs/design/config-routing.md` §8.
+/// Up: `crates/cli/src/local.rs` and `probe_models`.
+/// Down: `loong_http::get_json_raw` and `parse_models`.
+/// Verify: `cargo test -p loong-providers`.
 pub fn probe_models_url(url: &str, api_key: Option<&str>) -> Probe {
     match http::get_json_raw(url, api_key, PROBE_TIMEOUT) {
         // A transport error is the one thing that says nothing about the key.
@@ -110,6 +149,12 @@ pub fn probe_models_url(url: &str, api_key: Option<&str>) -> Probe {
 /// question from whether it can drive an agent, and a much cheaper one to answer first.
 /// A failure here is a path that will not work at all; a success here says nothing about
 /// whether the model can call tools.
+/// Purpose: One minimal completion, to prove a configured model answers.
+/// Serves: the wizard's "can it answer?" check.
+/// Design: `docs/design/config-routing.md` §8.
+/// Up: `crates/cli/src/local.rs`.
+/// Down: `loong_http::post_json` and `completion_text`.
+/// Verify: `cargo test -p loong-providers`.
 pub fn complete_once(
     base_url: &str,
     model: &str,
@@ -145,6 +190,12 @@ pub fn complete_once(
 /// `reasoning_content`. Reporting that as "the model did not speak" is wrong — it spoke,
 /// about its own reasoning — and it sends somebody looking for a broken path when what
 /// they have is a `max_tokens` that was too small.
+/// Purpose: The assistant's words out of an OpenAI-shaped reply, `reasoning_content` included.
+/// Serves: `complete_once` and the wizard's answer check.
+/// Design: `docs/design/config-routing.md` §8.
+/// Up: `complete_once` and its tests.
+/// Down: the reply's `content`/`reasoning_content` fields.
+/// Verify: `cargo test -p loong-providers`.
 pub fn completion_text(body: &str) -> Result<String, String> {
     let Ok(value) = serde_json::from_str::<Value>(body) else {
         return Err(format!(
@@ -179,6 +230,12 @@ pub fn completion_text(body: &str) -> Result<String, String> {
 /// useless for working out why. An endpoint that authenticates and then names nothing is
 /// neither, and its body is the only thing that says which. Returns the status and the
 /// body, or the transport error — the caller prints them.
+/// Purpose: The status and body of a list request, for when two outcomes are not enough.
+/// Serves: the wizard's failure detail.
+/// Design: `docs/design/config-routing.md` §8.
+/// Up: `crates/cli/src/local.rs`.
+/// Down: `loong_http::get_json_raw`.
+/// Verify: `cargo test -p loong-providers`.
 pub fn raw_models_answer(url: &str, api_key: Option<&str>) -> Result<(u16, String), String> {
     let response = http::get_json_raw(url, api_key, PROBE_TIMEOUT).map_err(|e| e.0)?;
     Ok((response.status, response.body))
@@ -192,6 +249,12 @@ pub fn raw_models_answer(url: &str, api_key: Option<&str>) -> Result<(u16, Strin
 /// `400`/`404` means the request was *accepted far enough to complain about the model
 /// id*, which is proof that the key was fine; it comes back `Ok` with no models rather
 /// than as a rejection, so a stale model name costs a model list, never a working key.
+/// Purpose: The fallback for a vendor with no `/models` route: spend one token.
+/// Serves: the wizard for vendors that publish no free key check.
+/// Design: `docs/design/config-routing.md` §8.
+/// Up: `crates/cli/src/local.rs`.
+/// Down: `loong_http::post_json` and `Probe`.
+/// Verify: `cargo test -p loong-providers`.
 pub fn probe_with_completion(base_url: &str, model: &str, api_key: Option<&str>) -> Probe {
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
     let body = serde_json::json!({
@@ -235,6 +298,12 @@ pub fn probe_with_completion(base_url: &str, model: &str, api_key: Option<&str>)
 /// parse is not a failed probe — the key demonstrably worked, and the caller can
 /// still write a profile and let the user name a model. Returning "no models" is
 /// strictly better than turning a working key into an error.
+/// Purpose: Read a `/models` body into ids and windows, tolerating each vendor's shape.
+/// Serves: `probe_models_url` and the wizard's raw-body fallback.
+/// Design: `docs/design/config-routing.md` §8.
+/// Up: `probe_models_url` and `crates/cli/src/local.rs`.
+/// Down: `ModelInfo`.
+/// Verify: `cargo test -p loong-providers`.
 pub fn parse_models(body: &str) -> Vec<ModelInfo> {
     let Ok(value) = serde_json::from_str::<Value>(body) else {
         return Vec::new();
@@ -270,6 +339,12 @@ pub fn parse_models(body: &str) -> Vec<ModelInfo> {
 }
 
 /// Trim a vendor's error body down to something showable.
+/// Purpose: Reduce a vendor error body to one showable sentence.
+/// Serves: every rejection and HTTP failure in this file.
+/// Design: `docs/design/config-routing.md` §8.
+/// Up: `probe_models_url`, `probe_with_completion` and `complete_once`.
+/// Down: `serde_json` and the 200-character bound.
+/// Verify: `cargo test -p loong-providers`.
 fn describe(body: &str) -> String {
     let trimmed = body.trim();
     if trimmed.is_empty() {
@@ -304,6 +379,8 @@ fn describe(body: &str) -> String {
 ///
 /// DashScope: a key bound to one region returns `401 invalid_api_key` from another
 /// region's endpoint. The message is the only thing that says so.
+/// Purpose: Distinguish a DashScope region mismatch from a wrong key.
+/// Contract: `crates/providers/src/probe.rs`.
 fn looks_like_a_region_mismatch(detail: &str) -> bool {
     let lower = detail.to_ascii_lowercase();
     lower.contains("invalid_api_key")
@@ -313,6 +390,12 @@ fn looks_like_a_region_mismatch(detail: &str) -> bool {
 }
 
 /// Every model id the vendor listed, for a caller that just wants the names.
+/// Purpose: Every model id the vendor listed.
+/// Serves: the wizard's model picker.
+/// Design: `docs/design/config-routing.md` §8.
+/// Up: `crates/cli/src/local.rs`.
+/// Down: the `Probe::Ok` model list.
+/// Verify: `cargo test -p loong-providers`.
 pub fn model_ids(probe: &Probe) -> Vec<String> {
     match probe {
         Probe::Ok { models } => models.iter().map(|m| m.id.clone()).collect(),
@@ -321,6 +404,12 @@ pub fn model_ids(probe: &Probe) -> Vec<String> {
 }
 
 /// A one-line summary for a status line or an error.
+/// Purpose: A one-line human summary for a status line or an error.
+/// Serves: the wizard and the CLI's error paths.
+/// Design: `docs/design/config-routing.md` §8.
+/// Up: `crates/cli/src/local.rs`.
+/// Down: the `Probe` variants.
+/// Verify: `cargo test -p loong-providers`.
 pub fn render(probe: &Probe) -> String {
     match probe {
         Probe::Ok { models } if models.is_empty() => "连接成功（未返回模型列表）".to_string(),
@@ -342,6 +431,8 @@ pub fn render(probe: &Probe) -> String {
 }
 
 impl From<HttpError> for Probe {
+    /// Purpose: Treat a transport error as unreachable, never as a bad key.
+    /// Contract: `crates/providers/src/probe.rs`.
     fn from(error: HttpError) -> Self {
         Probe::Unreachable { detail: error.0 }
     }
@@ -352,6 +443,7 @@ mod tests {
     use super::*;
 
     #[test]
+    /// Purpose: Pin that a reply with only `reasoning_content` counts as an answer.
     fn a_model_that_only_thought_still_counts_as_having_answered() {
         // Found by pinging four real models: DeepSeek came back with an empty `content`
         // and the whole answer in `reasoning_content`, because the token cap was spent
@@ -377,6 +469,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that a DeepSeek-shaped body yields ids and published context windows.
     fn a_deepseek_style_body_yields_ids_and_context_windows() {
         // The real shape, captured from `GET https://api.deepseek.com/models`.
         let body = r#"{"object":"list","data":[
@@ -396,6 +489,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that a body without windows still yields the model ids.
     fn a_body_without_context_windows_still_yields_model_ids() {
         // Moonshot and DashScope list ids only. That is a *working key*, so it must
         // not read as a failure.
@@ -408,6 +502,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that Ollama's `name` key and nested `details.context_length` are read.
     fn an_ollama_shaped_body_is_read_by_its_own_key_name() {
         // Ollama's native `/api/tags`, trimmed to the parts that matter. `name` rather
         // than `id`, and the context window nested one level down — the two reasons the
@@ -430,6 +525,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that an unparseable body is an empty list, not a failed probe.
     fn an_unparseable_body_is_not_treated_as_a_failed_probe() {
         // Whatever this was, the key worked. Losing the model list is survivable;
         // throwing away a working key is not.
@@ -439,6 +535,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that a DashScope region mismatch is not reported as a bad key.
     fn a_region_mismatch_is_not_reported_as_a_bad_key() {
         // DashScope's real wording, which is the only thing that distinguishes this
         // from a genuinely wrong key.
@@ -459,6 +556,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that an ordinary rejection reads as a rejection.
     fn a_plain_rejection_reads_as_a_rejection() {
         let rejected = Probe::Rejected {
             status: 401,
@@ -469,6 +567,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that unreachable never blames the key.
     fn unreachable_never_blames_the_key() {
         let probe = Probe::Unreachable {
             detail: "connecting to 127.0.0.1:1: Connection refused (os error 111)".to_string(),
@@ -481,6 +580,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that an error body is reduced to its message and bounded.
     fn an_error_body_is_reduced_to_its_message() {
         // A person should not have to read a wall of JSON to find one sentence.
         let described = describe(r#"{"error":{"message":"model not found","type":"x"}}"#);
@@ -494,6 +594,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that the models URL is joined without doubling the slash.
     fn the_models_url_is_built_without_doubling_the_slash() {
         // `probe_models` is what the wizard calls, so the join has to be right for
         // both `https://api.deepseek.com` and `https://api.moonshot.cn/v1`.

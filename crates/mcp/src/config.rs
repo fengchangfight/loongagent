@@ -1,3 +1,12 @@
+//! Purpose: Read `mcp.toml` and keep its servers inert until a human trusts the manifest.
+//!
+//! # Contract
+//! - **Serves:** the kernel's `attach_mcp` and the CLI's `mcp` command.
+//! - **Design:** `docs/design/extension-model.md` §3 and `docs/design/security-trust.md` §1.
+//! - **Upstream:** `crates/kernel/src/turn/build.rs` and `crates/cli/src/mcp.rs`.
+//! - **Downstream:** `loong_manifest` for the hash and trust check, `loong_schema::ActionClass`.
+//! - **Verify:** `cargo test -p loong-mcp` · `./scripts/check.sh`
+//!
 //! MCP server configuration, behind the same trust gate as hooks.
 //!
 //! A server entry names a command to run, which makes `.loongagent/mcp.toml`
@@ -22,6 +31,12 @@ const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 const MAX_TIMEOUT_MS: u64 = 600_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Purpose: One server entry: command, args, env, action classes and deadline.
+/// Serves: `McpSet`, `McpClient::start` and `McpTool`.
+/// Design: `docs/design/extension-model.md` §3 and `docs/design/security-trust.md` §1.
+/// Up: `McpSet::load` parses it from `mcp.toml`.
+/// Down: `McpClient::start` and `McpTool::new`.
+/// Verify: `cargo test -p loong-mcp`.
 pub struct McpServerSpec {
     pub name: String,
     pub command: String,
@@ -37,12 +52,24 @@ pub struct McpServerSpec {
 }
 
 impl McpServerSpec {
+    /// Purpose: The action class for one tool: its override, else the server default.
+    /// Serves: the kernel's `attach_mcp` when it registers a tool.
+    /// Design: `docs/design/extension-model.md` §3.
+    /// Up: `crates/kernel/src/turn/build.rs`.
+    /// Down: the `tools` map and `action_class` field.
+    /// Verify: `cargo test -p loong-mcp`.
     pub fn class_for(&self, tool: &str) -> ActionClass {
         self.tools.get(tool).copied().unwrap_or(self.action_class)
     }
 }
 
 #[derive(Debug)]
+/// Purpose: Why `mcp.toml` could not be read, parsed or accepted.
+/// Serves: `McpSet::load` and the CLI's error output.
+/// Design: `docs/design/extension-model.md` §3.
+/// Up: `McpSet::load` constructs it.
+/// Down: its `Display` impl.
+/// Verify: `cargo test -p loong-mcp`.
 pub enum ConfigError {
     Io(String),
     Parse(String),
@@ -50,6 +77,8 @@ pub enum ConfigError {
 }
 
 impl std::fmt::Display for ConfigError {
+    /// Purpose: Prefix parse and validation errors with `mcp.toml`.
+    /// Contract: `crates/mcp/src/config.rs`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ConfigError::Io(m) => write!(f, "{m}"),
@@ -62,6 +91,12 @@ impl std::fmt::Display for ConfigError {
 impl std::error::Error for ConfigError {}
 
 #[derive(Debug, Clone)]
+/// Purpose: The parsed manifest plus its trust verdict.
+/// Serves: the kernel's `attach_mcp` and the CLI's `mcp` command.
+/// Design: `docs/design/extension-model.md` §3 and `docs/design/security-trust.md` §1.
+/// Up: `McpSet::load`.
+/// Down: `active`, `trust_now` and `summary`.
+/// Verify: `cargo test -p loong-mcp`.
 pub struct McpSet {
     pub workspace: PathBuf,
     pub dir: PathBuf,
@@ -70,6 +105,12 @@ pub struct McpSet {
 }
 
 impl McpSet {
+    /// Purpose: Parse the manifest and check its trust record, with no manifest meaning no servers.
+    /// Serves: `crates/kernel/src/turn/build.rs` and `crates/cli/src/mcp.rs`.
+    /// Design: `docs/design/extension-model.md` §3 and `docs/design/security-trust.md` §1.
+    /// Up: those two callers.
+    /// Down: `loong_manifest::check` and `parse_class`.
+    /// Verify: `cargo test -p loong-mcp`.
     pub fn load(workspace: impl AsRef<Path>) -> Result<Self, ConfigError> {
         let workspace = workspace.as_ref().to_path_buf();
         let dir = workspace.join(MCP_DIR);
@@ -151,6 +192,12 @@ impl McpSet {
     }
 
     /// The servers that may actually run: none until the bytes are trusted.
+    /// Purpose: The servers that may run: none until the bytes are trusted.
+    /// Serves: the kernel's `attach_mcp`.
+    /// Design: `docs/design/extension-model.md` §3.
+    /// Up: `crates/kernel/src/turn/build.rs`.
+    /// Down: the `servers` field, gated by `trust`.
+    /// Verify: `cargo test -p loong-mcp`.
     pub fn active(&self) -> &[McpServerSpec] {
         match self.trust {
             loong_manifest::TrustStatus::Trusted => &self.servers,
@@ -158,6 +205,12 @@ impl McpSet {
         }
     }
 
+    /// Purpose: Record the current manifest bytes as trusted.
+    /// Serves: `loongagent mcp trust`.
+    /// Design: `docs/design/extension-model.md` §3 and `docs/design/security-trust.md` §1.
+    /// Up: `crates/cli/src/mcp.rs` and tests.
+    /// Down: `loong_manifest::record`.
+    /// Verify: `cargo test -p loong-mcp`.
     pub fn trust_now(&self) -> Result<PathBuf, ConfigError> {
         let sources = sources_of(&self.dir, &self.dir.join(MCP_FILE), &self.servers);
         let path = self.dir.join(MCP_TRUST_FILE);
@@ -165,6 +218,12 @@ impl McpSet {
         Ok(path)
     }
 
+    /// Purpose: A one-line trust summary for startup logs and `mcp list`.
+    /// Serves: `crates/cli/src/mcp.rs`.
+    /// Design: `docs/design/extension-model.md` §3.
+    /// Up: the CLI.
+    /// Down: `trust` and `loong_manifest::inert_message`.
+    /// Verify: `cargo test -p loong-mcp`.
     pub fn summary(&self) -> String {
         match &self.trust {
             loong_manifest::TrustStatus::Absent => "no MCP servers".to_string(),
@@ -180,11 +239,15 @@ impl McpSet {
     }
 }
 
+/// Purpose: The one file whose bytes this trust record covers: `mcp.toml`.
+/// Contract: `crates/mcp/src/config.rs`.
 fn sources_of(dir: &Path, manifest: &Path, servers: &[McpServerSpec]) -> loong_manifest::Sources {
     let _ = (dir, servers);
     vec![(MCP_FILE.to_string(), manifest.to_path_buf())]
 }
 
+/// Purpose: Parse an action-class name, naming the accepted set on failure.
+/// Contract: `crates/mcp/src/config.rs`.
 fn parse_class(server: &str, text: &str) -> Result<ActionClass, ConfigError> {
     match text {
         "investigate" => Ok(ActionClass::Investigate),
@@ -198,12 +261,24 @@ fn parse_class(server: &str, text: &str) -> Result<ActionClass, ConfigError> {
 }
 
 #[derive(Deserialize)]
+/// Purpose: The TOML shape: a table of `server` entries.
+/// Serves: `McpSet::load`.
+/// Design: `docs/design/extension-model.md` §3.
+/// Up: `toml::from_str` in `load`.
+/// Down: `RawServer`.
+/// Verify: `cargo test -p loong-mcp`.
 struct RawFile {
     #[serde(default)]
     server: Vec<RawServer>,
 }
 
 #[derive(Deserialize, Default)]
+/// Purpose: One `[[server]]` table before validation.
+/// Serves: `RawFile` and `McpSet::load`.
+/// Design: `docs/design/extension-model.md` §3.
+/// Up: `RawFile`.
+/// Down: `McpSet::load`'s validation.
+/// Verify: `cargo test -p loong-mcp`.
 struct RawServer {
     name: Option<String>,
     command: Option<String>,
@@ -223,6 +298,8 @@ mod tests {
 
     static N: AtomicU64 = AtomicU64::new(0);
 
+    /// Purpose: A fresh temporary workspace carrying a `.loongagent` directory.
+    /// Contract: `crates/mcp/src/config.rs`.
     fn workspace() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "loong-mcp-{}-{}",
@@ -233,11 +310,14 @@ mod tests {
         dir
     }
 
+    /// Purpose: Write an `mcp.toml` body into a test workspace.
+    /// Contract: `crates/mcp/src/config.rs`.
     fn write(ws: &Path, body: &str) {
         std::fs::write(ws.join(MCP_DIR).join(MCP_FILE), body).unwrap();
     }
 
     #[test]
+    /// Purpose: Pin that no manifest means no servers and the "no MCP servers" summary.
     fn no_manifest_means_no_servers() {
         let ws = workspace();
         let set = McpSet::load(&ws).unwrap();
@@ -247,6 +327,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that a configured server is inert until trusted and runs after `trust_now`.
     fn a_server_is_inert_until_trusted() {
         let ws = workspace();
         write(
@@ -267,6 +348,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that an omitted action class defaults to `out_of_bounds`, a server is required, and the timeout is capped.
     fn the_default_action_class_is_the_cautious_one() {
         let ws = workspace();
         write(&ws, "[[server]]\nname = \"fs\"\ncommand = \"node\"\n");
@@ -287,6 +369,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that a per-tool override beats the server default.
     fn per_tool_overrides_beat_the_server_default() {
         let ws = workspace();
         write(
@@ -302,6 +385,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin the loud, specific errors for a broken manifest.
     fn broken_manifests_are_loud_and_specific() {
         let ws = workspace();
 
@@ -349,6 +433,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that editing the manifest re-arms the trust question.
     fn editing_the_manifest_re_arms_the_question() {
         let ws = workspace();
         write(&ws, "[[server]]\nname = \"a\"\ncommand = \"node\"\n");

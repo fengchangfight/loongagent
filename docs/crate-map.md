@@ -23,12 +23,12 @@ listed is a violation. The middle column is each crate's own `//!` header.
 | `loong-index` | Answer tree, search and count queries from a disposable SQLite copy of the JSONL log. | `loong-eventlog`, `loong-schema` |
 | `loong-kernel` | The fixed kernel (ADR-0004): the model+tool loop, the context ledger that is | `loong-config`, `loong-context`, `loong-eventlog`, `loong-hooks`, `loong-index`, `loong-mcp`, `loong-providers`, `loong-sandbox`, `loong-schema`, `loong-skills`, `loong-tools` |
 | `loong-manifest` | Gate repository manifests behind a human trust decision and a change-detection hash. | — |
-| `loong-mcp` | MCP (T-15): external tools behind the same interface as the built-ins. | `loong-manifest`, `loong-protocol`, `loong-schema`, `loong-tools` |
+| `loong-mcp` | MCP: external tools behind the same `Tool` interface as the built-ins. | `loong-manifest`, `loong-protocol`, `loong-schema`, `loong-tools` |
 | `loong-pack` | Sign and verify the one envelope every distributed artifact travels in. | — |
 | `loong-plugin` | Plugins: a bundle of skills you install **by name**, instead of hand-copying | `loong-config`, `loong-skills` |
 | `loong-proc` | Run a child process with bounded output, a hard timeout and teardown of its whole tree. | — |
 | `loong-protocol` | Define the JSON-RPC 2.0 envelopes and one-line framing that carry schema messages between surfaces and the server. | `loong-schema` |
-| `loong-providers` | Model providers behind one `Model` interface (ADR-0004). | `loong-http`, `loong-schema` |
+| `loong-providers` | Model providers behind one `Model` interface, so the kernel never learns which vendor answered (ADR-0004). | `loong-http`, `loong-schema` |
 | `loong-sandbox` | The policy decision point: allow, ask or deny plus the rule that fired, and never a widening. | `loong-schema` |
 | `loong-schema` | Own the single source of truth for every message on the wire, generated once for Rust and TypeScript. | — |
 | `loong-server` | The local agent server (ADR-0001): sessions live here, clients attach. | `loong-eventlog`, `loong-kernel`, `loong-protocol`, `loong-schema` |

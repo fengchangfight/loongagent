@@ -96,6 +96,6 @@ kernel writes the provenance pair.
 - [control-plane.md](../control-plane.md) — endpoints, tokens, serve and publish.
 - [config-routing.md](../config-routing.md) §4–§5 — the envelope, the cache and the lock.
 - [security-trust.md](../security-trust.md) — where the signing key and the pin sit.
-- [control-plane.md](../../runbooks/control-plane.md) — the operational sequence.
+- [control-plane.md](../../runbooks/control-plane.md) — the runbook entry: bootstrap, operate, security.
 - `crates/control/src/lib.rs` — `sync`, `fetch`, `Cache`; `crates/pack/src/lib.rs` —
   `Envelope::verify`.

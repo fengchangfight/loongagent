@@ -162,9 +162,8 @@ Two claims that are easy to conflate, kept apart here as ADR-0012 §1 keeps them
   would eventually accept the wrong pack; sharing the crate makes agreement a compiler
   property.
 
-The runbook is [control-plane.md](../runbooks/control-plane.md) — key and token bootstrap,
-`serve`, `publish`, the systemd unit and the day-two operations. Two deployment facts belong
-here as well:
+The runbooks start at [control-plane.md](../runbooks/control-plane.md) — bootstrap, operate
+and security. Two deployment facts belong here as well:
 
 - **There is no TLS listener.** The plane speaks plain HTTP; a non-loopback client refuses
   `http://` because a pack decides where prompts go. Expose it behind a TLS reverse proxy or an
@@ -198,6 +197,7 @@ here as well:
   pre-gateway router.
 - [security-trust.md](security-trust.md) — where the signing key, the pin and the pack sit in
   the trust map.
-- [control-plane.md](../runbooks/control-plane.md) — the operational sequence.
+- [control-plane.md](../runbooks/control-plane.md) — the runbook entry: bootstrap, operate and
+  security.
 - `crates/control/src/lib.rs` — the client sync, the cache and the server endpoints;
   `crates/control/src/bin/loongagent-control.rs` — keygen, sign, check, serve and publish. The install sequence is [pack-install.md](flows/pack-install.md).

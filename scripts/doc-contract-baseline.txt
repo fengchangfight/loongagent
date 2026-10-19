@@ -24,5 +24,4 @@ docs/decisions/0015-two-tree-levels.md
 docs/decisions/0016-pack-distribution.md
 docs/decisions/0017-layered-context.md
 docs/decisions/0018-plugin-install-and-bootstrap.md
-docs/runbooks/control-plane.md
 docs/runbooks/windows-build.md

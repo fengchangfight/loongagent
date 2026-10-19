@@ -20,22 +20,22 @@ Language: zh
 
 ## 13. 分阶段实现（每阶段可独立验证、可停在任意一步）
 
-| 阶段 | 内容 | 完成判据 |
-|---|---|---|
-| **P1** 真相先可检索 | `crates/context`：L1 物化（确定性抽取 + 内容哈希去重）、实体与关键词索引、增量摄入水位、`rebuild`/`verify` | 按关键词/路径/模块找回任意历史事件；删库重建结果一致；2 字中文可命中（实测表见 [data-model.md](data-model.md) §5.3） |
-| **P2** 派生摘要可读 | L2 的**确定性一半**：切段、digest（改动文件/命令/测试成败转变/状态）、`summary`/`citation`/`summary_entity`/`summary_inputs` 落库、`recall`+`expand` 只读路径 | 任意 L2 都能展开到原文；引用区间全部有效且落在自身区间内；派生血缘记录为「原始事件区间」（非另一条摘要）；12 个测试覆盖 |
-| **P3** 后台常态 | 字节 tail（`tail.rs`）、增量 `sync`、`digest_pending` 补积压、`worker::step`/`run_activation`（前台让出 + 预算 + 统计）、截断自动重建 | 空闲看待机 27 µs；追加一个任务 8.4 ms 且不随日志增长；前台忙时 `Deferred` 且不读日志；**增量派生 == 全量重建**（有断言） |
-| **P4** 前台变浅 | L3 域地图（确定性 rollup）+ L4 全局地图（硬上限 400 token）+ 内核 `Category::CognitiveMap`、`Ledger::replace`、`refresh_map`；**引擎开启时不再丢弃任何交换** | L4 是**独立 system 消息**、置于系统提示之后、只一条且原地刷新；引擎开启的长会话 `dropped_messages == 0` 且首轮请求仍在；引擎关闭时行为与改造前**完全一致**（有对照测试） |
-| **P5** 语义层可选 | `Summarizer` trait、Ollama 原生客户端（`/api/chat`、`think=false`、JSON schema）、`Store::synthesize`（**纯增量**：合并而非覆盖）、**`recall`/`expand` 工具**（[recall.md](recall.md) §7.2）、`[context_engine]`/`[summarizer]` 的 `Profile` 解析（含 ADR-0008 权威：企业层可强制 `enabled=false`，用户层不能放宽；仓库层不得选 `summarizer.base_url`/`model`）、忠实度测试 | 未装模型 = R 模式行为（`NoSummarizer`）；装了 = 只补 `rejected`/`why`/`open_questions`/`conclusion`，**计算字段与引用一律不可被模型改写**（6 个测试）；**忠实度实测见 §14 未决项 2**：0.6B 编造 0、3B 编造 3；`recall` 有 6 个内核测试；`Profile` 侧 5 个测试；`ContextEngine` 测试（R 模式不碰模型、semantic 在后台并落库、模型不可达只降级那一段、未知 kind 失败关闭） |
-| **P5.5** 空闲窗口与可见性 | 模型调用移出前台：独立 worker 线程 + 第二个 `Store` + `WindowBudget`（`window_calls`/`window_tokens`，narrow-only 取最小）+ 整轮 busy 且在每次调用前让出；`ContextExplain` 的 `memory_mode`/`memory_summarizer`/`memory_degraded`/`memory_layers`/`memory_worker`；TUI F2 与状态栏 | **前台 6 次步边界 17–19 ms，而同一模型调用在前台要 301 ms**（`#[ignore]` measurement）；一次空闲窗口实测（7B）：窗口 1 = 4 段 / 10.44 s（含模型加载），窗口 2 = 4 段 / 5.50 s，合计 15.94 s；`refresh_never_calls_the_model` 结构性门禁；两个写者同库实测；TUI "off" 与 "on 还没产出" 显示不同、降级有测试 |
-| **P6** | 内置推理：先做 candle spike（纯 Rust，决定是否需要 C++），再决定 `llama-cpp-2` 可选 feature 与 `agent-full` 产物 | 由 §14 未决项 1 拍板后再立项；**当前默认是 Ollama，P6 不是前置条件** |
+| 阶段 | 状态 | 内容 | 完成判据 |
+|---|---|---|---|
+| **P1** 真相先可检索 | ✅ **已实现（2026-10-13）** | `crates/context`：L1 物化（确定性抽取 + 内容哈希去重）、实体与关键词索引、增量摄入水位、`rebuild`/`verify` | 按关键词/路径/模块找回任意历史事件；删库重建结果一致；2 字中文可命中（实测表见 [data-model.md](data-model.md) §5.3） |
+| **P2** 派生摘要可读 | ✅ **已实现（2026-10-13）** | L2 的**确定性一半**：切段、digest（改动文件/命令/测试成败转变/状态）、`summary`/`citation`/`summary_entity`/`summary_inputs` 落库、`recall`+`expand` 只读路径 | 任意 L2 都能展开到原文；引用区间全部有效且落在自身区间内；派生血缘记录为「原始事件区间」（非另一条摘要）；12 个测试覆盖 |
+| **P3** 后台常态 | ✅ **已实现（2026-10-13）** | 字节 tail（`tail.rs`）、增量 `sync`、`digest_pending` 补积压、`worker::step`/`run_activation`（前台让出 + 预算 + 统计）、截断自动重建 | 空闲看待机 27 µs；追加一个任务 8.4 ms 且不随日志增长；前台忙时 `Deferred` 且不读日志；**增量派生 == 全量重建**（有断言） |
+| **P4** 前台变浅 | ✅ **已实现（2026-10-13）** | L3 域地图（确定性 rollup）+ L4 全局地图（硬上限 400 token）+ 内核 `Category::CognitiveMap`、`Ledger::replace`、`refresh_map`；**引擎开启时不再丢弃任何交换** | L4 是**独立 system 消息**、置于系统提示之后、只一条且原地刷新；引擎开启的长会话 `dropped_messages == 0` 且首轮请求仍在；引擎关闭时行为与改造前**完全一致**（有对照测试） |
+| **P5** 语义层可选 | ✅ **已实现（2026-10-13）** | `Summarizer` trait、Ollama 原生客户端（`/api/chat`、`think=false`、JSON schema）、`Store::synthesize`（**纯增量**：合并而非覆盖）、**`recall`/`expand` 工具**（[recall.md](recall.md) §7.2）、`[context_engine]`/`[summarizer]` 的 `Profile` 解析（含 ADR-0008 权威：企业层可强制 `enabled=false`，用户层不能放宽；仓库层不得选 `summarizer.base_url`/`model`）、忠实度测试 | 未装模型 = R 模式行为（`NoSummarizer`）；装了 = 只补 `rejected`/`why`/`open_questions`/`conclusion`，**计算字段与引用一律不可被模型改写**（6 个测试）；**忠实度实测见 §14 未决项 2**：0.6B 编造 0、3B 编造 3；`recall` 有 6 个内核测试；`Profile` 侧 5 个测试；`ContextEngine` 测试（R 模式不碰模型、semantic 在后台并落库、模型不可达只降级那一段、未知 kind 失败关闭） |
+| **P5.5** 空闲窗口与可见性 | ✅ **已实现（2026-10-14）** | 模型调用移出前台：独立 worker 线程 + 第二个 `Store` + `WindowBudget`（`window_calls`/`window_tokens`，narrow-only 取最小）+ 整轮 busy 且在每次调用前让出；`ContextExplain` 的 `memory_mode`/`memory_summarizer`/`memory_degraded`/`memory_layers`/`memory_worker`；TUI F2 与状态栏 | **前台 6 次步边界 17–19 ms，而同一模型调用在前台要 301 ms**（`#[ignore]` measurement）；一次空闲窗口实测（7B）：窗口 1 = 4 段 / 10.44 s（含模型加载），窗口 2 = 4 段 / 5.50 s，合计 15.94 s；`refresh_never_calls_the_model` 结构性门禁；两个写者同库实测；TUI "off" 与 "on 还没产出" 显示不同、降级有测试 |
+| **P6**（待定） | 待定 | 内置推理：先做 candle spike（纯 Rust，决定是否需要 C++），再决定 `llama-cpp-2` 可选 feature 与 `agent-full` 产物 | 由 §14 未决项 1 拍板后再立项；**当前默认是 Ollama，P6 不是前置条件** |
 
 每个阶段的测试要求：**同一输入必得同一输出**（确定性部分）、**引用可校验**、
 **模式降级不损坏记忆**。
 
 ---
 
-## 14. 小模型后端与检索：实测依据与开放问题
+## 14. 待讨论（本轮要拍的）
 
 1. **小模型后端 —— owner 已定：本机 Ollama（2026-10-13）**
 

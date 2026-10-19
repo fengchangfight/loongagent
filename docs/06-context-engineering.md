@@ -9,8 +9,8 @@ Language: zh
 
 本文是上下文设计的入口。核心主张是：把上下文管理从**有损压缩**改成**可逆的信息组织** ——
 原文永不离开事件日志，前台只携带少量"认知摘要"，需要时用关键词索引一层层定位回原始证据。
-完整的 L1–L4 结构、两种运行模式、七组机制细节都移到了 [`docs/context/`](context/README.md)；
-旧文件名保留，外部链接照常可用。下面的表是每一节的落点。
+完整的 L1–L4 结构、两种运行模式、各组机制细节与当前限制都移到了
+[`docs/context/`](context/README.md)；旧文件名保留，外部链接照常可用。下面的表是每一节的落点。
 
 ## 章节去向
 
@@ -23,5 +23,6 @@ Language: zh
 | §9 事件种类（后台工作与摘要变更的可见事件） | [context/pipeline.md](context/pipeline.md) |
 | §7 前台合成与 `recall`（唯一检索入口、系统提示纪律） | [context/recall.md](context/recall.md) |
 | §8 失效模式与对策（核心风险表） | [context/failure-modes.md](context/failure-modes.md) |
-| §11 配置、§11.0 `@` 文件引用、§11.1 模型不写文件 | [context/config.md](context/config.md) |
-| §12 非目标、§13 分阶段实现、§14 小模型后端与检索的实测依据 | [context/rollout.md](context/rollout.md) |
+| §11 配置、§11.0 `@` 文件引用、§11.2 模型不写文件 | [context/config.md](context/config.md) |
+| §11.1 缺口清单与已落地（当前状态与限制） | [context/status.md](context/status.md) |
+| §12 非目标、§13 分阶段实现、§14 待讨论 | [context/rollout.md](context/rollout.md) |

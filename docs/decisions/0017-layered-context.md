@@ -4,8 +4,9 @@ Language: zh
 
 - **Status:** Proposed（整体形态待 owner sign off；**§1 检索层/理解层分离、§2 分层、
   §5 两模式已获 owner 认可方向**；未定项见文末）
-- **Date:** 2026-10-13（owner 选定 Ollama 小模型后端；字段归属规则见 Decision §4，
-  实测与决定见文末第 1 项）
+- **Date:** 2026-10-13（同日更新：owner 选定 Ollama 小模型后端；字段归属规则见 Decision §4，
+  实测与决定见文末第 1 项。**2026-10-14 更新：P1–P5.5 已实现；空闲窗口调度、TUI 记忆状态落地，
+  尚未落地的部分见文末"④ 的落地与证据"与设计文档 [§11.1](../context/status.md)**）
 - **Decides:** ADR-0006 §4 的修订方向；上下文管理的整体形态
 - **Design doc:** [docs/context/README.md](../context/README.md)
 
@@ -182,16 +183,16 @@ ADR-0006 定下的机制是对的：上下文只能由内核组装，每个块�
 - **新增事件种类**（schema 先行，`scripts/gen-schema.py` 生成）：
   `memory.l1.materialized`、`memory.summary.updated`、`memory.superseded`、
   `memory.worker.state` —— 后台工作与摘要变更都是可见事件，本 ADR 的承诺才可审计。
-  **实现状态：一个都还没有。** `protocol.toml` 里没有 `memory.*` 事件，
+  **实现状态（2026-10-14）：一个都还没有。** `protocol.toml` 里没有 `memory.*` 事件，
   引擎也从不写日志（它只读会话日志、只写 sidecar）：水位在 `meta`、摘要在 `summary`、
-  worker 统计在进程内。**"摘要变更可审计"这条承诺尚未兑现**，见设计文档 §9。
-- **两处尚未落地的机制（审计发现，如实列出）**：
+  worker 统计在进程内。**"摘要变更可审计"这条承诺尚未兑现**，列在设计文档 [§11.1](../context/status.md)。
+- **两处尚未落地的机制（2026-10-14 审计发现，如实列出）**：
   1. **`superseded_by` 从未被写过。** 过期摘要当前由 `replace_overlapping` **删除**并
      重派生，而不是"标 `superseded_by` 保留历史"（Decision §6 的后半句没兑现）。
   2. **配置并未全部接线。** `[context_engine] l4_max_tokens` 与 `episode_events` 会被解析
      但无人读取（L4 上限与切段阈值仍是常量）；`store`/`episode_gap_secs`/
      `domain_rollup_episodes`/`recall_limit`/`recall_max_tokens`/`model_fast`/`think`/
-     `timeout_ms`/`on_error` 则会被 `deny_unknown_fields` 直接拒绝。详见设计文档 §11。
+     `timeout_ms`/`on_error` 则会被 `deny_unknown_fields` 直接拒绝。详见设计文档 [§11](../context/config.md)。
   3. **`nice`/线程优先级未做**（§8 的"可选"一条）；单线程已实现。
 - **成本是可解释的**：每条摘要都有 `producer` 与引用，模型调用次数是可见计数；
   "这个会话为记忆花了多少"是一个查询。
@@ -241,7 +242,7 @@ ADR-0006 定下的机制是对的：上下文只能由内核组装，每个块�
   5. L3 模块粒度（`src/kernel` vs `src/kernel/turn.rs`）；
   6. 前台是否注入 L3，还是完全按 `recall` 按需；
   7. 跨会话复用是否立项（T-10 与 ADR-0010 的关系）。
-  这些未定项对应设计文档 §14，落定后以 owner decision 追加在本节，而不是新开 ADR。
+  这些未定项对应设计文档 [§14](../context/rollout.md)，落定后以 owner decision 追加在本节，而不是新开 ADR。
 - **验证方式**（本 ADR 的承诺必须可证伪）：①同一日志重放必得同一确定性产物；
   ②`loong context verify` 校验所有引用区间有效、且每条摘要的派生血缘满足 §2 的
   "不许链式总结"（可机械检查）；③删库重建后 `recall` 结果一致；

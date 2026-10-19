@@ -11,7 +11,7 @@ Language: zh
 
 | # | 失效模式 | 后果 | 对策（机制，非约定） |
 |---|---|---|---|
-| 1 | **漂移**：L4 越抽象越偏离事实 | 模型自信地记错项目状态 | ①**禁止链式总结**：每层只从当前子层重派生，旧版摘要不进输入集合（[principles.md](principles.md) §4.2.1，`summary_inputs` 可机械检查）②引用区间 + `superseded_by`（**列在、从未写入**）+ `expand` 强制带原文（[recall.md](recall.md) §7.2 要点 1） |
+| 1 | **漂移**：L4 越抽象越偏离事实 | 模型自信地记错项目状态 | ①**禁止链式总结**：每层只从当前子层重派生，旧版摘要不进输入集合（[principles.md](principles.md) §4.2.1，`summary_inputs` 可机械检查）②引用区间 + `superseded_by`（**列在、从未写入**，见 [status.md](status.md) §11.1）+ `expand` 强制带原文（[recall.md](recall.md) §7.2 要点 1） |
 | 2 | 高层摘要吞掉关键细节 | 决策依据消失 | digest 保底（[pipeline.md](pipeline.md) §6.2）+ L1 原子记录 + 关键词索引按需回填 |
 | 3 | 摘要被当事实 | 错误结论在会话内传播 | 系统提示纪律 + `expand` 强制带原文 + 摘要标注 `producer` 与 `status` |
 | 4 | 后台拖慢交互 | 体验变差 | 单飞行 + 窗口预算 + 前台优先 + 可关闭（[principles.md](principles.md) §4.6）；走本机 HTTP 端点时模型在别的进程里 |
@@ -23,4 +23,4 @@ Language: zh
 | 10 | 摘要掩盖了"被否决的方案" | 重蹈覆辙 | L2 synthesis 的**必填字段**：`rejected[]`、`open_questions[]` |
 | 11 | 关键词查询静默返回 0 | 模型以为"没有这段历史" | 关键词逐词 AND（[recall.md](recall.md) §7.2 要点 5）；不走 FTS5，从根上避开短词陷阱 |
 | 12 | **输入里没有的信息，模型只能编或弃权** | 要么记忆变薄，要么记忆变假 | digest 必须携带**尝试序列**（每次改动 + 紧随其后的验证结果，[pipeline.md](pipeline.md) §6.2）；能算的字段一律由程序算，绝不让模型"抄一份它读得到的清单" |
-| 13 | 静默降级（模型连不上、schema 版本不对） | 用户以为记忆在跑，其实没有 | `memory_degraded` 记录原因（引擎级失败 + "N 段退回 digest"），TUI F2 面板与状态栏 `mem ⚠ degraded` 显示（已实现） |
+| 13 | 静默降级（模型连不上、schema 版本不对） | 用户以为记忆在跑，其实没有 | `memory_degraded` 记录原因（引擎级失败 + "N 段退回 digest"），TUI F2 面板与状态栏 `mem ⚠ degraded` 显示（**已实现 2026-10-14**，见 [status.md](status.md) §11.1） |

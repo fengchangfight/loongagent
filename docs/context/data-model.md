@@ -69,7 +69,7 @@ CREATE TABLE summary (               -- L2/L3；L4 不落库（见下）
   schema_ver    INTEGER NOT NULL,
   seq_from      INTEGER NOT NULL,
   seq_to        INTEGER NOT NULL,
-  superseded_by TEXT,                -- 已定义、尚未被写过
+  superseded_by TEXT,                -- 已定义、尚未被写过（§11.1）
   domain        TEXT,                -- L3 的模块归属，确定性规则（§14 未决项 6）
   tokens        INTEGER NOT NULL,
   created_at    INTEGER NOT NULL,
@@ -168,4 +168,4 @@ char-unigram 派生列（总量约 1.8 倍，且对 `LIKE` 语义无损、无字
 
 **诚实注记（2026-10-14）**：上面"让脏集合能精确计算"这句话，只在"归属是确定性规则"
 这个意义上成立；**脏集合本身没有实现** —— 当前 `digest_domains()` 每轮遍历全部 domain
-比较内容（[pipeline.md](pipeline.md) §6.4），不是 O(增量)。
+比较内容（[pipeline.md](pipeline.md) §6.4、[status.md](status.md) §11.1），不是 O(增量)。

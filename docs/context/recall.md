@@ -23,7 +23,7 @@ Language: zh
 `Lifetime::Turn` 的账本条目目前仍被预算淘汰逻辑使用，只是不由 `recall` 产生。
 
 L4 必须**有 token 上限**：当前是常量 `L4_MAX_TOKENS = 400`（`synthesis.rs`），
-`[context_engine] l4_max_tokens` 虽被解析但**还没有被读取**。R 模式与 S 模式
+`[context_engine] l4_max_tokens` 虽被解析但**还没有被读取**（[status.md](status.md) §11.1）。R 模式与 S 模式
 共用同一个确定性 L4；草案里"R 模式的 L4 更短（200）"没有实现。
 
 ### 7.2 `recall` 工具（唯一检索入口）—— 已实现

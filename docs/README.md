@@ -109,7 +109,7 @@ file that does not exist yet.
 | [04-system-overview.md](04-system-overview.md) | The architecture as decided — one-read end-to-end picture | Agreed |
 | [05-parity-and-synthesis.md](05-parity-and-synthesis.md) | Parity vs Claude Code + absorption backlog from the field + deliberate "no"s | Living |
 | [06-context-engineering.md](06-context-engineering.md) | Context engineering — entry to the layered reversible memory design (L1–L4 + raw archive, background increment, `recall`) | Discussing (P1–P5.5 implemented) |
-| [context/](context/) | The context design in detail — principles, data model, pipeline, `recall`, failure modes, config, rollout | Discussing (P1–P5.5 implemented) |
+| [context/](context/) | The context design in detail — principles, data model, pipeline, `recall`, failure modes, config, status, rollout | Discussing (P1–P5.5 implemented) |
 | [07-extending.md](07-extending.md) | Changing the machinery — entry to the four extension procedures | Living |
 | [extending/](extending/) | The four procedures in detail — built-in tool, event, hook, routing — each with its proof command | Living |
 | [design/](design/) | Subsystem design: one document per mechanism, one per flow; the layer between the overview and the code. | Living |

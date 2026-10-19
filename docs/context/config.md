@@ -4,10 +4,10 @@ Language: zh
 
 - **Up:** [README.md](README.md)
 - **Authority:** [ADR-0006](../decisions/0006-context-engine.md) · [ADR-0017](../decisions/0017-layered-context.md) · [ADR-0008](../decisions/0008-configuration-layering.md)
-- **Code:** `crates/config/src/layer.rs`, `crates/tui-app/src/mention.rs`, `crates/kernel/src/turn/loop.rs`
+- **Code:** `crates/config/src/layer.rs`, `crates/tui-app/src/mention.rs`, `crates/kernel/src/turn.rs`
 - **Verify:** `cargo test -p loong-config -p loong-context -p loong-kernel` · `./scripts/check.sh`
 
-## 11. 配置
+## 11. 配置（已接线部分 + 仍在草案部分）
 
 **owner 决定（2026-10-13）：小模型后端先用本机 Ollama。** 默认模型已按 2026-10-14 的
 忠实度重测改为 `qwen2.5:7b-instruct`（见 [rollout.md](rollout.md) §14 未决项 2）。
@@ -37,7 +37,7 @@ window_tokens = 6000           # 每个空闲窗口最多多少 token（估算�
 `summarizer.on_error`。它们描述的行为目前是写死的：`think = false` 与 60 s 超时在
 `OllamaSummarizer` 里，失败一律 degrade 到 digest，存储只有 sidecar 一种，recall 上限是
 `RECALL_MAX_CHARS = 4800`（常量），domain rollup 阈值是 `DOMAIN_ROLLUP_EPISODES = 3`
-（常量）。
+（常量）。这些都列在 [status.md](status.md) §11.1。
 
 `window_calls` / `window_tokens` 是**每个空闲窗口**的硬预算（[principles.md](principles.md) §4.6），不是"每个步边界"，
 并且是 ADR-0008 的 narrow-only 键、**取最小值**：更高层可以把后台的花费压小，更低层
@@ -72,7 +72,7 @@ loongagent local semantic off              # 已实现：关闭
 loong context status               # 已实现：水位、实体、各层条数、producer 分布
 loong context verify               # 已实现：引用完整性校验（§4.1）
 loong context rebuild              # 已实现：丢弃并重建派生库
-F2 面板                            # 已实现：账本分类 + 记忆状态
+F2 面板                            # 已实现：账本分类 + 记忆状态（见 §11.1）
 
 loong context build [--all]        # **草案，未实现**
 loong context explain              # **草案，未实现**（L4 全文只出现在请求里）
@@ -97,7 +97,7 @@ TUI 在 F2 面板渲染它们，并在降级时于状态栏常驻 `mem ⚠ degra
 
 ---
 
-## 11.0 TUI：`@` 文件引用
+## 11.0 TUI：`@` 文件引用（2026-10-14）
 
 输入框里打 `@` 会列出工作区文件，`↑/↓`（或 `Tab`/`Shift-Tab`）选择，`enter` 插入，
 `esc` 取消。它插入的是**路径文本**（`@src/main.rs`），**不读文件内容**。
@@ -125,7 +125,9 @@ TUI 在 F2 面板渲染它们，并在降级时于状态栏常驻 `mem ⚠ degra
 - 键位**排在所有 Escape/方向键分支之前** —— 否则 catch-all 的 `Esc`（退出程序）
   会把它吞掉（**这也是测试抓到的真 bug**）。
 
-## 11.1 模型不写文件、只在聊天里贴代码
+---
+
+## 11.2 模型不写文件、只在聊天里贴代码（2026-10-14 修）
 
 
 **症状**：用本地模型让它写一个单页 HTML 游戏，它把整个文件贴在回复里、让你自己保存；
@@ -183,7 +185,7 @@ portun
    `loong-http` 里，见 `BodyReader` 的注释）。**所以检测不能"从头解析 JSON"，只能扫描**：
    文本可能两头都被切掉。
 3. **同一个模型并不是不会调用**：本机对 Ollama `/v1` 的三次短上下文采样都是干净的
-   `tool_calls` delta、`content` 为空。这是 §11.1 开头那条结论的又一例 —— **不稳定**。
+   `tool_calls` delta、`content` 为空。这是 §11.2 开头那条结论的又一例 —— **不稳定**。
 
 **原始样本（真实抓取，`--debug-model`）** —— 差别就在通道，不在措辞：
 
@@ -237,3 +239,5 @@ harness 没变，变的是模型在压力下的输出通道。长历史复现时
 `tool_calls` = 服务端认为这是调用；`stop` + content 里是 JSON = 模型把调用打印成了文本。
 它**不进事件日志** —— 日志是记录（ADR-0003），原始 provider 体是诊断数据。这是本节两个
 失败形状与"模型能力"之间的区别第一次可以**直接看**，而不是靠猜。
+
+---

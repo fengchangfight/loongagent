@@ -91,7 +91,7 @@ Language: zh
 **实现状态（2026-10-14）**：切段只有两条判据落地（`crates/context/src/digest.rs` 的
 `segment()`）：新 user 消息且上一段已有 `SEGMENT_MIN_EVENTS = 4` 条事件，或距上一段
 起点超过 `SEGMENT_GAP_MS = 10 min`。②④的"阈值进配置"**没有落地** ——
-`[context_engine] episode_events` 虽被解析，但还没有被任何一段代码读取。
+`[context_engine] episode_events` 虽被解析，但还没有被任何一段代码读取（[status.md](status.md) §11.1）。
 可重放这一条有测试保证（同输入必得同边界）。
 
 ### 6.4 上行触发
@@ -130,7 +130,7 @@ L2 退化成"改了哪些文件、跑了什么、结果如何"的事实清单 �
 
 ---
 
-## 9. 事件种类
+## 9. 事件种类（**尚未落地**）
 
 后台工作与摘要变更都必须是**可见事件**，否则 ADR-0006 的"没有隐藏的注入"就破了。
 拟新增四类（`crates/schema/protocol.toml` → `scripts/gen-schema.py` 生成）：
@@ -139,7 +139,7 @@ L2 退化成"改了哪些文件、跑了什么、结果如何"的事实清单 �
 > `memory.*` 事件，引擎也从不写日志 —— 它只读会话日志、只写自己的 sidecar。
 > 现状是：水位在 `meta` 表、摘要在 `summary` 表、worker 统计在进程内的
 > `ContextExplain.memory_worker`，**都不是事件**。所以"摘要变更可审计、水位不是
-> 暗状态"这条承诺**还没有兑现**。`materialize.rs` 已经
+> 暗状态"这条承诺**还没有兑现**；这是 [status.md](status.md) §11.1 缺口表里的一条。`materialize.rs` 已经
 > 认得 `memory.summary.updated` / `memory.superseded` 两个 kind（遇到时按可检索事件
 > 物化），但那只是为将来预留的读取路径，不是有人在写它们。
 

@@ -132,10 +132,12 @@ L2–L4 是它的**递归归纳**。这样 L4/L3/L2/L1 是四层，底座独立�
 | 原章节 | 现在的位置 |
 |---|---|
 | §0 一句话、§1 现状、§2 目标结构、§3 两种运行模式、§10 与现有 ADR 的关系 | 本文件 |
-| §4 原则 | [principles.md](principles.md) |
-| §5 数据模型 | [data-model.md](data-model.md) |
-| §6 流水线、§9 事件种类 | [pipeline.md](pipeline.md) |
-| §7 前台合成与 `recall` | [recall.md](recall.md) |
-| §8 失效模式与对策 | [failure-modes.md](failure-modes.md) |
-| §11 配置、§11.0 `@` 文件引用、§11.1 模型不写文件 | [config.md](config.md) |
-| §12 非目标、§13 分阶段实现、§14 小模型后端与检索 | [rollout.md](rollout.md) |
+| §4 原则（原文是唯一真相、上行收敛、不链式总结、只处理一次、先确定性后模型、稳态、前台优先） | [principles.md](principles.md) |
+| §5 数据模型（位置、DDL、`atom.text`、实体抽取） | [data-model.md](data-model.md) |
+| §6 流水线（统一形状、digest/synthesis、切段、上行触发、走一遍） | [pipeline.md](pipeline.md) |
+| §9 事件种类（后台工作与摘要变更的可见事件） | [pipeline.md](pipeline.md) |
+| §7 前台合成与 `recall`（唯一检索入口、系统提示纪律） | [recall.md](recall.md) |
+| §8 失效模式与对策（核心风险表） | [failure-modes.md](failure-modes.md) |
+| §11 配置、§11.0 `@` 文件引用、§11.2 模型不写文件 | [config.md](config.md) |
+| §11.1 缺口清单与已落地（当前状态与限制） | [status.md](status.md) |
+| §12 非目标、§13 分阶段实现、§14 待讨论 | [rollout.md](rollout.md) |

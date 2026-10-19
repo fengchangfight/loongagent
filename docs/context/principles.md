@@ -103,7 +103,7 @@ cursor.offset == 文件长度  ∧  digested_through >= 已闭合段末尾  ∧ 
 **实现状态（2026-10-14）**：目前只有 ①（`set_foreground_busy(false)` 唤醒）和
 "新内容派生完 `refresh()` 主动 `wake()`"落地；后台另有一个 `idle_sleep`（默认 250 ms）
 的定时查看。②③④**尚未实现** —— 整轮算 busy 意味着工具等待期间不会富化，
-队列阈值不触发唤醒，`/context build` 这条命令也不存在。
+队列阈值不触发唤醒，`/context build` 这条命令也不存在（见 [status.md](status.md) §11.1 缺口表）。
 稳态判据本身（读没事可做 / 派生没事可做）已按上面的分析实现并实测。
 
 ### 4.6 不与前台争抢

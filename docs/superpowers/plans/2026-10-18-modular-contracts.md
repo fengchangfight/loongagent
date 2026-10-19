@@ -49,7 +49,8 @@ Every code file names one primary design document. This table is the source for 
 | Crate / area | Primary design document | Secondary |
 |---|---|---|
 | `schema`, `protocol`, `eventlog`, `index` | `docs/design/events-storage.md` | `sessions-lineage.md` |
-| `http`, `proc` | `tools-permissions.md` | `events-storage.md` |
+| `http` | `config-routing.md` §8 | `control-plane.md` |
+| `proc` | `tools-permissions.md` | — |
 | `config`, `manifest`, `providers` | `config-routing.md` | `security-trust.md` |
 | `sandbox`, `tools` | `tools-permissions.md` | `security-trust.md` |
 | `hooks`, `skills`, `mcp`, `plugin`, `pack` | `extension-model.md` | `security-trust.md` |
@@ -66,6 +67,7 @@ Every Phase C task uses this procedure. The task's Files list is the only input 
 - [ ] **Step A: Read the design document named in the task's Design column, and the files to annotate.**
 
 - [ ] **Step B: Write the module contract at the top of every file in the task.** Five labelled lines exactly as the spec's §4.3 example. `Design` names the task's document as a backticked `docs/...` path. `Verify` names the test target and, where useful, `./scripts/check.sh`.
+- [ ] **Step B2: Regenerate the crate map.** The map's middle column is each crate's first `//!` line, so after writing the module contract run `python3 scripts/layering_rules.py --emit-map . > docs/crate-map.md` and include `docs/crate-map.md` in the task commit.
 
 - [ ] **Step C: Write the item docs.** For each item: `Purpose` first. `pub` items, non-trivial private functions and every type get `Serves`, `Design`, `Up`, `Down`, `Verify`. Trivial private functions get `Purpose` plus `Contract: <file>`. Test functions get one `Purpose` line naming the behaviour they pin. Never restate the signature.
 
@@ -539,7 +541,7 @@ Every task follows the Per-Crate Annotation Procedure. The Files list is exact; 
 ### Task 22: http, proc, manifest, pack, web
 
 **Files:** `crates/http/src/lib.rs`, `crates/proc/src/lib.rs`, `crates/manifest/src/lib.rs`, `crates/pack/src/lib.rs`, `crates/web/src/lib.rs` (139 items)
-**Design:** `docs/design/events-storage.md` (http), `tools-permissions.md` (proc), `security-trust.md` (manifest, pack), `surfaces.md` (web)
+**Design:** `docs/design/config-routing.md` §8 + `docs/design/control-plane.md` (http), `tools-permissions.md` (proc), `security-trust.md` (manifest, pack), `surfaces.md` (web)
 **Verify:** `cargo test -p loong-http -p loong-proc -p loong-manifest -p loong-pack -p loong-web`
 
 - [ ] **Step 1:** Procedure; remove the five from the baseline.

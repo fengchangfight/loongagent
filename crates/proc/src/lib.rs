@@ -3,7 +3,7 @@
 //! # Contract
 //! - **Serves:** the shell tool and the shell hook kind share one safe spawn path (tools-permissions.md §4).
 //! - **Design:** `docs/design/tools-permissions.md` (ADR-0007).
-//! - **Upstream:** the shell tool, the hook runner and the skill runner.
+//! - **Upstream:** the shell tool and the hook runner.
 //! - **Downstream:** `Command`, `Scratch` files, the child's process group and `kill_process_group`.
 //! - **Verify:** `cargo test -p loong-proc` · `./scripts/check.sh`
 //!
@@ -45,7 +45,7 @@ pub const STDIN_LIMIT: usize = 32 * 1024;
 ///
 /// Serves: identical shell behaviour on Ubuntu and Windows, with a detected fallback (tools-permissions.md §4).
 /// Design: `docs/design/tools-permissions.md` (ADR-0007).
-/// Up: the shell tool, the hook runner and the skill runner.
+/// Up: the shell tool and the hook runner.
 /// Down: `detect`, `command`, `script` and `on_path`.
 /// Verify: `cargo test -p loong-proc`.
 pub enum Shell {
@@ -75,7 +75,7 @@ impl Shell {
     ///
     /// Serves: a caller that must not feed POSIX syntax to `cmd.exe`.
     /// Design: `docs/design/tools-permissions.md` (ADR-0007).
-    /// Up: `Shell`'s callers that branch on the dialect.
+    /// Up: the proc test; no in-tree caller.
     /// Down: the `Shell` variant.
     /// Verify: `cargo test -p loong-proc`.
     pub fn is_posix(&self) -> bool {
@@ -158,7 +158,7 @@ fn on_path(name: &str) -> bool {
 ///
 /// Serves: the seam where the kernel's confinement reaches a child (tools-permissions.md §4).
 /// Design: `docs/design/tools-permissions.md` (ADR-0007).
-/// Up: the shell tool, the hook runner and the skill runner.
+/// Up: the shell tool and the hook runner.
 /// Down: `run`, `Command` and the `confine` callback.
 /// Verify: `cargo test -p loong-proc`.
 pub struct RunSpec<'a> {
@@ -309,7 +309,7 @@ impl std::error::Error for ProcError {}
 ///
 /// Serves: every tool or hook child runs with a timeout, a cap and a whole-tree kill (tools-permissions.md §4).
 /// Design: `docs/design/tools-permissions.md` (ADR-0007).
-/// Up: the shell tool, the hook runner and the skill runner.
+/// Up: the shell tool and the hook runner.
 /// Down: `Scratch`, `Command`, `prepare_process_group`, `wait_with_timeout` and `kill_process_group`.
 /// Verify: `cargo test -p loong-proc`.
 pub fn run(spec: &RunSpec<'_>) -> Result<RunOutput, ProcError> {

@@ -1,9 +1,9 @@
 //! Purpose: Carry one JSON request over HTTP/1.1, plain or TLS, with bounded timeouts and a streamed reply.
 //!
 //! # Contract
-//! - **Serves:** the wire beneath provider calls and HTTP hooks, so neither owns a transport (events-storage.md §2, config-routing.md §8).
-//! - **Design:** `docs/design/events-storage.md` (ADR-0002).
-//! - **Upstream:** `loong-providers`' adapter, the HTTP hook kind and the control-plane client.
+//! - **Serves:** the wire beneath provider calls, HTTP hooks, the context summarizer and the control client, so none owns a transport (config-routing.md §8).
+//! - **Design:** `docs/design/config-routing.md` §8 (providers); `docs/design/control-plane.md` (the control client).
+//! - **Upstream:** `loong-providers`' adapter and probe, the HTTP hook kind, `loong-context`'s summarizer and `loong-control`'s client.
 //! - **Downstream:** `TcpStream`, rustls, and the `Transport` / `BodyReader` readers.
 //! - **Verify:** `cargo test -p loong-http` · `./scripts/check.sh`
 //!
@@ -25,7 +25,7 @@ use std::time::Duration;
 /// Purpose: One blocking connection, plain TCP or wrapped in rustls TLS.
 ///
 /// Serves: one read/write surface so the request code never branches on TLS (config-routing.md §8).
-/// Design: `docs/design/events-storage.md` (ADR-0002).
+/// Design: `docs/design/config-routing.md` §8.
 /// Up: `open` builds it; every request function reads and writes through it.
 /// Down: `TcpStream` and `rustls::StreamOwned`.
 /// Verify: `cargo test -p loong-http`.
@@ -72,7 +72,7 @@ impl Write for Transport {
 /// Purpose: Build the root store and TLS provider once and hand out the shared config.
 ///
 /// Serves: a hosted provider is reachable without re-parsing roots on every call (config-routing.md §8).
-/// Design: `docs/design/events-storage.md` (ADR-0002).
+/// Design: `docs/design/config-routing.md` §8.
 /// Up: `open` for every `https://` request.
 /// Down: `rustls::RootCertStore`, `webpki_roots` and the ring provider.
 /// Verify: `cargo test -p loong-http`.
@@ -99,7 +99,7 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 /// Purpose: A status and a body, returned whatever the status was.
 ///
 /// Serves: a caller can tell a provider that answered with a refusal from one that did not answer (config-routing.md §8).
-/// Design: `docs/design/events-storage.md` (ADR-0002).
+/// Design: `docs/design/config-routing.md` §8.
 /// Up: `get_json_raw`, `get_json` and `post_json` return it.
 /// Down: the response head and body readers.
 /// Verify: `cargo test -p loong-http`.
@@ -112,7 +112,7 @@ pub struct HttpResponse {
 /// Purpose: A transport or protocol failure as one message string.
 ///
 /// Serves: one error type for resolving, connecting, TLS, framing and reading.
-/// Design: `docs/design/events-storage.md` (ADR-0002).
+/// Design: `docs/design/config-routing.md` §8.
 /// Up: every public request function returns it.
 /// Down: its `Display` and `Error` impls.
 /// Verify: `cargo test -p loong-http`.
@@ -139,8 +139,8 @@ fn err(message: impl Into<String>) -> HttpError {
 /// Split a URL into the pieces a socket needs, and say whether it is TLS.
 /// Purpose: Split a URL into host, port, path and whether it needs TLS.
 ///
-/// Serves: one URL parser for connecting and for writing the request line (events-storage.md §2).
-/// Design: `docs/design/events-storage.md` (ADR-0002).
+/// Serves: one URL parser for connecting and for writing the request line (config-routing.md §8).
+/// Design: `docs/design/config-routing.md` §8.
 /// Up: `open`, `write_request` and `get_json_raw`.
 /// Down: string splitting only; no network access.
 /// Verify: `cargo test -p loong-http`.
@@ -179,9 +179,9 @@ pub fn parse_http_url(url: &str) -> Result<(String, u16, String, bool), HttpErro
 /// user told the first when the second is true will go and re-issue a working key.
 /// Purpose: GET a URL and return the response whatever its status.
 ///
-/// Serves: the control-plane probe can tell a refusal from an unreachable host (config-routing.md §4).
-/// Design: `docs/design/events-storage.md` (ADR-0002).
-/// Up: `get_json` and the model-list probe.
+/// Serves: a provider probe can tell a refusal from an unreachable host (config-routing.md §8).
+/// Design: `docs/design/config-routing.md` §8.
+/// Up: `loong-providers`' probe (`probe_models_url` and `raw_models_answer`); `get_json` wraps it.
 /// Down: `open`, `parse_http_url` and `read_head`.
 /// Verify: `cargo test -p loong-http`.
 pub fn get_json_raw(
@@ -223,9 +223,9 @@ pub fn get_json_raw(
 /// Same framing, same TLS, no body.
 /// Purpose: GET a small JSON resource and treat a non-2xx status as an error.
 ///
-/// Serves: a probe that only needs the value or the failure.
-/// Design: `docs/design/events-storage.md` (ADR-0002).
-/// Up: the control-plane client and the provider probes.
+/// Serves: the control client fetches the pack or checks health and needs only the value or the failure (control-plane.md).
+/// Design: `docs/design/config-routing.md` §8; `docs/design/control-plane.md` (the control client).
+/// Up: `loong-control`'s pack fetch and health check.
 /// Down: `get_json_raw`.
 /// Verify: `cargo test -p loong-http`.
 pub fn get_json(
@@ -251,7 +251,7 @@ pub fn get_json(
 /// Purpose: POST a JSON body and read the whole response.
 ///
 /// Serves: one request and one reply for the non-streaming provider path and HTTP hooks (config-routing.md §8).
-/// Design: `docs/design/events-storage.md` (ADR-0002).
+/// Design: `docs/design/config-routing.md` §8.
 /// Up: `loong-providers`' `complete` and the HTTP hook kind.
 /// Down: `open`, `write_request` and `read_head`.
 /// Verify: `cargo test -p loong-http`.
@@ -281,7 +281,7 @@ pub fn post_json(
 /// Purpose: POST and hand each Server-Sent Event `data:` payload to a callback as it arrives.
 ///
 /// Serves: a model answer that appears while it is still being written (config-routing.md §8).
-/// Design: `docs/design/events-storage.md` (ADR-0002).
+/// Design: `docs/design/config-routing.md` §8.
 /// Up: `loong-providers`' streaming path.
 /// Down: `open`, `write_request`, `read_head` and the line buffer.
 /// Verify: `cargo test -p loong-http`.
@@ -356,7 +356,7 @@ pub fn post_sse(
 /// Purpose: Resolve, connect, set read/write timeouts and complete the TLS handshake.
 ///
 /// Serves: a certificate problem is reported as a certificate problem (config-routing.md §8).
-/// Design: `docs/design/events-storage.md` (ADR-0002).
+/// Design: `docs/design/config-routing.md` §8.
 /// Up: every request function.
 /// Down: `parse_http_url`, `TcpStream::connect_timeout`, `tls_config` and rustls.
 /// Verify: `cargo test -p loong-http`.
@@ -389,7 +389,7 @@ fn open(url: &str, timeout: Duration) -> Result<Transport, HttpError> {
 /// Purpose: Write the POST head plus body, adding the bearer token when one is given.
 ///
 /// Serves: the request shape the provider and hook callers share.
-/// Design: `docs/design/events-storage.md` (ADR-0002).
+/// Design: `docs/design/config-routing.md` §8.
 /// Up: `post_json` and `post_sse`.
 /// Down: `parse_http_url` and `Transport::write_all`.
 /// Verify: `cargo test -p loong-http`.
@@ -428,8 +428,8 @@ fn write_request(
 /// chunks whose boundaries have nothing to do with event boundaries.
 /// Purpose: Read the status line and headers and return a reader on the body.
 ///
-/// Serves: framing that honours `Content-Length` and decodes a chunked body (events-storage.md §2).
-/// Design: `docs/design/events-storage.md` (ADR-0002).
+/// Serves: framing that honours `Content-Length` and decodes a chunked body (config-routing.md §8).
+/// Design: `docs/design/config-routing.md` §8.
 /// Up: `get_json_raw`, `post_json` and `post_sse`.
 /// Down: `Transport::read`, the chunk-size check and `BodyReader`.
 /// Verify: `cargo test -p loong-http`.
@@ -508,8 +508,8 @@ fn read_body(stream: &mut Transport, buf: &mut [u8]) -> std::io::Result<usize> {
 
 /// Purpose: The response body reader: plain with a declared length, or chunked.
 ///
-/// Serves: callers read plain bytes even when the wire is chunked (events-storage.md §2).
-/// Design: `docs/design/events-storage.md` (ADR-0002).
+/// Serves: callers read plain bytes even when the wire is chunked (config-routing.md §8).
+/// Design: `docs/design/config-routing.md` §8.
 /// Up: `read_head` returns it; the request functions read it.
 /// Down: `Transport`, `read_body` and `read_chunk_size`.
 /// Verify: `cargo test -p loong-http`.
@@ -534,8 +534,8 @@ struct BodyReader<'a> {
 impl Read for BodyReader<'_> {
     /// Purpose: Read a plain or chunked body without losing the rest of a chunk.
     ///
-    /// Serves: a body larger than the caller's buffer arrives whole (events-storage.md §2).
-    /// Design: `docs/design/events-storage.md` (ADR-0002).
+    /// Serves: a body larger than the caller's buffer arrives whole (config-routing.md §8).
+    /// Design: `docs/design/config-routing.md` §8.
     /// Up: `Read::read_to_string` in the request functions and the tests.
     /// Down: `read_body` and `read_chunk_size`.
     /// Verify: `cargo test -p loong-http`.
@@ -612,8 +612,8 @@ impl Read for BodyReader<'_> {
 
 /// Purpose: Parse one chunk-size line and return `None` at the terminating zero chunk.
 ///
-/// Serves: chunked transfer decoding (events-storage.md §2).
-/// Design: `docs/design/events-storage.md` (ADR-0002).
+/// Serves: chunked transfer decoding (config-routing.md §8).
+/// Design: `docs/design/config-routing.md` §8.
 /// Up: `BodyReader::read`.
 /// Down: `Transport::read` and `u64::from_str_radix`.
 /// Verify: `cargo test -p loong-http`.
@@ -662,7 +662,7 @@ pub mod testing {
     /// Purpose: Serve one canned HTTP response on loopback and return the base URL and request handle.
     ///
     /// Serves: dependent crates' tests drive the provider and hook paths without their own harness.
-    /// Design: `docs/design/events-storage.md` (ADR-0002).
+    /// Design: `docs/design/config-routing.md` §8.
     /// Up: the tests in this crate and in the provider and hook crates.
     /// Down: `TcpListener` and `read_request`.
     /// Verify: `cargo test -p loong-http`.
@@ -687,7 +687,7 @@ pub mod testing {
     /// Purpose: Serve chunked Server-Sent Events on loopback, one piece per write.
     ///
     /// Serves: streaming tests that control the chunk boundaries.
-    /// Design: `docs/design/events-storage.md` (ADR-0002).
+    /// Design: `docs/design/config-routing.md` §8.
     /// Up: streaming tests in this crate and in `loong-providers`.
     /// Down: `TcpListener` and `read_request`.
     /// Verify: `cargo test -p loong-http`.
@@ -720,7 +720,7 @@ pub mod testing {
     /// Purpose: Read a full HTTP request line, headers and the body its length declares.
     ///
     /// Serves: a fake server that hands the raw request to a test.
-    /// Design: `docs/design/events-storage.md` (ADR-0002).
+    /// Design: `docs/design/config-routing.md` §8.
     /// Up: `fake_server` and `fake_sse_server`.
     /// Down: `TcpStream::read` and the `Content-Length` header.
     /// Verify: `cargo test -p loong-http`.

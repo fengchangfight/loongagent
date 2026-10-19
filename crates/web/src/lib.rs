@@ -262,7 +262,7 @@ fn websocket(
 ///
 /// Serves: the web layer's own tests and a model-free demo (surfaces.md §4).
 /// Design: `docs/design/surfaces.md` (ADR-0009).
-/// Up: the tests in this module and a demo caller.
+/// Up: the tests in this module; no in-tree demo caller.
 /// Down: `Session::exchange` and `serde_json`.
 /// Verify: `cargo test -p loong-web`.
 pub struct Echo(pub Vec<String>);

@@ -37,7 +37,7 @@ returns 0 and stops.
 event). The model half, `Store::synthesize_window`, runs on the worker in idle windows,
 never on the turn's path. With the engine on the original stays reachable through the
 derived store and `recall`. The store methods are `crates/context/src/`; the
-engine-on rule and the L4 map are context-ledger §4.
+engine-on rule is [context-ledger.md](../context-ledger.md) §4; the L4 map is §6.
 
 ## 4. The event, or no event
 

@@ -25,14 +25,6 @@ crates/cli/tests/sandbox_self_test.rs
 crates/cli/tests/tui_surface.rs
 crates/cli/tests/vertical_slice.rs
 crates/cli/tests/web_surface.rs
-crates/config/src/catalog.rs
-crates/config/src/layer.rs
-crates/config/src/lib.rs
-crates/config/src/merge.rs
-crates/config/src/paths.rs
-crates/config/src/profile.rs
-crates/config/src/secret.rs
-crates/config/src/tests.rs
 crates/context/src/digest.rs
 crates/context/src/lib.rs
 crates/context/src/materialize.rs

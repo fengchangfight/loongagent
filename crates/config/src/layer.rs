@@ -1,3 +1,12 @@
+//! Purpose: The layer order and the four merge kinds: every key declares how a lower layer may change it.
+//!
+//! # Contract
+//! - **Serves:** config resolution and `config explain`.
+//! - **Design:** `docs/design/config-routing.md` §1–§2 (ADR-0008).
+//! - **Upstream:** `merge`, `paths` and the control plane's payload parser.
+//! - **Downstream:** the typed `Profile` values and the named layer order.
+//! - **Verify:** `cargo test -p loong-config` · `./scripts/check.sh`
+//!
 use super::*;
 use crate::check_secret_reference;
 use crate::paths::expand_home;
@@ -8,6 +17,12 @@ use serde::Deserialize;
 /// Lowest to highest precedence. The order *is* the rule: later beats earlier for
 /// free-override, and can never loosen earlier for narrow-only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// Purpose: Lowest to highest precedence; the order is itself the merge rule.
+/// Serves: merge order, provenance and `config show`'s layer names.
+/// Design: `docs/design/config-routing.md` §1.
+/// Up: `paths` builds the file list; `resolve_with` sorts the layers it was given.
+/// Down: the per-kind merge rules and `Provenance::layer`.
+/// Verify: `cargo test -p loong-config`.
 pub enum Layer {
     Builtin,
     Org,
@@ -22,6 +37,12 @@ pub enum Layer {
 }
 
 impl Layer {
+    /// Purpose: The layer's name in an error, a rule string or `config show`.
+    /// Serves: provenance output and the control-plane lock's error message.
+    /// Design: `docs/design/config-routing.md` §1.
+    /// Up: `merge`'s lock error and the CLI's config command.
+    /// Down: the enum variants.
+    /// Verify: `cargo test -p loong-config`.
     pub fn as_str(self) -> &'static str {
         match self {
             Layer::Builtin => "builtin",
@@ -36,6 +57,12 @@ impl Layer {
 
 /// How a key merges (ADR-0008 §2). A property of the key, never of the value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Purpose: How a key merges: free-override, narrow-only, add-only or reference.
+/// Serves: the one rule that stops a lower layer widening a higher one.
+/// Design: `docs/design/config-routing.md` §2.
+/// Up: `kind_of`; the merge's match and the control lock.
+/// Down: `merge`'s per-kind handling.
+/// Verify: `cargo test -p loong-config`.
 pub enum Kind {
     FreeOverride,
     NarrowOnly,
@@ -44,6 +71,12 @@ pub enum Kind {
 }
 
 impl Kind {
+    /// Purpose: The kind's name in an error, an explanation or a test assertion.
+    /// Serves: `config explain` and the lock error.
+    /// Design: `docs/design/config-routing.md` §2.
+    /// Up: the CLI's config command and kernel tests.
+    /// Down: the enum variants.
+    /// Verify: `cargo test -p loong-config`.
     pub fn as_str(self) -> &'static str {
         match self {
             Kind::FreeOverride => "free-override",
@@ -56,6 +89,12 @@ impl Kind {
 
 /// The kind of each known key. An unknown key is an error, not a silent no-op:
 /// a typo in a policy file must not look like it worked.
+/// Purpose: The declared kind of a known key, or `None` for a typo.
+/// Serves: load-time validation and the merge rule; an unknown key is an error.
+/// Design: `docs/design/config-routing.md` §2.
+/// Up: `LayerValues::from_file`, `merge` and the CLI's config command.
+/// Down: no callee; the match table is the declaration.
+/// Verify: `cargo test -p loong-config`.
 pub fn kind_of(key: &str) -> Option<Kind> {
     Some(match key {
         "model" | "base_url" | "profile" | "models" | "router.default" | "router.rules" => {
@@ -99,6 +138,12 @@ pub fn kind_of(key: &str) -> Option<Kind> {
 
 /// A value that survives resolution, with where it came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Purpose: A resolved value, carrying the variant the merge compares rather than a rendered string.
+/// Serves: provenance rows and the typed `Profile` mirrors.
+/// Design: `docs/design/config-routing.md` §2.
+/// Up: layer loading, pack values and the merge.
+/// Down: `Value::render` and the merge's per-kind handling.
+/// Verify: `cargo test -p loong-config`.
 pub enum Value {
     Text(String),
     Number(u64),
@@ -109,6 +154,12 @@ pub enum Value {
 }
 
 impl Value {
+    /// Purpose: The value as `config show` and an error print it.
+    /// Serves: the surfaces that print provenance and the add-only union's key.
+    /// Design: `docs/design/config-routing.md` §2.
+    /// Up: the CLI's config, web and server surfaces; `merge` for the add-only key.
+    /// Down: `Condition::render` for a rule list.
+    /// Verify: `cargo test -p loong-config`.
     pub fn render(&self) -> String {
         match self {
             Value::Text(t) => t.clone(),
@@ -127,6 +178,12 @@ impl Value {
 
 /// "Why is this the value?" — one row per contributing key.
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Purpose: One contributing key: the winning value, its layer and source, and the losers.
+/// Serves: `config explain` and the PDP's rule string.
+/// Design: `docs/design/config-routing.md` §2.
+/// Up: `merge`; read through `Profile::explain`.
+/// Down: the surfaces that print it and `permission_with_source`.
+/// Verify: `cargo test -p loong-config`.
 pub struct Provenance {
     pub key: String,
     pub kind: Kind,
@@ -139,6 +196,12 @@ pub struct Provenance {
 }
 
 #[derive(Debug)]
+/// Purpose: Why configuration could not be read, parsed or accepted.
+/// Serves: every loader that must name the bad file and the rule it broke.
+/// Design: `docs/design/config-routing.md` §1–§3.
+/// Up: the loaders and the merge; the CLI surfaces it.
+/// Down: its `Display` impl and every `Result` in this crate.
+/// Verify: `cargo test -p loong-config`.
 pub enum ConfigError {
     Io(String),
     Parse(String),
@@ -146,6 +209,8 @@ pub enum ConfigError {
 }
 
 impl std::fmt::Display for ConfigError {
+    /// Purpose: Render the error with the file prefix a person needs.
+    /// Contract: `crates/config/src/layer.rs`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ConfigError::Io(m) => write!(f, "{m}"),
@@ -161,9 +226,21 @@ impl std::error::Error for ConfigError {}
 ///
 /// Kept in this crate because the payload *is* configuration: the control plane and
 /// the local agent must agree on what it means, and the merge rules apply to it.
+/// Purpose: Parse a pack payload into named profiles, validating adapters, models and routing.
+/// Serves: the control plane and the client, which must agree on what a pack means.
+/// Design: `docs/design/config-routing.md` §4 (ADR-0016).
+/// Up: `loong-control`'s publish, fetch and health paths.
+/// Down: `finish_model`, `parse_condition` and `check_pack_secret`.
+/// Verify: `cargo test -p loong-config`.
 pub fn profiles_from_payload(payload: &str) -> Result<ProfilePack, ConfigError> {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
+    /// Purpose: The top of a pack payload: its default profile name and its profiles.
+    /// Serves: `profiles_from_payload`'s `deny_unknown_fields` parse.
+    /// Design: `docs/design/config-routing.md` §4.
+    /// Up: `profiles_from_payload` through `toml::from_str`.
+    /// Down: `RawProfileEntry`.
+    /// Verify: `cargo test -p loong-config`.
     struct RawPayload {
         default_profile: Option<String>,
         #[serde(default)]
@@ -171,6 +248,12 @@ pub fn profiles_from_payload(payload: &str) -> Result<ProfilePack, ConfigError> 
     }
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
+    /// Purpose: One profile inside a pack payload.
+    /// Serves: pack parsing and the per-profile validation.
+    /// Design: `docs/design/config-routing.md` §4.
+    /// Up: `RawPayload`.
+    /// Down: `RawModel` and `RawRouter`.
+    /// Verify: `cargo test -p loong-config`.
     struct RawProfileEntry {
         name: String,
         description: Option<String>,
@@ -283,6 +366,12 @@ pub fn profiles_from_payload(payload: &str) -> Result<ProfilePack, ConfigError> 
 /// silently ignored is a guard that silently does not exist.
 #[derive(Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
+/// Purpose: One profile file's fields, before any layer merge.
+/// Serves: `LayerValues::from_file`; `deny_unknown_fields` makes a typo loud.
+/// Design: `docs/design/config-routing.md` §1–§3.
+/// Up: `LayerValues::from_file`.
+/// Down: `RawModel`, `RawRouter`, `RawControl`, `RawContextEngine` and `RawSummarizer`.
+/// Verify: `cargo test -p loong-config`.
 struct RawProfile {
     profile: Option<String>,
     /// `local` or `managed`. See [`Profile::mode`].
@@ -314,6 +403,12 @@ struct RawProfile {
 /// it wants to change.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Purpose: The `[context_engine]` table of one profile file.
+/// Serves: the opt-in layered memory and its narrow-only switches.
+/// Design: `docs/design/config-routing.md` §2; `docs/design/context-ledger.md`.
+/// Up: `RawProfile`.
+/// Down: `LayerValues::from_file`'s enabled, mode and budget rows.
+/// Verify: `cargo test -p loong-config`.
 struct RawContextEngine {
     /// A **narrow-only switch**, stored as 0/1: the organisation may force the
     /// layered memory off and a lower layer may not turn it back on. Turning it on
@@ -329,6 +424,12 @@ struct RawContextEngine {
 /// `[summarizer]`: which local model, if any.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Purpose: The `[summarizer]` table: kind, endpoint and idle-window budget.
+/// Serves: the local summariser's policy.
+/// Design: `docs/design/config-routing.md` §2.
+/// Up: `RawProfile`.
+/// Down: `LayerValues::from_file`.
+/// Verify: `cargo test -p loong-config`.
 struct RawSummarizer {
     /// Narrow-only, like `context_engine.enabled`: a user may not switch on a
     /// facility the firm switched off.
@@ -350,12 +451,24 @@ struct RawSummarizer {
 /// `loongagent setup` writes.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Purpose: The user's side of the control plane: which named profile to run.
+/// Serves: `control.profile` resolution.
+/// Design: `docs/design/config-routing.md` §4.
+/// Up: `RawProfile`.
+/// Down: `LayerValues::from_file`.
+/// Verify: `cargo test -p loong-config`.
 struct RawControl {
     profile: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Purpose: One `[[models]]` entry before catalog expansion.
+/// Serves: profile and pack model declarations.
+/// Design: `docs/design/config-routing.md` §4.
+/// Up: `RawProfile` and `RawProfileEntry`.
+/// Down: `finish_model`.
+/// Verify: `cargo test -p loong-config`.
 struct RawModel {
     name: String,
     kind: Option<String>,
@@ -375,6 +488,12 @@ struct RawModel {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Purpose: The router table of a profile file or a pack payload.
+/// Serves: ordered first-match routing.
+/// Design: `docs/design/config-routing.md` §7.
+/// Up: `RawProfile` and `RawProfileEntry`.
+/// Down: `RawRule` and `parse_condition`.
+/// Verify: `cargo test -p loong-config`.
 struct RawRouter {
     default: Option<String>,
     #[serde(default)]
@@ -383,6 +502,12 @@ struct RawRouter {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Purpose: One routing rule as written: a `when` expression and the model to use.
+/// Serves: `parse_condition`'s input.
+/// Design: `docs/design/config-routing.md` §7.
+/// Up: `RawRouter`.
+/// Down: `parse_condition`.
+/// Verify: `cargo test -p loong-config`.
 struct RawRule {
     when: String,
     #[serde(rename = "use")]
@@ -390,6 +515,12 @@ struct RawRule {
 }
 
 impl LayerValues {
+    /// Purpose: Read one layer file and validate every key and value against its declared kind.
+    /// Serves: `resolve_with`; this is where the project-layer refusals live.
+    /// Design: `docs/design/config-routing.md` §2–§3.
+    /// Up: `merge::resolve_with`.
+    /// Down: `finish_model`, `check_secret_reference`, `parse_condition`, `parse_class`, `parse_verdict` and `expand_home`.
+    /// Verify: `cargo test -p loong-config`.
     pub(super) fn from_file(
         layer: Layer,
         path: &Path,
@@ -690,6 +821,12 @@ impl LayerValues {
     /// without it, a profile could widen `out_of_bounds` from ask to allow. With it,
     /// such an attempt resolves to the stricter built-in value and is recorded as
     /// overridden, which is what ADR-0008 §2 means by narrow-only.
+    /// Purpose: The built-in ladder as the lowest layer and the ceiling of permissiveness.
+    /// Serves: `resolve_with` and the PDP's allow/ask/deny defaults.
+    /// Design: `docs/design/tools-permissions.md` §3; `docs/design/config-routing.md` §1.
+    /// Up: `merge::resolve_with`.
+    /// Down: the three `Layer::Builtin` permission rows.
+    /// Verify: `cargo test -p loong-config`.
     pub(super) fn builtin_defaults() -> Self {
         Self {
             layer: Layer::Builtin,
@@ -714,6 +851,12 @@ impl LayerValues {
 
 const ADAPTER_KINDS: &[&str] = &["openai-compat"];
 
+/// Purpose: The English action-class key to its schema value.
+/// Serves: `permissions.*` from a file and the merged verdict rows.
+/// Design: `docs/design/tools-permissions.md` §3.
+/// Up: `LayerValues::from_file` and `merge`'s typed view.
+/// Down: `ActionClass`.
+/// Verify: `cargo test -p loong-config`.
 pub(super) fn parse_class(text: &str) -> Option<ActionClass> {
     match text {
         "investigate" => Some(ActionClass::Investigate),
@@ -723,6 +866,12 @@ pub(super) fn parse_class(text: &str) -> Option<ActionClass> {
     }
 }
 
+/// Purpose: The allow/ask/deny text to its schema value.
+/// Serves: `permissions.*` validation.
+/// Design: `docs/design/tools-permissions.md` §3.
+/// Up: `LayerValues::from_file`.
+/// Down: `Verdict`.
+/// Verify: `cargo test -p loong-config`.
 fn parse_verdict(text: &str) -> Option<Verdict> {
     match text {
         "allow" => Some(Verdict::Allow),

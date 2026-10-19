@@ -1,8 +1,19 @@
+//! Purpose: The configuration regression suite: layer order, merge kinds, the mode guard and the secret path.
+//!
+//! # Contract
+//! - **Serves:** `cargo test -p loong-config`, as the proof for the contracts in the sibling files.
+//! - **Design:** `docs/design/config-routing.md` §1–§7.
+//! - **Upstream:** the public configuration API.
+//! - **Downstream:** the behaviour each test pins.
+//! - **Verify:** `cargo test -p loong-config` · `./scripts/check.sh`
+//!
 use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static N: AtomicU64 = AtomicU64::new(0);
 
+/// Purpose: A fresh temporary workspace directory for one test.
+/// Contract: `crates/config/src/tests.rs`.
 fn workspace() -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "loong-config-{}-{}",
@@ -13,6 +24,8 @@ fn workspace() -> PathBuf {
     dir
 }
 
+/// Purpose: Write one profile file into a test workspace and return its path.
+/// Contract: `crates/config/src/tests.rs`.
 fn write(dir: &Path, name: &str, body: &str) -> PathBuf {
     let path = dir.join(name);
     std::fs::write(&path, body).unwrap();
@@ -20,6 +33,7 @@ fn write(dir: &Path, name: &str, body: &str) -> PathBuf {
 }
 
 #[test]
+/// Purpose: Pin that an unmentioned context engine is off, and that a user may opt in.
 fn the_layered_memory_is_off_unless_someone_says_so() {
     let ws = workspace();
     // Absent everywhere: off. A mechanism that switched itself on because a key
@@ -41,6 +55,7 @@ fn the_layered_memory_is_off_unless_someone_says_so() {
 }
 
 #[test]
+/// Purpose: Pin the narrow-only rule for `context_engine.enabled`.
 fn a_firm_can_force_the_layered_memory_off_and_a_user_cannot_loosen_it() {
     // The whole reason the switch is narrow-only: this is a policy question
     // (background work spends a model) and policy belongs to the higher layer.
@@ -63,6 +78,7 @@ fn a_firm_can_force_the_layered_memory_off_and_a_user_cannot_loosen_it() {
 }
 
 #[test]
+/// Purpose: Pin that `record` works with no summariser while `semantic` carries the local one.
 fn record_mode_is_useful_without_a_model_and_semantic_needs_one() {
     let ws = workspace();
     let record = write(
@@ -91,6 +107,7 @@ fn record_mode_is_useful_without_a_model_and_semantic_needs_one() {
 }
 
 #[test]
+/// Purpose: Pin that a smaller background window wins across layers.
 fn the_enrichment_window_is_narrow_only_and_smaller_wins() {
     // The window is the background's spend per idle turn of the crank. A firm
     // may cap it; a lower layer must not be able to raise it (ADR-0008 §2).
@@ -133,6 +150,7 @@ fn the_enrichment_window_is_narrow_only_and_smaller_wins() {
 }
 
 #[test]
+/// Purpose: Pin the project-layer refusal of the summariser's endpoint keys.
 fn a_repository_may_not_choose_where_memory_is_summarised() {
     // The same threat as `base_url`: a repository that could point the
     // summariser somewhere would be choosing where a session's history goes —
@@ -155,6 +173,7 @@ fn a_repository_may_not_choose_where_memory_is_summarised() {
 }
 
 #[test]
+/// Purpose: Pin that an unimplemented mode or summariser kind is refused, not read as the default.
 fn an_unknown_mode_or_summariser_kind_is_refused_by_name() {
     let ws = workspace();
     let bad_mode = write(&ws, "b.toml", "[context_engine]\nmode = \"clever\"\n");
@@ -171,6 +190,7 @@ fn an_unknown_mode_or_summariser_kind_is_refused_by_name() {
 }
 
 #[test]
+/// Purpose: Pin that a profile cannot widen the built-in ladder.
 fn the_builtin_ladder_is_the_ceiling_of_permissiveness() {
     let ws = workspace();
     // A profile that tries to make out-of-bounds actions free.
@@ -203,6 +223,7 @@ fn the_builtin_ladder_is_the_ceiling_of_permissiveness() {
 }
 
 #[test]
+/// Purpose: Pin that a resolved key carries its layer, source and kind.
 fn a_single_layer_resolves_with_provenance() {
     let ws = workspace();
     let user = write(
@@ -225,6 +246,7 @@ fn a_single_layer_resolves_with_provenance() {
 }
 
 #[test]
+/// Purpose: Pin the strictest-wins rule for numeric caps and verdicts.
 fn narrow_only_keys_only_narrow() {
     let ws = workspace();
     let org = write(
@@ -269,6 +291,7 @@ fn narrow_only_keys_only_narrow() {
 }
 
 #[test]
+/// Purpose: Pin the deliberate exception that a larger answer reserve is stricter.
 fn a_reserve_is_stricter_when_it_is_bigger() {
     // Every other narrow-only number is strictest when smallest. A reserve for the
     // model's answer is the other way round: keeping more room is the conservative
@@ -301,6 +324,7 @@ fn a_reserve_is_stricter_when_it_is_bigger() {
 }
 
 #[test]
+/// Purpose: Pin that a stricter lower value wins and the looser one is recorded as overridden.
 fn narrowing_is_allowed_and_recorded() {
     let ws = workspace();
     let org = write(&ws, "org.toml", "budget_tokens = 100000\n");
@@ -311,6 +335,7 @@ fn narrowing_is_allowed_and_recorded() {
 }
 
 #[test]
+/// Purpose: Pin that a free-override key takes the most local layer that sets it.
 fn free_override_takes_the_most_local_layer() {
     let ws = workspace();
     let org = write(&ws, "org.toml", "model = \"org-model\"\n");
@@ -330,6 +355,7 @@ fn free_override_takes_the_most_local_layer() {
 }
 
 #[test]
+/// Purpose: Pin the project-layer refusal of `model`, `base_url` and `api_key`.
 fn a_repository_may_not_choose_where_prompts_go() {
     let ws = workspace();
     for key in ["model", "base_url", "api_key"] {
@@ -353,6 +379,7 @@ fn a_repository_may_not_choose_where_prompts_go() {
 }
 
 #[test]
+/// Purpose: Pin that a project skill directory may not escape the workspace.
 fn a_project_skill_dir_must_stay_inside_the_workspace() {
     let ws = workspace();
     let inside = write(&ws, "p1.toml", "skill_dirs = [\"./team-skills\"]\n");
@@ -368,6 +395,7 @@ fn a_project_skill_dir_must_stay_inside_the_workspace() {
 }
 
 #[test]
+/// Purpose: Pin that a literal key is refused while a reference is accepted.
 fn secrets_never_live_in_config() {
     let ws = workspace();
     let literal = write(&ws, "u.toml", "api_key = \"sk-live-abcdef\"\n");
@@ -382,6 +410,7 @@ fn secrets_never_live_in_config() {
 }
 
 #[test]
+/// Purpose: Pin that add-only keys union across layers.
 fn add_only_keys_union_across_layers() {
     let ws = workspace();
     std::fs::create_dir_all(ws.join("team-skills")).unwrap();
@@ -413,6 +442,7 @@ fn add_only_keys_union_across_layers() {
 }
 
 #[test]
+/// Purpose: Pin that an unknown key or bad value is an error naming the file.
 fn unknown_keys_and_bad_values_are_loud() {
     let ws = workspace();
     // A typo must be named, not ignored: a guard that silently does not exist
@@ -452,6 +482,7 @@ fn unknown_keys_and_bad_values_are_loud() {
 }
 
 #[test]
+/// Purpose: Pin that a layer file that does not exist is skipped.
 fn absent_layers_are_skipped_not_invented() {
     let ws = workspace();
     let missing = ws.join("nope.toml");
@@ -474,6 +505,7 @@ fn absent_layers_are_skipped_not_invented() {
 }
 
 #[test]
+/// Purpose: Pin that models, a router and its rules parse from one file.
 fn several_models_and_a_router_can_be_declared() {
     let ws = workspace();
     let user = write(
@@ -524,6 +556,7 @@ fn several_models_and_a_router_can_be_declared() {
 }
 
 #[test]
+/// Purpose: Pin that a provider shorthand fills the endpoint, id and key reference.
 fn a_provider_shorthand_supplies_the_endpoint_the_model_and_the_key_reference() {
     let ws = workspace();
     let user = write(
@@ -567,6 +600,7 @@ fn a_provider_shorthand_supplies_the_endpoint_the_model_and_the_key_reference() 
 }
 
 #[test]
+/// Purpose: Pin the error that names both the explicit and shorthand fixes.
 fn a_model_with_neither_an_endpoint_nor_a_provider_names_both_ways_to_fix_it() {
     let ws = workspace();
     let user = write(&ws, "u.toml", "[[models]]\nname = \"x\"\nmodel = \"m\"\n");
@@ -593,6 +627,7 @@ fn a_model_with_neither_an_endpoint_nor_a_provider_names_both_ways_to_fix_it() {
 }
 
 #[test]
+/// Purpose: Pin that an unknown provider is refused before any model is built.
 fn a_provider_nobody_knows_is_refused_rather_than_silently_endpointless() {
     let ws = workspace();
     let user = write(
@@ -611,6 +646,7 @@ fn a_provider_nobody_knows_is_refused_rather_than_silently_endpointless() {
 }
 
 #[test]
+/// Purpose: Pin that `mode = "local"` in `local.toml` resolves and is honoured.
 fn local_mode_is_a_setting_that_lives_in_the_local_file() {
     // The rule, stated directly rather than by writing to somebody's home directory:
     // `mode` means something in the local file and in a file named on the command
@@ -642,6 +678,7 @@ fn local_mode_is_a_setting_that_lives_in_the_local_file() {
 }
 
 #[test]
+/// Purpose: Pin the mode guard against the managed user file.
 fn the_managed_profile_may_not_declare_local_mode() {
     // The bug this rule exists for: `mode = "local"` written into the *managed* user
     // file made `loongagent tui` — with no flag at all — resolve as a local install
@@ -664,6 +701,7 @@ fn the_managed_profile_may_not_declare_local_mode() {
 }
 
 #[test]
+/// Purpose: Pin that a local run's layer list excludes the managed profile and org file.
 fn a_local_run_never_reads_the_managed_profile_or_the_org_file() {
     // The isolation, asserted on the layer list itself: if these paths are not in
     // it, no amount of configuration in them can reach a local run.
@@ -693,6 +731,7 @@ fn a_local_run_never_reads_the_managed_profile_or_the_org_file() {
 }
 
 #[test]
+/// Purpose: Pin that models keep declaration order rather than sorting by name.
 fn models_come_back_in_the_order_they_were_declared() {
     // The order *is* the tier ladder: cheapest first, most capable last, and the
     // digits the status bar counts by. The merge collects through a map keyed
@@ -723,6 +762,7 @@ fn models_come_back_in_the_order_they_were_declared() {
 }
 
 #[test]
+/// Purpose: Pin that a locally declared order wins and a lower-only model is appended.
 fn a_model_only_a_lower_layer_declares_is_appended_rather_than_lost() {
     // The order comes from the most local layer that declares any models, but the
     // *set* is a union: an organisation may add a model this user never mentioned,
@@ -748,6 +788,7 @@ fn a_model_only_a_lower_layer_declares_is_appended_rather_than_lost() {
 }
 
 #[test]
+/// Purpose: Pin the project-layer refusal of `mode`.
 fn a_repository_may_not_switch_an_install_out_of_managed_mode() {
     let ws = workspace();
     let project = write(&ws, ".loongagent/profile.toml", "mode = \"local\"\n");
@@ -762,6 +803,7 @@ fn a_repository_may_not_switch_an_install_out_of_managed_mode() {
 }
 
 #[test]
+/// Purpose: Pin that an unknown mode is an error, not a silent managed run.
 fn a_mode_nobody_implements_is_refused_rather_than_read_as_managed() {
     let ws = workspace();
     let user = write(&ws, "u.toml", "mode = \"offline\"\n");
@@ -773,6 +815,7 @@ fn a_mode_nobody_implements_is_refused_rather_than_read_as_managed() {
 }
 
 #[test]
+/// Purpose: Pin that `model` plus `base_url` still becomes one default model.
 fn the_shorthand_still_means_one_model() {
     let ws = workspace();
     let user = write(
@@ -791,6 +834,7 @@ fn the_shorthand_still_means_one_model() {
 }
 
 #[test]
+/// Purpose: Pin the project-layer refusal of `[[models]]`.
 fn a_repository_may_not_define_a_model() {
     let ws = workspace();
     let project = write(
@@ -805,6 +849,7 @@ fn a_repository_may_not_define_a_model() {
 }
 
 #[test]
+/// Purpose: Pin that a project may route among models a higher layer defines.
 fn a_project_may_route_among_models_it_did_not_define() {
     let ws = workspace();
     let user = write(
@@ -827,6 +872,7 @@ fn a_project_may_route_among_models_it_did_not_define() {
 }
 
 #[test]
+/// Purpose: Pin that a model redefinition may lower its budget but not raise it.
 fn a_model_budget_only_narrows_across_layers() {
     let ws = workspace();
     let org = write(
@@ -855,6 +901,7 @@ fn a_model_budget_only_narrows_across_layers() {
 }
 
 #[test]
+/// Purpose: Pin that a router naming an undefined model is refused.
 fn a_router_that_names_a_missing_model_is_an_error() {
     let ws = workspace();
     let user = write(
@@ -870,6 +917,7 @@ fn a_router_that_names_a_missing_model_is_an_error() {
 }
 
 #[test]
+/// Purpose: Pin that a malformed routing condition names the file and rule.
 fn conditions_are_checked_where_they_are_written() {
     let ws = workspace();
     for (when, expected) in [
@@ -892,6 +940,7 @@ fn conditions_are_checked_where_they_are_written() {
 }
 
 #[test]
+/// Purpose: Pin that an unknown adapter kind is refused and the known ones are named.
 fn an_unknown_adapter_kind_is_refused_with_the_list() {
     let ws = workspace();
     let user = write(
@@ -909,6 +958,7 @@ fn an_unknown_adapter_kind_is_refused_with_the_list() {
 }
 
 #[test]
+/// Purpose: Pin every comparison operator against its fact.
 fn conditions_evaluate_the_facts_they_name() {
     let condition = parse_condition("context_tokens >= 1000").unwrap();
     assert!(!condition.matches(&Facts {
@@ -936,6 +986,7 @@ fn conditions_evaluate_the_facts_they_name() {
 }
 
 #[test]
+/// Purpose: Pin first-match routing and the default when no rule fires.
 fn the_router_takes_the_first_matching_rule() {
     let router = Router {
         default: Some("fallback".to_string()),
@@ -995,6 +1046,7 @@ description = \"Air-gapped: nothing leaves the machine.\"\n\
   model = \"whatever-you-run\"\n";
 
 #[test]
+/// Purpose: Pin that a pack payload becomes named profiles with their descriptions and router.
 fn a_pack_payload_becomes_named_profiles_with_descriptions() {
     let pack = profiles_from_payload(EXAMPLE_PACK).unwrap();
     assert_eq!(pack.default_profile.as_deref(), Some("default"));
@@ -1024,6 +1076,7 @@ fn a_pack_payload_becomes_named_profiles_with_descriptions() {
 }
 
 #[test]
+/// Purpose: Pin that a pack's literal secret still produces a warning, not a silent pass.
 fn a_literal_in_a_config_file_is_still_refused() {
     // The pack may carry a secret for now; a file a repository or a dotfiles
     // directory can commit may not. That is the line the amendment keeps.
@@ -1041,6 +1094,7 @@ fn a_literal_in_a_config_file_is_still_refused() {
 }
 
 #[test]
+/// Purpose: Pin that a value pasted after `env:` is refused as not a variable name.
 fn a_secret_pasted_after_the_prefix_is_refused() {
     // The mistake this exists for: `env:` followed by the key itself passes a
     // prefix check, and then the key is inside the signed pack — and inside a
@@ -1097,6 +1151,7 @@ fn a_secret_pasted_after_the_prefix_is_refused() {
 }
 
 #[test]
+/// Purpose: Pin the pack errors for an empty profile set, an empty model set and an unknown route.
 fn a_broken_pack_says_what_is_wrong() {
     let err = profiles_from_payload("[[profiles]]\nname = \"x\"\n")
         .unwrap_err()
@@ -1138,6 +1193,7 @@ fn a_broken_pack_says_what_is_wrong() {
 }
 
 #[test]
+/// Purpose: Pin that a verified pack outranks the local org file and leaves provenance.
 fn the_pack_is_the_control_layer_and_it_outranks_a_local_org_file() {
     let ws = workspace();
     // A stale local org file naming a different endpoint for the same model.
@@ -1175,6 +1231,7 @@ fn the_pack_is_the_control_layer_and_it_outranks_a_local_org_file() {
 }
 
 #[test]
+/// Purpose: Pin the control-layer lock against a rewrite, while narrowing stays allowed.
 fn a_user_or_project_may_not_rewrite_what_the_control_plane_set() {
     let ws = workspace();
     let pack = || {
@@ -1220,6 +1277,7 @@ fn a_user_or_project_may_not_rewrite_what_the_control_plane_set() {
 }
 
 #[test]
+/// Purpose: Pin that `kind_of` answers for every key the layer loader can produce.
 fn every_known_key_declares_a_kind() {
     for key in [
         "model",
@@ -1240,6 +1298,7 @@ fn every_known_key_declares_a_kind() {
 }
 
 #[test]
+/// Purpose: Pin the builtin-to-session layer order.
 fn the_layer_order_is_the_rule() {
     assert!(Layer::Builtin < Layer::Org);
     assert!(Layer::Org < Layer::Project);
@@ -1248,6 +1307,7 @@ fn the_layer_order_is_the_rule() {
 }
 
 #[test]
+/// Purpose: Pin the managed layer file names and their order.
 fn layer_paths_are_where_they_claim_to_be() {
     // The user layer lives under one root, and `LOONGAGENT_HOME` moves it.
     std::env::set_var("LOONGAGENT_HOME", "/tmp/loong-home-test");
@@ -1262,6 +1322,7 @@ fn layer_paths_are_where_they_claim_to_be() {
 }
 
 #[test]
+/// Purpose: Pin that the managed layer paths are the documented ones.
 fn layer_paths_used_to_be_where_they_claim_to_be() {
     let ws = workspace();
     let paths = layer_paths(&ws, Some(Path::new("/tmp/session.toml")));

@@ -1,3 +1,12 @@
+//! Purpose: Configuration and profile layering: one stack, four merge kinds, and a secret path that is a reference (ADR-0008).
+//!
+//! # Contract
+//! - **Serves:** every surface that resolves settings: the CLI's layer choice, the control plane's pack check and the kernel's build step.
+//! - **Design:** `docs/design/config-routing.md` §1–§5 (ADR-0008).
+//! - **Upstream:** `Args::settings_with_pack` in the CLI, `loong-control` after it verifies a pack, and every kernel build.
+//! - **Downstream:** `layer`, `merge`, `paths`, `profile`, `secret`, and the `Profile` those consumers read.
+//! - **Verify:** `cargo test -p loong-config` · `./scripts/check.sh`
+//!
 //! Configuration and profile layering (ADR-0008).
 //!
 //! The whole point of this crate is one sentence from the decision record:
@@ -59,6 +68,12 @@ pub use profile::{
 pub(crate) use secret::check_secret_reference;
 
 /// One layer's raw settings, already validated against the key table.
+/// Purpose: One layer's settings as the ordered key/value rows its file produced.
+/// Serves: the merge, which needs the source string and the rows, not a typed profile.
+/// Design: `docs/design/config-routing.md` §1.
+/// Up: `merge::resolve_with`, which builds the built-in one and reads the rest from files.
+/// Down: `merge::merge` and `LayerValues::from_file`/`builtin_defaults`.
+/// Verify: `cargo test -p loong-config`.
 struct LayerValues {
     layer: Layer,
     source: String,
@@ -67,6 +82,12 @@ struct LayerValues {
 
 /// The effective configuration, after merging every layer.
 #[derive(Debug, Clone, Default)]
+/// Purpose: The effective configuration after every present layer has merged.
+/// Serves: every consumer that needs one resolved answer plus its provenance.
+/// Design: `docs/design/config-routing.md` §2 and §4.
+/// Up: `merge::resolve_with` returns it; the CLI and the kernel's build step read it.
+/// Down: the typed fields and the private `provenance` map filled by `merge`.
+/// Verify: `cargo test -p loong-config`.
 pub struct Profile {
     /// Which pack this configuration came from, when it came from one.
     pub control: Option<ControlProvenance>,

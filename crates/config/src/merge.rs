@@ -1,7 +1,22 @@
+//! Purpose: Merge present layers by each key's kind, lock the control layer, and keep provenance.
+//!
+//! # Contract
+//! - **Serves:** every resolved setting, and every surface that explains one.
+//! - **Design:** `docs/design/config-routing.md` §1–§4 (ADR-0008, ADR-0016).
+//! - **Upstream:** the CLI's config and control commands, and kernel tests.
+//! - **Downstream:** `LayerValues`, `kind_of`, `parse_class` and `local_profile_path`.
+//! - **Verify:** `cargo test -p loong-config` · `./scripts/check.sh`
+//!
 use super::*;
 use crate::layer::parse_class;
 
 /// Merge the layers that exist, lowest precedence first.
+/// Purpose: Resolve the layers that exist, lowest precedence first.
+/// Serves: the CLI's managed configuration path and kernel tests.
+/// Design: `docs/design/config-routing.md` §1.
+/// Up: the CLI's config, control and local commands; kernel tests.
+/// Down: `resolve_with` with no pack.
+/// Verify: `cargo test -p loong-config`.
 pub fn resolve(layers: &[(Layer, PathBuf)], workspace: &Path) -> Result<Profile, ConfigError> {
     resolve_with(layers, workspace, None)
 }
@@ -11,6 +26,12 @@ pub fn resolve(layers: &[(Layer, PathBuf)], workspace: &Path) -> Result<Profile,
 /// The pack arrives as values rather than as a path because it was *verified* before
 /// it got here: nothing that reaches this function may be an unverified file a user
 /// could edit (ADR-0008 §6).
+/// Purpose: Resolve the layer files plus an optional verified pack as the control layer.
+/// Serves: the CLI after `Envelope::verify`; the pack arrives as values, never as an unverified path.
+/// Design: `docs/design/config-routing.md` §1 and §4.
+/// Up: the CLI's `settings_with_pack`.
+/// Down: `LayerValues::from_file`, `merge`, `finish` and `mode_is_legitimate`.
+/// Verify: `cargo test -p loong-config`.
 pub fn resolve_with(
     layers: &[(Layer, PathBuf)],
     workspace: &Path,
@@ -61,6 +82,12 @@ pub fn resolve_with(
 ///
 /// Split out so the rule can be stated — and tested — without a test having to write to
 /// the real user's home directory.
+/// Purpose: Whether a `mode` value from this layer and file is allowed to mean anything.
+/// Serves: the mode guard: only a session file or `local.toml` may set it.
+/// Design: `docs/design/config-routing.md` §3.
+/// Up: `resolve_with`.
+/// Down: `local_profile_path` and `Layer::Session`.
+/// Verify: `cargo test -p loong-config`.
 pub(super) fn mode_is_legitimate(layer: Layer, source: &str) -> bool {
     // A session layer is a file somebody named on the command line, which is as
     // deliberate as it gets. Everything else is a file that was read because of where
@@ -70,6 +97,12 @@ pub(super) fn mode_is_legitimate(layer: Layer, source: &str) -> bool {
 
 /// Rules that only make sense once every layer has been merged: the shorthand form,
 /// and a router that may only name models that exist.
+/// Purpose: Apply the post-merge rules: the one-model shorthand, router validation and the convenience mirrors.
+/// Serves: `resolve_with`; keeps the typed view and the provenance from disagreeing.
+/// Design: `docs/design/config-routing.md` §2 and §7.
+/// Up: `resolve_with`.
+/// Down: `Profile::default_model` and `ModelSpec`.
+/// Verify: `cargo test -p loong-config`.
 fn finish(profile: &mut Profile) -> Result<(), ConfigError> {
     // `model`/`base_url`/`api_key` on their own are the one-model shorthand, which
     // is what every profile written before `[[models]]` existed looks like.
@@ -123,6 +156,12 @@ fn finish(profile: &mut Profile) -> Result<(), ConfigError> {
     Ok(())
 }
 
+/// Purpose: Fold the ordered layers into one `Profile`, following each key's declared kind.
+/// Serves: `resolve_with`; the control lock and the add-only union happen here.
+/// Design: `docs/design/config-routing.md` §2.
+/// Up: `resolve_with`.
+/// Down: `LayerValues`, `kind_of`, `stricter_for` and `Value`.
+/// Verify: `cargo test -p loong-config`.
 fn merge(layers: &[LayerValues]) -> Result<Profile, ConfigError> {
     let mut profile = Profile::default();
     // Key → the winning row so far, plus what lost.
@@ -383,6 +422,8 @@ fn merge(layers: &[LayerValues]) -> Result<Profile, ConfigError> {
 /// is the other way round: keeping more room for the answer is the conservative choice, so
 /// a lower layer may raise it but never shrink it. Getting that backwards would let a
 /// project file quietly leave the model less room to answer than the organisation allowed.
+/// Purpose: Which of two narrow-only values is stricter, with the larger-reserve exception.
+/// Contract: `crates/config/src/merge.rs`.
 fn stricter_for(key: &str, current: &Value, candidate: &Value) -> (bool, bool) {
     if key == "reserved_context_size" {
         if let (Value::Number(a), Value::Number(b)) = (current, candidate) {
@@ -392,6 +433,12 @@ fn stricter_for(key: &str, current: &Value, candidate: &Value) -> (bool, bool) {
     stricter(current, candidate)
 }
 
+/// Purpose: Compare two numbers or verdicts, saying which is stricter and whether the loser is recorded.
+/// Serves: `stricter_for` and the narrow-only rule.
+/// Design: `docs/design/config-routing.md` §2.
+/// Up: `stricter_for`.
+/// Down: `Value::Number` and `Value::Verdict`.
+/// Verify: `cargo test -p loong-config`.
 fn stricter(current: &Value, candidate: &Value) -> (bool, bool) {
     match (current, candidate) {
         (Value::Number(a), Value::Number(b)) => {

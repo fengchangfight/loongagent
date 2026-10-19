@@ -14,7 +14,7 @@ listed is a violation. The middle column is each crate's own `//!` header.
 
 | Crate | What it is | Allowed dependencies |
 |---|---|---|
-| `loong-config` | Configuration and profile layering (ADR-0008). | `loong-schema` |
+| `loong-config` | Configuration and profile layering: one stack, four merge kinds, and a secret path that is a reference (ADR-0008). | `loong-schema` |
 | `loong-context` | Layered, reversible context memory (ADR-0017). | `loong-eventlog`, `loong-http`, `loong-schema` |
 | `loong-control` | Talking to the control plane: fetching the signed profile pack, verifying it, | `loong-config`, `loong-http`, `loong-pack` |
 | `loong-eventlog` | Write and read the append-only JSONL event log that is one session's source of truth. | `loong-schema` |

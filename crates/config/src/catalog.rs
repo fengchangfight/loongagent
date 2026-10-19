@@ -1,3 +1,12 @@
+//! Purpose: The provider catalog expands a one-line provider shorthand without reading the environment.
+//!
+//! # Contract
+//! - **Serves:** `--local` setup and the model wizard, which must not make a person type an endpoint.
+//! - **Design:** `docs/design/config-routing.md` §8 (ADR-0008 §5).
+//! - **Upstream:** `profile::finish_model`, the wizard and the live probe test.
+//! - **Downstream:** the `Provider` constants and the `Expansion` handed back to a profile.
+//! - **Verify:** `cargo test -p loong-config` · `./scripts/check.sh`
+//!
 //! The provider catalog: the handful of facts a person should never have to type.
 //!
 //! `loongagent tui --local` exists so somebody with a private API key can try the
@@ -24,6 +33,12 @@
 /// usually a vendor quirk and occasionally our own bug, which is why the caller announces
 /// when it is being used rather than passing it off as the live list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Purpose: A model a vendor documents when its endpoint enumerates none.
+/// Serves: a first run against a provider whose list route is absent or unreliable.
+/// Design: `docs/design/config-routing.md` §8.
+/// Up: `Provider::curated_models`.
+/// Down: the provider's curated list and the wizard's picker.
+/// Verify: `cargo test -p loong-config`.
 pub struct CatalogModel {
     pub id: &'static str,
     pub context_window: Option<u64>,
@@ -31,6 +46,12 @@ pub struct CatalogModel {
 
 /// One provider the catalog knows about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Purpose: One provider's fixed facts: endpoint, key variable, list route and hints.
+/// Serves: the shorthand, the wizard's picker and key probing.
+/// Design: `docs/design/config-routing.md` §8.
+/// Up: `PROVIDERS`, `provider`, `expand` and `guess_from_key`.
+/// Down: the constant entries and `models_url`.
+/// Verify: `cargo test -p loong-config`.
 pub struct Provider {
     /// The name that appears on the left of `provider = "…/…"`, and the id the
     /// wizard stores.
@@ -81,6 +102,12 @@ pub struct Provider {
 impl Provider {
     /// The URL that answers "which models do you serve?" — the free half of a key
     /// check. `None` where the vendor publishes no such route.
+    /// Purpose: The URL that answers "which models do you serve?", when one exists.
+    /// Serves: key validation that costs no tokens.
+    /// Design: `docs/design/config-routing.md` §8.
+    /// Up: the CLI's setup path in `crates/cli/src/local.rs` and the live probe test.
+    /// Down: `probe_url` and `lists_models`.
+    /// Verify: `cargo test -p loong-config`.
     pub fn models_url(&self) -> Option<String> {
         if let Some(explicit) = self.probe_url {
             return Some(explicit.to_string());
@@ -287,12 +314,24 @@ pub const PROVIDERS: &[Provider] = &[
 ];
 
 /// Look one up by id.
+/// Purpose: Look a provider up by its catalog id.
+/// Serves: expansion, the wizard and the live probe test.
+/// Design: `docs/design/config-routing.md` §8.
+/// Up: `expand`, `crates/cli/src/local.rs` and `crates/cli/tests/live_probe.rs`.
+/// Down: `PROVIDERS`.
+/// Verify: `cargo test -p loong-config`.
 pub fn provider(id: &str) -> Option<&'static Provider> {
     PROVIDERS.iter().find(|p| p.id == id)
 }
 
 /// What a `provider = "deepseek/deepseek-flash"` line turns into.
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Purpose: What a provider shorthand turns into: provider, endpoint, model id and key reference.
+/// Serves: `finish_model`'s precedence of what a person wrote over what the catalog assumes.
+/// Design: `docs/design/config-routing.md` §8.
+/// Up: `expand`; read by `finish_model`.
+/// Down: the `ModelSpec` fields.
+/// Verify: `cargo test -p loong-config`.
 pub struct Expansion {
     pub provider: &'static Provider,
     pub base_url: String,
@@ -306,6 +345,12 @@ pub struct Expansion {
 ///
 /// Split on the **first** slash only: a model id may contain more (a namespaced
 /// Ollama tag, a gateway path), and the provider name never does.
+/// Purpose: Expand `<provider>/<model>` into an endpoint, a model id and a key reference.
+/// Serves: the four-line local profile.
+/// Design: `docs/design/config-routing.md` §8 (ADR-0008 §5).
+/// Up: `profile::finish_model`.
+/// Down: `provider` and `ids`.
+/// Verify: `cargo test -p loong-config`.
 pub fn expand(spec: &str) -> Result<Expansion, String> {
     let spec = spec.trim();
     let (id, model) = spec.split_once('/').ok_or_else(|| {
@@ -343,6 +388,12 @@ pub fn expand(spec: &str) -> Result<Expansion, String> {
 }
 
 /// The ids, for an error message or a picker.
+/// Purpose: The catalog's provider ids, for an error message or a picker.
+/// Serves: `expand`'s unknown-provider message and the wizard.
+/// Design: `docs/design/config-routing.md` §8.
+/// Up: `expand` and `crates/cli/src/local.rs`.
+/// Down: `PROVIDERS`.
+/// Verify: `cargo test -p loong-config`.
 pub fn ids() -> Vec<&'static str> {
     PROVIDERS.iter().map(|p| p.id).collect()
 }
@@ -355,6 +406,12 @@ pub fn ids() -> Vec<&'static str> {
 /// highlights first — the user confirms, and the probe decides.
 ///
 /// It never returns an empty list, so a caller can always fall back to "ask".
+/// Purpose: Candidate providers for a pasted key, most likely first — a hint, never a decision.
+/// Serves: the wizard's highlighted row; the probe still decides.
+/// Design: `docs/design/config-routing.md` §8.
+/// Up: `crates/cli/src/local.rs`'s setup path.
+/// Down: `PROVIDERS`.
+/// Verify: `cargo test -p loong-config`.
 pub fn guess_from_key(key: &str) -> Vec<&'static str> {
     let key = key.trim();
     let remote: Vec<&'static str> = PROVIDERS
@@ -406,6 +463,7 @@ mod tests {
     use super::*;
 
     #[test]
+    /// Purpose: Pin that the shorthand carries a key reference, never a secret.
     fn a_provider_and_a_model_expand_to_an_endpoint_and_a_reference() {
         let expanded = expand("deepseek/deepseek-flash").unwrap();
         assert_eq!(expanded.base_url, "https://api.deepseek.com");
@@ -419,6 +477,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that a loopback provider gets no key reference.
     fn a_local_provider_expands_with_no_key_at_all() {
         // Ollama wants none, so there is nothing to name — and nothing for a secret to be
         // filed under on the way past.
@@ -429,6 +488,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that a model id keeps its namespace and tag.
     fn only_the_first_slash_splits_because_model_ids_may_contain_more() {
         let expanded = expand("ollama/qwen2.5:3b").unwrap();
         assert_eq!(expanded.provider.id, "ollama");
@@ -443,6 +503,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that a malformed shorthand names the syntax and the known providers.
     fn a_malformed_shorthand_says_what_the_providers_are() {
         let err = expand("deepseek-flash").unwrap_err();
         assert!(err.contains("<provider>/<model>"), "{err}");
@@ -457,6 +518,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin each provider's list route against its verified facts.
     fn every_provider_has_a_usable_models_url_except_the_two_that_do_not() {
         for provider in PROVIDERS {
             match provider.models_url() {
@@ -497,6 +559,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that the list route and the probe model agree for every provider.
     fn a_provider_with_no_list_route_names_a_model_to_spend_a_token_on() {
         // The two facts have to agree: a vendor whose key cannot be checked for free
         // must say what to check it against, and one that can must not carry a guess
@@ -518,6 +581,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that Kimi Code, Moonshot and their regional hosts are distinct doors.
     fn kimi_code_is_its_own_door_and_not_the_open_platform() {
         // The bug: a Kimi Code key was sent to `api.moonshot.cn/v1` and came back
         // `401 Invalid Authentication`, which reads as "your key is wrong" — and it was
@@ -550,6 +614,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin the wrong-door hint for each vendor that has a second product.
     fn every_vendor_with_two_doors_says_which_one_a_rejected_key_belongs_to() {
         // The generic "rejected" message sends somebody to re-issue a working key. These
         // are the vendors where the other product is a real possibility.
@@ -574,6 +639,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that an ambiguous key keeps every remote candidate and leads with the two plausible vendors.
     fn a_key_of_ambiguous_shape_leads_with_the_two_vendors_it_could_be() {
         // A made-up key: this test is about the shape it presents, never the value.
         let hex = guess_from_key("sk-0123456789abcdef0123456789abcdef");
@@ -591,6 +657,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that a self-identifying OpenAI prefix leads the candidate list.
     fn a_self_identifying_prefix_leads_without_probing_first() {
         let openai = guess_from_key("sk-proj-abc123");
         assert_eq!(openai[0], "openai");
@@ -598,6 +665,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that no evidence means no ordering, not no options.
     fn an_unrecognisable_key_still_returns_every_candidate() {
         let unknown = guess_from_key("hunter2");
         assert_eq!(

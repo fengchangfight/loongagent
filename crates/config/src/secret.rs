@@ -1,5 +1,20 @@
+//! Purpose: Check that a secret is a reference and an endpoint is an http(s) URL or a reference.
+//!
+//! # Contract
+//! - **Serves:** layer loading and pack verification; keeps secrets out of configuration.
+//! - **Design:** `docs/design/config-routing.md` §3, §5 and §9 (ADR-0008 §5).
+//! - **Upstream:** `LayerValues::from_file` and `profiles_from_payload`.
+//! - **Downstream:** `ConfigError` at the first bad value.
+//! - **Verify:** `cargo test -p loong-config` · `./scripts/check.sh`
+//!
 use super::*;
 
+/// Purpose: Refuse a literal secret and accept only a well-formed reference.
+/// Serves: every local file and every pack reference; a key pasted after `env:` is refused.
+/// Design: `docs/design/config-routing.md` §5 (ADR-0008 §5).
+/// Up: `LayerValues::from_file` and `profiles_from_payload` through `check_pack_secret`.
+/// Down: `is_secret_name`.
+/// Verify: `cargo test -p loong-config`.
 pub(super) fn check_secret_reference(
     source: &str,
     key: &str,
@@ -61,6 +76,12 @@ pub(super) fn check_secret_reference(
 /// Deliberately strict. `sk-4f06…` fails on the hyphen and the case; a pasted
 /// alphanumeric secret fails because a long unbroken run of characters with no
 /// underscore is not how anybody names a variable.
+/// Purpose: Whether a string is an environment-variable name, not a value.
+/// Serves: `check_secret_reference`'s strictness against a pasted key.
+/// Design: `docs/design/config-routing.md` §5.
+/// Up: `check_secret_reference`.
+/// Down: no callee; the character rules are the decision.
+/// Verify: `cargo test -p loong-config`.
 fn is_secret_name(name: &str) -> bool {
     if name.is_empty() || name.len() > 64 {
         return false;
@@ -88,6 +109,12 @@ fn is_secret_name(name: &str) -> bool {
 ///
 /// A *malformed* reference is still refused: `env:sk-4f06…` is not a name, and
 /// accepting it would silently look up a variable called `sk-4f06…`.
+/// Purpose: Validate a pack's key reference, accepting a literal only with a visible warning.
+/// Serves: `profiles_from_payload`; the pack is the one recorded exception.
+/// Design: `docs/design/config-routing.md` §5 and §9.
+/// Up: `profiles_from_payload`.
+/// Down: `check_secret_reference` and the warnings list.
+/// Verify: `cargo test -p loong-config`.
 pub(super) fn check_pack_secret(
     key: &str,
     value: &str,
@@ -106,6 +133,12 @@ pub(super) fn check_pack_secret(
     Ok(())
 }
 
+/// Purpose: Require a `base_url` to be an http(s) URL or a reference, not a bare host.
+/// Serves: every endpoint key; the project layer may not choose one.
+/// Design: `docs/design/config-routing.md` §3 and §5.
+/// Up: `LayerValues::from_file`.
+/// Down: no callee; the prefix check is the decision.
+/// Verify: `cargo test -p loong-config`.
 pub(super) fn check_endpoint_reference(
     source: &str,
     key: &str,

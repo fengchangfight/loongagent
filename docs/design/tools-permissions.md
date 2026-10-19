@@ -74,28 +74,17 @@ defaulting to `out_of_bounds` because the kernel cannot know what a tool does.
 ## 3. The decision: allow, ask, deny — plus the rule
 
 ```mermaid
-flowchart TD
-    CALL["model call: tool name + arguments"] --> CLS["Tool::action_class(args, cwd)"]
-    CLS --> PDP["Pdp::decide(class, tool) returns a Ruling: verdict, rule, reason"]
-    PDP --> TC["tool.call (action_class)"]
-    TC --> HOOKS{"pre_tool hooks report a stricter verdict?"}
-    HOOKS -- yes --> STRICT["ruling = the hook's: rule = hook:id"]
-    HOOKS -- no --> KEEP["ruling stays the PDP's"]
-    STRICT --> DECIDED["policy.decided: verdict + rule"]
-    KEEP --> DECIDED
-    DECIDED --> V{"verdict"}
-    EXEC["Kernel::execute: Tool::execute(args, ExecContext)"]
-    V -- allow --> EXEC
-    V -- "ask with /yolo" --> YOLO["policy.decided (yolo), tool.call again"]
-    YOLO --> EXEC
-    V -- ask --> ASK["permission_requested hooks, approval.requested, turn parks"]
-    ASK --> HUMAN{"respond_to_approval"}
-    HUMAN -- granted --> EXEC
-    HUMAN -- denied --> UDENY["tool.result ok = false: denied by the user"]
-    V -- deny --> PDENY["tool.result ok = false: denied by policy (rule, reason)"]
-    EXEC --> PEP["write guard inside the tool + Confinement on every child it spawns"]
-    PEP --> RESULT["tool.result, then post_tool hooks"]
+flowchart LR
+    C["Tool::action_class"] --> D["Pdp::decide<br/>verdict · rule · reason"]
+    D --> V{"verdict"}
+    V -- allow --> A["allow"]
+    V -- ask --> S["ask"]
+    V -- deny --> N["deny"]
 ```
+
+The end-to-end sequence — `tool.call`, `pre_tool`, `policy.decided`, the three arms,
+`approval.requested` and `respond_to_approval` — is
+[flows/tool-approval.md](flows/tool-approval.md).
 
 `Pdp` is a three-slot `Ladder` with a rule string per slot. Its defaults are
 junior-proof: investigate and workspace writes allowed, out of bounds asked.

@@ -177,67 +177,9 @@ encoding failure, or a caller using the API out of order.
 
 ## 7. One turn, in sequence
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant S as Surface
-    participant K as Kernel
-    participant H as HookRunner
-    participant R as Router
-    participant M as Model
-    participant P as Pdp
-    participant T as Tool
-    participant L as SessionLog and Ledger
-
-    S->>K: submit_with(text, on_delta)
-    K->>L: message.appended (user)
-    K->>H: user_prompt_submit
-    H-->>K: allow, or tighten
-    Note over K: tighten -> TurnOutcome.refused, no model call
-    loop each step, up to max_steps
-        Note over K: interrupted? -> turn.interrupted and return
-        K->>K: refresh_map, compact_if_needed
-        K->>R: select(Facts)
-        R-->>K: chosen model and rule
-        K->>M: complete_streaming(request, on_delta)
-        M-->>K: text and/or tool_calls
-        K->>L: cost.recorded
-        alt no tool calls
-            alt nudge fires (once)
-                K->>K: correction in messages; continue loop
-            else answer stands
-                K->>L: message.appended (assistant answer)
-                K-->>S: TurnOutcome { final_text }
-            end
-        else tool calls
-            K->>L: message.appended (assistant)
-            loop each registry call in order
-                K->>P: decide(action_class)
-                P-->>K: allow / ask / deny
-                K->>L: tool.call
-                K->>H: pre_tool
-                H-->>K: allow, or tighten
-                K->>L: policy.decided (the stricter verdict)
-                alt allow
-                    K->>T: execute(args)
-                    T-->>K: output
-                    K->>L: tool.result
-                    K->>H: post_tool
-                else ask
-                    K->>H: permission_requested
-                    K->>L: approval.requested
-                    K-->>S: TurnOutcome { pending_approval }
-                else deny
-                    K->>L: tool.result (ok = false)
-                end
-            end
-        end
-    end
-```
-
-The surface answers a parked turn with `respond_to_approval`, which writes
-`approval.decided`, runs or refuses the call, and calls the same loop again; §5
-gives the conditions around that resume.
+The end-to-end sequence is [flows/turn-lifecycle.md](flows/turn-lifecycle.md); §5
+gives the conditions around an approval resume, which this document keeps as a
+mechanism.
 
 ## 8. Where to read next
 

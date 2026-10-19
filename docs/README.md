@@ -104,7 +104,8 @@ file that does not exist yet.
 |-----|-------|--------|
 | [00-vision.md](00-vision.md) | Vision, ambition, non-goals, target users | Draft |
 | [01-landscape-synthesis.md](archive/01-landscape-synthesis.md) | Cross-tool synthesis: features, pros/cons, design tensions | Superseded by 05 |
-| [02-topics.md](02-topics.md) | Idea backlog — raw topics, waiting to be discussed | Living |
+| [02-topics.md](02-topics.md) | Idea backlog — entry, status legend, and where each group moved | Living |
+| [topics/](topics/) | The 26 topics in full — index, open topics, decided topics by theme | Living |
 | [03-architecture.md](03-architecture.md) | Architecture, question-driven (AQ-1…AQ-12 decision map) | Agreed |
 | [04-system-overview.md](04-system-overview.md) | The architecture as decided — one-read end-to-end picture | Agreed |
 | [05-parity-and-synthesis.md](05-parity-and-synthesis.md) | Parity vs Claude Code + absorption backlog from the field + deliberate "no"s | Living |

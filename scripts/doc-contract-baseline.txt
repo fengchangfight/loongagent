@@ -4,7 +4,6 @@
 DEVELOPMENT.md
 README.md
 docs/00-vision.md
-docs/02-topics.md
 docs/03-architecture.md
 docs/04-system-overview.md
 docs/05-parity-and-synthesis.md

@@ -1,6 +1,6 @@
 # Windows build runbook
 
-- **Up:** [README.md](../../README.md)
+- **Up:** [README.md](README.md)
 - **Authority:** [ADR-0013](../decisions/0013-implementation-language.md)
 - **Code:** `scripts/build-windows.ps1`, `scripts/build-windows.cmd`
 - **Verify:** `powershell -ExecutionPolicy Bypass -File scripts/build-windows.ps1`

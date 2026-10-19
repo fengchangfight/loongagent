@@ -63,7 +63,9 @@ document describes. `Verify` names the command that proves them.
 Exceptions, each for a stated reason:
 
 - ADRs keep their `Status:` line and gain only `Up`. Their decision text is the
-  record and does not change.
+  record and does not change, except by an explicit human decision. ADR-0005's
+  2026-10-18 routing revision is the one recorded exception; any future change to
+  a decision body needs a human decision of its own.
 - `docs/README.md` is the root: it carries `Code` and `Verify`, but no `Up`.
 - `README.md`, `DEVELOPMENT.md` and `docs/00-vision.md` are entry points; their
   `Up` may name `docs/04-system-overview.md` or, for `docs/00-vision.md`, the

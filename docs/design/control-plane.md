@@ -200,4 +200,4 @@ here as well:
   the trust map.
 - [control-plane.md](../runbooks/control-plane.md) — the operational sequence.
 - `crates/control/src/lib.rs` — the client sync, the cache and the server endpoints;
-  `crates/control/src/bin/loongagent-control.rs` — keygen, sign, check, serve and publish.
+  `crates/control/src/bin/loongagent-control.rs` — keygen, sign, check, serve and publish. The install sequence is [pack-install.md](flows/pack-install.md).

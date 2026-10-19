@@ -246,4 +246,4 @@ magically restored to the prompt.
   `compaction_clears_stale_tool_output_before_dropping_anything`,
   `compaction_never_splits_a_tool_pair`,
   `the_layered_engine_puts_a_map_in_front_of_the_model`,
-  `recall_is_offered_only_when_there_is_memory_behind_it`.
+  `recall_is_offered_only_when_there_is_memory_behind_it`. The flow is [context-compaction.md](flows/context-compaction.md).

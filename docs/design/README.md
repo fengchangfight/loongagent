@@ -5,8 +5,7 @@
 - **Code:** `crates/kernel/src/lib.rs`
 - **Verify:** `./scripts/check.sh`
 
-[`04-system-overview.md`](../04-system-overview.md) is the one-read picture; this
-directory is one document per mechanism or flow, each owning its topic and linking down.
+[`04-system-overview.md`](../04-system-overview.md) is the one-read picture; this directory is one document per mechanism or flow, each owning its topic and linking down.
 
 ## The workspace in layers
 
@@ -118,6 +117,7 @@ set, crate by crate, is [`../crate-map.md`](../crate-map.md), generated from
 | [surfaces.md](surfaces.md) | The surfaces: the local server, the CLI as composition root, TUI and web, ACP decided not built, and the JSON-RPC they share. | `crates/cli/src/main.rs`, `crates/server/src/lib.rs`, `crates/tui/src/lib.rs`, `crates/tui-app/src/lib.rs`, `crates/web/src/lib.rs` |
 | [control-plane.md](control-plane.md) | The control plane: local, managed and unbuilt gateway modes; the pack endpoint; the pinned key; what is not built. | `crates/control/src/`, `crates/pack/src/lib.rs`, `crates/config/src/lib.rs` |
 | [security-trust.md](security-trust.md) | The trust boundaries: what is trusted, who signs or owns it, what enforces it, and the honest gaps. | `crates/sandbox/`, `crates/manifest/`, `crates/pack/`, `crates/config/src/secret.rs`, `crates/hooks/src/config.rs` |
+| [Flows](flows/) | End-to-end sequences: [turn lifecycle](flows/turn-lifecycle.md), [tool approval](flows/tool-approval.md), [resume and fork](flows/resume-fork.md), [context compaction](flows/context-compaction.md), [pack install](flows/pack-install.md). Each names the exact functions and events and links up to the owning subsystem. | — |
 
 A row is added by the task that writes the document; a mechanism with no row has no page in this layer to own it yet.
 

@@ -152,4 +152,4 @@ flowchart TB
   storage-side account of both levels.
 - `crates/kernel/src/turn/session.rs` — `lineage` and `replay_history`, the two functions
   that make a child runnable.
-- `crates/cli/src/session.rs` — `fork`, `delete`, `resume`, and the branch arithmetic.
+- `crates/cli/src/session.rs` — `fork`, `delete`, `resume`, and the branch arithmetic. The flow is [resume-fork.md](flows/resume-fork.md).

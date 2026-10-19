@@ -68,8 +68,10 @@ module contract names the test target. `mod` declarations need nothing: the file
 contract covers them.
 
 A file that cannot carry a contract is listed, with a reason, in
-`scripts/contract-exemptions.txt`: `crates/schema/src/generated.rs` and the
-crate-root build scripts `crates/cli/build.rs` and `crates/control/build.rs`.
+`scripts/contract-exemptions.txt`: the generated schema files
+`crates/schema/src/generated.rs` and
+`crates/schema/tests/generated_roundtrip.rs`, and the crate-root build scripts
+`crates/cli/build.rs` and `crates/control/build.rs`.
 `crates/kernel/src/turn/build.rs` is a module, not a build script. A single item
 may use `// Contract-exempt: <reason>`; a stale exemption fails the gate.
 

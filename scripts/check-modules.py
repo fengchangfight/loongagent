@@ -74,6 +74,7 @@ MIN_REASON = 10
 ALLOWED_FILE_EXEMPTIONS = frozenset(
     {
         "crates/schema/src/generated.rs",
+        "crates/schema/tests/generated_roundtrip.rs",
         "crates/cli/build.rs",
         "crates/control/build.rs",
     }
@@ -739,8 +740,8 @@ def read_exemptions(root: str) -> tuple[dict[str, str], dict[str, dict[str, str]
             elif key not in ALLOWED_FILE_EXEMPTIONS:
                 problems.append(
                     f"{relative}:{number}: file exemption is not allowed: "
-                    f"{key} (the list is closed to generated.rs and the two "
-                    "crate-root build scripts)"
+                    f"{key} (the list is closed to the generated schema files "
+                    "and the two crate-root build scripts)"
                 )
             else:
                 file_level[key] = reason

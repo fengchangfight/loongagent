@@ -90,7 +90,14 @@ def header_line(root: str, name: str) -> str:
                 if line.startswith("//!"):
                     text = line[3:].strip()
                     if text:
-                        return text
+                        # A module contract opens with `Purpose:`; the map
+                        # carries the sentence, not the field label.
+                        for label in ("Purpose:", "**Purpose:**"):
+                            if text.startswith(label):
+                                text = text[len(label) :].strip()
+                                break
+                        if text:
+                            return text
                     break
     except OSError as error:
         raise SystemExit(

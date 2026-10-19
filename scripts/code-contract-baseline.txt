@@ -81,7 +81,6 @@ crates/mcp/src/lib.rs
 crates/pack/src/lib.rs
 crates/plugin/src/lib.rs
 crates/proc/src/lib.rs
-crates/protocol/src/lib.rs
 crates/providers/src/lib.rs
 crates/providers/src/openai_compat.rs
 crates/providers/src/probe.rs
@@ -89,8 +88,6 @@ crates/sandbox/src/landlock.rs
 crates/sandbox/src/landlock_unsupported.rs
 crates/sandbox/src/lib.rs
 crates/sandbox/src/sandbox.rs
-crates/schema/src/lib.rs
-crates/schema/tests/generated_roundtrip.rs
 crates/server/src/lib.rs
 crates/skills/src/lib.rs
 crates/tools/src/lib.rs

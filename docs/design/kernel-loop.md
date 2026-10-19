@@ -155,8 +155,8 @@ that the ruling was relaxed; the sandbox is a different axis and still applies.
 conversation with `Kernel::replay_history`, so the next turn sees the history it
 had. The parked `PendingCall` lives only in memory (`Kernel.pending`), so a
 restarted process does not resume an unanswered approval; the person starts a new
-turn. The end-to-end flow is the subject of `docs/design/flows/turn-lifecycle.md`
-(written in a later task; this document owns the loop, not the whole lifecycle).
+turn. The end-to-end flow is [turn-lifecycle.md](flows/turn-lifecycle.md)
+(this document owns the loop, not the whole lifecycle).
 
 ## 6. How a turn ends
 

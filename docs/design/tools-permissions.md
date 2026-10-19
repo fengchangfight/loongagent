@@ -119,7 +119,7 @@ The three arms:
   `appr-N` id, and park the turn. `Kernel::respond_to_approval` later writes
   `approval.decided` and either runs the call or records a refusal. `/yolo`
   (`Kernel::set_auto_approve`) turns an ask into an allow, and says so with a
-  second `policy.decided` and a second `tool.call`.
+  second `policy.decided` and a second `tool.call`. The sequence is [tool-approval.md](flows/tool-approval.md).
 - **Deny** — record `tool.result` with `ok: false` and the rule and reason. The
   model reads it and continues; a denial is not an error.
 

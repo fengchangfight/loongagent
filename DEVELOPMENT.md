@@ -145,9 +145,9 @@ binary the TUI spawns as its server (used by the end-to-end test).
 
 ## TUI presentation contracts
 
-These are presentation decisions that no design page owns; the mechanism is in
-[`docs/design/surfaces.md`](docs/design/surfaces.md) §3, and `README.md` has the
-keys a user needs.
+The palette, the mark and the fold/colour rules are owned by
+[`docs/design/surfaces.md`](docs/design/surfaces.md) §3; this section keeps the
+day-to-day contracts, and `README.md` has the keys a user needs.
 
 - **Folds are keyboard-first.** `tab`/`shift-tab` walk the `… N more line(s)`
   markers, `enter` opens one, and clippings never depend on a mouse. A fold is

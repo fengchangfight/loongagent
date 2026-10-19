@@ -1,5 +1,10 @@
 # 00 — Vision
 
+- **Up:** [../README.md](../README.md)
+- **Authority:** [docs/README.md](README.md)
+- **Code:** `docs/00-vision.md`, `docs/decisions/`
+- **Verify:** `./scripts/check.sh`
+
 ## Name
 
 **loongagent** — after the Chinese 龙 (loong), a mythical creature composed of

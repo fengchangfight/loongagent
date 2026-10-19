@@ -1,5 +1,10 @@
 # 05 — Parity and synthesis: matching Claude Code, absorbing the field
 
+- **Up:** [04-system-overview.md](04-system-overview.md)
+- **Authority:** [docs/README.md](README.md) — the tree and conventions; each row names its own ADR or topic
+- **Code:** `docs/05-parity-and-synthesis.md`, `docs/02-topics.md`
+- **Verify:** `./scripts/check.sh`
+
 - **Purpose:** turn two goals into checkable items — **"feature-wise, don't lose
   to Claude Code"** and **"absorb the best of the field (Pi, DeepSeek Harness,
   Codex, OpenCode, Amp, Cursor, Aider, Goose, Kiro)"**.
@@ -114,9 +119,9 @@ rows below are what "not losing" means concretely.
 | CC feature | Our status | Where | Next |
 |---|---|---|---|
 | Streamed responses (text as it is written) | ✅ | Adapter-level SSE (2026-10-08): `model.delta` is a **transient notification**, deliberately not an event — the finished message is the record, so the log never fills with partial states. Tool-call argument fragments are reassembled; a server that ignores `stream` is still understood | tool-call deltas are not rendered live |
-| Signed pack distribution from a control plane | ✅ | `loongagent-control` (keygen/sign/serve/publish) + client sync: one envelope in a shared crate (ADR-0016), Ed25519 via `ring`, public key pinned out of band, client/admin tokens separated, operator/reader roles split, verified pack occupies the locked `control` layer, offline fallback to the last verified pack, `control.synced` + `profile.selected` in the log (2026-10-09) | identity/SSO, model gateway, dashboards and the audit uplink are out of scope by ADR-0012; no key rotation/revocation yet; transport is poll-on-start, no push |
-| Several models + routing policy | ✅ | `[[models]]` + `[router]` with an explicit condition language (`context_tokens`, `step`), first-match-wins; the rule that fired is logged as `model.selected` (2026-10-09). A project layer may not define models, only route among existing ones; a model's budget only narrows across layers | no live switch by hand inside a session; no cost- or latency-based rules (the facts are not measured yet) |
-| Mid-session model switch, effort levels | ⚠️ | ADR-0005/0008: switching allowed **within the profile's allowed set**. The profile now *chooses* the model (`model` + `base_url`, resolved from the layers) and `--model` remains the session override | mid-session switching itself is not implemented |
+| Signed pack distribution from a control plane | ✅ | `loongagent-control` (keygen/sign/serve/publish) + client sync: one envelope in a shared crate (ADR-0016), Ed25519 via `ring`, public key pinned out of band, client/admin tokens separated, operator/reader roles split, verified pack occupies the locked `control` layer, offline fallback to the last verified pack, `control.synced` + `profile.selected` in the log (2026-10-09) | identity/SSO, model gateway, dashboards and the audit uplink are scoped by ADR-0012 but not built yet; no key rotation/revocation yet; transport is poll-on-start, no push |
+| Several models + routing policy | ✅ | `[[models]]` + `[router]` with an explicit condition language (`context_tokens`, `step`), first-match-wins; the rule that fired is logged as `model.selected` (2026-10-09). A project layer may not define models, only route among existing ones; a model's budget only narrows across layers | live switch by hand is local mode's design (ADR-0005), not built yet; no cost- or latency-based rules (the facts are not measured yet) |
+| Mid-session model switch, effort levels | ⚠️ | ADR-0005/0008: in gateway mode switching stays within the profile's allowed set; in local mode the user picks any configured model. The profile *chooses* the model in gateway mode (`model` + `base_url`, resolved from the layers) and `--model` remains the session override | mid-session switching itself is not implemented |
 | Subagent-specific model | ✅ | T-17 + ADR-0005 | — |
 | SDK (Python + TypeScript) over the same loop | ✅ | ADR-0002 (JSON-RPC + schema) | generate bindings |
 | Headless / print mode / CI | ✅ | `loongagent run "…"` (headless) and `loongagent repl` (line mode, works under a pipe) — the line surface exists *because* CI and scripts need a surface that is not a TTY | — |
@@ -144,7 +149,7 @@ rows below are what "not losing" means concretely.
 | B12 | Skills/commands hot reload for skills authors | Pi | ❌ | **T-24** |
 | B13 | Multi-kind hooks + deterministic-enforcement framing | CC | ✅ (shell + HTTP shipped 2026-10-07; MCP pending T-15) | ADR-0007 §7, `loong-hooks` |
 | B14 | Sandbox self-test before first tool call | Codex | ✅ | ADR-0007 |
-| B15 | Capability dial instead of model picker; silent re-route as frontier moves | Amp | ✅ | ADR-0005 + ADR-0008 profiles |
+| B15 | Capability dial instead of model picker; silent re-route as frontier moves | Amp | ✅ gateway mode | ADR-0005 + ADR-0008 profiles; local mode keeps the picker deliberately |
 | B16 | Context ring from ledger data | Cursor | ✅ | ADR-0006 |
 | B17 | Capability registry as pure data | Aider | ✅ | ADR-0004 |
 | B18 | Uniform tool interface incl. built-ins | Goose | ✅ | ADR-0004 |
@@ -158,7 +163,7 @@ rows below are what "not losing" means concretely.
 
 | # | Property | Why CC/DSH structurally can't match it |
 |---|---|---|
-| C1 | **Cost governance as policy**: profiles, local-decides routing, org hard caps enforced as `deny`, escalation as auditable events | CC has subscription windows and `/usage`; DSH leaves budgets to plugins |
+| C1 | **Cost governance as policy**: profiles, gateway routing where the keys live, hard caps refused at the gateway and `deny`ed locally, escalation as auditable events | CC has subscription windows and `/usage`; DSH leaves budgets to plugins |
 | C2 | **Org policy distribution**: signed packs, monotonic layers, org > project > user | CC has managed settings; DSH has none. **The signed envelope ships and is verified** (ADR-0016): a pack is Ed25519-signed under a pinned key and checked on every start before it can occupy the org layer. What is *not* signed is the **local** org file, `/etc/loongagent/profile.toml`, which an administrator owns; that file — not the pack — is the one that must not be called tamper-resistant |
 | C3 | **Control plane for aggregate audit/statistics** (opt-in, allow-listed uplink) | CC is per-user; DSH has no control plane |
 | C4 | **Model-agnostic by design**: any provider, any local model, no vendor lock | CC is Claude-first; DSH is DeepSeek-first |
@@ -180,7 +185,7 @@ rows below are what "not losing" means concretely.
 | D7 | Editor fork; desktop app; CI surface | ADR-0009 |
 | D8 | Vector DB in v1 | Structural retrieval first (ADR-0006/T-15) |
 | D9 | Marketplace in v1 | Signed internal catalog later; git-URL installs at project/user layers |
-| D10 | Server-side live **routing** — and the model ceilings and task-class policy it would carry | The local brain decides every live call and the server never routes; the server learns and ships policy packs only (ADR-0005) |
+| D10 | Server-side live **routing that does not hold the keys** — a routing brain calling providers through a client that owns the credential | Routing follows the keys: whoever holds the credential calls the provider and decides (ADR-0005). Gateway mode's routing *is* server-side because the gateway holds the keys and pays; local mode has no router at all. The 2026-10-02 "server never routes" claim is superseded; what remains rejected is routing authority without the keys |
 | D11 | Hidden **context injection** — anything reaching the model that the user cannot see or review | The context ledger is the only write path and there is no side channel to the model: plugins, MCP servers, skills, hooks and subagents may only *propose* entries (ADR-0006) |
 | D12 | Session **merge** — reconciling two session logs into one | There is no sync, so there is nothing to merge; import keeps the original id when it is absent locally and records `importedFrom` on collision (ADR-0014 §5) |
 | D13 | Automatic cross-session **memory sharing** — one session's memory reaching another without an explicit act | Sessions, their trees and personal memory are the never-auto-shared side of ADR-0010's hard boundary; sharing is an explicit human act and reuse is an explicit import (ADR-0010, ADR-0014) |

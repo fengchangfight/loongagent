@@ -2,10 +2,6 @@
 # and fails on an entry that is missing or now passes, so this list only shrinks.
 # Regenerate with: python3 scripts/check-docs.py --emit-baseline scripts/doc-contract-baseline.txt
 README.md
-docs/00-vision.md
-docs/03-architecture.md
-docs/04-system-overview.md
-docs/05-parity-and-synthesis.md
 docs/decisions/0001-one-binary-client-server.md
 docs/decisions/0002-json-rpc-wire-protocol.md
 docs/decisions/0003-jsonl-truth-sqlite-index.md

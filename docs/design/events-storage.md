@@ -151,8 +151,8 @@ project directory, so the reference is a file name: `dir/<id>.jsonl`, with the l
 the whole chain named; a cycle is refused with the session that repeated, though not the chain.
 Either way a child without its prefix is not merely unexplained, it is inoperable.
 `Kernel::replay_history` replays the ancestor prefix up to `parent_seq`, then the session's own
-events, and labels inherited ledger entries `user from <ancestor>`, `assistant from <ancestor>`
-and `tool:<call_id> from <ancestor>`. `loongagent delete` removes the whole branch for the same
+events. Only inherited user messages keep a label (`user from <ancestor>`); replayed assistant
+and tool entries are ordinary history. `loongagent delete` removes the whole branch for the same
 reason: a surviving child would refuse to open.
 
 ## 6. The envelope and `ignorable`

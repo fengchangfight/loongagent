@@ -177,9 +177,7 @@ encoding failure, or a caller using the API out of order.
 
 ## 7. One turn, in sequence
 
-The end-to-end sequence is [flows/turn-lifecycle.md](flows/turn-lifecycle.md); §5
-gives the conditions around an approval resume, which this document keeps as a
-mechanism.
+The end-to-end sequence is [flows/turn-lifecycle.md](flows/turn-lifecycle.md); §5 keeps the approval-resume conditions.
 
 ## 8. Where to read next
 

@@ -5,124 +5,95 @@
 - **Code:** `crates/cli/src/control.rs`, `crates/control/src/lib.rs`, `crates/pack/src/lib.rs`, `crates/config/src/`
 - **Verify:** `cargo test -p loongagent -p loong-control -p loong-pack` · `./scripts/check.sh`
 
-A managed install gets its model endpoints and router from a **signed profile pack**.
-This page follows one install: resolve the control plane and its pinned key, fetch,
-verify, cache only after verification, seat the pack as the `control` layer, and
-record what ran. The service side is [control-plane.md](../control-plane.md); the
-envelope, the cache and the layer lock are [config-routing.md](../config-routing.md)
-§4–§5.
+A managed install gets its model endpoints and router from a signed profile pack.
+This page keeps the sequence. The service side is
+[control-plane.md](../control-plane.md); the envelope, the verify order, the cache
+rule and the layer lock are [config-routing.md](../config-routing.md) §4–§5.
 
 ## 1. Resolve the plane and the pin
 
-`loongagent setup`, `control sync`, `profiles` and `use` all start at `load_control`:
+`load_control` reads `system_control_path` (`/etc/loongagent/control.toml`) and
+`user_control_path` (`$LOONGAGENT_HOME/control.toml`); `merge_control` lets the
+machine file win `url` and `public_key`, and the user file supply only `token`. With
+no machine file the install is unmanaged and the user file is the whole
+configuration. `control_config` unhexes the 32-byte Ed25519 key, requires a token
+reference, and `check_transport` allows HTTPS or loopback HTTP. The pinned key is the
+trust anchor, written out of band. The mechanism is config-routing §4.
 
-- `system_control_path` (`/etc/loongagent/control.toml`) and `user_control_path`
-  (`$LOONGAGENT_HOME/control.toml`, normally `~/.loongagent/control.toml`) are read,
-  then `merge_control` lets the machine file win `url` and `public_key`; the user file
-  may supply only `token`.
-- `control_config` unhexes the key, refuses anything but a 32-byte Ed25519 key,
-  requires the token to be a reference (`env:`, `file:`, and the reserved `keychain:`
-  and `gateway:` spellings), and runs `ControlConfig::check_transport`: HTTPS, or
-  plain HTTP only on loopback.
-- The pinned key is the trust anchor. It is written out of band and is never learned
-  from the server.
+## 2. Fetch and verify
 
-## 2. Fetch
+`loong_control::sync` calls `fetch` (`GET /v1/pack/profiles` with the bearer token),
+parses with `Envelope::from_json`, then runs
+`Envelope::verify(&config.public_key, &[PROFILES_SCHEMA])`. A missing signature, an
+unknown schema, a `key_id` that does not match the pin, or a bad Ed25519 signature is
+`ControlError::Rejected`. Only after verification does `Cache::store` write the
+envelope (atomically); a `Rejected` pack never falls back to the cache and is never
+cached. `409` / `404` is `NothingPublished`; another transport failure is
+`Unreachable`. The envelope and the exact verify order are config-routing §4.
 
-`loong_control::sync(&config, &cache, token, timeout)` calls `fetch`, which is
-`GET /v1/pack/profiles` with the bearer token (`loong_http::get_json`), and parses the
-body with `Envelope::from_json`.
+## 3. Seat and record
 
-- `409` or `404` becomes `ControlError::NothingPublished` ("ask your profile
-  administrator to publish a pack").
-- Any other transport failure becomes `ControlError::Unreachable`.
+`profiles_from_payload` → `ProfilePack::pick` (the user's `control.profile`, else the
+default, else the first) → `pack_layer` → `models`, `router.default`,
+`router.rules` on `Layer::Control`. `Args::settings_with_pack` resolves the layers
+twice so the pack cannot set the choice that selects it. The **initial `serve`
+kernel** records `Kernel::record_control_synced` (`control.synced`) and
+`Kernel::record_profile_selected` (`profile.selected`). The `session.new` factory
+builds a kernel but does **not** record either event, so a `/new` session has no
+`control.synced` or `profile.selected` until a path records them. The layer and its
+lock are config-routing §2 and §5.
 
-## 3. Verify against the pinned key
-
-`Envelope::verify(&config.public_key, &[PROFILES_SCHEMA])` checks, in this order:
-
-1. the signature is present and the payload schema is one this build knows
-   (`loongagent.profiles/1`), else `Malformed` or `UnsupportedSchema`;
-2. `key_id(public_key) == envelope.key_id`, else `WrongKey` — a valid signature under
-   a different key is still refused;
-3. the Ed25519 signature over `Envelope::signing_bytes`, the canonical JSON of every
-   field except `signature` (artifact, schema, version, issuer, scope, issue time,
-   key id and payload). A changed byte is `BadSignature`.
-
-Only after this does `Cache::store` write the envelope, atomically (a unique temporary
-file then a rename; the same pack is not rewritten). A failed verification never falls
-back to the cache and never caches the bad pack.
-
-## 4. Seat the layer
-
-`profiles_from_payload` parses and validates the payload. `ProfilePack::pick` chooses
-the profile: the user's `control.profile`, else the pack's default, else the first;
-an unknown choice is an error rather than a silent substitution.
-
-`pack_layer(&profile)` turns the choice into `models`, `router.default` and
-`router.rules` for `Layer::Control`. `Args::settings_with_pack` resolves the layers
-twice — without the pack to learn `control.profile`, then with the pack in place — so
-the pack never sets the choice that selects it. A key set by the control layer is
-locked against lower layers; a narrow-only key can still be narrowed.
-
-## 5. Record
-
-At session start, if a pack is in force, `crates/cli/src/server.rs` calls
-`Kernel::record_control_synced` (→ `control.synced`: issuer, version, `key_id`,
-profile, `from_cache`, note), then `Kernel::record_profile_selected` (→
-`profile.selected`: name, description, models). These are provenance events: they
-answer "what policy was in force?" for a session that has already run.
-
-## 6. When it goes wrong
+## 4. When it goes wrong
 
 | Failure | What happens |
 |---|---|
-| Bad signature, wrong key, unknown schema | `ControlError::Rejected`; nothing is applied, cached or seated. The message names the key or schema; re-pinning is an administrator's act, not the user's. |
-| Plane unreachable, last verified cache exists | `sync` returns the cached envelope after re-verifying it (`from_cache: true`, with a note); the session runs on the last known policy. |
-| Plane unreachable, no cache | `ControlError::Unreachable`; session start turns it into "no profile pack has been synced on this machine yet" and names the address, while `control sync` and `setup` report the unreachable error. |
-| Nothing published | `NothingPublished`, with the publish instruction. |
-| Cached pack no longer verifies | loading it is a hard error ("the cached pack no longer verifies"), not a stale fallback. |
+| Bad signature, wrong key, unknown schema | `ControlError::Rejected`; nothing is applied, cached or seated. Re-pinning is an administrator's act. |
+| Plane unreachable, verified cache exists | `sync` returns the cached envelope after re-verifying it (`from_cache: true`, with a note); the session runs on the last known policy. |
+| Plane unreachable, no cache | `ControlError::Unreachable`; session start says no pack has been synced and names the address, while `control sync` and `setup` report the unreachable error. |
+| Nothing published | `NothingPublished` with the publish instruction; a verified cache still serves, because this is not a `Rejected` pack and `sync` falls back. With no cache it is an error. |
+| Cached pack no longer verifies | the `sync` fallback fails as `Rejected` (the cache is not used); `cached_pack_state` (`profiles`, `use`) says "the cached pack no longer verifies". |
 
 **Expiry.** A pack carries no expiry: `issued_at_ms` is signed but never compared to
-the clock. There is therefore no "expired" refusal in this code, and a machine that
-never reconnects keeps the last verified pack (ADR-0016 §7). That is a decided
-limitation, not a missing check.
+the clock. There is no "expired" refusal in this code, and a machine that never
+reconnects keeps the last verified pack (ADR-0016 §7). That is a decided limitation,
+not a missing check.
 
-## 7. What is cached
+## 5. What is cached
 
-Only the verified envelope, as JSON, under the state directory:
+Only the verified envelope, as JSON, at
 `<config>/control/<origin>/profiles.json`, one cache per control-plane origin
-(`ControlConfig::origin`). The signing key stays on the control plane; the pinned
-public key and the token reference stay in `control.toml`; no session content is sent.
-`cached_pack_state` reads the cache without the network and verifies it again before a
-surface shows it.
+(`ControlConfig::origin`). The signing key stays on the control plane; the pin and the
+token reference stay in `control.toml`; no session content is sent. `cached_pack_state`
+reads and re-verifies the cache without the network for `profiles` and `use`.
 
-## 8. One install, in a flowchart
+## 6. One install, in a flowchart
 
 ```mermaid
 flowchart TD
-    A["setup / control sync / profiles"] --> B["load_control: machine + user file<br/>merge_control: machine wins url and key"]
-    B --> C["control_config: 32-byte key, token reference, check_transport"]
-    C --> D["sync: GET /v1/pack/profiles with the bearer token"]
-    D --> E{"reachable and published?"}
-    E -- no --> F{"last verified cache?"}
-    F -- yes --> G["verify the cache with the pinned key"]
-    G --> H["seat: profiles_from_payload -> pick -> pack_layer"]
-    F -- no --> I["Unreachable / NothingPublished<br/>nothing is seated"]
-    E -- yes --> J["Envelope::verify(pinned key, schema)"]
-    J -- "bad, wrong key, unknown schema" --> K["Rejected: no cache, no fallback, no seat"]
-    J -- ok --> L["Cache::store after verification"]
-    L --> H
-    H --> M["control layer: models, router.default, router.rules"]
-    M --> N["record_control_synced -> control.synced<br/>record_profile_selected -> profile.selected"]
+    A["setup / control sync / session start / profiles / use"] --> B["load_control: machine + user file"]
+    B --> C["control_config: pinned key, token reference, check_transport"]
+    C --> D{"which path?"}
+    D -- "setup / control sync / session start" --> E["sync: GET /v1/pack/profiles"]
+    D -- "profiles / use" --> F["cached_pack_state: load cache, verify, no fetch"]
+    E --> G{"reachable?"}
+    G -- yes --> H["Envelope::verify(pinned key, schema)"]
+    H -- "bad / wrong key / unknown schema" --> I["Rejected: no cache, no fallback, no seat"]
+    H -- ok --> J["Cache::store after verification"]
+    G -- "no answer / NothingPublished" --> K{"verified cache?"}
+    K -- yes --> L["verify cache; from_cache = true"]
+    K -- no --> M["Unreachable / NothingPublished<br/>nothing is seated"]
+    F --> N["seat: profiles_from_payload -> pick -> pack_layer"]
+    J --> N
+    L --> N
+    N --> O["initial serve kernel: control.synced + profile.selected<br/>session.new factory: neither"]
 ```
 
-The order matters: verification precedes caching, caching precedes seating, and the
-record is written by the kernel once the session's layer is resolved.
+Verification precedes caching, caching precedes seating, and only the initial `serve`
+kernel writes the provenance pair.
 
-## 9. Where to read next
+## 7. Where to read next
 
-- [control-plane.md](../control-plane.md) — the endpoints, the tokens, serve and publish.
+- [control-plane.md](../control-plane.md) — endpoints, tokens, serve and publish.
 - [config-routing.md](../config-routing.md) §4–§5 — the envelope, the cache and the lock.
 - [security-trust.md](../security-trust.md) — where the signing key and the pin sit.
 - [control-plane.md](../../runbooks/control-plane.md) — the operational sequence.

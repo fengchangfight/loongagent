@@ -119,7 +119,7 @@ exchanges.
 `Kernel::compact_if_needed` runs at every step boundary, after `refresh_map`,
 and does nothing when `ledger.total_tokens()` is at or under the ceiling. When
 it does run it takes `keep = keep_newest_tokens.min(ceiling / 2)` (default
-20 Ki) and works in a fixed order.
+20,000 tokens) and works in a fixed order.
 
 **Phase 1 — clear stale tool output.** `Ledger::clear_tool_outputs` walks
 backwards to find where the newest `keep` tokens begin, and clears only entries
@@ -144,23 +144,7 @@ exchange survives and only its stale tool bodies are cleared. A test pins each
 side: `with_the_engine_on_a_long_session_never_drops_an_exchange` and
 `with_the_engine_off_compaction_still_drops_exchanges`.
 
-```mermaid
-flowchart TD
-    A["step boundary: refresh_map, then compact_if_needed"] --> B{"total_tokens > input_ceiling()?"}
-    B -- no --> Z["nothing happens"]
-    B -- yes --> K["keep = keep_newest_tokens.min(ceiling / 2)"]
-    K --> C["clear tool output older than the newest keep tokens<br/>History + tool: only · pinned and the newest entry stay"]
-    C --> D{"still over the ceiling?"}
-    D -- no --> CHG{"anything cleared or dropped?"}
-    D -- "yes, engine off" --> F["drop_oldest_exchange until under or nothing safe to drop"]
-    D -- "yes, engine on" --> G["stop dropping: no exchange is dropped"]
-    F --> CHG
-    G --> CHG
-    CHG -- yes --> E["compaction.applied with the counts of what changed"]
-    CHG -- no --> Z2["no event: nothing changed"]
-    E --> Z3["tokens_before, tokens_after, kept_tokens,<br/>cleared_tool_outputs, dropped_messages"]
-```
-
+The sequence at a step boundary is [flows/context-compaction.md](flows/context-compaction.md).
 `compaction.applied` is written only when something actually changed; a single
 long turn with nothing stale can leave the context over budget without an event.
 

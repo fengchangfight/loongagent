@@ -246,4 +246,4 @@ still wins over the shorthand.
   and the locked `control` layer.
 - [tools-permissions.md](tools-permissions.md) §3 — where the resolved permission ladder
   becomes the PDP's rule string.
-- `crates/config/src/tests.rs` — the layer, merge and mode-guard behaviour pinned by tests.
+- `crates/config/src/tests.rs` — the layer, merge and mode-guard behaviour pinned by tests. The install sequence is [pack-install.md](flows/pack-install.md).

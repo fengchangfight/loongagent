@@ -95,6 +95,8 @@ restating it. Detail links down: a parent summarises and points.
 
 Every check is shown failing on a seeded defect before it is trusted; a check
 that has never failed has not been shown to work. During migration,
-`scripts/code-contract-baseline.txt` and `scripts/doc-contract-baseline.txt`
-list files that do not comply yet. The gates skip those entries and fail on a
-stale one, so a task removes its own entries and never leaves one behind.
+`scripts/code-contract-baseline.txt` lists files that do not comply yet; the gate
+skips those entries and fails on a stale one, so a task removes its own entries
+and never leaves one behind. `scripts/doc-contract-baseline.txt` was deleted after
+the document-tree audit, so `scripts/check-docs.py` now checks the whole
+maintained tree; a future migration that needs one would recreate it explicitly.

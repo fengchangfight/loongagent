@@ -28,10 +28,11 @@ checked rather than retyped; because it needs that capture it is the one check
 that is not part of a bare run. A check that is asked for and cannot run is an
 error, never a silent skip.
 
-During migration, scripts/doc-contract-baseline.txt lists documents that do not
-satisfy the navigation contract yet. The four checks skip those documents and
-fail on an entry whose file is missing or which now passes every one of them:
-the list is a ratchet that only shrinks.
+The document baseline was deleted after the document-tree audit, so a bare run
+checks every maintained document. A future migration may create
+scripts/doc-contract-baseline.txt explicitly; while it exists, the four checks
+skip the documents it lists and fail on an entry whose file is missing or which
+now passes every one of them, so the list is a ratchet that only shrinks.
 """
 from __future__ import annotations
 
@@ -143,7 +144,9 @@ DEFAULT_BUDGET = 250
 
 # The baseline, relative to the root. It is a ratchet, not an ignore list: a
 # missing file means nothing is baselined, and an entry that no longer fails
-# every one of the four checks is a failure.
+# every one of the four checks is a failure. The file was deleted after the
+# document-tree audit, so the gate normally checks the whole tree; a future
+# migration recreates it explicitly.
 DEFAULT_BASELINE = "scripts/doc-contract-baseline.txt"
 BASELINE_COMMENT = """\
 # Documents whose navigation contract is not complete yet. The gate skips these

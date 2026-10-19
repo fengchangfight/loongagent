@@ -28,8 +28,9 @@ are owned by [kernel-loop.md](../kernel-loop.md); the tool gate by
    `message.appended`. Tool calls record the assistant message once and go through
    `Kernel::dispatch`; the gate is [tool-approval.md](tool-approval.md).
 5. **Result and next step.** The results go back into the conversation and the loop
-   takes another step. An `Ask` parks the turn (`approval.requested`); a failed or
-   denied call is an ordinary `tool.result` with `ok: false`.
+   takes another step. An `Ask` parks the turn (`approval.requested`), and the rest
+   of that assistant message gets `tool.result` "not run"; a failed or denied call is
+   an ordinary `tool.result` with `ok: false`.
 6. **End.** Answered, asked, stopped, step limit, refused or error. The six endings
    and their `TurnOutcome` fields are [kernel-loop.md](../kernel-loop.md) §6.
 
@@ -114,4 +115,4 @@ a parked turn with `approval.respond`; the kernel resumes the same turn.
 - [tool-approval.md](tool-approval.md) — the gate and its resume in detail.
 - [context-ledger.md](../context-ledger.md) §4 — what `compact_if_needed` changes.
 - [events-storage.md](../events-storage.md) — the envelope every event is written in.
-- `crates/kernel/src/turn/tests.rs` — the endings above, pinned.
+- `crates/kernel/src/turn/tests.rs` — the tests behind [kernel-loop.md](../kernel-loop.md) §6.

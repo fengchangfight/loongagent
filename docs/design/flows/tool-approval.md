@@ -24,8 +24,9 @@ the action classes, the PDP ladder and the two enforcers are owned by
    hook verdict replaces the ruling and its rule becomes `hook:<ids>`;
    `policy.decided` records the verdict and rule the kernel acts on.
 5. **Arm.** Allow: `Kernel::execute` → `tool.result` → `post_tool`. Ask:
-   `permission_requested`, `approval.requested` (`appr-N`), the turn parks. Deny:
-   `tool.result` with `ok: false` and the rule.
+   `permission_requested`, `approval.requested` (`appr-N`), the turn parks, and the
+   rest of that assistant message gets `tool.result` "not run". Deny: `tool.result`
+   with `ok: false` and the rule.
 6. **Answer.** `Kernel::respond_to_approval` writes `approval.decided`, fires
    `permission_decided`, then either runs the same `Kernel::execute` with the same
    `ExecContext` or writes `tool.result` "denied by the user".

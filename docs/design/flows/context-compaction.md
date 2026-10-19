@@ -14,7 +14,8 @@ and the layered store by `crates/context/src/`.
 
 At every step boundary, after `refresh_map`, `compact_if_needed` compares
 `ledger.total_tokens()` with `Kernel::input_ceiling()`: the stricter of the budget ×
-`compact_at_percent` and the selected model's window minus `reserved_context_size`.
+`compact_at_percent` / 100 (default 80%) and the selected model's window minus
+`reserved_context_size` (a reserve larger than half a window is capped at half).
 At or under the ceiling it returns without an event. Otherwise `keep =
 keep_newest_tokens.min(ceiling / 2)` (20,000 tokens by default) is the newest window
 kept verbatim. With no budget and no window there is no ceiling, so compaction never
@@ -35,7 +36,8 @@ returns 0 and stops.
 `Store::digest_domains`, then replaces the L4 map in place (`Ledger::replace`, no
 event). The model half, `Store::synthesize_window`, runs on the worker in idle windows,
 never on the turn's path. With the engine on the original stays reachable through the
-derived store and `recall`. Owner: context-ledger §4 and §6.
+derived store and `recall`. The store methods are `crates/context/src/`; the
+engine-on rule and the L4 map are context-ledger §4.
 
 ## 4. The event, or no event
 

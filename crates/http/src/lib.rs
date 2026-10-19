@@ -1,3 +1,12 @@
+//! Purpose: Carry one JSON request over HTTP/1.1, plain or TLS, with bounded timeouts and a streamed reply.
+//!
+//! # Contract
+//! - **Serves:** the wire beneath provider calls and HTTP hooks, so neither owns a transport (events-storage.md §2, config-routing.md §8).
+//! - **Design:** `docs/design/events-storage.md` (ADR-0002).
+//! - **Upstream:** `loong-providers`' adapter, the HTTP hook kind and the control-plane client.
+//! - **Downstream:** `TcpStream`, rustls, and the `Transport` / `BodyReader` readers.
+//! - **Verify:** `cargo test -p loong-http` · `./scripts/check.sh`
+//!
 //! The smallest HTTP/1.1 client that can carry a JSON POST — shared by the
 //! provider adapters and the HTTP hook kind, so neither owns a transport.
 //!
@@ -13,12 +22,22 @@ use std::time::Duration;
 
 /// One connection, plain or wrapped in TLS. Both are blocking sockets with the
 /// same read/write timeouts, so the calling code does not branch again.
+/// Purpose: One blocking connection, plain TCP or wrapped in rustls TLS.
+///
+/// Serves: one read/write surface so the request code never branches on TLS (config-routing.md §8).
+/// Design: `docs/design/events-storage.md` (ADR-0002).
+/// Up: `open` builds it; every request function reads and writes through it.
+/// Down: `TcpStream` and `rustls::StreamOwned`.
+/// Verify: `cargo test -p loong-http`.
 enum Transport {
     Plain(TcpStream),
     Tls(Box<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>),
 }
 
 impl Read for Transport {
+    /// Purpose: Read from whichever transport this connection wraps.
+    ///
+    /// Contract: `crates/http/src/lib.rs`.
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         match self {
             Transport::Plain(stream) => stream.read(buf),
@@ -28,12 +47,18 @@ impl Read for Transport {
 }
 
 impl Write for Transport {
+    /// Purpose: Write to whichever transport this connection wraps.
+    ///
+    /// Contract: `crates/http/src/lib.rs`.
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         match self {
             Transport::Plain(stream) => stream.write(buf),
             Transport::Tls(stream) => stream.write(buf),
         }
     }
+    /// Purpose: Flush whichever transport this connection wraps.
+    ///
+    /// Contract: `crates/http/src/lib.rs`.
     fn flush(&mut self) -> std::io::Result<()> {
         match self {
             Transport::Plain(stream) => stream.flush(),
@@ -44,6 +69,13 @@ impl Write for Transport {
 
 /// The root store and provider, built once: constructing them per request would
 /// re-parse every root certificate on every model call.
+/// Purpose: Build the root store and TLS provider once and hand out the shared config.
+///
+/// Serves: a hosted provider is reachable without re-parsing roots on every call (config-routing.md §8).
+/// Design: `docs/design/events-storage.md` (ADR-0002).
+/// Up: `open` for every `https://` request.
+/// Down: `rustls::RootCertStore`, `webpki_roots` and the ring provider.
+/// Verify: `cargo test -p loong-http`.
 fn tls_config() -> Arc<rustls::ClientConfig> {
     static CONFIG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
     CONFIG
@@ -64,15 +96,32 @@ fn tls_config() -> Arc<rustls::ClientConfig> {
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Purpose: A status and a body, returned whatever the status was.
+///
+/// Serves: a caller can tell a provider that answered with a refusal from one that did not answer (config-routing.md §8).
+/// Design: `docs/design/events-storage.md` (ADR-0002).
+/// Up: `get_json_raw`, `get_json` and `post_json` return it.
+/// Down: the response head and body readers.
+/// Verify: `cargo test -p loong-http`.
 pub struct HttpResponse {
     pub status: u16,
     pub body: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Purpose: A transport or protocol failure as one message string.
+///
+/// Serves: one error type for resolving, connecting, TLS, framing and reading.
+/// Design: `docs/design/events-storage.md` (ADR-0002).
+/// Up: every public request function returns it.
+/// Down: its `Display` and `Error` impls.
+/// Verify: `cargo test -p loong-http`.
 pub struct HttpError(pub String);
 
 impl std::fmt::Display for HttpError {
+    /// Purpose: Render the error message unchanged.
+    ///
+    /// Contract: `crates/http/src/lib.rs`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
     }
@@ -80,11 +129,21 @@ impl std::fmt::Display for HttpError {
 
 impl std::error::Error for HttpError {}
 
+/// Purpose: Wrap a message as an `HttpError`.
+///
+/// Contract: `crates/http/src/lib.rs`.
 fn err(message: impl Into<String>) -> HttpError {
     HttpError(message.into())
 }
 
 /// Split a URL into the pieces a socket needs, and say whether it is TLS.
+/// Purpose: Split a URL into host, port, path and whether it needs TLS.
+///
+/// Serves: one URL parser for connecting and for writing the request line (events-storage.md §2).
+/// Design: `docs/design/events-storage.md` (ADR-0002).
+/// Up: `open`, `write_request` and `get_json_raw`.
+/// Down: string splitting only; no network access.
+/// Verify: `cargo test -p loong-http`.
 pub fn parse_http_url(url: &str) -> Result<(String, u16, String, bool), HttpError> {
     let (rest, tls, default_port) = if let Some(rest) = url.strip_prefix("https://") {
         (rest, true, 443)
@@ -118,6 +177,13 @@ pub fn parse_http_url(url: &str) -> Result<(String, u16, String, bool), HttpErro
 /// That distinction is not pedantry: on a first run it is the difference between
 /// "your key is wrong" and "this vendor is unreachable from your network", and a
 /// user told the first when the second is true will go and re-issue a working key.
+/// Purpose: GET a URL and return the response whatever its status.
+///
+/// Serves: the control-plane probe can tell a refusal from an unreachable host (config-routing.md §4).
+/// Design: `docs/design/events-storage.md` (ADR-0002).
+/// Up: `get_json` and the model-list probe.
+/// Down: `open`, `parse_http_url` and `read_head`.
+/// Verify: `cargo test -p loong-http`.
 pub fn get_json_raw(
     url: &str,
     bearer: Option<&str>,
@@ -155,6 +221,13 @@ pub fn get_json_raw(
 
 /// GET a small, structured resource, treating a non-2xx status as a failure.
 /// Same framing, same TLS, no body.
+/// Purpose: GET a small JSON resource and treat a non-2xx status as an error.
+///
+/// Serves: a probe that only needs the value or the failure.
+/// Design: `docs/design/events-storage.md` (ADR-0002).
+/// Up: the control-plane client and the provider probes.
+/// Down: `get_json_raw`.
+/// Verify: `cargo test -p loong-http`.
 pub fn get_json(
     url: &str,
     bearer: Option<&str>,
@@ -175,6 +248,13 @@ pub fn get_json(
 /// connect and the read/write, so a hanging server cannot hang a tool or a hook.
 /// The status comes back to the caller rather than being an error, because an
 /// adapter reads its protocol's way of saying "no" out of the body.
+/// Purpose: POST a JSON body and read the whole response.
+///
+/// Serves: one request and one reply for the non-streaming provider path and HTTP hooks (config-routing.md §8).
+/// Design: `docs/design/events-storage.md` (ADR-0002).
+/// Up: `loong-providers`' `complete` and the HTTP hook kind.
+/// Down: `open`, `write_request` and `read_head`.
+/// Verify: `cargo test -p loong-http`.
 pub fn post_json(
     url: &str,
     body: &str,
@@ -198,6 +278,13 @@ pub fn post_json(
 /// details matter: a streamed HTTP/1.1 reply uses **chunked** transfer encoding
 /// (there is no `Content-Length` to wait for), and a chunk boundary has nothing to
 /// do with an event boundary, so the reader buffers *lines*, not chunks.
+/// Purpose: POST and hand each Server-Sent Event `data:` payload to a callback as it arrives.
+///
+/// Serves: a model answer that appears while it is still being written (config-routing.md §8).
+/// Design: `docs/design/events-storage.md` (ADR-0002).
+/// Up: `loong-providers`' streaming path.
+/// Down: `open`, `write_request`, `read_head` and the line buffer.
+/// Verify: `cargo test -p loong-http`.
 pub fn post_sse(
     url: &str,
     body: &str,
@@ -266,6 +353,13 @@ pub fn post_sse(
 
 /// Connect, with TLS when the URL asks for it. The handshake completes here, so a
 /// certificate problem is reported as a certificate problem.
+/// Purpose: Resolve, connect, set read/write timeouts and complete the TLS handshake.
+///
+/// Serves: a certificate problem is reported as a certificate problem (config-routing.md §8).
+/// Design: `docs/design/events-storage.md` (ADR-0002).
+/// Up: every request function.
+/// Down: `parse_http_url`, `TcpStream::connect_timeout`, `tls_config` and rustls.
+/// Verify: `cargo test -p loong-http`.
 fn open(url: &str, timeout: Duration) -> Result<Transport, HttpError> {
     let (host, port, _path, tls) = parse_http_url(url)?;
     let addr = (host.as_str(), port)
@@ -292,6 +386,13 @@ fn open(url: &str, timeout: Duration) -> Result<Transport, HttpError> {
     Ok(Transport::Tls(Box::new(stream)))
 }
 
+/// Purpose: Write the POST head plus body, adding the bearer token when one is given.
+///
+/// Serves: the request shape the provider and hook callers share.
+/// Design: `docs/design/events-storage.md` (ADR-0002).
+/// Up: `post_json` and `post_sse`.
+/// Down: `parse_http_url` and `Transport::write_all`.
+/// Verify: `cargo test -p loong-http`.
 fn write_request(
     stream: &mut Transport,
     url: &str,
@@ -325,6 +426,13 @@ fn write_request(
 ///
 /// A **chunked** body is decoded here so callers see plain bytes: SSE arrives in
 /// chunks whose boundaries have nothing to do with event boundaries.
+/// Purpose: Read the status line and headers and return a reader on the body.
+///
+/// Serves: framing that honours `Content-Length` and decodes a chunked body (events-storage.md §2).
+/// Design: `docs/design/events-storage.md` (ADR-0002).
+/// Up: `get_json_raw`, `post_json` and `post_sse`.
+/// Down: `Transport::read`, the chunk-size check and `BodyReader`.
+/// Verify: `cargo test -p loong-http`.
 fn read_head(stream: &mut Transport) -> Result<(u16, String, BodyReader<'_>), HttpError> {
     let mut head = Vec::new();
     let mut byte = [0u8; 1];
@@ -388,6 +496,9 @@ fn read_head(stream: &mut Transport) -> Result<(u16, String, BodyReader<'_>), Ht
 /// full* into "peer closed connection without sending TLS close_notify". It is only a
 /// problem if bytes are missing, and that is precisely what a `Content-Length` is for — see
 /// `BodyReader`, where a short body against a declared length is still an error.
+/// Purpose: Read from the transport, treating a missing TLS `close_notify` as end of body.
+///
+/// Contract: `crates/http/src/lib.rs`.
 fn read_body(stream: &mut Transport, buf: &mut [u8]) -> std::io::Result<usize> {
     match stream.read(buf) {
         Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(0),
@@ -395,6 +506,13 @@ fn read_body(stream: &mut Transport, buf: &mut [u8]) -> std::io::Result<usize> {
     }
 }
 
+/// Purpose: The response body reader: plain with a declared length, or chunked.
+///
+/// Serves: callers read plain bytes even when the wire is chunked (events-storage.md §2).
+/// Design: `docs/design/events-storage.md` (ADR-0002).
+/// Up: `read_head` returns it; the request functions read it.
+/// Down: `Transport`, `read_body` and `read_chunk_size`.
+/// Verify: `cargo test -p loong-http`.
 struct BodyReader<'a> {
     stream: &'a mut Transport,
     chunked: bool,
@@ -414,6 +532,13 @@ struct BodyReader<'a> {
 }
 
 impl Read for BodyReader<'_> {
+    /// Purpose: Read a plain or chunked body without losing the rest of a chunk.
+    ///
+    /// Serves: a body larger than the caller's buffer arrives whole (events-storage.md §2).
+    /// Design: `docs/design/events-storage.md` (ADR-0002).
+    /// Up: `Read::read_to_string` in the request functions and the tests.
+    /// Down: `read_body` and `read_chunk_size`.
+    /// Verify: `cargo test -p loong-http`.
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         if self.done {
             return Ok(0);
@@ -485,6 +610,13 @@ impl Read for BodyReader<'_> {
     }
 }
 
+/// Purpose: Parse one chunk-size line and return `None` at the terminating zero chunk.
+///
+/// Serves: chunked transfer decoding (events-storage.md §2).
+/// Design: `docs/design/events-storage.md` (ADR-0002).
+/// Up: `BodyReader::read`.
+/// Down: `Transport::read` and `u64::from_str_radix`.
+/// Verify: `cargo test -p loong-http`.
 fn read_chunk_size(stream: &mut Transport) -> std::io::Result<Option<usize>> {
     let mut line = Vec::new();
     let mut byte = [0u8; 1];
@@ -527,6 +659,13 @@ pub mod testing {
 
     /// Returns `(base_url, join_handle)`; the handle yields the raw request the
     /// client sent, so a test can assert the wire shape.
+    /// Purpose: Serve one canned HTTP response on loopback and return the base URL and request handle.
+    ///
+    /// Serves: dependent crates' tests drive the provider and hook paths without their own harness.
+    /// Design: `docs/design/events-storage.md` (ADR-0002).
+    /// Up: the tests in this crate and in the provider and hook crates.
+    /// Down: `TcpListener` and `read_request`.
+    /// Verify: `cargo test -p loong-http`.
     pub fn fake_server(response: &'static str) -> (String, JoinHandle<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -545,6 +684,13 @@ pub mod testing {
     /// case where one event is split across two chunks.
     ///
     /// `pieces` are written as they are, so a test controls the framing exactly.
+    /// Purpose: Serve chunked Server-Sent Events on loopback, one piece per write.
+    ///
+    /// Serves: streaming tests that control the chunk boundaries.
+    /// Design: `docs/design/events-storage.md` (ADR-0002).
+    /// Up: streaming tests in this crate and in `loong-providers`.
+    /// Down: `TcpListener` and `read_request`.
+    /// Verify: `cargo test -p loong-http`.
     pub fn fake_sse_server(pieces: Vec<String>) -> (String, JoinHandle<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -571,6 +717,13 @@ pub mod testing {
         )
     }
 
+    /// Purpose: Read a full HTTP request line, headers and the body its length declares.
+    ///
+    /// Serves: a fake server that hands the raw request to a test.
+    /// Design: `docs/design/events-storage.md` (ADR-0002).
+    /// Up: `fake_server` and `fake_sse_server`.
+    /// Down: `TcpStream::read` and the `Content-Length` header.
+    /// Verify: `cargo test -p loong-http`.
     pub fn read_request(sock: &mut std::net::TcpStream) -> String {
         let mut raw = Vec::new();
         let mut buf = [0u8; 4096];
@@ -603,6 +756,7 @@ mod tests {
     use std::net::TcpListener;
     use std::time::Duration;
 
+    /// Purpose: Pins the host, port, path and scheme split, including bad ports.
     #[test]
     fn urls_are_split_into_host_port_path_and_scheme() {
         assert_eq!(
@@ -628,6 +782,7 @@ mod tests {
 
     /// A real TLS handshake against a real host. Skipped only when this machine has
     /// no route out; a TLS failure is a failure, not a skip.
+    /// Purpose: Pins that a real TLS handshake and request complete against a public host, or that the network is absent.
     #[test]
     fn https_really_works_against_a_public_host() {
         let response = post_json(
@@ -653,6 +808,7 @@ mod tests {
         }
     }
 
+    /// Purpose: Pins that a certificate for another host is refused.
     #[test]
     fn a_certificate_that_does_not_match_the_host_is_refused() {
         // `wrong.host.badssl.com` presents a certificate for another name; if DNS or
@@ -679,6 +835,7 @@ mod tests {
         }
     }
 
+    /// Purpose: Pins the POST framing, the bearer header and the body.
     #[test]
     fn a_post_round_trips_and_carries_the_bearer_token() {
         let (url, server) =
@@ -701,6 +858,7 @@ mod tests {
         assert_eq!(body, "{\"hello\":1}");
     }
 
+    /// Purpose: Pins that a non-2xx response is returned, not hidden as an error.
     #[test]
     fn a_non_2xx_status_is_returned_not_hidden() {
         let (url, server) =
@@ -711,6 +869,7 @@ mod tests {
         server.join().unwrap();
     }
 
+    /// Purpose: Pins that SSE payloads reach the callback in order and `[DONE]` stops the stream.
     #[test]
     fn sse_events_arrive_in_order_as_they_are_written() {
         let (url, server) = fake_sse_server(vec![
@@ -732,6 +891,7 @@ mod tests {
         );
     }
 
+    /// Purpose: Pins that a body stops at `Content-Length`, not at connection close.
     #[test]
     fn a_body_stops_at_its_declared_length_and_not_at_the_connection() {
         // Two things at once. The body ends where `Content-Length` says, so trailing
@@ -769,6 +929,7 @@ mod tests {
         );
     }
 
+    /// Purpose: Pins that a chunk larger than the caller's buffer is delivered whole.
     #[test]
     fn a_chunk_larger_than_the_callers_buffer_is_delivered_not_discarded() {
         // The bug, and it was the worst shape a bug can have: silent data loss. `read`
@@ -813,6 +974,7 @@ mod tests {
         );
     }
 
+    /// Purpose: Pins that a closing CRLF split across reads does not end the body.
     #[test]
     fn a_crlf_split_across_two_reads_does_not_end_the_body() {
         // A guard rather than a reproduction: the closing CRLF was taken with a single
@@ -827,6 +989,7 @@ mod tests {
         assert_eq!(response.body, "firstsecond", "both chunks, whole");
     }
 
+    /// Purpose: Pins that an event split across chunks is reassembled.
     #[test]
     fn a_chunk_boundary_does_not_split_an_event() {
         // One event, delivered in three pieces: the reader buffers lines, not chunks.
@@ -848,6 +1011,7 @@ mod tests {
         server.join().unwrap();
     }
 
+    /// Purpose: Pins that a non-2xx stream is an error carrying the body.
     #[test]
     fn a_non_2xx_stream_is_an_error_with_the_body() {
         let (url, server) = fake_server(
@@ -864,6 +1028,7 @@ mod tests {
         server.join().unwrap();
     }
 
+    /// Purpose: Pins a GET with a bearer token and a body.
     #[test]
     fn a_get_reads_a_body_and_a_bearer_token() {
         let (url, server) = fake_server(
@@ -878,6 +1043,7 @@ mod tests {
         assert!(sent.contains("Authorization: Bearer s3cret"));
     }
 
+    /// Purpose: Pins that a failing GET carries the server's message.
     #[test]
     fn a_get_that_fails_carries_what_the_server_said() {
         let (url, server) = fake_server(
@@ -890,6 +1056,7 @@ mod tests {
         server.join().unwrap();
     }
 
+    /// Purpose: Pins that a dead endpoint is an error, not a hang.
     #[test]
     fn a_dead_endpoint_is_an_error_not_a_hang() {
         let err = post_json(

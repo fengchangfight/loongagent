@@ -57,7 +57,6 @@ crates/control/tests/key_material_never_lands_in_git.rs
 crates/hooks/src/config.rs
 crates/hooks/src/lib.rs
 crates/hooks/src/run.rs
-crates/http/src/lib.rs
 crates/kernel/src/context_engine.rs
 crates/kernel/src/ledger.rs
 crates/kernel/src/lib.rs
@@ -72,13 +71,10 @@ crates/kernel/src/turn/nudge.rs
 crates/kernel/src/turn/recall.rs
 crates/kernel/src/turn/session.rs
 crates/kernel/src/turn/tests.rs
-crates/manifest/src/lib.rs
 crates/mcp/src/client.rs
 crates/mcp/src/config.rs
 crates/mcp/src/lib.rs
-crates/pack/src/lib.rs
 crates/plugin/src/lib.rs
-crates/proc/src/lib.rs
 crates/providers/src/lib.rs
 crates/providers/src/openai_compat.rs
 crates/providers/src/probe.rs
@@ -98,4 +94,3 @@ crates/tui-app/src/tests.rs
 crates/tui-app/src/wizard.rs
 crates/tui-app/src/worker.rs
 crates/tui/src/lib.rs
-crates/web/src/lib.rs

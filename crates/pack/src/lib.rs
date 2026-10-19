@@ -1,3 +1,12 @@
+//! Purpose: Sign and verify the one envelope every distributed artifact travels in.
+//!
+//! # Contract
+//! - **Serves:** a pack can occupy the `control` layer only after its signature verifies under the pinned key (security-trust.md §1, config-routing.md §4).
+//! - **Design:** `docs/design/security-trust.md` (ADR-0016); `docs/design/config-routing.md` §4 owns the layer.
+//! - **Upstream:** `loong-control` verifies a fetched pack; the control plane signs it.
+//! - **Downstream:** `ring` Ed25519, `Envelope::signing_bytes` and the pinned `key_id`.
+//! - **Verify:** `cargo test -p loong-pack` · `./scripts/check.sh`
+//!
 //! The one signed envelope every distributed artifact travels in.
 //!
 //! ADR-0008 §6: profiles, policy and context packs share **one** envelope, and the
@@ -29,6 +38,13 @@ pub const PROFILES_ARTIFACT: &str = "loongagent.profiles";
 pub const PROFILES_SCHEMA: &str = "loongagent.profiles/1";
 
 #[derive(Debug)]
+/// Purpose: Why a pack is malformed, signed by the wrong key, or unreadable to this build.
+///
+/// Serves: verification refuses a pack before it can become policy (config-routing.md §4).
+/// Design: `docs/design/security-trust.md` (ADR-0016).
+/// Up: `Envelope::verify`, `sign`, `to_json` and `from_json`.
+/// Down: the envelope fields and the pinned key id.
+/// Verify: `cargo test -p loong-pack`.
 pub enum PackError {
     /// The envelope is malformed, or a field failed its own check.
     Malformed(String),
@@ -49,6 +65,13 @@ pub enum PackError {
 }
 
 impl std::fmt::Display for PackError {
+    /// Purpose: Render each verification failure as the sentence a user or the control plane reads.
+    ///
+    /// Serves: an error that says which check failed, not just that verification did.
+    /// Design: `docs/design/security-trust.md` (ADR-0016).
+    /// Up: `Display` for `PackError`.
+    /// Down: the variants of `PackError`.
+    /// Verify: `cargo test -p loong-pack`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PackError::Malformed(m) => write!(f, "malformed envelope: {m}"),
@@ -76,6 +99,13 @@ impl std::error::Error for PackError {}
 
 /// The envelope, as it travels (JSON on the wire) and as it is cached on disk.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Purpose: The signed artifact envelope: what it is, who signed it, the payload and the signature.
+///
+/// Serves: every distributed artifact travels in one verifiable shape (security-trust.md §1).
+/// Design: `docs/design/security-trust.md` (ADR-0016); `docs/design/config-routing.md` §4.
+/// Up: `loong-control` fetches and verifies one; the control plane signs one.
+/// Down: `signing_bytes`, `sign` and `verify`.
+/// Verify: `cargo test -p loong-pack`.
 pub struct Envelope {
     /// What this is, e.g. `loongagent.profiles`.
     pub artifact: String,
@@ -103,6 +133,13 @@ impl Envelope {
     /// Built by hand rather than by serializing the struct: `serde_json`'s map
     /// ordering is stable here, but a field added later must not silently change
     /// what older signatures covered, and an explicit list makes that visible.
+    /// Purpose: The canonical bytes the signature covers: every field except the signature.
+    ///
+    /// Serves: a field added later cannot silently change what older signatures covered (config-routing.md §4).
+    /// Design: `docs/design/security-trust.md` (ADR-0016).
+    /// Up: `sign` and `verify`.
+    /// Down: the explicit JSON field list.
+    /// Verify: `cargo test -p loong-pack`.
     pub fn signing_bytes(&self) -> Vec<u8> {
         let canonical = serde_json::json!({
             "artifact": self.artifact,
@@ -118,6 +155,13 @@ impl Envelope {
     }
 
     /// Sign a payload with an Ed25519 private key in PKCS#8 form.
+    /// Purpose: Sign a payload with an Ed25519 private key in PKCS#8 form.
+    ///
+    /// Serves: the control plane minting a pack the client can pin (config-routing.md §4).
+    /// Design: `docs/design/security-trust.md` (ADR-0016).
+    /// Up: the control plane's publish path and the pack tests.
+    /// Down: `Ed25519KeyPair`, `signing_bytes` and `key_id`.
+    /// Verify: `cargo test -p loong-pack`.
     pub fn sign(
         key_pkcs8: &[u8],
         artifact: &str,
@@ -152,6 +196,13 @@ impl Envelope {
     /// `expected_schema` is what this build understands; a pack for a schema it does
     /// not know is refused before the signature is even checked, because "valid
     /// signature, unknown content" must never be treated as usable.
+    /// Purpose: Verify the envelope against the caller's pinned public key and expected schema.
+    ///
+    /// Serves: a valid signature under some other key, or an unknown payload, is refused (config-routing.md §4).
+    /// Design: `docs/design/security-trust.md` (ADR-0016).
+    /// Up: `loong-control` and the cache load.
+    /// Down: `key_id`, `signing_bytes` and `UnparsedPublicKey::verify`.
+    /// Verify: `cargo test -p loong-pack`.
     pub fn verify(&self, public_key: &[u8], expected_schema: &[&str]) -> Result<(), PackError> {
         if self.signature.is_empty() {
             return Err(PackError::Malformed("no signature".to_string()));
@@ -176,10 +227,24 @@ impl Envelope {
             .map_err(|_| PackError::BadSignature)
     }
 
+    /// Purpose: Serialize the envelope for the wire or the cache.
+    ///
+    /// Serves: one JSON shape for transport and disk.
+    /// Design: `docs/design/security-trust.md` (ADR-0016).
+    /// Up: the control-plane client and the cache writer.
+    /// Down: `serde_json::to_string`.
+    /// Verify: `cargo test -p loong-pack`.
     pub fn to_json(&self) -> Result<String, PackError> {
         serde_json::to_string(self).map_err(|e| PackError::Json(e.to_string()))
     }
 
+    /// Purpose: Parse a cached or fetched envelope and reject an empty artifact or version.
+    ///
+    /// Serves: a malformed envelope is refused before verification (config-routing.md §4).
+    /// Design: `docs/design/security-trust.md` (ADR-0016).
+    /// Up: the control-plane client when it reads the cache.
+    /// Down: `serde_json::from_str` and the required-field check.
+    /// Verify: `cargo test -p loong-pack`.
     pub fn from_json(text: &str) -> Result<Self, PackError> {
         let envelope: Envelope =
             serde_json::from_str(text).map_err(|e| PackError::Json(e.to_string()))?;
@@ -195,6 +260,13 @@ impl Envelope {
 /// A short, stable fingerprint of a public key: the first eight bytes of its
 /// SHA-256, hex. Short enough to read aloud, long enough that a collision is not a
 /// practical concern for pinning.
+/// Purpose: A short fingerprint of a public key: the first eight bytes of its SHA-256, hex.
+///
+/// Serves: key rotation and pinning without reading the whole key (config-routing.md §4).
+/// Design: `docs/design/security-trust.md` (ADR-0016).
+/// Up: `sign`, `verify` and the control plane's key output.
+/// Down: `ring::digest` and `hex`.
+/// Verify: `cargo test -p loong-pack`.
 pub fn key_id(public_key: &[u8]) -> String {
     let digest = digest::digest(&digest::SHA256, public_key);
     hex(&digest.as_ref()[..8])
@@ -202,6 +274,13 @@ pub fn key_id(public_key: &[u8]) -> String {
 
 /// Generate an Ed25519 keypair as PKCS#8. The caller writes the private half with
 /// mode 0600 and never sends it anywhere.
+/// Purpose: Generate an Ed25519 keypair as PKCS#8 and a public key.
+///
+/// Serves: the control plane's `keygen` command (control-plane.md).
+/// Design: `docs/design/security-trust.md` (ADR-0016).
+/// Up: the control-plane binary and the pack tests.
+/// Down: `Ed25519KeyPair::generate_pkcs8` and the system random source.
+/// Verify: `cargo test -p loong-pack`.
 pub fn generate_keypair() -> Result<(Vec<u8>, Vec<u8>), PackError> {
     let random = SystemRandom::new();
     let pkcs8 = Ed25519KeyPair::generate_pkcs8(&random)
@@ -213,16 +292,37 @@ pub fn generate_keypair() -> Result<(Vec<u8>, Vec<u8>), PackError> {
 
 /// The public half of a PKCS#8 private key, so `sign` and `keygen` agree on what
 /// the pinned key will be.
+/// Purpose: The public half of a PKCS#8 private key.
+///
+/// Serves: `sign` and `keygen` agree on which key a client pins (config-routing.md §4).
+/// Design: `docs/design/security-trust.md` (ADR-0016).
+/// Up: the control-plane key output and the pack tests.
+/// Down: `Ed25519KeyPair::from_pkcs8`.
+/// Verify: `cargo test -p loong-pack`.
 pub fn public_of(key_pkcs8: &[u8]) -> Result<Vec<u8>, PackError> {
     let pair = Ed25519KeyPair::from_pkcs8(key_pkcs8)
         .map_err(|e| PackError::Crypto(format!("reading the private key: {e}")))?;
     Ok(pair.public_key().as_ref().to_vec())
 }
 
+/// Purpose: Render bytes as lowercase hex.
+///
+/// Serves: the signature and key id text forms (config-routing.md §4).
+/// Design: `docs/design/security-trust.md` (ADR-0016).
+/// Up: `sign`, `key_id` and the hex test.
+/// Down: `format!` per byte.
+/// Verify: `cargo test -p loong-pack`.
 pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Purpose: Parse lowercase hex into bytes, returning `None` on an odd length or bad digit.
+///
+/// Serves: a non-hex signature is refused before it is verified (config-routing.md §4).
+/// Design: `docs/design/security-trust.md` (ADR-0016).
+/// Up: `verify` and the hex test.
+/// Down: `u8::from_str_radix`.
+/// Verify: `cargo test -p loong-pack`.
 pub fn unhex(text: &str) -> Option<Vec<u8>> {
     if text.len() % 2 != 0 {
         return None;
@@ -237,6 +337,13 @@ pub fn unhex(text: &str) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
+    /// Purpose: Generate a keypair and sign a sample payload for a test.
+    ///
+    /// Serves: the pack tests share one signing fixture.
+    /// Design: `docs/design/security-trust.md` (ADR-0016).
+    /// Up: every signing test in this module.
+    /// Down: `generate_keypair` and `Envelope::sign`.
+    /// Verify: `cargo test -p loong-pack`.
     fn signed(version: &str, payload: &str) -> (Vec<u8>, Envelope) {
         let (private, public) = generate_keypair().unwrap();
         let envelope = Envelope::sign(
@@ -253,6 +360,7 @@ mod tests {
         (public, envelope)
     }
 
+    /// Purpose: Pins that a signed pack verifies under its own key and survives JSON.
     #[test]
     fn a_signed_pack_verifies_under_its_own_key() {
         let (public, envelope) = signed("2026.10.09-1", "default_profile = \"default\"\n");
@@ -267,6 +375,7 @@ mod tests {
         back.verify(&public, &[PROFILES_SCHEMA]).unwrap();
     }
 
+    /// Purpose: Pins that changing any field the signature covers makes verification fail.
     #[test]
     fn any_field_the_signature_covers_can_not_be_changed() {
         let (public, envelope) = signed("v1", "payload");
@@ -290,6 +399,7 @@ mod tests {
         }
     }
 
+    /// Purpose: Pins that a valid pack signed by another key is refused.
     #[test]
     fn a_pack_signed_by_another_key_is_refused_even_though_it_is_valid() {
         let (_, theirs) = signed("v1", "their payload");
@@ -303,6 +413,7 @@ mod tests {
         }
     }
 
+    /// Purpose: Pins that a tampered payload and a garbage signature fail the signature check.
     #[test]
     fn a_signature_from_a_tampered_payload_does_not_verify() {
         // Same key_id, so this is the signature check itself, not the key check.
@@ -321,6 +432,7 @@ mod tests {
         ));
     }
 
+    /// Purpose: Pins that an unknown payload schema is refused before the signature check.
     #[test]
     fn an_unknown_payload_schema_is_refused_before_anything_else() {
         let (private, _) = generate_keypair().unwrap();
@@ -345,6 +457,7 @@ mod tests {
         }
     }
 
+    /// Purpose: Pins that a pack with an empty signature is not verifiable.
     #[test]
     fn an_unsigned_pack_is_not_verifiable() {
         let (public, mut envelope) = signed("v1", "payload");
@@ -355,6 +468,7 @@ mod tests {
         ));
     }
 
+    /// Purpose: Pins that hex round-trips and refuses odd-length or non-hex input.
     #[test]
     fn hex_round_trips_and_refuses_nonsense() {
         assert_eq!(

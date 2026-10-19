@@ -1,3 +1,12 @@
+//! Purpose: Serve the embedded browser page and bridge WebSocket lines to the same JSON-RPC server.
+//!
+//! # Contract
+//! - **Serves:** a browser surface that speaks exactly what the TUI speaks, with a token on the handshake (surfaces.md §4).
+//! - **Design:** `docs/design/surfaces.md` (ADR-0009).
+//! - **Upstream:** `loongagent web` serves it; a browser opens the page and the socket.
+//! - **Downstream:** `Session`, `tungstenite`, the TCP listener and the embedded `INDEX` page.
+//! - **Verify:** `cargo test -p loong-web` · `./scripts/check.sh`
+//!
 //! The web surface (ADR-0009): the same session, in a browser.
 //!
 //! This layer is deliberately **ignorant of the protocol**: it carries JSON-RPC
@@ -29,6 +38,13 @@ pub const INDEX: &str = include_str!("index.html");
 ///
 /// The lines are exactly what the stdio server writes — events first, then the
 /// response — so a WebSocket message maps one-to-one onto a `handle_line` call.
+/// Purpose: What the web layer needs from a session: one line in, answer lines out as they arrive.
+///
+/// Serves: the browser speaks exactly what the stdio server speaks (surfaces.md §4).
+/// Design: `docs/design/surfaces.md` (ADR-0009).
+/// Up: `serve` and `handle` hold one behind a mutex.
+/// Down: `exchange`, implemented by the server bridge and by `Echo`.
+/// Verify: `cargo test -p loong-web`.
 pub trait Session: Send {
     /// Send one line, and hand back each line of the answer **as it arrives**.
     ///
@@ -36,6 +52,7 @@ pub trait Session: Send {
     /// making the browser wait for the last byte would waste the whole point of the
     /// event stream. A session that only produces its lines at the end is still
     /// correct — it simply calls the sink late.
+    /// Purpose: Send one line and hand back each answer line as it arrives.
     fn exchange(
         &mut self,
         line: &str,
@@ -44,6 +61,13 @@ pub trait Session: Send {
 }
 
 /// A token no other page can guess, read from the OS entropy pool.
+/// Purpose: Read 16 bytes from the OS entropy pool and return them as hex.
+///
+/// Serves: the handshake token no other page can guess (surfaces.md §4).
+/// Design: `docs/design/surfaces.md` (ADR-0009).
+/// Up: `loongagent web` before it prints the URL.
+/// Down: `/dev/urandom` and `format!` per byte.
+/// Verify: `cargo test -p loong-web`.
 pub fn random_token() -> Result<String, String> {
     let mut bytes = [0u8; 16];
     std::fs::File::open("/dev/urandom")
@@ -52,6 +76,13 @@ pub fn random_token() -> Result<String, String> {
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
+/// Purpose: Bind the web listener on the requested host and port and report the actual address.
+///
+/// Serves: loopback by default, with `--bind` as the operator's choice (surfaces.md §4).
+/// Design: `docs/design/surfaces.md` (ADR-0009).
+/// Up: `loongagent web`.
+/// Down: `TcpListener::bind` and `local_addr`.
+/// Verify: `cargo test -p loong-web`.
 pub fn bind(host: &str, port: u16) -> Result<(TcpListener, SocketAddr), String> {
     let listener =
         TcpListener::bind((host, port)).map_err(|e| format!("binding {host}:{port}: {e}"))?;
@@ -61,6 +92,13 @@ pub fn bind(host: &str, port: u16) -> Result<(TcpListener, SocketAddr), String> 
 
 /// Accept connections until the process ends. Each connection gets a thread; the
 /// session is behind a mutex, so two browsers cannot interleave one request.
+/// Purpose: Accept connections until the process ends, one thread each, one session behind a mutex.
+///
+/// Serves: one request at a time reaches the session while responses stream out (surfaces.md §4).
+/// Design: `docs/design/surfaces.md` (ADR-0009).
+/// Up: `loongagent web` after `bind`.
+/// Down: `handle` and `std::thread::spawn`.
+/// Verify: `cargo test -p loong-web`.
 pub fn serve(session: Arc<Mutex<dyn Session>>, listener: TcpListener, token: String) {
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
@@ -74,6 +112,13 @@ pub fn serve(session: Arc<Mutex<dyn Session>>, listener: TcpListener, token: Str
     }
 }
 
+/// Purpose: Decide whether a connection is the page or a WebSocket and dispatch it.
+///
+/// Serves: one listener serves both the page and the protocol (surfaces.md §4).
+/// Design: `docs/design/surfaces.md` (ADR-0009).
+/// Up: `serve` for every accepted connection.
+/// Down: `static_page` and `websocket`.
+/// Verify: `cargo test -p loong-web`.
 fn handle(
     stream: TcpStream,
     session: Arc<Mutex<dyn Session>>,
@@ -93,6 +138,13 @@ fn handle(
     }
 }
 
+/// Purpose: Answer a plain GET with the embedded page.
+///
+/// Serves: a demo needs no asset server and no bundler (surfaces.md §4).
+/// Design: `docs/design/surfaces.md` (ADR-0009).
+/// Up: `handle` for a non-WebSocket request.
+/// Down: `INDEX` and the TCP writes.
+/// Verify: `cargo test -p loong-web`.
 fn static_page(mut stream: TcpStream) -> Result<(), String> {
     // Consume the request headers; the page does not depend on them.
     let mut buffer = [0u8; 4096];
@@ -110,6 +162,13 @@ fn static_page(mut stream: TcpStream) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// Purpose: Accept the WebSocket handshake with the token check, then bridge messages to the session.
+///
+/// Serves: the browser drives the same JSON-RPC session as the TUI (surfaces.md §4).
+/// Design: `docs/design/surfaces.md` (ADR-0009).
+/// Up: `handle` when the request upgrades.
+/// Down: `tungstenite::accept_hdr`, `Session::exchange` and the socket writes.
+/// Verify: `cargo test -p loong-web`.
 fn websocket(
     stream: TcpStream,
     session: Arc<Mutex<dyn Session>>,
@@ -199,9 +258,23 @@ fn websocket(
 
 /// A session that answers from a script: the web layer's own tests, and a way to
 /// demo the page without a model behind it.
+/// Purpose: A session that answers from a script, for tests and for a page demo without a model.
+///
+/// Serves: the web layer's own tests and a model-free demo (surfaces.md §4).
+/// Design: `docs/design/surfaces.md` (ADR-0009).
+/// Up: the tests in this module and a demo caller.
+/// Down: `Session::exchange` and `serde_json`.
+/// Verify: `cargo test -p loong-web`.
 pub struct Echo(pub Vec<String>);
 
 impl Session for Echo {
+    /// Purpose: Emit the scripted lines, then a generic accepted result for the request id.
+    ///
+    /// Serves: a deterministic answer without a kernel (surfaces.md §4).
+    /// Design: `docs/design/surfaces.md` (ADR-0009).
+    /// Up: `websocket` through `Session`.
+    /// Down: the scripted lines and the `json!` result.
+    /// Verify: `cargo test -p loong-web`.
     fn exchange(
         &mut self,
         line: &str,
@@ -224,6 +297,9 @@ mod tests {
     use super::*;
     use tungstenite::client::IntoClientRequest;
 
+    /// Purpose: Start a server with a fresh token on loopback for a test.
+    ///
+    /// Contract: `crates/web/src/lib.rs`.
     fn start(session: Arc<Mutex<dyn Session>>) -> (SocketAddr, String) {
         let (listener, addr) = bind("127.0.0.1", 0).unwrap();
         let token = random_token().unwrap();
@@ -232,6 +308,7 @@ mod tests {
         (addr, token)
     }
 
+    /// Purpose: Pins that the page is served without a token because the socket is the gated part.
     #[test]
     fn the_page_is_served_without_a_token() {
         // The page itself carries no secret: it is the socket that is gated, so a
@@ -252,6 +329,7 @@ mod tests {
         );
     }
 
+    /// Purpose: Pins that a WebSocket carries a request and gets the event and then the answer.
     #[test]
     fn a_websocket_carries_a_request_and_gets_the_answer_back() {
         let session = Arc::new(Mutex::new(Echo(vec![
@@ -279,6 +357,7 @@ mod tests {
         assert!(second.contains("accepted"), "{second}");
     }
 
+    /// Purpose: Pins that a WebSocket without the token is refused.
     #[test]
     fn a_websocket_without_the_token_is_refused() {
         let session = Arc::new(Mutex::new(Echo(vec![])));
@@ -296,10 +375,25 @@ mod tests {
         }
     }
 
+    /// Purpose: Pins that lines reach the browser as the session produces them and the response comes last.
     #[test]
     fn lines_reach_the_browser_as_the_session_produces_them() {
+        /// Purpose: A session that emits two delta lines and then a response, to pin streaming order.
+        ///
+        /// Serves: the test that lines reach the browser as they are produced (surfaces.md §4).
+        /// Design: `docs/design/surfaces.md` (ADR-0009).
+        /// Up: `lines_reach_the_browser_as_the_session_produces_them`.
+        /// Down: `Session::exchange`.
+        /// Verify: `cargo test -p loong-web`.
         struct Trickle;
         impl Session for Trickle {
+            /// Purpose: Emit two delta lines before the final response.
+            ///
+            /// Serves: the streaming test, where the order of the lines is the point (surfaces.md §4).
+            /// Design: `docs/design/surfaces.md` (ADR-0009).
+            /// Up: `websocket` through `Session`.
+            /// Down: the sink callback and `json!`.
+            /// Verify: `cargo test -p loong-web`.
             fn exchange(
                 &mut self,
                 _line: &str,
@@ -335,10 +429,21 @@ mod tests {
         );
     }
 
+    /// Purpose: Pins that a session failure becomes an event instead of a dead socket.
     #[test]
     fn a_session_failure_becomes_an_event_instead_of_a_dead_socket() {
+        /// Purpose: A session whose exchange fails, to pin the error event on the socket.
+        ///
+        /// Serves: a transport failure reaches the page instead of freezing it (surfaces.md §4).
+        /// Design: `docs/design/surfaces.md` (ADR-0009).
+        /// Up: `a_session_failure_becomes_an_event_instead_of_a_dead_socket`.
+        /// Down: `Session::exchange`.
+        /// Verify: `cargo test -p loong-web`.
         struct Broken;
         impl Session for Broken {
+            /// Purpose: Always fail, as a dropped server connection would.
+            ///
+            /// Contract: `crates/web/src/lib.rs`.
             fn exchange(
                 &mut self,
                 _line: &str,
@@ -361,6 +466,7 @@ mod tests {
         );
     }
 
+    /// Purpose: Pins that tokens are random hex of a usable length.
     #[test]
     fn tokens_are_random_hex_of_a_usable_length() {
         let a = random_token().unwrap();
@@ -370,6 +476,7 @@ mod tests {
         assert_ne!(a, b, "two tokens must not collide");
     }
 
+    /// Purpose: Pins that the embedded page speaks the protocol the kernel emits.
     #[test]
     fn the_embedded_page_talks_the_protocol() {
         // The page is the other half of the contract: it must speak JSON-RPC and

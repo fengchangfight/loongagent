@@ -1,3 +1,12 @@
+//! Purpose: Run a child process with bounded output, a hard timeout and teardown of its whole tree.
+//!
+//! # Contract
+//! - **Serves:** the shell tool and the shell hook kind share one safe spawn path (tools-permissions.md §4).
+//! - **Design:** `docs/design/tools-permissions.md` (ADR-0007).
+//! - **Upstream:** the shell tool, the hook runner and the skill runner.
+//! - **Downstream:** `Command`, `Scratch` files, the child's process group and `kill_process_group`.
+//! - **Verify:** `cargo test -p loong-proc` · `./scripts/check.sh`
+//!
 //! Running a child process safely: bounded output, a hard timeout, and teardown
 //! of the **whole process tree**.
 //!
@@ -32,6 +41,13 @@ pub const STDIN_LIMIT: usize = 32 * 1024;
 /// Detected rather than hard-coded, because "is there a shell?" is a property of
 /// the machine, not of the build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Purpose: How this platform hands a command or a script to a shell: POSIX `sh` or `cmd.exe`.
+///
+/// Serves: identical shell behaviour on Ubuntu and Windows, with a detected fallback (tools-permissions.md §4).
+/// Design: `docs/design/tools-permissions.md` (ADR-0007).
+/// Up: the shell tool, the hook runner and the skill runner.
+/// Down: `detect`, `command`, `script` and `on_path`.
+/// Verify: `cargo test -p loong-proc`.
 pub enum Shell {
     /// `sh -c <command>` / `sh <script>`
     Posix,
@@ -40,6 +56,13 @@ pub enum Shell {
 }
 
 impl Shell {
+    /// Purpose: Detect whether this machine has a POSIX shell, falling back to `cmd.exe`.
+    ///
+    /// Serves: one shell contract across platforms (tools-permissions.md §4).
+    /// Design: `docs/design/tools-permissions.md` (ADR-0007).
+    /// Up: the shell tool and the hook runner when they choose how to spawn.
+    /// Down: `on_path` and `cfg!(windows)`.
+    /// Verify: `cargo test -p loong-proc`.
     pub fn detect() -> Self {
         if !cfg!(windows) || on_path("sh") {
             Shell::Posix
@@ -48,11 +71,25 @@ impl Shell {
         }
     }
 
+    /// Purpose: Say whether this shell understands POSIX command text.
+    ///
+    /// Serves: a caller that must not feed POSIX syntax to `cmd.exe`.
+    /// Design: `docs/design/tools-permissions.md` (ADR-0007).
+    /// Up: `Shell`'s callers that branch on the dialect.
+    /// Down: the `Shell` variant.
+    /// Verify: `cargo test -p loong-proc`.
     pub fn is_posix(&self) -> bool {
         matches!(self, Shell::Posix)
     }
 
     /// The program to spawn.
+    /// Purpose: The program to spawn for this shell.
+    ///
+    /// Serves: one place that names `sh` or `cmd.exe`.
+    /// Design: `docs/design/tools-permissions.md` (ADR-0007).
+    /// Up: `command`, `script` and the shell tool's spawn path.
+    /// Down: the `Shell` variant.
+    /// Verify: `cargo test -p loong-proc`.
     pub fn program(&self) -> &'static str {
         match self {
             Shell::Posix => "sh",
@@ -61,6 +98,13 @@ impl Shell {
     }
 
     /// Program plus arguments for running a **command string**.
+    /// Purpose: Program plus arguments for running a command string.
+    ///
+    /// Serves: `sh -c <text>` on POSIX and `cmd.exe /C <text>` on the fallback.
+    /// Design: `docs/design/tools-permissions.md` (ADR-0007).
+    /// Up: the shell tool when it runs a model-authored command.
+    /// Down: `program`.
+    /// Verify: `cargo test -p loong-proc`.
     pub fn command(&self, text: &str) -> (String, Vec<String>) {
         let flag = match self {
             Shell::Posix => "-c",
@@ -77,6 +121,13 @@ impl Shell {
     /// Different from [`Shell::command`] on purpose: `sh <script>` does not need the
     /// script to be executable and does not need a shebang, which is exactly how the
     /// hook runner writes its scripts.
+    /// Purpose: Program plus arguments for running a script file.
+    ///
+    /// Serves: `sh <script>` reads the file, so it needs no executable bit or shebang.
+    /// Design: `docs/design/tools-permissions.md` (ADR-0007).
+    /// Up: the hook runner when it writes and runs a hook script.
+    /// Down: `program`.
+    /// Verify: `cargo test -p loong-proc`.
     pub fn script(&self, path: &Path) -> (String, Vec<String>) {
         let path = path.to_string_lossy().to_string();
         match self {
@@ -90,6 +141,9 @@ impl Shell {
 ///
 /// Windows resolves bare names through `PATHEXT`, so `sh.exe` has to be looked for
 /// explicitly; Unix just looks for the name.
+/// Purpose: Whether `name` is an executable a shell could find on PATH.
+///
+/// Contract: `crates/proc/src/lib.rs`.
 fn on_path(name: &str) -> bool {
     let Some(path) = std::env::var_os("PATH") else {
         return false;
@@ -100,6 +154,13 @@ fn on_path(name: &str) -> bool {
     })
 }
 
+/// Purpose: One child process request: program, args, cwd, stdin, timeout, output limit and confinement.
+///
+/// Serves: the seam where the kernel's confinement reaches a child (tools-permissions.md §4).
+/// Design: `docs/design/tools-permissions.md` (ADR-0007).
+/// Up: the shell tool, the hook runner and the skill runner.
+/// Down: `run`, `Command` and the `confine` callback.
+/// Verify: `cargo test -p loong-proc`.
 pub struct RunSpec<'a> {
     pub program: &'a str,
     pub args: &'a [String],
@@ -113,6 +174,13 @@ pub struct RunSpec<'a> {
 }
 
 impl<'a> RunSpec<'a> {
+    /// Purpose: Build a spec with no stdin and the default 64 KiB per-stream output limit.
+    ///
+    /// Serves: the common spawn without a builder chain.
+    /// Design: `docs/design/tools-permissions.md` (ADR-0007).
+    /// Up: the shell tool and the hook runner.
+    /// Down: the `RunSpec` fields.
+    /// Verify: `cargo test -p loong-proc`.
     pub fn new(program: &'a str, args: &'a [String], cwd: &'a Path, timeout: Duration) -> Self {
         Self {
             program,
@@ -124,14 +192,35 @@ impl<'a> RunSpec<'a> {
             confine: None,
         }
     }
+    /// Purpose: Set the bytes to write to the child's stdin.
+    ///
+    /// Serves: a hook that reads its event as JSON on stdin.
+    /// Design: `docs/design/tools-permissions.md` (ADR-0007).
+    /// Up: the hook runner.
+    /// Down: the `stdin` field.
+    /// Verify: `cargo test -p loong-proc`.
     pub fn stdin(mut self, bytes: &'a [u8]) -> Self {
         self.stdin = Some(bytes);
         self
     }
+    /// Purpose: Set the per-stream output cap.
+    ///
+    /// Serves: a tool result that cannot flood the context (tools-permissions.md §4).
+    /// Design: `docs/design/tools-permissions.md` (ADR-0007).
+    /// Up: the shell tool.
+    /// Down: the `output_limit` field.
+    /// Verify: `cargo test -p loong-proc`.
     pub fn output_limit(mut self, limit: usize) -> Self {
         self.output_limit = limit;
         self
     }
+    /// Purpose: Set the callback installed in the forked child before `exec`.
+    ///
+    /// Serves: the kernel's confinement policy is the child's (tools-permissions.md §4).
+    /// Design: `docs/design/tools-permissions.md` (ADR-0007).
+    /// Up: the shell tool passing `ctx.confinement.confine`.
+    /// Down: the `confine` field and `run`'s pre-spawn hook.
+    /// Verify: `cargo test -p loong-proc`.
     pub fn confine(mut self, confine: &'a dyn Fn(&mut Command)) -> Self {
         self.confine = Some(confine);
         self
@@ -139,6 +228,13 @@ impl<'a> RunSpec<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Purpose: What a finished child produced: status, timeout flag, both streams and truncation flags.
+///
+/// Serves: a tool result that says how it ended and whether it was cut short (tools-permissions.md §4).
+/// Design: `docs/design/tools-permissions.md` (ADR-0007).
+/// Up: `run` and the shell tool's result formatting.
+/// Down: `ExitStatus` and the bounded scratch streams.
+/// Verify: `cargo test -p loong-proc`.
 pub struct RunOutput {
     /// `None` when the timeout fired and the tree was killed.
     pub status: Option<ExitStatus>,
@@ -150,12 +246,33 @@ pub struct RunOutput {
 }
 
 impl RunOutput {
+    /// Purpose: Whether the child exited successfully.
+    ///
+    /// Serves: the shell tool's ok flag.
+    /// Design: `docs/design/tools-permissions.md` (ADR-0007).
+    /// Up: the shell tool.
+    /// Down: `ExitStatus::success`.
+    /// Verify: `cargo test -p loong-proc`.
     pub fn success(&self) -> bool {
         matches!(self.status, Some(s) if s.success())
     }
+    /// Purpose: The exit code, when the child exited normally.
+    ///
+    /// Serves: a result that names the exit code instead of only success or failure.
+    /// Design: `docs/design/tools-permissions.md` (ADR-0007).
+    /// Up: the shell tool's description of the result.
+    /// Down: `ExitStatus::code`.
+    /// Verify: `cargo test -p loong-proc`.
     pub fn code(&self) -> Option<i32> {
         self.status.and_then(|s| s.code())
     }
+    /// Purpose: A short human description of how the child ended: exit code, signal or timeout.
+    ///
+    /// Serves: a tool result a person can read.
+    /// Design: `docs/design/tools-permissions.md` (ADR-0007).
+    /// Up: the shell tool's result formatting.
+    /// Down: `status` and `ExitStatus::code`.
+    /// Verify: `cargo test -p loong-proc`.
     pub fn describe_exit(&self) -> String {
         match self.status {
             Some(s) => match s.code() {
@@ -168,9 +285,19 @@ impl RunOutput {
 }
 
 #[derive(Debug)]
+/// Purpose: A spawn, timeout or I/O failure as one message string.
+///
+/// Serves: one error type at the process boundary.
+/// Design: `docs/design/tools-permissions.md` (ADR-0007).
+/// Up: `run` returns it to the shell tool and the hook runner.
+/// Down: its `Display` and `Error` impls.
+/// Verify: `cargo test -p loong-proc`.
 pub struct ProcError(pub String);
 
 impl std::fmt::Display for ProcError {
+    /// Purpose: Render the error message unchanged.
+    ///
+    /// Contract: `crates/proc/src/lib.rs`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
     }
@@ -178,6 +305,13 @@ impl std::fmt::Display for ProcError {
 
 impl std::error::Error for ProcError {}
 
+/// Purpose: Run one child to completion or timeout and return its bounded output.
+///
+/// Serves: every tool or hook child runs with a timeout, a cap and a whole-tree kill (tools-permissions.md §4).
+/// Design: `docs/design/tools-permissions.md` (ADR-0007).
+/// Up: the shell tool, the hook runner and the skill runner.
+/// Down: `Scratch`, `Command`, `prepare_process_group`, `wait_with_timeout` and `kill_process_group`.
+/// Verify: `cargo test -p loong-proc`.
 pub fn run(spec: &RunSpec<'_>) -> Result<RunOutput, ProcError> {
     if let Some(bytes) = spec.stdin {
         if bytes.len() > STDIN_LIMIT {
@@ -237,6 +371,13 @@ pub fn run(spec: &RunSpec<'_>) -> Result<RunOutput, ProcError> {
 }
 
 /// Two scratch files plus their directory, removed on drop.
+/// Purpose: The private directory holding a run's stdout and stderr files, removed on drop.
+///
+/// Serves: output goes to files, not pipes, so a timeout cannot deadlock a reader (tools-permissions.md §4).
+/// Design: `docs/design/tools-permissions.md` (ADR-0007).
+/// Up: `run`.
+/// Down: `TempDir`-like creation, `std::fs::File` and `remove_dir_all`.
+/// Verify: `cargo test -p loong-proc`.
 struct Scratch {
     dir: PathBuf,
 }
@@ -244,6 +385,9 @@ struct Scratch {
 static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl Scratch {
+    /// Purpose: Create a unique scratch directory.
+    ///
+    /// Contract: `crates/proc/src/lib.rs`.
     fn new() -> Result<Self, ProcError> {
         let dir = std::env::temp_dir().join(format!(
             "loong-proc-{}-{}",
@@ -253,9 +397,15 @@ impl Scratch {
         std::fs::create_dir_all(&dir).map_err(|e| ProcError(format!("{}: {e}", dir.display())))?;
         Ok(Self { dir })
     }
+    /// Purpose: The path of one scratch file.
+    ///
+    /// Contract: `crates/proc/src/lib.rs`.
     fn path(&self, name: &str) -> PathBuf {
         self.dir.join(name)
     }
+    /// Purpose: Create and return one scratch output file.
+    ///
+    /// Contract: `crates/proc/src/lib.rs`.
     fn file(&self, name: &str) -> Result<std::fs::File, ProcError> {
         std::fs::File::create(self.path(name))
             .map_err(|e| ProcError(format!("creating scratch output: {e}")))
@@ -263,13 +413,30 @@ impl Scratch {
 }
 
 impl Drop for Scratch {
+    /// Purpose: Remove the scratch directory and its files.
+    ///
+    /// Contract: `crates/proc/src/lib.rs`.
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
 
+/// Purpose: The marker that the child did not finish before its deadline.
+///
+/// Serves: a timeout is a distinct outcome, not an I/O error.
+/// Design: `docs/design/tools-permissions.md` (ADR-0007).
+/// Up: `wait_with_timeout` and `run`.
+/// Down: no data; it only signals the timeout branch.
+/// Verify: `cargo test -p loong-proc`.
 struct TimedOut;
 
+/// Purpose: Poll the child until it exits or the deadline passes.
+///
+/// Serves: a hard timeout that does not depend on the child cooperating (tools-permissions.md §4).
+/// Design: `docs/design/tools-permissions.md` (ADR-0007).
+/// Up: `run`.
+/// Down: `Child::try_wait` and `Instant`.
+/// Verify: `cargo test -p loong-proc`.
 fn wait_with_timeout(
     child: &mut std::process::Child,
     timeout: Duration,
@@ -288,6 +455,13 @@ fn wait_with_timeout(
     }
 }
 
+/// Purpose: Read a scratch stream up to a byte limit and report truncation.
+///
+/// Serves: bounded output that says where it was cut (tools-permissions.md §7).
+/// Design: `docs/design/tools-permissions.md` (ADR-0007).
+/// Up: `run` after the child ends.
+/// Down: `File::open`, `BufReader` and the length check.
+/// Verify: `cargo test -p loong-proc`.
 fn read_bounded(path: &Path, limit: usize) -> Result<(String, bool), ProcError> {
     let file =
         std::fs::File::open(path).map_err(|e| ProcError(format!("{}: {e}", path.display())))?;
@@ -325,6 +499,9 @@ fn read_bounded(path: &Path, limit: usize) -> Result<(String, bool), ProcError> 
 }
 
 #[cfg(unix)]
+/// Purpose: Put the child in its own process group so a timeout can reach its tree.
+///
+/// Contract: `crates/proc/src/lib.rs`.
 fn prepare_process_group(cmd: &mut Command) {
     use std::os::unix::process::CommandExt;
     cmd.process_group(0);
@@ -336,6 +513,9 @@ fn prepare_process_group(cmd: &mut Command) {
 /// aimed at; it also keeps a Ctrl-C aimed at the console from reaching the agent's
 /// own process group by accident.
 #[cfg(windows)]
+/// Purpose: Give the Windows child a new process group for `taskkill /T` and console isolation.
+///
+/// Contract: `crates/proc/src/lib.rs`.
 fn prepare_process_group(cmd: &mut Command) {
     use std::os::windows::process::CommandExt;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
@@ -343,12 +523,23 @@ fn prepare_process_group(cmd: &mut Command) {
 }
 
 #[cfg(not(any(unix, windows)))]
+/// Purpose: No process-group setup on this platform.
+///
+/// Contract: `crates/proc/src/lib.rs`.
 fn prepare_process_group(_cmd: &mut Command) {}
 
 /// Kill the child **and everything it spawned**.
 #[cfg(unix)]
+/// Purpose: Kill the child's whole process group with `kill(-pid)`, then reap the child.
+///
+/// Serves: a timeout kills the grandchild too, not only `sh` (tools-permissions.md §4).
+/// Design: `docs/design/tools-permissions.md` (ADR-0007).
+/// Up: `run` on a timeout.
+/// Down: the libc `syscall` declaration and `Child::kill`/`wait`.
+/// Verify: `cargo test -p loong-proc`.
 fn kill_process_group(child: &mut std::process::Child) {
     extern "C" {
+        /// Purpose: Declare the libc `syscall` used to signal the process group.
         fn syscall(num: std::ffi::c_long, ...) -> std::ffi::c_long;
     }
     const SYS_KILL: std::ffi::c_long = 62; // x86_64 and aarch64
@@ -367,6 +558,9 @@ fn kill_process_group(child: &mut std::process::Child) {
 /// `timeout` or a spawned server running — exactly the leak this module exists to
 /// prevent. `taskkill` ships with every supported Windows.
 #[cfg(windows)]
+/// Purpose: Kill the child's tree with `taskkill /T`.
+///
+/// Contract: `crates/proc/src/lib.rs`.
 fn kill_process_group(child: &mut std::process::Child) {
     let pid = child.id().to_string();
     let _ = Command::new("taskkill")
@@ -380,6 +574,9 @@ fn kill_process_group(child: &mut std::process::Child) {
 }
 
 #[cfg(not(any(unix, windows)))]
+/// Purpose: Kill only the direct child on this platform.
+///
+/// Contract: `crates/proc/src/lib.rs`.
 fn kill_process_group(child: &mut std::process::Child) {
     let _ = child.kill();
     let _ = child.wait();
@@ -391,6 +588,9 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static N: AtomicU64 = AtomicU64::new(0);
+    /// Purpose: Create a unique temporary directory for a test.
+    ///
+    /// Contract: `crates/proc/src/lib.rs`.
     fn tempdir() -> PathBuf {
         let d = std::env::temp_dir().join(format!(
             "loong-proc-test-{}-{}",
@@ -400,6 +600,9 @@ mod tests {
         std::fs::create_dir_all(&d).unwrap();
         d
     }
+    /// Purpose: Build `sh -c <script>` arguments for a test.
+    ///
+    /// Contract: `crates/proc/src/lib.rs`.
     fn sh(script: &str) -> Vec<String> {
         vec!["-c".to_string(), script.to_string()]
     }
@@ -407,6 +610,7 @@ mod tests {
     // POSIX shell script: skipped where there is no `sh` (Windows without Git for
     // Windows/WSL). The portable behaviour is covered by the tests that do not spawn a shell.
     #[cfg_attr(windows, ignore = "needs a POSIX shell (sh)")]
+    /// Purpose: Pins that stdout, stderr and the exit code come back separately.
     #[test]
     fn output_and_exit_status_come_back() {
         let cwd = tempdir();
@@ -422,6 +626,7 @@ mod tests {
     // POSIX shell script: skipped where there is no `sh` (Windows without Git for
     // Windows/WSL). The portable behaviour is covered by the tests that do not spawn a shell.
     #[cfg_attr(windows, ignore = "needs a POSIX shell (sh)")]
+    /// Purpose: Pins that the stdin payload reaches the child.
     #[test]
     fn stdin_reaches_the_child() {
         let cwd = tempdir();
@@ -435,6 +640,7 @@ mod tests {
     // POSIX shell script: skipped where there is no `sh` (Windows without Git for
     // Windows/WSL). The portable behaviour is covered by the tests that do not spawn a shell.
     #[cfg_attr(windows, ignore = "needs a POSIX shell (sh)")]
+    /// Purpose: Pins the per-stream output cap and its truncation flag.
     #[test]
     fn output_is_bounded_per_stream() {
         let cwd = tempdir();
@@ -448,6 +654,7 @@ mod tests {
     // POSIX shell script: skipped where there is no `sh` (Windows without Git for
     // Windows/WSL). The portable behaviour is covered by the tests that do not spawn a shell.
     #[cfg_attr(windows, ignore = "needs a POSIX shell (sh)")]
+    /// Purpose: Pins that a timeout kills the grandchild too, quickly.
     #[test]
     fn a_timeout_kills_the_whole_tree() {
         let cwd = tempdir();
@@ -477,6 +684,7 @@ mod tests {
     // POSIX shell script: skipped where there is no `sh` (Windows without Git for
     // Windows/WSL). The portable behaviour is covered by the tests that do not spawn a shell.
     #[cfg_attr(windows, ignore = "needs a POSIX shell (sh)")]
+    /// Purpose: Pins that an oversized stdin payload is refused before spawning.
     #[test]
     fn an_oversized_stdin_payload_is_refused_before_spawning() {
         let cwd = tempdir();
@@ -486,6 +694,7 @@ mod tests {
         assert!(run(&spec).unwrap_err().0.contains("over the"));
     }
 
+    /// Purpose: Pins that a missing program is an error, not a panic.
     #[test]
     fn a_missing_program_is_an_error_not_a_panic() {
         let cwd = tempdir();
@@ -498,6 +707,7 @@ mod tests {
         assert!(run(&spec).unwrap_err().0.contains("spawning"));
     }
 
+    /// Purpose: Pins the shell choice and its command and script argument shape.
     #[test]
     fn the_shell_is_the_one_the_platform_actually_has() {
         let shell = Shell::detect();

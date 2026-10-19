@@ -19,14 +19,14 @@ listed is a violation. The middle column is each crate's own `//!` header.
 | `loong-control` | Talking to the control plane: fetching the signed profile pack, verifying it, | `loong-config`, `loong-http`, `loong-pack` |
 | `loong-eventlog` | Write and read the append-only JSONL event log that is one session's source of truth. | `loong-schema` |
 | `loong-hooks` | Lifecycle hooks: the deterministic enforcement layer (ADR-0007 §7). | `loong-http`, `loong-manifest`, `loong-proc`, `loong-schema` |
-| `loong-http` | The smallest HTTP/1.1 client that can carry a JSON POST — shared by the | — |
+| `loong-http` | Carry one JSON request over HTTP/1.1, plain or TLS, with bounded timeouts and a streamed reply. | — |
 | `loong-index` | Answer tree, search and count queries from a disposable SQLite copy of the JSONL log. | `loong-eventlog`, `loong-schema` |
 | `loong-kernel` | The fixed kernel (ADR-0004): the model+tool loop, the context ledger that is | `loong-config`, `loong-context`, `loong-eventlog`, `loong-hooks`, `loong-index`, `loong-mcp`, `loong-providers`, `loong-sandbox`, `loong-schema`, `loong-skills`, `loong-tools` |
-| `loong-manifest` | Manifest trust: a repository's configuration is **content from that | — |
+| `loong-manifest` | Gate repository manifests behind a human trust decision and a change-detection hash. | — |
 | `loong-mcp` | MCP (T-15): external tools behind the same interface as the built-ins. | `loong-manifest`, `loong-protocol`, `loong-schema`, `loong-tools` |
-| `loong-pack` | The one signed envelope every distributed artifact travels in. | — |
+| `loong-pack` | Sign and verify the one envelope every distributed artifact travels in. | — |
 | `loong-plugin` | Plugins: a bundle of skills you install **by name**, instead of hand-copying | `loong-config`, `loong-skills` |
-| `loong-proc` | Running a child process safely: bounded output, a hard timeout, and teardown | — |
+| `loong-proc` | Run a child process with bounded output, a hard timeout and teardown of its whole tree. | — |
 | `loong-protocol` | Define the JSON-RPC 2.0 envelopes and one-line framing that carry schema messages between surfaces and the server. | `loong-schema` |
 | `loong-providers` | Model providers behind one `Model` interface (ADR-0004). | `loong-http`, `loong-schema` |
 | `loong-sandbox` | Policy decision point (ADR-0007): the kernel decides, the OS enforces. | `loong-schema` |
@@ -36,5 +36,5 @@ listed is a violation. The middle column is each crate's own `//!` header.
 | `loong-tools` | Tools behind one uniform, MCP-shaped interface — built-ins included | `loong-proc`, `loong-schema` |
 | `loong-tui` | Terminal client (ADR-0009): renders the event stream and sends intents. | `loong-protocol`, `loong-schema` |
 | `loong-tui-app` | The full-screen terminal surface (ADR-0009, ADR-0013): a ratatui view over a | `loong-schema`, `loong-tui` |
-| `loong-web` | The web surface (ADR-0009): the same session, in a browser. | — |
+| `loong-web` | Serve the embedded browser page and bridge WebSocket lines to the same JSON-RPC server. | — |
 | `loongagent` | loongagent — one binary, many faces (ADR-0009). | `loong-config`, `loong-context`, `loong-control`, `loong-eventlog`, `loong-hooks`, `loong-http`, `loong-index`, `loong-kernel`, `loong-manifest`, `loong-mcp`, `loong-pack`, `loong-plugin`, `loong-proc`, `loong-protocol`, `loong-providers`, `loong-sandbox`, `loong-schema`, `loong-server`, `loong-skills`, `loong-tools`, `loong-tui`, `loong-tui-app`, `loong-web` |

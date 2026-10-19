@@ -1,4 +1,4 @@
-//! Purpose: Tools behind one interface, with autonomy allocated per action and every child confined (ADR-0004, ADR-0007).
+//! Purpose: Tools behind one interface, with autonomy allocated per action and confinement on children that go through `ExecContext`/`loong_proc` (ADR-0004, ADR-0007).
 //!
 //! # Contract
 //! - **Serves:** the kernel's registry and dispatch, the MCP adapter and the skill tool.

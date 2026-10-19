@@ -77,9 +77,9 @@ impl Default for Ladder {
 
 impl Ladder {
     /// Purpose: The verdict in force for one action class.
-    /// Serves: `Pdp::tighten_from`, `Pdp::decide` and the kernel's approval path.
+    /// Serves: `Pdp`'s decision and tightening methods.
     /// Design: `docs/design/tools-permissions.md` §3.
-    /// Up: `Pdp::tighten_from` and `Pdp::decide`.
+    /// Up: `Pdp::tighten_from` and `Pdp::decide`; no caller outside this module.
     /// Down: the three ladder fields.
     /// Verify: `cargo test -p loong-sandbox`.
     pub fn get(&self, class: ActionClass) -> Verdict {
@@ -208,9 +208,9 @@ impl Pdp {
 
     /// Tighten one action class. Refuses to widen (ADR-0008 monotonicity).
     /// Purpose: Tighten one action class, refusing any change that would widen.
-    /// Serves: the kernel's hook tightening and its tests.
-    /// Design: `docs/design/tools-permissions.md` §3 and §5.
-    /// Up: `Kernel::dispatch` and kernel tests.
+    /// Serves: callers that narrow a class without naming a provenance layer.
+    /// Design: `docs/design/tools-permissions.md` §3.
+    /// Up: its own unit tests and kernel tests; no production caller (the kernel narrows through `tighten_from`).
     /// Down: `tighten_from` with the source `session`.
     /// Verify: `cargo test -p loong-sandbox`.
     pub fn tighten(&mut self, class: ActionClass, verdict: Verdict) -> Result<(), PolicyError> {
@@ -220,9 +220,9 @@ impl Pdp {
     /// Tighten and record **who** narrowed it, so the rule that fired names its
     /// source (ADR-0008 §4 provenance, ADR-0007 "the rule that fired").
     /// Purpose: Tighten one class and record which source narrowed it.
-    /// Serves: the kernel's build step and a hook's stricter ruling.
+    /// Serves: the kernel's build step, which applies a profile's values with their provenance.
     /// Design: `docs/design/tools-permissions.md` §3.
-    /// Up: the kernel's build step, `Pdp::tighten` and the hook path.
+    /// Up: `Kernel::build` and `Pdp::tighten`.
     /// Down: `Ladder::get`/`set`, `rank` and `class_name`.
     /// Verify: `cargo test -p loong-sandbox`.
     pub fn tighten_from(

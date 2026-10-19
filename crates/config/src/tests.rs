@@ -1076,7 +1076,7 @@ fn a_pack_payload_becomes_named_profiles_with_descriptions() {
 }
 
 #[test]
-/// Purpose: Pin that a pack's literal secret still produces a warning, not a silent pass.
+/// Purpose: Pin that a literal key in a user profile is refused as not a reference.
 fn a_literal_in_a_config_file_is_still_refused() {
     // The pack may carry a secret for now; a file a repository or a dotfiles
     // directory can commit may not. That is the line the amendment keeps.
@@ -1151,7 +1151,7 @@ fn a_secret_pasted_after_the_prefix_is_refused() {
 }
 
 #[test]
-/// Purpose: Pin the pack errors for an empty profile set, an empty model set and an unknown route.
+/// Purpose: Pin the pack errors for an empty profile set, an empty model set and an unknown route, plus the warning for a pack's literal secret.
 fn a_broken_pack_says_what_is_wrong() {
     let err = profiles_from_payload("[[profiles]]\nname = \"x\"\n")
         .unwrap_err()
@@ -1307,7 +1307,7 @@ fn the_layer_order_is_the_rule() {
 }
 
 #[test]
-/// Purpose: Pin the managed layer file names and their order.
+/// Purpose: Pin that the user layer resolves under `LOONGAGENT_HOME`.
 fn layer_paths_are_where_they_claim_to_be() {
     // The user layer lives under one root, and `LOONGAGENT_HOME` moves it.
     std::env::set_var("LOONGAGENT_HOME", "/tmp/loong-home-test");

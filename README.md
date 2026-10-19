@@ -35,7 +35,7 @@ L1 原文/物化  ── 永远开启（这是"不丢原文"的兑现）
    └── S 模式：小模型补充 L2/L3/L4，模型不可达时按段降级回 digest，不是整段失效
 ```
 
-细节在 [docs/06-context-engineering.md](docs/06-context-engineering.md) 与
+细节在 [docs/context/README.md](docs/context/README.md) 与
 [ADR-0017](docs/decisions/0017-layered-context.md)。
 
 ---
@@ -262,7 +262,7 @@ model = "qwen2.5:7b-instruct"
 - 摘要模型在 CPU 上就够快（实测 3B 一次完整归纳约 1–3 秒，0.6B 更快，**延迟不是约束**），
   但**质量差别是真的**：`why` 字段的忠实度实测 7B 7/7、3B 6/7、0.6B 3/7，所以默认是
   `qwen2.5:7b-instruct`。能算的字段由程序算，模型只答 `why` / `open_questions` / `conclusion`，
-  见 [docs/06-context-engineering.md](docs/06-context-engineering.md) §14。
+  见 [docs/context/rollout.md](docs/context/rollout.md) §14。
 
 ---
 

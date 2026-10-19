@@ -224,8 +224,8 @@ magically restored to the prompt.
 - [04 System overview](../04-system-overview.md) §3 item 3 — context assembly
   as one of the four kernel-owned things.
 - [06 Context engineering](../06-context-engineering.md) — the memory design's
-  entry point (Chinese); the per-layer detail belongs in `docs/context/README.md`
-  when that layer is written.
+  entry point (Chinese); the per-layer detail is in
+  [docs/context/](../context/README.md).
 - `crates/kernel/src/turn/tests.rs` — the behaviour pinned here:
   `compaction_clears_stale_tool_output_before_dropping_anything`,
   `compaction_never_splits_a_tool_pair`,

@@ -33,10 +33,11 @@ is tracked here so decisions survive context windows and sessions.
   checks (links, orphans, citations) skip the directory entirely.
 - A document under `docs/` whose body is not English carries a `Language: <code>`
   line immediately below its title, so a reader who cannot read the language is
-  warned before the first paragraph. `docs/06-context-engineering.md` and
-  `docs/decisions/0017-layered-context.md` are the two marked exceptions, and
-  translating them is not in scope. (`README.md` is Chinese throughout and is
-  not marked: it is the entry document, not an exception inside `docs/`.)
+  warned before the first paragraph. `docs/06-context-engineering.md`, every
+  file under `docs/context/`, and `docs/decisions/0017-layered-context.md` are
+  the marked exceptions, and translating them is not in scope. (`README.md` is
+  Chinese throughout and is not marked: it is the entry document, not an
+  exception inside `docs/`.)
 - Docs are updated in place whenever discussion changes the design — they reflect
   the *current* shared understanding, not a history. History lives in git.
 - Nothing is "Agreed" until the human explicitly signs off in conversation.
@@ -107,7 +108,8 @@ file that does not exist yet.
 | [03-architecture.md](03-architecture.md) | Architecture, question-driven (AQ-1…AQ-12 decision map) | Agreed |
 | [04-system-overview.md](04-system-overview.md) | The architecture as decided — one-read end-to-end picture | Agreed |
 | [05-parity-and-synthesis.md](05-parity-and-synthesis.md) | Parity vs Claude Code + absorption backlog from the field + deliberate "no"s | Living |
-| [06-context-engineering.md](06-context-engineering.md) | Context engineering — layered reversible memory (L1–L4 + raw archive, background increment, `recall`) | Discussing (P1–P5.5 implemented) |
+| [06-context-engineering.md](06-context-engineering.md) | Context engineering — entry to the layered reversible memory design (L1–L4 + raw archive, background increment, `recall`) | Discussing (P1–P5.5 implemented) |
+| [context/](context/) | The context design in detail — principles, data model, pipeline, `recall`, failure modes, config, rollout | Discussing (P1–P5.5 implemented) |
 | [07-extending.md](07-extending.md) | Changing the machinery — a new built-in tool, a new event, a hook, how routing picks a model | Living |
 | [design/](design/) | Subsystem design: one document per mechanism, one per flow; the layer between the overview and the code. | Living |
 | human-written/ | The human's own notes — input, never edited by an agent (`AGENTS.md`, `scripts/check-human-written.sh`) | — |

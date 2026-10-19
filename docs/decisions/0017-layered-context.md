@@ -4,11 +4,10 @@ Language: zh
 
 - **Status:** Proposed（整体形态待 owner sign off；**§1 检索层/理解层分离、§2 分层、
   §5 两模式已获 owner 认可方向**；未定项见文末）
-- **Date:** 2026-10-13（同日更新：owner 选定 Ollama 小模型后端；字段归属规则见 Decision §4，
-  实测与决定见文末第 1 项。**2026-10-14 更新：P1–P5.5 已实现；空闲窗口调度、TUI 记忆状态落地，
-  尚未落地的部分见文末"④ 的落地与证据"与设计文档 §11.1**）
+- **Date:** 2026-10-13（owner 选定 Ollama 小模型后端；字段归属规则见 Decision §4，
+  实测与决定见文末第 1 项）
 - **Decides:** ADR-0006 §4 的修订方向；上下文管理的整体形态
-- **Design doc:** [docs/06-context-engineering.md](../06-context-engineering.md)
+- **Design doc:** [docs/context/README.md](../context/README.md)
 
 ## Context
 
@@ -183,10 +182,10 @@ ADR-0006 定下的机制是对的：上下文只能由内核组装，每个块�
 - **新增事件种类**（schema 先行，`scripts/gen-schema.py` 生成）：
   `memory.l1.materialized`、`memory.summary.updated`、`memory.superseded`、
   `memory.worker.state` —— 后台工作与摘要变更都是可见事件，本 ADR 的承诺才可审计。
-  **实现状态（2026-10-14）：一个都还没有。** `protocol.toml` 里没有 `memory.*` 事件，
+  **实现状态：一个都还没有。** `protocol.toml` 里没有 `memory.*` 事件，
   引擎也从不写日志（它只读会话日志、只写 sidecar）：水位在 `meta`、摘要在 `summary`、
-  worker 统计在进程内。**"摘要变更可审计"这条承诺尚未兑现**，列在设计文档 §11.1。
-- **两处尚未落地的机制（2026-10-14 审计发现，如实列出）**：
+  worker 统计在进程内。**"摘要变更可审计"这条承诺尚未兑现**，见设计文档 §9。
+- **两处尚未落地的机制（审计发现，如实列出）**：
   1. **`superseded_by` 从未被写过。** 过期摘要当前由 `replace_overlapping` **删除**并
      重派生，而不是"标 `superseded_by` 保留历史"（Decision §6 的后半句没兑现）。
   2. **配置并未全部接线。** `[context_engine] l4_max_tokens` 与 `episode_events` 会被解析

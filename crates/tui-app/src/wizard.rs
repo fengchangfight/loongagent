@@ -1,7 +1,7 @@
 //! Purpose: The local first-run wizard: one provider, one API key, and the models the vendor answers with.
 //!
 //! # Contract
-//! - **Serves:** `crates/cli/src/local.rs`'s first run, through `local_wizard`, `after_validation` and the choice types re-exported here.
+//! - **Serves:** `crates/cli/src/local.rs`'s first run, through `local_wizard` and the choice types re-exported here.
 //! - **Design:** `docs/design/surfaces.md` §3 and §6.
 //! - **Upstream:** `crates/cli/src/local.rs` calls `local_wizard` and builds `ProviderChoice`, `Validation` and `OfferedKey`.
 //! - **Downstream:** `ratatui` for the forms, `setup::full_screen_needs_a_terminal`, and the `MARK_*` palette in this crate.
@@ -214,7 +214,7 @@ impl Finished {
     /// Purpose: The colour for this ending: green for done, yellow for stopped, red for failed.
     /// Serves: `App::draw`.
     /// Design: `docs/design/surfaces.md` §3.
-    /// Up: `App::draw`.
+    /// Up: `App::draw` and `the_tick_says_how_the_turn_ended_and_which_way`.
     /// Down: no call; it maps `Outcome` to a `Style`.
     /// Verify: `cargo test -p loong-tui-app`.
     /// Its colour, which is half of what makes it readable at a glance.
@@ -510,7 +510,7 @@ impl LocalWizard {
     /// Purpose: Float the providers a refusal suggested, keeping the rest in order and never inventing one.
     /// Serves: `local_wizard` after a failed validation.
     /// Design: `docs/design/surfaces.md` §3.
-    /// Up: `local_wizard`.
+    /// Up: `local_wizard` and `a_refusal_can_re_rank_the_list_without_asking_anyone_again`.
     /// Down: no call; it reorders `providers` and resets the caret.
     /// Verify: `cargo test -p loong-tui-app`.
     /// Float the named providers to the top, keeping everything else in order.

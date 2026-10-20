@@ -69,7 +69,7 @@ pub enum ToWorker {
 }
 
 /// Purpose: The worker's reports back to the screen: rendered lines, streamed deltas, state, folds and failures.
-/// Serves: `App::drain`, the only reader, and `worker::spawn_worker`, the only writer.
+/// Serves: `App::drain`, the only reader, and `worker::spawn_worker` and the tests' `fed` helper, which write them.
 /// Design: `docs/design/surfaces.md` §3; `docs/design/sessions-lineage.md` §1 for the replayed past.
 /// Up: `worker::spawn_worker` sends every variant; the tests in this crate send them directly through a channel.
 /// Down: `App::drain` folds them into `lines`, `pending`, `context`, `models`, `folded` and `finished`.
@@ -132,7 +132,7 @@ pub enum Action {
 }
 
 /// Purpose: Put the transcript on the clipboard with OSC 52 and also write it to a session-named temporary file.
-/// Contract: called by `surface::run` for `/copy`; calls `base64` for the escape payload and writes the file the caller names on screen.
+/// Contract: called by `surface::run` for `/copy` and by `copy_puts_the_transcript_on_the_clipboard_and_in_a_file`; calls `base64` for the escape payload and writes the file the caller names on screen.
 /// Put text on the clipboard with OSC 52 — the escape sequence terminals honour, and the
 /// only way to reach a clipboard from an application that is not the window system's — and
 /// also write it beside the session's other files. The file is the honest half: OSC 52 is
@@ -750,7 +750,7 @@ impl App {
     /// Purpose: Read the renderer's `⇄ model` line and move the bar with it, so a rule's mid-turn switch is not missed.
     /// Serves: `App::drain`'s `FromWorker::Lines` arm.
     /// Design: `docs/design/surfaces.md` §3.
-    /// Up: `App::drain`.
+    /// Up: `App::drain` and `the_bar_follows_a_switch_a_rule_made_mid_turn`.
     /// Down: no call; it assigns `selected`.
     /// Verify: `cargo test -p loong-tui-app`.
     /// Notice a `⇄ model a → b (…)` line and move the bar with it.
@@ -1337,7 +1337,7 @@ impl App {
     }
 
     /// Purpose: Ask the server process to stop the running turn, saying "interrupting" rather than "stopped".
-    /// Contract: called by `handle_key`'s Ctrl-C and Esc arms; signals `App::interrupt` and calls `push_lines`.
+    /// Contract: called by `handle_key`'s Ctrl-C and Esc arms and by `a_turn_the_person_stopped_says_so_rather_than_showing_a_tick`; signals `App::interrupt` and calls `push_lines`.
     /// Ask for the turn to stop. The server stops at the next step boundary — after the
     /// tool that is already running finishes — so the line says "interrupting", not
     /// "stopped".
@@ -2065,7 +2065,7 @@ impl App {
     }
 
     /// Purpose: Keep the full text of a fold the turn sent, bounded by `FOLD_KEEP` so a long session cannot grow without limit.
-    /// Contract: called by `drain`'s `Fold` arm and `surface::run`'s replayed history.
+    /// Contract: called by `drain`'s `Fold` arm, `surface::run`'s replayed history and `enter_opens_a_fold_the_turn_sent_without_asking_the_log`.
     /// Keep the full text of a fold this view was shown. A number already held is replaced:
     /// the newest fold is the one anyone is about to open, so what must not survive is the
     /// oldest, and the log still has every one of them.
@@ -2197,7 +2197,7 @@ impl App {
     /// Purpose: Scroll the conversation on a wheel event, or the open fold when one is on screen.
     /// Serves: `surface::run`'s mouse event arm.
     /// Design: `docs/design/surfaces.md` §3.
-    /// Up: `surface::run`.
+    /// Up: `surface::run` and `the_wheel_scrolls_the_conversation`.
     /// Down: `App::scroll_fold`.
     /// Verify: `cargo test -p loong-tui-app`.
     /// A mouse wheel event: scrolling the conversation is the one thing a wheel

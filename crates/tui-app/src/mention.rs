@@ -77,7 +77,7 @@ impl FileIndex {
     /// Purpose: Read the workspace's files, preferring git and falling back to a bounded walk.
     /// Serves: `App::refresh_picker`.
     /// Design: `docs/design/surfaces.md` §3.
-    /// Up: `App::refresh_picker` and the tests.
+    /// Up: `App::refresh_picker`, and only when `mention_files` is `None`.
     /// Down: `git_files` and `walk_files`.
     /// Verify: `cargo test -p loong-tui-app`.
     /// Read the workspace's files. Prefers git; falls back to a bounded walk.
@@ -106,7 +106,7 @@ impl FileIndex {
     /// Purpose: The directory this index was read from.
     /// Serves: no caller today; the picker matches relative paths and never joins them back to the root.
     /// Design: `docs/design/surfaces.md` §3.
-    /// Up: no caller; `FileIndex::read` is the only writer.
+    /// Up: no caller; `FileIndex::read` and `FileIndex::from_files` both set it.
     /// Down: no call; it borrows `root`.
     /// Verify: `cargo test -p loong-tui-app`.
     pub fn root(&self) -> &Path {
@@ -236,7 +236,7 @@ fn subsequence_rank(haystack: &str, needle: &str) -> Option<u32> {
 /// Purpose: The `@`-token the caret is inside, as a byte range and the text typed after the trigger.
 /// Serves: `Picker::refresh`.
 /// Design: `docs/design/surfaces.md` §3.
-/// Up: `Picker::refresh` and the tests.
+/// Up: `Picker::refresh` only; the tests reach it through `App`.
 /// Down: `char_to_byte`.
 /// Verify: `cargo test -p loong-tui-app`.
 /// The `@`-token the caret is inside, if any.
@@ -399,9 +399,9 @@ pub struct Picker {
 
 impl Picker {
     /// Purpose: Build the picker for the current text and caret, or `None` when the caret left the reference.
-    /// Serves: `App::refresh_picker` and the picker tests.
+    /// Serves: `App::refresh_picker`.
     /// Design: `docs/design/surfaces.md` §3.
-    /// Up: `App::refresh_picker` and the tests.
+    /// Up: `App::refresh_picker` only; the picker tests reach it through `App`.
     /// Down: `token_at` and `FileIndex::matches`.
     /// Verify: `cargo test -p loong-tui-app`.
     /// Refresh against the current input and a workspace index. `None` when the

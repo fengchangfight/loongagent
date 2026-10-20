@@ -3,7 +3,7 @@
 //! # Contract
 //! - **Serves:** the kernel's turn, which holds a `Box<dyn Model>`, and every surface that previews an answer.
 //! - **Design:** `docs/design/config-routing.md` §8.
-//! - **Upstream:** `crates/kernel/src/turn.rs` and `crates/cli/src/server.rs` build an implementation.
+//! - **Upstream:** `crates/cli/src/server.rs` builds an implementation; `crates/kernel/src/turn.rs` holds the `Box<dyn Model>`.
 //! - **Downstream:** the real adapter `openai_compat`, the probe, and `loong_schema`'s JSON type.
 //! - **Verify:** `cargo test -p loong-providers` · `./scripts/check.sh`
 //!
@@ -174,9 +174,9 @@ pub trait Model: Send {
     /// default delivers the whole text in one delta, so a model that cannot stream
     /// still works behind every surface.
     /// Purpose: The same call, reporting text as it is written.
-    /// Serves: surfaces that preview an answer; the returned response is still the record.
+    /// Serves: the kernel's step loop, which forwards deltas as transient notifications; the returned response is still the record.
     /// Design: `docs/design/config-routing.md` §8.
-    /// Up: the kernel's model call and the CLI's live output.
+    /// Up: `crates/kernel/src/turn/loop.rs`; surfaces see deltas through the protocol, not by calling this.
     /// Down: `Model::complete` by default; `OpenAiCompat` overrides it.
     /// Verify: `cargo test -p loong-providers`.
     fn complete_streaming(
@@ -244,9 +244,9 @@ impl ScriptedModel {
 
     /// Declare a context window, so a test can watch the kernel compact against it.
     /// Purpose: Declare a window so a test can watch compaction fire.
-    /// Serves: the kernel's compaction tests.
+    /// Serves: the crate's own window test; no other caller in the tree.
     /// Design: `docs/design/config-routing.md` §8.
-    /// Up: kernel tests and the CLI's demo setup.
+    /// Up: `a_model_can_declare_how_much_it_holds` in this file.
     /// Down: `Model::context_window`.
     /// Verify: `cargo test -p loong-providers`.
     pub fn with_context_window(mut self, tokens: u64) -> Self {
@@ -256,9 +256,9 @@ impl ScriptedModel {
 
     /// A model that immediately answers with text and no tool calls.
     /// Purpose: A double that answers with text and no tool calls.
-    /// Serves: tests and demos that need one plain answer.
+    /// Serves: the provider, kernel-turn and server tests that need one plain answer.
     /// Design: `docs/design/config-routing.md` §8.
-    /// Up: provider, kernel and CLI tests.
+    /// Up: `crates/providers`, `crates/kernel/src/turn/tests.rs` and `crates/server/src/lib.rs` tests.
     /// Down: `ScriptedModel::new`.
     /// Verify: `cargo test -p loong-providers`.
     pub fn saying(text: &str) -> Self {
@@ -275,9 +275,9 @@ impl ScriptedModel {
     /// Number of completions requested so far — lets a test assert that the loop
     /// stopped instead of spinning.
     /// Purpose: How many completions were requested so far.
-    /// Serves: tests that assert the loop stopped rather than spun.
+    /// Serves: the crate's own script test; no other caller in the tree.
     /// Design: `docs/design/config-routing.md` §8.
-    /// Up: `crates/providers` tests and kernel loop tests.
+    /// Up: `scripted_model_plays_its_script_then_stops` in this file.
     /// Down: the `cursor` field.
     /// Verify: `cargo test -p loong-providers`.
     pub fn calls(&self) -> usize {

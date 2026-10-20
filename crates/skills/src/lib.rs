@@ -110,9 +110,9 @@ pub struct Skill {
 impl Skill {
     /// The body, when it is already in hand.
     /// Purpose: The body when it is in hand; `None` for an MCP prompt.
-    /// Serves: `SkillSet::invoke`.
+    /// Serves: `SkillSet::invoke` and the kernel's bootstrap lookup.
     /// Design: `docs/design/extension-model.md` §2.
-    /// Up: `SkillSet::invoke`.
+    /// Up: `SkillSet::invoke` and `crates/kernel/src/turn/build.rs`.
     /// Down: the `Origin` variants.
     /// Verify: `cargo test -p loong-skills`.
     pub fn body(&self) -> Option<&str> {

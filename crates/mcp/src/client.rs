@@ -9,8 +9,8 @@
 //!
 //! A stdio MCP client: JSON-RPC 2.0 over newline-delimited messages.
 //!
-//! Deliberately small. It does the handshake, lists tools, calls tools, and does
-//! nothing else — no resources, no prompts, no sampling, and it does not serve
+//! Deliberately small. It does the handshake, lists and fetches prompts, lists and
+//! calls tools, and nothing else — no resources, no sampling — and it does not serve
 //! server-initiated requests (a server that needs the model gets an error, not a
 //! silent hang).
 //!
@@ -223,7 +223,7 @@ impl McpClient {
     }
 
     /// Purpose: The configured server name.
-    /// Serves: no in-tree caller outside the crate's tests and the `Debug` output.
+    /// Serves: `KernelMcp` in `crates/kernel/src/turn/build.rs`, which matches a server by name.
     /// Design: `docs/design/extension-model.md` §3.
     /// Up: `KernelMcp` in `crates/kernel/src/turn/build.rs` matches a server by name.
     /// Down: the `name` field.

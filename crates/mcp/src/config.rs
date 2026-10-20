@@ -35,7 +35,7 @@ const MAX_TIMEOUT_MS: u64 = 600_000;
 /// Serves: `McpSet`, `McpClient::start` and `McpTool`.
 /// Design: `docs/design/extension-model.md` §3 and `docs/design/security-trust.md` §1.
 /// Up: `McpSet::load` parses it from `mcp.toml`.
-/// Down: `McpClient::start` and `McpTool::new`.
+/// Down: `McpClient::start`, which copies its fields, and `class_for`, which `attach_mcp` calls.
 /// Verify: `cargo test -p loong-mcp`.
 pub struct McpServerSpec {
     pub name: String,
@@ -106,9 +106,9 @@ pub struct McpSet {
 
 impl McpSet {
     /// Purpose: Parse the manifest and check its trust record, with no manifest meaning no servers.
-    /// Serves: `crates/kernel/src/turn/build.rs` and `crates/cli/src/mcp.rs`.
+    /// Serves: `crates/kernel/src/turn/build.rs`, `crates/cli/src/mcp.rs` and `crates/cli/src/server.rs`.
     /// Design: `docs/design/extension-model.md` §3 and `docs/design/security-trust.md` §1.
-    /// Up: those two callers.
+    /// Up: those three callers.
     /// Down: `loong_manifest::check` and `parse_class`.
     /// Verify: `cargo test -p loong-mcp`.
     pub fn load(workspace: impl AsRef<Path>) -> Result<Self, ConfigError> {
@@ -219,9 +219,9 @@ impl McpSet {
     }
 
     /// Purpose: A one-line trust summary for startup logs and `mcp list`.
-    /// Serves: `crates/cli/src/mcp.rs`.
+    /// Serves: `crates/cli/src/mcp.rs` and the kernel's `attach_mcp` startup note.
     /// Design: `docs/design/extension-model.md` §3.
-    /// Up: the CLI.
+    /// Up: `crates/cli/src/mcp.rs` and `crates/kernel/src/turn/build.rs`.
     /// Down: `trust` and `loong_manifest::inert_message`.
     /// Verify: `cargo test -p loong-mcp`.
     pub fn summary(&self) -> String {

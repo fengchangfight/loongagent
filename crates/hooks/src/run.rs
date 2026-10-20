@@ -521,7 +521,7 @@ pub fn strictest(a: &Verdict, b: &Verdict) -> Verdict {
 /// Purpose: The payload every hook receives: the event, a timestamp and the moment's fields.
 /// Serves: the kernel's hook calls.
 /// Design: `docs/design/extension-model.md` §1.
-/// Up: `crates/kernel/src/turn.rs` and `turn/loop.rs`.
+/// Up: `crates/kernel/src/turn.rs`, which adds the event fields.
 /// Down: `HookEvent::wire` and `now_ms`; the hook's stdin or request body.
 /// Verify: `cargo test -p loong-hooks`.
 pub fn payload(event: HookEvent, fields: Value) -> Value {

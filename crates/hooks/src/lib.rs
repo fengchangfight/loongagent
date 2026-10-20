@@ -15,9 +15,9 @@
 //! *decisions* around the loop reproducible and administrable, while the loop
 //! itself stays small enough to audit.
 //!
-//! What runs in v1: `shell` (a fingerprinted script) and `http` (an endpoint,
-//! off until the manifest opts in). The `mcp` kind needs the MCP client (T-15)
-//! and is refused with that reason rather than accepted and ignored.
+//! All three kinds run: `shell` (a fingerprinted script), `http` (an endpoint,
+//! off until the manifest opts in) and `mcp` (a tool on a trusted server). The
+//! verdict contract is the same for each.
 //!
 //! See [`config`] for the manifest and the trust gate, and [`run`] for the
 //! verdict contract and monotonic aggregation.

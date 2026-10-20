@@ -64,8 +64,9 @@ Every `fn`, `struct`, `enum`, `trait`, `union` and `type` carries a doc block.
 `Upstream`/`Downstream`. A private function whose body is at most 12 lines may
 use `Purpose:` and `Contract:` in place of the five. Types always carry the full
 block, private or not. A test function carries one `Purpose` line; the file's
-module contract names the test target. `mod` declarations need nothing: the file
-contract covers them.
+module contract names the test target. A declaration-only trait method may carry
+one `Purpose` line; the trait's contract carries the rest. `mod` declarations
+need nothing: the file contract covers them.
 
 A file that cannot carry a contract is listed, with a reason, in
 `scripts/contract-exemptions.txt`: the generated schema files

@@ -385,7 +385,7 @@ impl Model for OpenAiCompat {
     /// Purpose: Stream an answer and reassemble exactly what a plain call would return.
     /// Serves: surfaces that preview text; the returned response is the record.
     /// Design: `docs/design/config-routing.md` §8.
-    /// Up: `Model::complete_streaming` callers.
+    /// Up: `crates/kernel/src/turn/loop.rs`, the one production caller.
     /// Down: `loong_http::post_sse` and `parse_response`'s response shape.
     /// Verify: `cargo test -p loong-providers`.
     fn complete_streaming(

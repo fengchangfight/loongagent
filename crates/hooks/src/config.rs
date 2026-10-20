@@ -60,7 +60,7 @@ impl HookEvent {
     /// Purpose: The event's snake_case name on the wire and in the payload.
     /// Serves: `HookEvent::parse` and `payload`.
     /// Design: `docs/design/extension-model.md` §1.
-    /// Up: `parse`, `summary` and the CLI's `hooks list`.
+    /// Up: `parse`, `HookSet::load`'s error listing, `payload`, the CLI's `hooks list` and the kernel's `hook.fired`.
     /// Down: the manifest spelling and the payload's `event` field.
     /// Verify: `cargo test -p loong-hooks`.
     pub fn wire(self) -> &'static str {
@@ -225,9 +225,9 @@ impl HookSet {
     /// error; a malformed one is (silently ignoring a broken guard is the worst
     /// outcome).
     /// Purpose: Parse the manifest and check its trust record, with no manifest meaning no hooks.
-    /// Serves: `crates/kernel/src/turn/build.rs` and `crates/cli/src/hooks.rs`.
+    /// Serves: `crates/kernel/src/turn/build.rs`, `crates/cli/src/hooks.rs` and `crates/cli/src/server.rs`.
     /// Design: `docs/design/extension-model.md` §1 and `docs/design/security-trust.md` §1.
-    /// Up: those two callers.
+    /// Up: those three callers.
     /// Down: `read_trust` and `sources_of`.
     /// Verify: `cargo test -p loong-hooks`.
     pub fn load(workspace: impl AsRef<Path>) -> Result<Self, ConfigError> {
@@ -396,9 +396,9 @@ impl HookSet {
 
     /// Record the current bytes as trusted — the explicit, per-repository opt-in.
     /// Purpose: Record the current bytes as trusted, the explicit per-repository opt-in.
-    /// Serves: `loongagent hooks trust`.
+    /// Serves: `loongagent hooks trust` and the crate's tests.
     /// Design: `docs/design/extension-model.md` §1 and `docs/design/security-trust.md` §1.
-    /// Up: `crates/cli/src/hooks.rs`, the server's startup path and tests.
+    /// Up: `crates/cli/src/hooks.rs`; `crates/server/src/lib.rs` calls it only from a test.
     /// Down: `loong_manifest::record`.
     /// Verify: `cargo test -p loong-hooks`.
     pub fn trust_now(&self) -> Result<PathBuf, ConfigError> {
@@ -428,9 +428,9 @@ impl HookSet {
 
     /// A one-line summary for startup logs and `hooks list`.
     /// Purpose: A one-line trust summary for startup logs and `hooks list`.
-    /// Serves: `crates/cli/src/hooks.rs` and the server's startup note.
+    /// Serves: `crates/cli/src/hooks.rs` and the kernel's startup note.
     /// Design: `docs/design/extension-model.md` §1.
-    /// Up: the CLI and the server.
+    /// Up: `crates/cli/src/hooks.rs` and `crates/kernel/src/turn/build.rs`.
     /// Down: `trust` and the spec count.
     /// Verify: `cargo test -p loong-hooks`.
     pub fn summary(&self) -> String {

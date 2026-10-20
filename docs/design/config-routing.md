@@ -193,29 +193,30 @@ router appears only if the user's profile declares one, and the model gateway is
 ## 8. Providers behind one trait
 
 `crates/providers/src/lib.rs` is the whole interface the kernel sees: `Model` has `complete`,
-`complete_streaming` (the same call with an `on_delta` callback) and `context_window`. The
-first two return `Result<CompletionResponse, ModelError>`; streaming defaults to one delta
-carrying the whole answer, and `context_window` defaults to `None`.
+`complete_streaming` (the same call with an `on_delta` callback) and `context_window`. They
+return `Result<CompletionResponse, ModelError>`; streaming defaults to one whole-answer delta
+and `context_window` to `None`.
 
-`CompletionRequest` is `{messages, tools}`; `CompletionResponse` is `{text, tool_calls,
-usage}`; `ChatMessage` is tagged `system` / `user` / `assistant` / `tool`, with tool calls on
-the assistant message and `call_id` + `output` on the tool message. `ModelError::Transport`
-and `ModelError::Protocol` are the two failures; a provider error ends the turn.
+**First-run probe.** `crates/providers/src/probe.rs` asks a vendor's own `/models` route
+(`probe_models`, or `probe_models_url` for a native path), and keeps a refused key distinct
+from an unreachable vendor.
 
-`OpenAiCompat` is the only real adapter (`ADAPTER_KINDS` is `["openai-compat"]`). It speaks
-the Chat Completions protocol over HTTP/HTTPS through `loong-http`: `stream: false` for
-`complete`, and `stream: true` with `stream_options.include_usage` for
-`complete_streaming`. The streamed path reassembles text fragments and fragmented tool calls
-into exactly the response the non-streaming path would have produced; a server that ignores
-`stream` and sends a whole `message` is treated as one large fragment. `context_window`
-reports the window the adapter was built with, or `None` when nobody said.
+`CompletionRequest` is `{messages, tools}`; `CompletionResponse` is `{text, tool_calls, usage}`;
+`ChatMessage` is tagged `system` / `user` / `assistant` / `tool`, with calls on the assistant
+message and `call_id` + `output` on the tool one. `ModelError` has `Transport`/`Protocol`; it ends the turn.
+
+`OpenAiCompat` is the only real adapter (`ADAPTER_KINDS` is `["openai-compat"]`). It speaks the
+Chat Completions protocol over HTTP/HTTPS through `loong-http`: `stream: false` for `complete`,
+and `stream: true` with `stream_options.include_usage` for `complete_streaming`. The streamed
+path reassembles text fragments and fragmented tool calls into exactly the response the plain
+path would have produced; a server that ignores `stream` and sends a whole `message` counts as
+one large fragment. `context_window` reports the built window, or `None` when nobody said.
 
 Streaming is a **preview, never the record**. Deltas reach `on_delta` and become transient
-`model.delta` notifications; the returned `CompletionResponse` is what the kernel consumes,
-and the final `message.appended` is what the log keeps. `ScriptedModel` is the deterministic
-test double, and `provider = "vendor/model"` is expanded by `crates/config/src/catalog.rs`
-into an endpoint, a model id and a key reference — an explicit `base_url`, `model` or key
-still wins over the shorthand.
+`model.delta` notifications; the returned `CompletionResponse` is what the kernel consumes, and
+the final `message.appended` is what the log keeps. `ScriptedModel` is the deterministic test
+double, and `provider = "vendor/model"` is expanded by `crates/config/src/catalog.rs` into an
+endpoint, a model id and a key reference — explicit `base_url`, `model` or key still wins.
 
 ## 9. Known gaps
 

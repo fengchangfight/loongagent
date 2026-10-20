@@ -3,7 +3,7 @@
 //! Serves: "what was asked, changed, run and verified" as computed facts, each traceable to a `seq` (ADR-0006, ADR-0017).
 //!
 //! # Contract
-//! - **Design:** `docs/context/pipeline.md` §6.2–§6.3; `docs/design/context-ledger.md` §5.
+//! - **Design:** `docs/context/pipeline.md` §6.2–§6.3.
 //! - **Upstream:** `Store::digest`, `Store::digest_pending` and `Store::synthesize_window` build segments and digests.
 //! - **Downstream:** `crate::summaries::tail_summary` stores the result, and `render` produces the text `Store::recall`/`expand` return.
 //! - **Verify:** `cargo test -p loong-context --test summaries` · `./scripts/check.sh`.
@@ -40,7 +40,7 @@ impl Segment {
     /// Purpose: The episode's id: the seed `seq` plus the end `seq`.
     /// Serves: an id that stays the same while the last episode grows, and cannot collide with another segmentation.
     /// Design: `docs/context/pipeline.md` §6.3.
-    /// Up: `Digest::build` and `Store::digest_pending`.
+    /// Up: `Digest::build`; no other caller.
     /// Down: Formats the two `seq` values; no callee.
     /// Verify: `cargo test -p loong-context --test summaries a_digest_is_deterministic`.
     /// The episode's id: derived from the seed and the end, so growing the last

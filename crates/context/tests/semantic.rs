@@ -3,9 +3,9 @@
 //! Serves: the field-ownership rule in ADR-0017 §4 as a regression net: a model cannot rewrite a computed status, a citation, an episode boundary or the call budget.
 //!
 //! # Contract
-//! - **Design:** `docs/context/pipeline.md` §6.2 and §6.6; `docs/context/status.md` §11.1; `docs/design/context-ledger.md` §4.
+//! - **Design:** `docs/context/pipeline.md` §6.2 and §6.6; `docs/context/status.md` §11.1.
 //! - **Upstream:** `loong_context::{Store, WindowBudget}` and the scripted `Summarizer` implementations below.
-//! - **Downstream:** `crate::summary`'s conditional enrichment write, the window budget and the foreground yield.
+//! - **Downstream:** `crate::summaries`' conditional enrichment write, the window budget and the foreground yield.
 //! - **Verify:** `cargo test -p loong-context --test semantic`.
 
 use loong_context::summarizer::{Summarizer, SummarizerError, Synthesis};

@@ -3,10 +3,10 @@
 //! Serves: the property that decides whether semantic summarisation is safe to ship, measured without depending on a developer's machine.
 //!
 //! # Contract
-//! - **Design:** `docs/context/pipeline.md` §6.2; `docs/context/config.md` §11; `docs/design/context-ledger.md` §5.
+//! - **Design:** `docs/context/pipeline.md` §6.2; `docs/context/failure-modes.md` §8 (item 6); `docs/context/config.md` §11.
 //! - **Upstream:** `loong_context::summarizer` and the dataset and scorer below.
 //! - **Downstream:** The shipped `DigestInput`/`Synthesis` contract and the `OllamaSummarizer` request shape.
-//! - **Verify:** `cargo test -p loong-context --test faithfulness`.
+//! - **Verify:** `cargo test -p loong-context --test faithfulness` · `cargo test -p loong-context --test faithfulness -- --ignored --nocapture`.
 
 use loong_context::digest::Edit;
 use loong_context::summarizer::{

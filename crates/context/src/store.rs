@@ -5,7 +5,7 @@
 //! # Contract
 //! - **Design:** `docs/context/data-model.md` §5.2; `docs/design/context-ledger.md` §1 and §7.
 //! - **Upstream:** `loong-kernel`'s `ContextEngine`, `turn/recall.rs`, and `loongagent context status/verify/rebuild` open and drive it.
-//! - **Downstream:** `crate::summaries`, `crate::synthesis`, `crate::worker` and `crate::tail` use its connection and rows.
+//! - **Downstream:** `crate::summaries` and `crate::synthesis` use its connection and rows; `crate::worker` drives its sync and digest methods; `Store::sync` calls `crate::tail`.
 //! - **Verify:** `cargo test -p loong-context` · `./scripts/check.sh`.
 
 use crate::materialize::materialize;
@@ -128,7 +128,7 @@ impl Hit {
     /// Purpose: The stable citation handle for a hit.
     /// Serves: callers carrying a `seq` forward without inventing a second identifier.
     /// Design: `docs/context/recall.md` §7.2.
-    /// Up: `loong-kernel`'s `turn/recall.rs`.
+    /// Up: The retrieval test `one_atom_can_be_expanded`; no production caller (the kernel renders `hit.seq` directly).
     /// Down: Returns `(seq, seq)`; no callee.
     /// Verify: `cargo test -p loong-context --test retrieval one_atom_can_be_expanded`.
     /// The citation a caller should carry forward: `seq` is the stable handle.
@@ -139,8 +139,8 @@ impl Hit {
 
 /// Purpose: What one incremental look at the log produced.
 /// Serves: `sync` telling a worker whether it synced, idled or must rebuild.
-/// Design: `docs/context/data-model.md` §5.2; `docs/context/pipeline.md` §6.6.
-/// Up: `Store::sync`, `crate::worker::step` and the kernel's `refresh`.
+/// Design: `docs/context/data-model.md` §5.2; `docs/context/principles.md` §4.3.
+/// Up: `Store::sync` returns it; `crate::worker::step` matches it. The kernel's `refresh` calls `sync` but ignores the outcome.
 /// Down: Its variants are matched by the worker and the tests.
 /// Verify: `cargo test -p loong-context --test worker sync_reads_once_and_then_idles`.
 /// What one incremental look at the log produced.
@@ -186,7 +186,7 @@ impl SearchQuery {
     /// Purpose: A query for the given terms with the default limit.
     /// Serves: one constructor so callers never spell the term list by hand.
     /// Design: `docs/context/recall.md` §7.2.
-    /// Up: `loong-kernel`'s `turn/recall.rs` and the tests.
+    /// Up: The retrieval and search-cost tests; the kernel builds a struct literal instead.
     /// Down: `SearchQuery::default`; no other callee.
     /// Verify: `cargo test -p loong-context --test retrieval`.
     pub fn new(terms: impl IntoIterator<Item = impl Into<String>>) -> Self {
@@ -200,7 +200,7 @@ impl SearchQuery {
     /// Purpose: Set the result limit.
     /// Serves: bounding a recall answer in one place.
     /// Design: `docs/context/recall.md` §7.2.
-    /// Up: `loong-kernel`'s `turn/recall.rs` and the tests.
+    /// Up: The retrieval and search-cost tests; no other caller.
     /// Down: Mutates the query; no callee.
     /// Verify: `cargo test -p loong-context --test retrieval results_are_newest_first`.
     pub fn limit(mut self, limit: usize) -> Self {
@@ -629,7 +629,7 @@ impl Store {
     /// Purpose: Read one atom in full, as a `Hit`.
     /// Serves: the "expand" half of search-then-expand, with the citation intact.
     /// Design: `docs/context/recall.md` §7.2.
-    /// Up: The retrieval tests; `recall`'s evidence path uses `Store::expand` instead.
+    /// Up: The retrieval tests and `loongagent context verify` (`cli/context.rs`); `recall`'s evidence path uses `Store::expand` instead.
     /// Down: `Store::entities_of` and `row_to_hit`.
     /// Verify: `cargo test -p loong-context --test retrieval one_atom_can_be_expanded`.
     /// Read one atom in full — the "expand" half of search-then-expand.
@@ -666,7 +666,7 @@ impl Store {
     /// Purpose: Ingest everything in the log the store has not seen, reading the whole file.
     /// Serves: the one-shot build path: idempotent, resumable and linear in the log.
     /// Design: `docs/context/data-model.md` §5.2.
-    /// Up: `Store::rebuild` and `loongagent context build`.
+    /// Up: `Store::rebuild`, `loongagent context rebuild` via `open_context_store` (`cli/context.rs`), and the CLI status/verify path that calls `open_context_store`.
     /// Down: `replay_lenient`, `Store::skipped`, `materialize`, `insert_atom` and `Store::set_meta`.
     /// Verify: `cargo test -p loong-context --test retrieval ingest_is_idempotent`.
     /// Ingest everything in `log` that the store has not seen. Idempotent: it
@@ -730,7 +730,7 @@ impl Store {
 
     /// Purpose: Where a resident worker should resume reading.
     /// Serves: tailing only what was appended instead of re-reading the session.
-    /// Design: `docs/context/pipeline.md` §6.6.
+    /// Design: `docs/context/principles.md` §4.3.
     /// Up: `Store::sync`; no caller outside it.
     /// Down: `Store::meta` and `Store::watermark`.
     /// Verify: `cargo test -p loong-context --test worker sync_reads_once_and_then_idles`.
@@ -754,7 +754,7 @@ impl Store {
 
     /// Purpose: Read only what was appended since the last look.
     /// Serves: staying current costing what was appended, not what the session has accumulated.
-    /// Design: `docs/context/pipeline.md` §6.6.
+    /// Design: `docs/context/principles.md` §4.3.
     /// Up: `crate::worker::step` and the kernel's `ContextEngine::refresh`.
     /// Down: `crate::tail::read_new_bounded`, `Store::absorb` and `Store::set_meta`.
     /// Verify: `cargo test -p loong-context --test worker sync_reads_once_and_then_idles`.
@@ -791,7 +791,7 @@ impl Store {
 
     /// Purpose: Materialise envelopes read straight from the tail.
     /// Serves: one write path shared with `ingest`, so a tailed and a rebuilt session cannot drift.
-    /// Design: `docs/context/pipeline.md` §6.6.
+    /// Design: `docs/context/principles.md` §4.3.
     /// Up: `Store::sync`.
     /// Down: `materialize`, `insert_atom`, `Store::skipped` and `Store::set_meta`.
     /// Verify: `cargo test -p loong-context --test worker what_the_worker_derives_equals_what_a_full_rebuild`.
@@ -977,7 +977,7 @@ impl Store {
     /// Purpose: Entities matching a partial name, with how many atoms reference each.
     /// Serves: answering "what modules and commands does this session even touch?".
     /// Design: `docs/context/data-model.md` §5.4.
-    /// Up: `loongagent context status` and the retrieval/summaries tests.
+    /// Up: The retrieval and summaries tests; no production caller.
     /// Down: SQL over `entity` and `atom_entity`; no other callee.
     /// Verify: `cargo test -p loong-context --test retrieval entity_filters`.
     /// Entities matching a partial name, with how many atoms reference each.

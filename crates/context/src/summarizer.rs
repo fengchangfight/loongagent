@@ -3,7 +3,7 @@
 //! Serves: the "additive, never authoritative" rule: a model may explain, but it cannot overwrite status, citations or boundaries.
 //!
 //! # Contract
-//! - **Design:** `docs/context/pipeline.md` §6.2 and `docs/context/config.md` §11; `docs/design/context-ledger.md` §5.
+//! - **Design:** `docs/context/pipeline.md` §6.2 and `docs/context/config.md` §11.
 //! - **Upstream:** `loong-kernel`'s `ContextEngine` chooses an implementation; `Store::synthesize_window` calls it off the critical path.
 //! - **Downstream:** `crate::digest::merge_synthesis` merges the answer; the `producer` column records which model (if any) wrote it.
 //! - **Verify:** `cargo test -p loong-context` · `./scripts/check.sh`.

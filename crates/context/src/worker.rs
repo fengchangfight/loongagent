@@ -4,7 +4,7 @@
 //!
 //! # Contract
 //! - **Design:** `docs/context/pipeline.md` §6.6; `docs/context/status.md` §11.1.
-//! - **Upstream:** The kernel's `ContextEngine::refresh` and its worker thread drive it; the worker tests drive it directly.
+//! - **Upstream:** No production caller: the kernel's `ContextEngine` calls `Store` directly (`refresh` for the deterministic layers, its own thread for `synthesize_window`). The worker tests drive `step`/`run_activation`; `IdleForeground` is used by those tests and one kernel test.
 //! - **Downstream:** `Store::sync`, `Store::digest_pending` and `Store::digest_domains`.
 //! - **Verify:** `cargo test -p loong-context` · `./scripts/check.sh`.
 

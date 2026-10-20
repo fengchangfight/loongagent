@@ -276,7 +276,7 @@ fn write_attempt_opt(args: Option<&serde_json::Value>) -> Option<String> {
 
 /// Purpose: Whether a tool call changes a file.
 /// Serves: write detection by name and by argument shape, so an unseen tool that writes is still recognised.
-/// Design: `docs/context/data-model.md` §5.4.
+/// Design: `docs/context/data-model.md` §5.2–§5.3.
 /// Up: `materialize`.
 /// Down: Checks `WRITE_TOOLS` and the argument keys; no callee.
 /// Verify: `cargo test -p loong-context --test summaries touched_files`.

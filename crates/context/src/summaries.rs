@@ -3,8 +3,8 @@
 //! Serves: a summary that is re-derived from its children, never from its own previous version, and that a reader can always expand to the evidence.
 //!
 //! # Contract
-//! - **Design:** `docs/context/data-model.md` §5.2 and `docs/context/pipeline.md` §6.2–§6.4; `docs/design/context-ledger.md` §5.
-//! - **Upstream:** `crate::digest`, `crate::synthesis` and the kernel's enrichment worker call its `Store` methods.
+//! - **Design:** `docs/context/data-model.md` §5.2 and `docs/context/pipeline.md` §6.2–§6.4; `docs/design/context-ledger.md`.
+//! - **Upstream:** The kernel's `ContextEngine` and enrichment worker, `crate::worker` and `crate::synthesis` call its `Store` methods; `Store::digest*` calls `crate::digest` to build the L2 rows.
 //! - **Downstream:** `loong-kernel`'s `turn/recall.rs` and `context_explain`, and `loongagent context status/verify`.
 //! - **Verify:** `cargo test -p loong-context` · `./scripts/check.sh`.
 
@@ -799,7 +799,7 @@ impl Store {
     /// Purpose: `(count, tokens)` for one summary layer.
     /// Serves: the honesty surface reporting every layer, with an absent layer as `(0, 0)`.
     /// Design: `docs/context/status.md` §11.1.
-    /// Up: The kernel's `context_explain`; `loongagent context status`.
+    /// Up: The kernel's `context_explain`; no context test calls it.
     /// Down: SQL over `summary`; no other callee.
     /// Verify: `cargo test -p loong-context --test synthesis`.
     /// `(count, tokens)` for one layer, for the honesty surface. A layer the store
@@ -837,7 +837,7 @@ impl Store {
     /// Purpose: Load one summary with its citations and lineage.
     /// Serves: the one lookup that returns a complete `Summary`.
     /// Design: `docs/context/data-model.md` §5.2.
-    /// Up: `Store::digest_pending`, `Store::synthesize_window` and the tests.
+    /// Up: `Store::digest_pending`, `Store::synthesize_window`, `Store::expand` and the tests.
     /// Down: `row_to_summary`, `Store::citations_of` and `Store::inputs_of`.
     /// Verify: `cargo test -p loong-context --test summaries a_summary_records_its_lineage`.
     pub fn summary(&self, id: &str) -> Result<Option<Summary>, StoreError> {

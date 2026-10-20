@@ -193,7 +193,7 @@ fn a_digest_is_deterministic_and_rebuilding_reproduces_it() {
     assert_eq!(first, fresh_episodes);
 }
 
-/// Purpose: Pin that touched files and commands come from a write, not a read.
+/// Purpose: Pin that a digest names the edited file and the command that ran.
 #[test]
 fn touched_files_come_from_writes_not_reads() {
     let tmp = TempLog::new();
@@ -417,7 +417,7 @@ fn superseding_a_conclusion_keeps_the_old_one() {
     );
 }
 
-/// Purpose: Pin that a summary's entity links answer a module lookup, the input to L3.
+/// Purpose: Pin that the module entity behind an episode is queryable through the atom-entity index, the lookup L3 will use.
 #[test]
 fn a_summary_can_be_looked_up_by_a_module_it_mentions() {
     let tmp = TempLog::new();

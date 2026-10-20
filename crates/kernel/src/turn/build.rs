@@ -217,7 +217,8 @@ impl Kernel {
     ///
     /// Serves: resume for a caller or a test that has one model.
     /// Design: `docs/design/sessions-lineage.md` §5.
-    /// Up: `crates/server`'s tests and the turn tests; no production caller (`crates/cli/src/server.rs` uses `open_with_models`).
+    /// Up: `turn::tests` only; no production caller (`crates/server`'s tests and the
+    /// CLI use `create` or `open_with_models`).
     /// Down: `SessionLog::open` and `Kernel::build`.
     /// Verify: `cargo test -p loong-kernel turn::tests::a_reopened_session_hands_the_model_its_own_history`.
     pub fn open(

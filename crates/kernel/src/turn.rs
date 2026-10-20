@@ -284,9 +284,10 @@ impl KernelConfig {
     ///
     /// Serves: a caller enabling ADR-0017 without touching the rest of the config.
     /// Design: `docs/design/kernel-loop.md` §2.
-    /// Up: `crates/cli/src/server.rs` and the turn tests.
+    /// Up: no in-tree caller; `crates/cli/src/server.rs` and the turn tests set
+    /// `KernelConfig.context_engine` directly.
     /// Down: `KernelConfig.context_engine`.
-    /// Verify: `cargo test -p loong-kernel turn::tests::the_layered_engine_puts_a_map_in_front_of_the_model`.
+    /// Verify: `cargo test -p loong-kernel turn::`.
     /// Turn the layered memory on (ADR-0017). Off is the default, and off is the
     /// rollback path: the old compaction behaviour, byte for byte.
     pub fn with_context_engine(

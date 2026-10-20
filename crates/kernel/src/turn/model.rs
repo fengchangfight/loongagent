@@ -17,12 +17,10 @@ impl Kernel {
     /// Purpose: The models this session can switch to, in the profile's declaration order.
     ///
     /// Serves: a status bar numbering models the way the profile ranked them, not alphabetically.
-    /// Design: `docs/design/config-routing.md` §2.
+    /// Design: `docs/design/config-routing.md` §4 and §7.
     /// Up: `Kernel::model_list`; the turn tests.
     /// Down: `Kernel.models` and `Profile.models`; no fallible callee.
     /// Verify: `cargo test -p loong-kernel turn::tests::the_model_list_is_the_profile_order_and_a_person_can_choose_from_it`.
-    /// What the next request will actually carry, and why — the debug view behind a
-    /// "context" panel. It changes nothing: no event, no ledger movement.
     /// The models this session can switch to, in the order the configuration declared
     /// them.
     ///
@@ -59,7 +57,7 @@ impl Kernel {
     /// Purpose: The model currently running the session.
     ///
     /// Serves: a surface showing what a switch changed.
-    /// Design: `docs/design/config-routing.md` §2.
+    /// Design: `docs/design/config-routing.md` §7.
     /// Up: `crates/server`'s `model.list` answer; the turn tests.
     /// Down: `Kernel.selected_model`.
     /// Verify: `cargo test -p loong-kernel turn::tests::choosing_the_model_already_running_records_nothing`.
@@ -71,7 +69,7 @@ impl Kernel {
     /// Purpose: The model offerings a status bar draws: name, provider, window and wire name.
     ///
     /// Serves: one list that agrees with what routing can actually pick.
-    /// Design: `docs/design/config-routing.md` §2.
+    /// Design: `docs/design/config-routing.md` §4 and §7.
     /// Up: `crates/server`'s `model.list` and `model.select` answers.
     /// Down: `model_names` and `Profile.models`.
     /// Verify: `cargo test -p loong-kernel turn::tests::the_model_list_is_the_profile_order_and_a_person_can_choose_from_it`.
@@ -103,7 +101,7 @@ impl Kernel {
     /// Purpose: Switch the session's model, recording the choice and making it the router's default.
     ///
     /// Serves: a person's choice that survives the next turn and is visible in the log.
-    /// Design: `docs/design/kernel-loop.md` §2; `docs/design/config-routing.md` §2.
+    /// Design: `docs/design/kernel-loop.md` §2; `docs/design/config-routing.md` §7.
     /// Up: `crates/server`'s `model.select` handler; the CLI/TUI through the server; the turn tests.
     /// Down: `record_model_selected`, `Router.default` and `model_names`.
     /// Verify: `cargo test -p loong-kernel turn::tests::the_model_list_is_the_profile_order_and_a_person_can_choose_from_it`.

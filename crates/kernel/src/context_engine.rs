@@ -4,7 +4,8 @@
 //! mode the session is in.
 //!
 //! # Contract
-//! - **Design:** `docs/design/context-ledger.md` §3–§7.
+//! - **Design:** `docs/design/context-ledger.md` §3–§7;
+//!   `docs/context/pipeline.md` §6.6 owns the kernel-side worker rationale.
 //! - **Upstream:** `Kernel::build` opens it, `Kernel::refresh_map` refreshes it, and
 //!   `Kernel::run` sets the foreground-busy flag.
 //! - **Downstream:** `loong_context::Store`, `Summarizer` and the enrichment worker
@@ -81,7 +82,7 @@ pub struct ContextEngineConfig {
 /// Purpose: When background enrichment runs: events per sync and the idle sleep.
 ///
 /// Serves: bounded background work that never lengthens a turn.
-/// Design: `docs/design/context-ledger.md` §3.
+/// Design: `docs/context/pipeline.md` §6.6.
 /// Up: `ContextEngineConfig.worker`.
 /// Down: `ContextEngine::refresh` (`max_events`) and `spawn_worker` (`idle_sleep`).
 /// Verify: `cargo test -p loong-kernel context_engine::tests::refresh_never_calls_the_model`.
@@ -111,7 +112,7 @@ impl Default for WorkerConfig {
 /// Purpose: Which local model fills semantic fields, and the two window budgets.
 ///
 /// Serves: a background pass that cannot run away with the machine.
-/// Design: `docs/design/context-ledger.md` §3.
+/// Design: `docs/context/pipeline.md` §6.6.
 /// Up: `ContextEngineConfig::with_summarizer` and `crates/cli/src/server.rs`'s engine config.
 /// Down: `ContextEngine::open` builds the `OllamaSummarizer`; `window_budget` reads the budgets.
 /// Verify: `cargo test -p loong-kernel context_engine::tests::semantic_mode_enriches_in_the_background_and_records_the_answer`.
@@ -257,7 +258,7 @@ pub struct MemoryStatus {
 /// Purpose: State shared between the foreground and the enrichment thread.
 ///
 /// Serves: two threads touching counters, a wake flag and a stop flag without a lock across a model call.
-/// Design: `docs/design/context-ledger.md` §3.
+/// Design: `docs/context/pipeline.md` §6.6.
 /// Up: `ContextEngine` holds it; `spawn_worker` clones the `Arc`.
 /// Down: `ContextEngine::memory_status`, `degraded` and the worker loop.
 /// Verify: `cargo test -p loong-kernel context_engine::`.
@@ -347,7 +348,7 @@ impl EngineShared {
 /// Purpose: The engine, once it has a store: the foreground handle and the optional worker.
 ///
 /// Serves: a session whose memory is either genuinely on or deliberately absent.
-/// Design: `docs/design/context-ledger.md` §3.
+/// Design: `docs/context/pipeline.md` §6.6; `docs/design/context-ledger.md` §3.
 /// Up: `Kernel::build` opens it; `Kernel::refresh_map`, `run` and `recall_tool` use it.
 /// Down: `Store`, `EngineShared`, `Foreground` and the worker thread.
 /// Verify: `cargo test -p loong-kernel context_engine::`.
@@ -459,7 +460,7 @@ impl ContextEngine {
     /// Purpose: Start the enrichment thread, or record why it could not start.
     ///
     /// Serves: model calls that stay off the turn's critical path.
-    /// Design: `docs/design/context-ledger.md` §3.
+    /// Design: `docs/context/pipeline.md` §6.6.
     /// Up: `open_with`, when a summariser is configured.
     /// Down: `Store::synthesize_window`, `EngineShared` and `std::thread::Builder`.
     /// Verify: `cargo test -p loong-kernel context_engine::tests::the_foreground_flag_is_what_defers_the_worker`.
@@ -570,7 +571,7 @@ impl ContextEngine {
     /// Purpose: Keep the derived state current with the log: sync, digest episodes, roll domains, then wake the worker.
     ///
     /// Serves: a deterministic map for the current turn with no model call inside a step.
-    /// Design: `docs/design/context-ledger.md` §4–§5.
+    /// Design: `docs/context/pipeline.md` §6.6; `docs/design/context-ledger.md` §3.
     /// Up: `Kernel::refresh_map` at every step boundary.
     /// Down: `Store::sync`, `digest_pending`, `digest_domains` and `EngineShared::wake`.
     /// Verify: `cargo test -p loong-kernel context_engine::tests::refresh_never_calls_the_model`.
@@ -578,8 +579,9 @@ impl ContextEngine {
     /// failure degrades rather than aborting the turn — a stale map must never
     /// stop a person from working.
     ///
-    /// **Deterministic only.** The model call lives on the worker (see the module
-    /// note); this wakes it, because new episodes may mean new work, and returns.
+    /// **Deterministic only.** The model call lives on the worker
+    /// (`docs/context/pipeline.md` §6.6); this wakes it, because new episodes may
+    /// mean new work, and returns.
     pub fn refresh(&mut self) {
         if let Err(e) = self.store.sync(self.config.worker.max_events) {
             self.shared.degrade(e.to_string());
@@ -599,7 +601,7 @@ impl ContextEngine {
     /// Purpose: Tell the worker whether a turn is running, and wake it when the turn ends.
     ///
     /// Serves: background enrichment that never competes with the foreground.
-    /// Design: `docs/design/context-ledger.md` §5.
+    /// Design: `docs/context/pipeline.md` §6.6.
     /// Up: `Kernel::run` around `run_inner`.
     /// Down: `EngineShared::wake`.
     /// Verify: `cargo test -p loong-kernel context_engine::tests::the_foreground_flag_is_what_defers_the_worker`.
@@ -608,8 +610,9 @@ impl ContextEngine {
     pub fn set_foreground_busy(&self, busy: bool) {
         self.busy.store(busy, Ordering::SeqCst);
         if !busy {
-            // The turn is over, which is the main wake source in §4.5. Waking here
-            // means enrichment starts now rather than up to a sleep interval later.
+            // The turn is over, which is the main wake source
+            // (`docs/context/pipeline.md` §6.6). Waking here means enrichment starts
+            // now rather than up to a sleep interval later.
             self.shared.wake();
         }
     }
@@ -617,7 +620,7 @@ impl ContextEngine {
     /// Purpose: Whether a turn is currently running, as the engine sees it.
     ///
     /// Serves: the test and status surface checking the flag the worker obeys.
-    /// Design: `docs/design/context-ledger.md` §5.
+    /// Design: `docs/context/pipeline.md` §6.6.
     /// Up: the engine tests; no production caller.
     /// Down: the `busy` atomic.
     /// Verify: `cargo test -p loong-kernel context_engine::tests::the_foreground_flag_is_what_defers_the_worker`.
@@ -629,7 +632,7 @@ impl ContextEngine {
     /// Purpose: Ask the worker to look for work now.
     ///
     /// Serves: an embedder or test that does not want to wait for the idle sleep.
-    /// Design: `docs/design/context-ledger.md` §5.
+    /// Design: `docs/context/pipeline.md` §6.6.
     /// Up: no in-tree caller; the engine tests do not need it.
     /// Down: `EngineShared::wake`.
     /// Verify: `cargo test -p loong-kernel context_engine::`.

@@ -3149,7 +3149,8 @@ fn recall_refuses_a_request_with_nothing_to_search_for() {
     );
 }
 
-/// Purpose: An unknown summary id is named in the reply rather than silently returning empty.
+/// Purpose: An unknown summary id is named in the reply rather than silently returning empty;
+/// the happy path is covered by `crates/context`'s expansion tests, and the test's name predates this one.
 #[test]
 fn expand_returns_the_summary_with_its_original_events() {
     let t = Temp::new();

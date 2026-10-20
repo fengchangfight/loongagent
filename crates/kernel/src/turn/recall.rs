@@ -279,7 +279,7 @@ fn render_recall(summaries: &[loong_context::Summary], events: &[loong_context::
 /// Design: `docs/design/context-ledger.md` §5.
 /// Up: `Kernel::recall_tool`'s `expand` arm.
 /// Down: `Expansion`, `Summary` and the evidence atoms; no other callee.
-/// Verify: `cargo test -p loong-kernel turn::tests::expand_returns_the_summary_with_its_original_events`.
+/// Verify: `cargo test -p loong-kernel turn::tests`; the expansion data is covered by `cargo test -p loong-context expand_returns_the_summary_and_the_raw_evidence_it_rests_on`.
 /// Render a summary *with* the evidence it cites. The evidence is not a footnote:
 /// returning it in the same response is the mechanism that stops a derived index
 /// from being read as the record.

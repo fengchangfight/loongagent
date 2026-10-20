@@ -360,8 +360,6 @@ impl Ledger {
     /// Up: `Kernel::compact_if_needed` and `Kernel::replay_compaction`.
     /// Down: `marker`, `estimate_tokens` and `ClearReport`.
     /// Verify: `cargo test -p loong-kernel turn::tests::compaction_clears_stale_tool_output_before_dropping_anything`.
-    /// Drop non-pinned entries by eviction priority until the budget is met.
-    /// Whole entries only — a half-evicted message is worse than a missing one.
     /// Phase 1 of compaction (ADR-0006 §4): clear the **stale tool output** first,
     /// because it is the bulk of a long session's context and the least valuable —
     /// the model can re-run a command, but it cannot re-read a decision.
@@ -439,6 +437,8 @@ impl Ledger {
     /// Up: no kernel path calls it; the ledger tests pin it.
     /// Down: `Category::eviction_priority` and `EvictionReport`.
     /// Verify: `cargo test -p loong-kernel ledger::tests::pinned_entries_are_never_evicted_and_the_report_says_so`.
+    /// Drop non-pinned entries by eviction priority until the budget is met.
+    /// Whole entries only — a half-evicted message is worse than a missing one.
     pub fn evict_to_budget(&mut self) -> EvictionReport {
         let mut report = EvictionReport::default();
         let Some(budget) = self.budget else {

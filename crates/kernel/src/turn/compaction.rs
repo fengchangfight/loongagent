@@ -191,14 +191,6 @@ impl Kernel {
     /// Up: `Kernel::compact_if_needed`.
     /// Down: `Ledger::budget`, `current_window` and `KernelConfig.compact_at_percent` / `reserved_context_size`.
     /// Verify: `cargo test -p loong-kernel turn::tests::the_models_window_bounds_the_context_when_no_budget_does`.
-    /// ADR-0006 §4: compaction, in a fixed order, and visible.
-    ///
-    /// Clearing comes first because stale tool output is the bulk of a long
-    /// session's context and the least valuable part of it — the model can re-run
-    /// a command, but it cannot re-read a decision. Only then are the oldest whole
-    /// exchanges dropped, and never across a tool pair: an assistant's tool call
-    /// keeps its answer, because a conversation that splits them is invalid to
-    /// every provider.
     /// How much input one request may carry, right now.
     ///
     /// Two ceilings, and the stricter wins because either one overflowing ends the same
@@ -248,6 +240,14 @@ impl Kernel {
     /// Up: `Kernel::run_inner` at every step boundary.
     /// Down: `input_ceiling`, `Ledger::clear_tool_outputs`, `drop_oldest_exchange` and `Kernel::append` (`compaction.applied`).
     /// Verify: `cargo test -p loong-kernel turn::tests::compaction_clears_stale_tool_output_before_dropping_anything`.
+    /// ADR-0006 §4: compaction, in a fixed order, and visible.
+    ///
+    /// Clearing comes first because stale tool output is the bulk of a long
+    /// session's context and the least valuable part of it — the model can re-run
+    /// a command, but it cannot re-read a decision. Only then are the oldest whole
+    /// exchanges dropped, and never across a tool pair: an assistant's tool call
+    /// keeps its answer, because a conversation that splits them is invalid to
+    /// every provider.
     pub(super) fn compact_if_needed(&mut self, events: &mut Vec<u64>) -> Result<(), KernelError> {
         let Some(ceiling) = self.input_ceiling() else {
             return Ok(());

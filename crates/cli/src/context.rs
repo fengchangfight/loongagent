@@ -2,7 +2,7 @@
 //!
 //! # Contract
 //! - **Serves:** `loongagent context status|verify|rebuild`.
-//! - **Design:** `docs/design/surfaces.md` §2; `docs/design/context-ledger.md` §4 and §7.
+//! - **Design:** `docs/design/surfaces.md` §2; `docs/context/principles.md` §4.1.
 //! - **Upstream:** `main.rs`'s `context` arms dispatch here.
 //! - **Downstream:** `loong_context::Store` (`open`, `ingest`, `verify`, `rebuild`, `digest`, `summary_count`) and the session's JSONL log.
 //! - **Verify:** `cargo test -p loongagent` · `./scripts/check.sh`
@@ -16,7 +16,7 @@ mod context_command_tests {
 
     /// Purpose: Write a small session log whose attempts and abandoned edit the digest can be checked against.
     /// Serves: the two `context` command tests in this module.
-    /// Design: `docs/design/context-ledger.md` §4 and §7.
+    /// Design: `docs/context/pipeline.md` §6.2.
     /// Up: `status_names_the_store_and_says_the_memory_is_off_rather_than_empty` and `rebuild_then_verify_round_trips_and_the_digest_holds_the_attempt_sequence`.
     /// Down: `std::fs::write` and `std::env::temp_dir`.
     /// Verify: `cargo test -p loongagent`.
@@ -136,7 +136,7 @@ fn context_store_path(session: &Path) -> PathBuf {
 
 /// Purpose: Open the session's derived store, creating it only when the caller is the writing command.
 /// Serves: all three `context` commands.
-/// Design: `docs/design/context-ledger.md` §4 and §7.
+/// Design: `docs/context/data-model.md` §5.1–§5.2; `docs/context/pipeline.md` §6.6.
 /// Up: `context_status`, `context_verify` and `context_rebuild`; no other caller.
 /// Down: `context_store_path`, `loong_context::Store::{open, ingest}` and the session file's existence check.
 /// Verify: `cargo test -p loongagent`.
@@ -169,7 +169,7 @@ fn open_context_store(session: &Path, create: bool) -> Result<loong_context::Sto
 
 /// Purpose: Print what the layered memory holds, what has spent tokens getting there, and whether it is healthy.
 /// Serves: `loongagent context status`, the diagnostic that must not diagnose by rebuilding.
-/// Design: `docs/design/context-ledger.md` §4 and §7.
+/// Design: `docs/context/data-model.md` §5.2 (the tables this report reads).
 /// Up: `main.rs`'s `context` → `status` arm; no other caller.
 /// Down: `open_context_store` and `Store::{verify, summary_count, global_map, summaries_at, pending_synthesis}`.
 /// Verify: `cargo test -p loongagent`.
@@ -242,7 +242,7 @@ pub(crate) fn context_status(args: Args) -> Result<(), String> {
 
 /// Purpose: Check the derived store against its own records and every summary's citations against the log.
 /// Serves: `loongagent context verify`.
-/// Design: `docs/design/context-ledger.md` §7.
+/// Design: `docs/context/principles.md` §4.1 (the citation invariant).
 /// Up: `main.rs`'s `context` → `verify` arm; no other caller.
 /// Down: `open_context_store` and `Store::{verify, summaries_at, atom}`.
 /// Verify: `cargo test -p loongagent`.
@@ -291,7 +291,7 @@ pub(crate) fn context_verify(args: Args) -> Result<(), String> {
 
 /// Purpose: Throw the derived store away and rebuild it from the log, leaving the log untouched.
 /// Serves: `loongagent context rebuild`, the one writing context command.
-/// Design: `docs/design/context-ledger.md` §4 and §7.
+/// Design: `docs/context/principles.md` §4.1; `docs/context/data-model.md` §5.1–§5.2.
 /// Up: `main.rs`'s `context` → `rebuild` arm; no other caller.
 /// Down: `open_context_store`, `Store::{rebuild, digest, digest_domains}` and `context_store_path`.
 /// Verify: `cargo test -p loongagent`.

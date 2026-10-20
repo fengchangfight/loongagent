@@ -1,3 +1,12 @@
+//! Purpose: The configuration surface end to end: a repository may narrow but never widen, and every value names its layer.
+//!
+//! # Contract
+//! - **Serves:** ADR-0008's precedence rules as a user meets them.
+//! - **Design:** `docs/design/surfaces.md` §2; `docs/design/config-routing.md` §1–§5.
+//! - **Upstream:** runs `CARGO_BIN_EXE_loongagent` in a test-owned home and workspace; nothing imports this file.
+//! - **Downstream:** `config show`, `config explain` and `run`.
+//! - **Verify:** `cargo test -p loongagent --test config_layers`
+//!
 //! The configuration surface (ADR-0008): a repository may only narrow, and every
 //! value says which layer set it.
 
@@ -6,6 +15,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static N: AtomicU64 = AtomicU64::new(0);
 
+/// Purpose: A fresh workspace with its own `.loongagent` directory.
+/// Contract: `config_layers.rs` fixtures; every test calls it.
 /// Each test gets its own directory: cargo runs them in parallel, and a shared
 /// path means one test's profile file is another test's surprise.
 fn workspace() -> std::path::PathBuf {
@@ -18,10 +29,18 @@ fn workspace() -> std::path::PathBuf {
     dir
 }
 
+/// Purpose: The same run with no extra environment.
+/// Contract: `config_layers.rs` fixtures; most tests call it.
 fn run(dir: &std::path::Path, args: &[&str]) -> (bool, String, String) {
     run_env(dir, args, &[])
 }
 
+/// Purpose: Run the binary against a test-owned home and workspace, with extra environment for the layer under test.
+/// Serves: every test in this file.
+/// Design: `docs/design/config-routing.md` §1.
+/// Up: `run` and the tests that move the home; no other caller.
+/// Down: `std::process::Command` and the environment it sets.
+/// Verify: `cargo test -p loongagent --test config_layers`.
 fn run_env(dir: &std::path::Path, args: &[&str], envs: &[(&str, &str)]) -> (bool, String, String) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_loongagent"));
     // Hermetic: `~/.loongagent` is the developer's own install, and a test that reads it
@@ -47,6 +66,7 @@ fn run_env(dir: &std::path::Path, args: &[&str], envs: &[(&str, &str)]) -> (bool
     )
 }
 
+/// Purpose: A project ceiling wins over a session value, and `config explain` says which value lost and why.
 #[test]
 fn config_show_names_the_layer_that_set_each_value() {
     let dir = workspace();
@@ -89,6 +109,7 @@ fn config_show_names_the_layer_that_set_each_value() {
     );
 }
 
+/// Purpose: A repository cannot set `base_url`; the refusal names the rule.
 #[test]
 fn a_repository_may_not_choose_where_prompts_go() {
     let dir = workspace();
@@ -105,6 +126,7 @@ fn a_repository_may_not_choose_where_prompts_go() {
     );
 }
 
+/// Purpose: A repository cannot set `api_key`; the refusal names the rule.
 #[test]
 fn a_repository_may_not_put_a_secret_in_config_at_all() {
     let dir = workspace();
@@ -121,6 +143,7 @@ fn a_repository_may_not_put_a_secret_in_config_at_all() {
     );
 }
 
+/// Purpose: Even the user layer may not hold a literal secret, only a reference.
 #[test]
 fn a_local_layer_may_not_put_a_literal_secret_in_config() {
     let dir = workspace();
@@ -140,6 +163,7 @@ fn a_local_layer_may_not_put_a_literal_secret_in_config() {
     );
 }
 
+/// Purpose: A mistyped key is an error, not a value that silently does nothing.
 #[test]
 fn a_typo_in_a_policy_file_is_not_silently_ignored() {
     let dir = workspace();

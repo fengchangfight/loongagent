@@ -1,3 +1,12 @@
+//! Purpose: The two terminal surfaces: the full-screen one refuses a pipe and names line mode, and line mode works under one.
+//!
+//! # Contract
+//! - **Serves:** the first-run experience of both terminal surfaces.
+//! - **Design:** `docs/design/surfaces.md` §2 and §3.
+//! - **Upstream:** runs the built binary; nothing imports this file.
+//! - **Downstream:** `common::isolated_command`, and the `tui` and `repl` commands.
+//! - **Verify:** `cargo test -p loongagent --test tui_surface`
+//!
 //! The two terminal surfaces: a full-screen one that needs a TTY, and a line-mode
 //! one that does not. Both must say what they are instead of failing obscurely.
 
@@ -5,6 +14,7 @@ use std::process::Stdio;
 
 mod common;
 
+/// Purpose: A piped full-screen run fails with the reason and names `loongagent repl` as the way out.
 #[test]
 fn the_full_screen_surface_refuses_a_pipe_and_points_at_the_line_mode() {
     // The test harness has no TTY on stdout, which is exactly the case a user hits
@@ -38,6 +48,7 @@ fn the_full_screen_surface_refuses_a_pipe_and_points_at_the_line_mode() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Purpose: Line mode accepts a prompt on a pipe, prints the banner and the answer, and exits when the pipe closes.
 #[test]
 fn the_line_mode_surface_works_under_a_pipe() {
     let dir = std::env::temp_dir().join(format!("loongagent-repl-{}", std::process::id()));

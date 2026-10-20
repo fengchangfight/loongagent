@@ -1,3 +1,12 @@
+//! Purpose: The web surface end to end: a real WebSocket client, the token, the event stream and the page.
+//!
+//! # Contract
+//! - **Serves:** the localhost browser path ADR-0009 describes.
+//! - **Design:** `docs/design/surfaces.md` §4 and §7.
+//! - **Upstream:** runs `loongagent web`; nothing imports this file.
+//! - **Downstream:** `common::isolated_command` and a fake OpenAI-compatible model behind the server.
+//! - **Verify:** `cargo test -p loongagent --test web_surface`
+//!
 //! The web surface, end to end: the real binary, a real WebSocket client, and a
 //! model behind it. If this passes, a browser is the only part left untested — and
 //! a browser speaks the same protocol this client does.
@@ -15,6 +24,8 @@ mod common;
 
 static N: AtomicU64 = AtomicU64::new(0);
 
+/// Purpose: A fresh workspace for the one test.
+/// Contract: `web_surface.rs` fixtures; the test calls it.
 fn workspace() -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "loongagent-web-{}-{}",
@@ -25,6 +36,12 @@ fn workspace() -> std::path::PathBuf {
     dir
 }
 
+/// Purpose: A model that calls `read_file` once and then answers, so the page sees a tool turn.
+/// Serves: the one test in this file.
+/// Design: `docs/design/config-routing.md` §8.
+/// Up: the test; no other caller.
+/// Down: `std::net::TcpListener` and a reader thread.
+/// Verify: `cargo test -p loongagent --test web_surface`.
 /// A model that calls `read_file` once and then answers.
 fn fake_model() -> (String, std::thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -82,6 +99,12 @@ fn fake_model() -> (String, std::thread::JoinHandle<()>) {
     (format!("http://127.0.0.1:{port}/v1"), handle)
 }
 
+/// Purpose: One running `loongagent web` child, its port and the token from its banner.
+/// Serves: the one test in this file.
+/// Design: `docs/design/surfaces.md` §4.
+/// Up: `Web::start` builds it; the test connects through it.
+/// Down: the child process, its stdout banner and the `Drop` impl.
+/// Verify: `cargo test -p loongagent --test web_surface`.
 struct Web {
     child: Child,
     port: u16,
@@ -90,6 +113,12 @@ struct Web {
 }
 
 impl Web {
+    /// Purpose: Spawn `loongagent web`, read the URL and token from the banner, and keep stdout drained.
+    /// Serves: the one test in this file.
+    /// Design: `docs/design/surfaces.md` §4.
+    /// Up: the test; no other caller.
+    /// Down: `common::isolated_command` and `std::io::BufReader`.
+    /// Verify: `cargo test -p loongagent --test web_surface`.
     fn start(dir: &std::path::Path, base_url: &str) -> Self {
         let mut child = common::isolated_command()
             .arg("web")
@@ -150,6 +179,8 @@ impl Web {
         }
     }
 
+    /// Purpose: Open the WebSocket with the banner's token.
+    /// Contract: `web_surface.rs` fixture; the test is the only caller.
     fn connect(&self) -> tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>> {
         let request = format!("ws://127.0.0.1:{}/ws?token={}", self.port, self.token)
             .into_client_request()
@@ -161,12 +192,16 @@ impl Web {
 }
 
 impl Drop for Web {
+    /// Purpose: Kill and reap the web child when the test ends.
+    /// Contract: `web_surface.rs` `Drop` impl for `Web`.
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
 }
 
+/// Purpose: Send one request and return the events and the response, dropping the method list.
+/// Contract: `web_surface.rs` fixture; the attach call is the only caller.
 /// Send one request and collect the events plus the response.
 fn exchange(
     socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>>,
@@ -179,6 +214,12 @@ fn exchange(
     (events, response)
 }
 
+/// Purpose: The same exchange, also reporting every notification method so a streamed answer is distinguishable.
+/// Serves: the test that checks deltas arrive before the response.
+/// Design: `docs/design/surfaces.md` §7.
+/// Up: `exchange` and the test; no other caller.
+/// Down: the WebSocket and `serde_json`.
+/// Verify: `cargo test -p loongagent --test web_surface`.
 /// The same, but also reporting every notification method seen — which is how a
 /// test can tell a streamed answer from one delivered in a single piece.
 fn exchange_verbose(
@@ -211,6 +252,7 @@ fn exchange_verbose(
     }
 }
 
+/// Purpose: A browser attaches, submits a prompt, sees the tool turn's events and a delta before the answer, and is served the page.
 #[test]
 fn a_browser_can_drive_a_session_with_a_model_behind_it() {
     let (base_url, _model) = fake_model();

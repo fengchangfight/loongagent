@@ -1,3 +1,12 @@
+//! Purpose: Local mode end to end: the flag, the local file and the `local` subcommands, against the real binary.
+//!
+//! # Contract
+//! - **Serves:** the promise that `--local` removes the control plane rather than merely ignoring it.
+//! - **Design:** `docs/design/surfaces.md` §2; `docs/design/config-routing.md` §3.
+//! - **Upstream:** runs `CARGO_BIN_EXE_loongagent`; nothing imports this file.
+//! - **Downstream:** the `config`, `local` and `tui` commands, and the files a test-owned home holds.
+//! - **Verify:** `cargo test -p loongagent --test local_mode`
+//!
 //! `loongagent tui --local` (ADR-0009's surface, ADR-0008's layers): a mode that
 //! removes the control plane rather than merely ignoring it.
 //!
@@ -12,6 +21,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static N: AtomicU64 = AtomicU64::new(0);
 
+/// Purpose: A fresh home and workspace for one test.
+/// Contract: `local_mode.rs` fixtures; every test calls it.
 fn workspace() -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "loongagent-local-{}-{}",
@@ -22,6 +33,8 @@ fn workspace() -> std::path::PathBuf {
     dir
 }
 
+/// Purpose: A home whose control plane is a closed port, so a sync cannot accidentally pass.
+/// Contract: `local_mode.rs` fixtures; the control-plane tests call it.
 /// A home whose control plane is a closed port: reachable-looking, never reachable.
 /// Port 1 is reserved and nothing listens there, so a sync cannot accidentally pass.
 fn home_with_a_dead_control_plane() -> std::path::PathBuf {
@@ -35,6 +48,12 @@ fn home_with_a_dead_control_plane() -> std::path::PathBuf {
     dir
 }
 
+/// Purpose: Run the binary against a given home and workspace, with every catalog key removed from the environment.
+/// Serves: every test in this file, so a developer's exported key cannot change the result.
+/// Design: `docs/design/config-routing.md` §5.
+/// Up: the tests in this file; no other caller.
+/// Down: `std::process::Command` and `loong_config::catalog::PROVIDERS`.
+/// Verify: `cargo test -p loongagent --test local_mode`.
 fn run(home: &std::path::Path, args: &[&str]) -> (bool, String, String) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_loongagent"));
     command.env("LOONGAGENT_HOME", home);
@@ -64,6 +83,7 @@ fn run(home: &std::path::Path, args: &[&str]) -> (bool, String, String) {
     )
 }
 
+/// Purpose: Without `--local` a dead control plane fails a managed run, which is what gives the flag meaning.
 #[test]
 fn the_control_plane_is_really_consulted_without_the_flag() {
     // The control half of the experiment. Without this, the `--local` test below
@@ -77,6 +97,7 @@ fn the_control_plane_is_really_consulted_without_the_flag() {
     assert!(stderr.contains("unreachable"), "and say why: {stderr}");
 }
 
+/// Purpose: The same dead control plane does not matter under `--local`, and the run says which mode it is in.
 #[test]
 fn local_mode_never_touches_the_control_plane() {
     let home = home_with_a_dead_control_plane();
@@ -102,6 +123,7 @@ fn local_mode_never_touches_the_control_plane() {
     );
 }
 
+/// Purpose: A local install can record its mode in `local.toml`, so a resume keeps it without the flag.
 #[test]
 fn local_mode_may_be_declared_in_the_local_file_so_a_resume_keeps_it() {
     // `loongagent resume` re-enters with no memory of the original flag, so the setting
@@ -126,6 +148,7 @@ fn local_mode_may_be_declared_in_the_local_file_so_a_resume_keeps_it() {
     );
 }
 
+/// Purpose: A managed profile cannot switch the install out of its firm's policy by declaring itself local.
 #[test]
 fn the_managed_profile_cannot_declare_local_mode() {
     // The bug this rule exists for, as a test that runs the real binary: `mode = "local"`
@@ -150,6 +173,7 @@ fn the_managed_profile_cannot_declare_local_mode() {
     );
 }
 
+/// Purpose: A catalog provider shorthand resolves to the vendor's endpoint and model id without a hand-written URL.
 #[test]
 fn a_provider_shorthand_reaches_the_command_line_without_an_endpoint() {
     let home = workspace();
@@ -177,6 +201,7 @@ fn a_provider_shorthand_reaches_the_command_line_without_an_endpoint() {
     );
 }
 
+/// Purpose: A first local run with no key and no terminal refuses cleanly and leaves no half configuration.
 #[test]
 fn a_local_first_run_with_no_key_refuses_cleanly_and_writes_nothing() {
     // No key anywhere, and no terminal to ask on. The failure must be the *terminal*,
@@ -199,6 +224,7 @@ fn a_local_first_run_with_no_key_refuses_cleanly_and_writes_nothing() {
     );
 }
 
+/// Purpose: A checked-out repository cannot declare the install local, which would drop its firm's policy.
 #[test]
 fn a_repository_may_not_declare_the_install_local() {
     // The same threat as a repo choosing its own endpoint: `mode = "local"` in a
@@ -218,6 +244,12 @@ fn a_repository_may_not_declare_the_install_local() {
 
 // ---------------------------------------------------- the `local` subcommands
 
+/// Purpose: A home with three models from two providers, as `local add` would have left it.
+/// Serves: the `local` listing and delete tests.
+/// Design: `docs/design/config-routing.md` §3.
+/// Up: the `local` subcommand tests; no other caller.
+/// Down: `workspace` and `std::fs::write`.
+/// Verify: `cargo test -p loongagent --test local_mode`.
 /// A home with three models from two providers, as `local add` would have left it.
 fn home_with_models() -> std::path::PathBuf {
     let home = workspace();
@@ -233,6 +265,8 @@ fn home_with_models() -> std::path::PathBuf {
     home
 }
 
+/// Purpose: The model names a `local` listing shows, in order.
+/// Contract: `local_mode.rs` fixtures; the listing tests call it.
 /// The model names a `local` listing shows, in order.
 fn listed(stdout: &str) -> Vec<String> {
     stdout
@@ -244,6 +278,7 @@ fn listed(stdout: &str) -> Vec<String> {
         .collect()
 }
 
+/// Purpose: `local` lists the configured models, their context windows and the commands that change them.
 #[test]
 fn local_lists_what_is_configured_and_where_it_lives() {
     let home = home_with_models();
@@ -265,6 +300,7 @@ fn local_lists_what_is_configured_and_where_it_lives() {
     );
 }
 
+/// Purpose: An unconfigured install says so and names `local add` instead of showing an empty list.
 #[test]
 fn local_is_empty_before_anything_is_configured() {
     let home = workspace();
@@ -274,6 +310,7 @@ fn local_is_empty_before_anything_is_configured() {
     assert!(stdout.contains("local add"), "and says how: {stdout}");
 }
 
+/// Purpose: Deleting by slot removes that model and moves the router default to one that still exists.
 #[test]
 fn local_delete_by_slot_removes_one_and_moves_the_default() {
     let home = home_with_models();
@@ -296,6 +333,7 @@ fn local_delete_by_slot_removes_one_and_moves_the_default() {
     );
 }
 
+/// Purpose: Deleting by provider removes that provider's models and leaves the others alone.
 #[test]
 fn local_delete_by_provider_takes_all_of_that_provider() {
     let home = home_with_models();
@@ -308,6 +346,7 @@ fn local_delete_by_provider_takes_all_of_that_provider() {
     assert!(text.contains("default = \"qwen2.5:3b\""), "{text}");
 }
 
+/// Purpose: A selector that matches nothing fails before writing, and points at the listing.
 #[test]
 fn local_delete_says_what_is_configured_when_the_selector_matches_nothing() {
     let home = home_with_models();
@@ -323,6 +362,7 @@ fn local_delete_says_what_is_configured_when_the_selector_matches_nothing() {
     assert!(text.contains("deepseek-v4-pro"), "{text}");
 }
 
+/// Purpose: A provider name the catalog does not know is refused, with the known names listed.
 #[test]
 fn local_add_named_provider_refuses_a_name_the_catalog_does_not_know() {
     let home = workspace();
@@ -335,6 +375,7 @@ fn local_add_named_provider_refuses_a_name_the_catalog_does_not_know() {
     );
 }
 
+/// Purpose: A missing selector or an unknown subcommand prints usage and the commands that exist.
 #[test]
 fn the_local_subcommands_say_what_there_is_instead_of_guessing() {
     let home = workspace();

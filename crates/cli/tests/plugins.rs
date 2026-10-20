@@ -1,3 +1,12 @@
+//! Purpose: Plugins end to end: one command puts skills in the catalogue, the always-on skill reaches the prompt, and a broken install leaves nothing.
+//!
+//! # Contract
+//! - **Serves:** ADR-0018's install contract, observed through the real binary and a model.
+//! - **Design:** `docs/design/surfaces.md` §2; `docs/design/extension-model.md` §4 and §7.
+//! - **Upstream:** runs `CARGO_BIN_EXE_loongagent`; nothing imports this file.
+//! - **Downstream:** `plugin add|list|update|remove`, `skills list`, and `run` against a recording HTTP model.
+//! - **Verify:** `cargo test -p loongagent --test plugins`
+//!
 //! Plugins, end to end, against the real binary (ADR-0018).
 //!
 //! The claim being tested is not "a directory appeared under `plugins/`". It is that
@@ -16,6 +25,8 @@ use std::time::Duration;
 
 static N: AtomicU64 = AtomicU64::new(0);
 
+/// Purpose: A fresh directory for a home, a workspace or a plugin checkout.
+/// Contract: `plugins.rs` fixtures; every test calls it.
 fn temp_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "loongagent-plugin-{tag}-{}-{}",
@@ -27,6 +38,8 @@ fn temp_dir(tag: &str) -> PathBuf {
     dir
 }
 
+/// Purpose: Write a skill file in the shape the plugin ecosystem uses.
+/// Contract: `plugins.rs` fixtures; the install tests call it.
 /// A skill file, in the shape the Claude Code plugin ecosystem uses.
 fn skill(checkout: &Path, name: &str, body: &str) {
     let dir = checkout.join("skills").join(name);
@@ -38,6 +51,8 @@ fn skill(checkout: &Path, name: &str, body: &str) {
     .unwrap();
 }
 
+/// Purpose: Write a workspace skill, so a plugin can collide with something real.
+/// Contract: `plugins.rs` fixtures; the clash test calls it.
 /// A workspace skill, so a plugin can collide with something real.
 fn workspace_skill(ws: &Path, name: &str) {
     let dir = ws.join(".loongagent/skills").join(name);
@@ -49,6 +64,12 @@ fn workspace_skill(ws: &Path, name: &str) {
     .unwrap();
 }
 
+/// Purpose: Run the binary against a test-owned home and workspace, with extra environment for the model.
+/// Serves: every test in this file.
+/// Design: `docs/design/extension-model.md` §7.
+/// Up: `run` and the install tests; the recording-model test calls it directly.
+/// Down: `std::process::Command` and the environment it sets.
+/// Verify: `cargo test -p loongagent --test plugins`.
 fn run_in(home: &Path, ws: &Path, args: &[&str], env: &[(&str, &str)]) -> (bool, String, String) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_loongagent"));
     // A home of its own: the developer's real `~/.loongagent` has plugins in it, and
@@ -73,10 +94,18 @@ fn run_in(home: &Path, ws: &Path, args: &[&str], env: &[(&str, &str)]) -> (bool,
     )
 }
 
+/// Purpose: The same run with no extra environment.
+/// Contract: `plugins.rs` fixtures; most tests call it.
 fn run(home: &Path, ws: &Path, args: &[&str]) -> (bool, String, String) {
     run_in(home, ws, args, &[])
 }
 
+/// Purpose: A one-answer model that hands the test the request body it was sent.
+/// Serves: the test that proves the always-on skill reaches the prompt.
+/// Design: `docs/design/config-routing.md` §8.
+/// Up: the install test; no other caller.
+/// Down: `std::net::TcpListener` and a reader thread.
+/// Verify: `cargo test -p loongagent --test plugins`.
 /// A model that answers once, and hands the test the request body it was sent.
 fn recording_model() -> (String, std::sync::mpsc::Receiver<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -124,6 +153,8 @@ fn recording_model() -> (String, std::sync::mpsc::Receiver<String>) {
     (format!("http://127.0.0.1:{port}/v1"), rx)
 }
 
+/// Purpose: The system message a recorded request carried.
+/// Contract: `plugins.rs` fixture; the install test calls it.
 /// The system message the model was sent.
 fn system_message(body: &str) -> String {
     let value: Value = serde_json::from_str(body).expect("the request is JSON");
@@ -137,6 +168,7 @@ fn system_message(body: &str) -> String {
         .to_string()
 }
 
+/// Purpose: One command installs a plugin, its skills join the catalogue, the always-on body reaches the model's prompt, and removing it takes the skills away.
 #[test]
 fn one_command_installs_a_plugin_and_its_always_on_skill_reaches_the_model() {
     let home = temp_dir("home");
@@ -215,6 +247,7 @@ fn one_command_installs_a_plugin_and_its_always_on_skill_reaches_the_model() {
     );
 }
 
+/// Purpose: An install that would make two skills share a name fails and leaves nothing behind.
 #[test]
 fn an_install_that_would_break_the_catalogue_is_rolled_back() {
     let home = temp_dir("home");
@@ -240,6 +273,7 @@ fn an_install_that_would_break_the_catalogue_is_rolled_back() {
     );
 }
 
+/// Purpose: A checkout whose skill has no frontmatter is refused and not installed.
 #[test]
 fn a_plugin_whose_skills_do_not_parse_is_not_installed() {
     let home = temp_dir("home");
@@ -255,6 +289,7 @@ fn a_plugin_whose_skills_do_not_parse_is_not_installed() {
     assert!(out.contains("no plugins installed"), "{out}");
 }
 
+/// Purpose: An unknown plugin name names the known ones and the other accepted forms.
 #[test]
 fn an_unknown_name_says_which_names_are_known() {
     let home = temp_dir("home");
@@ -269,6 +304,7 @@ fn an_unknown_name_says_which_names_are_known() {
     assert!(said.contains("owner/repo"), "{said}");
 }
 
+/// Purpose: A plugin whose skills disappear stops a session loudly, and `plugin remove` is still the way out.
 #[test]
 fn a_manifest_that_stops_making_sense_stops_a_session_and_can_be_removed() {
     let home = temp_dir("home");
@@ -301,6 +337,7 @@ fn a_manifest_that_stops_making_sense_stops_a_session_and_can_be_removed() {
     assert!(ok, "{err}");
 }
 
+/// Purpose: When both scopes hold the same plugin, a bare name is refused and the two scope flags pick the copy.
 #[test]
 fn a_shadowed_name_says_which_copy_is_meant() {
     let home = temp_dir("shadow-home");

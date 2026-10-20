@@ -1,3 +1,12 @@
+//! Purpose: The end-to-end slice: the real server, JSON-RPC over stdio, the tool boundary and the log.
+//!
+//! # Contract
+//! - **Serves:** the three promises of the slice — the tool ran in the workspace, the boundary asked before stepping outside, and the streamed events are the log.
+//! - **Design:** `docs/design/surfaces.md` §1 and §7; `docs/design/events-storage.md`.
+//! - **Upstream:** runs the built binary as `server --stdio`; nothing imports this file.
+//! - **Downstream:** `common::isolated_command`, `session.attach`, `prompt.submit` and `approval.respond`.
+//! - **Verify:** `cargo test -p loongagent --test vertical_slice`
+//!
 //! End-to-end over the real binary: spawn `loongagent server --stdio`, speak
 //! JSON-RPC to it, and check the three things the slice promises — the tool ran
 //! inside the workspace, the policy boundary asked before stepping outside, and
@@ -15,6 +24,8 @@ static N: AtomicU64 = AtomicU64::new(0);
 
 const ESCAPE_NAME: &str = "loongagent-demo-escape.txt";
 
+/// Purpose: The path `demo-escape` names, derived the same way the model derives it.
+/// Contract: `vertical_slice.rs`; the approval test is the only caller.
 /// The path `demo-escape` names, derived the same way the model derives it rather
 /// than written as a literal `/tmp/...`: that literal is not absolute on Windows, so
 /// the "escape" would land inside the workspace and the test would prove nothing.
@@ -22,8 +33,16 @@ fn escape_path() -> PathBuf {
     std::env::temp_dir().join(ESCAPE_NAME)
 }
 
+/// Purpose: A temporary workspace that deletes itself at the end of a test.
+/// Serves: the three slice tests.
+/// Design: `docs/design/surfaces.md` §7.
+/// Up: the tests in this file; no other caller.
+/// Down: `std::env::temp_dir` and the `Drop` impl that removes it.
+/// Verify: `cargo test -p loongagent --test vertical_slice`.
 struct Temp(PathBuf);
 impl Temp {
+    /// Purpose: Create the test's own workspace directory.
+    /// Contract: `vertical_slice.rs` fixture; the slice tests call it.
     fn new() -> Self {
         let dir = std::env::temp_dir().join(format!(
             "loongagent-e2e-{}-{}",
@@ -33,16 +52,26 @@ impl Temp {
         std::fs::create_dir_all(&dir).unwrap();
         Temp(dir)
     }
+    /// Purpose: The workspace directory a test passes as `--cwd`.
+    /// Contract: `vertical_slice.rs` fixture; the slice tests call it.
     fn path(&self) -> &Path {
         &self.0
     }
 }
 impl Drop for Temp {
+    /// Purpose: Remove the workspace when the test ends, whatever the test decided.
+    /// Contract: `vertical_slice.rs` `Drop` impl for `Temp`.
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
+/// Purpose: One connected server child: its pipes, the next request id and the session id.
+/// Serves: the three slice tests.
+/// Design: `docs/design/surfaces.md` §1 and §7.
+/// Up: `Session::start` builds it; the tests call `prompt` and `respond`.
+/// Down: the child process, its stdin/stdout and the JSON-RPC framing.
+/// Verify: `cargo test -p loongagent --test vertical_slice`.
 struct Session {
     child: Child,
     stdin: ChildStdin,
@@ -52,6 +81,12 @@ struct Session {
 }
 
 impl Session {
+    /// Purpose: Spawn `server --stdio` in a workspace and attach to it.
+    /// Serves: all three slice tests.
+    /// Design: `docs/design/surfaces.md` §1.
+    /// Up: the tests in this file; no other caller.
+    /// Down: `common::isolated_command`, `session.attach` and `std::process::Command`.
+    /// Verify: `cargo test -p loongagent --test vertical_slice`.
     fn start(dir: &Path, model: &str) -> Self {
         let mut child = common::isolated_command()
             .arg("server")
@@ -85,6 +120,12 @@ impl Session {
         session
     }
 
+    /// Purpose: Send one request and read until its response, collecting the events on the way.
+    /// Serves: `start`, `prompt` and `respond`.
+    /// Design: `docs/design/surfaces.md` §7.
+    /// Up: `start`, `prompt` and `respond`; no other caller.
+    /// Down: the child's stdin/stdout and `serde_json`.
+    /// Verify: `cargo test -p loongagent --test vertical_slice`.
     /// Send a request and read until its response, collecting the events.
     fn call(&mut self, method: &str, params: Value) -> (Vec<Value>, Value) {
         let id = self.next_id;
@@ -116,6 +157,8 @@ impl Session {
         }
     }
 
+    /// Purpose: Submit one prompt to this session.
+    /// Contract: `vertical_slice.rs` fixture; the slice tests call it.
     fn prompt(&mut self, text: &str) -> (Vec<Value>, Value) {
         let session_id = self.session_id.clone();
         self.call(
@@ -124,6 +167,8 @@ impl Session {
         )
     }
 
+    /// Purpose: Answer one pending approval with the given decision.
+    /// Contract: `vertical_slice.rs` fixture; the approval test calls it.
     fn respond(&mut self, request_id: &str, granted: bool) -> (Vec<Value>, Value) {
         let session_id = self.session_id.clone();
         self.call(
@@ -134,12 +179,16 @@ impl Session {
 }
 
 impl Drop for Session {
+    /// Purpose: Kill and reap the server child when the test ends.
+    /// Contract: `vertical_slice.rs` `Drop` impl for `Session`.
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
 }
 
+/// Purpose: The event kinds a response streamed.
+/// Contract: `vertical_slice.rs` fixture; the two turn tests call it.
 fn kinds(events: &[Value]) -> Vec<String> {
     events
         .iter()
@@ -147,6 +196,8 @@ fn kinds(events: &[Value]) -> Vec<String> {
         .collect()
 }
 
+/// Purpose: The event kinds the session log actually holds.
+/// Contract: `vertical_slice.rs` fixture; the stream-equals-truth test calls it.
 fn logged_kinds(dir: &Path) -> Vec<String> {
     std::fs::read_to_string(dir.join("session.jsonl"))
         .unwrap()
@@ -160,6 +211,7 @@ fn logged_kinds(dir: &Path) -> Vec<String> {
         .collect()
 }
 
+/// Purpose: A prompt runs the tool inside the workspace and the streamed events are exactly the log's tail.
 #[test]
 fn a_tool_runs_inside_the_workspace_and_the_log_is_the_same_truth() {
     let t = Temp::new();
@@ -207,6 +259,7 @@ fn a_tool_runs_inside_the_workspace_and_the_log_is_the_same_truth() {
     }
 }
 
+/// Purpose: A write outside the workspace asks first, writes nothing before the answer, and records the refusal.
 #[test]
 fn an_out_of_bounds_write_asks_before_it_touches_anything() {
     let _ = std::fs::remove_file(escape_path());
@@ -246,6 +299,7 @@ fn an_out_of_bounds_write_asks_before_it_touches_anything() {
     assert!(logged.contains(&"approval.decided".to_string()));
 }
 
+/// Purpose: `loongagent run` drives a real server child and prints the model's answer.
 #[test]
 fn the_tui_client_drives_a_real_server() {
     let t = Temp::new();

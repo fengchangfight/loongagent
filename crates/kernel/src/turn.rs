@@ -1,15 +1,16 @@
-//! The turn loop — the fixed kernel (ADR-0004).
+//! Purpose: Run one turn and hold the types it is made of: user message, model, gated tool calls, results, and the ledger lockstep.
 //!
-//! A turn is: user message → model → tool calls → **PDP verdict per call** →
-//! execute (or ask, or deny) → feed results back → repeat, bounded by a step
-//! limit. Everything the loop does is an event (ADR-0003), and every block that
-//! reaches the model goes through the ledger (ADR-0006).
+//! Serves: a turn that stops for a human instead of blocking, and a log that can
+//! explain every step it took (ADR-0003, ADR-0004, ADR-0006).
 //!
-//! Approvals stop the turn instead of blocking it: `submit` returns a
-//! [`PendingCall`], the surface asks the human, and
-//! [`Kernel::respond_to_approval`] records the decision and resumes. That keeps
-//! the kernel synchronous and the approval itself an auditable event with a
-//! scope (ADR-0007 §6).
+//! # Contract
+//! - **Design:** `docs/design/kernel-loop.md`; `docs/design/flows/turn-lifecycle.md`
+//!   keeps the end-to-end sequence.
+//! - **Upstream:** `crates/server`'s `prompt.submit` and `approval.respond`; the
+//!   `run` and `web` CLI arms; the turn tests.
+//! - **Downstream:** the `turn` submodules, `Ledger`, `Pdp`, `Registry`, `Model`,
+//!   `HookRunner` and `SessionLog`.
+//! - **Verify:** `cargo test -p loong-kernel turn::` · `./scripts/check.sh`.
 
 use self::build::KernelMcp;
 use self::recall::{recall_parameters, RECALL_DESCRIPTION, RECALL_TOOL};
@@ -44,6 +45,13 @@ mod session;
 #[cfg(test)]
 mod tests;
 
+/// Purpose: Every way a turn can fail, each naming the subsystem that refused.
+///
+/// Serves: a failed turn that says whether the log, model, index, hooks, MCP, skills, config or session record is at fault.
+/// Design: `docs/design/kernel-loop.md` §6.
+/// Up: `Kernel::submit_with`, `Kernel::respond_to_approval`, `Kernel::build` and the turn's error paths.
+/// Down: `Display`, `Error` and the `From` conversions; callers match the variant.
+/// Verify: `cargo test -p loong-kernel turn::tests`.
 #[derive(Debug)]
 pub enum KernelError {
     Log(LogError),
@@ -68,6 +76,13 @@ pub enum KernelError {
 }
 
 impl std::fmt::Display for KernelError {
+    /// Purpose: Render an error as `subsystem: detail` for logs and surfaces.
+    ///
+    /// Serves: one readable line per failure.
+    /// Design: `docs/design/kernel-loop.md` §6.
+    /// Up: `Display`'s callers, including `crates/server` and every `unwrap`/`expect` message.
+    /// Down: the variants it formats.
+    /// Verify: `cargo test -p loong-kernel turn::tests`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             KernelError::Log(e) => write!(f, "log: {e}"),
@@ -87,23 +102,39 @@ impl std::fmt::Display for KernelError {
 impl std::error::Error for KernelError {}
 
 impl From<LogError> for KernelError {
+    /// Purpose: Map a log error into `KernelError::Log`.
+    ///
+    /// Contract: `turn.rs` error plumbing.
     fn from(e: LogError) -> Self {
         KernelError::Log(e)
     }
 }
 
 impl From<serde_json::Error> for KernelError {
+    /// Purpose: Map an encoding error into `KernelError::Encode`.
+    ///
+    /// Contract: `turn.rs` error plumbing.
     fn from(e: serde_json::Error) -> Self {
         KernelError::Encode(e)
     }
 }
 
 impl From<loong_index::IndexError> for KernelError {
+    /// Purpose: Map an index error into `KernelError::Index`.
+    ///
+    /// Contract: `turn.rs` error plumbing.
     fn from(e: loong_index::IndexError) -> Self {
         KernelError::Index(e)
     }
 }
 
+/// Purpose: A tool call waiting for a human decision: id, call, class, rule and reason.
+///
+/// Serves: a parked turn that can be answered later without losing what was asked.
+/// Design: `docs/design/kernel-loop.md` §5.
+/// Up: `Kernel::dispatch` creates it; `Kernel::run_inner` parks it; `Kernel::pending` and `TurnOutcome.pending_approval` expose it.
+/// Down: `Kernel::respond_to_approval` and the surface's approval prompt.
+/// Verify: `cargo test -p loong-kernel turn::tests::an_out_of_bounds_write_asks_then_resumes_on_the_answer`.
 /// A tool call waiting for a human decision.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PendingCall {
@@ -117,6 +148,13 @@ pub struct PendingCall {
     pub reason: String,
 }
 
+/// Purpose: What one turn produced: steps, answer, pending call, refusal, events and interruption.
+///
+/// Serves: the six endings in one value a surface can render.
+/// Design: `docs/design/kernel-loop.md` §1 and §6.
+/// Up: `Kernel::submit`, `submit_with` and `respond_to_approval` return it; `crates/server` maps it to the wire.
+/// Down: `crates/server`'s response and the turn tests.
+/// Verify: `cargo test -p loong-kernel turn::tests::a_tool_runs_and_the_turn_finishes`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TurnOutcome {
     pub steps: usize,
@@ -152,6 +190,13 @@ pub const DEFAULT_MAX_STEPS: usize = 100;
 /// may raise it but never shrink it.
 pub const DEFAULT_RESERVED_CONTEXT: u64 = 16_384;
 
+/// Purpose: Turn a configured step count into a limit, with `0` meaning no limit.
+///
+/// Serves: a `0` from a person or a layer meaning 'unset', never 'end before the first model call'.
+/// Design: `docs/design/kernel-loop.md` §4.
+/// Up: `Kernel::build` and `crates/cli/src/server.rs`; the turn tests.
+/// Down: `KernelConfig.max_steps` and `usize::MAX`.
+/// Verify: `cargo test -p loong-kernel turn::tests::zero_steps_is_no_limit_rather_than_no_work`.
 /// A configured step count, with `0` meaning **no limit**.
 ///
 /// Zero is never a sensible cap — it would end the turn before the model was asked anything —
@@ -171,6 +216,13 @@ pub fn steps_or_unlimited(steps: usize) -> usize {
     }
 }
 
+/// Purpose: Everything a turn needs that is not a capability: cwd, profile, limits, engine and bootstrap skills.
+///
+/// Serves: one resolved configuration object, narrowed before the first step.
+/// Design: `docs/design/kernel-loop.md` §1 and §4.
+/// Up: `crates/cli/src/server.rs` builds it; `Kernel::build` narrows it; the turn tests construct it.
+/// Down: `Kernel::build`, `Kernel::run_inner` and `Kernel::input_ceiling`.
+/// Verify: `cargo test -p loong-kernel turn::tests::narrow_only_numbers_are_the_strictest_of_the_two`.
 #[derive(Debug, Clone)]
 pub struct KernelConfig {
     pub cwd: PathBuf,
@@ -205,6 +257,13 @@ pub struct KernelConfig {
 }
 
 impl KernelConfig {
+    /// Purpose: A default configuration for a workspace.
+    ///
+    /// Serves: the common case: no budget, the shipped limits and no engine.
+    /// Design: `docs/design/kernel-loop.md` §1.
+    /// Up: the CLI, the server tests and the turn tests.
+    /// Down: the `KernelConfig` fields.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_tool_runs_and_the_turn_finishes`.
     pub fn new(cwd: impl Into<PathBuf>) -> Self {
         Self {
             cwd: cwd.into(),
@@ -221,6 +280,13 @@ impl KernelConfig {
         }
     }
 
+    /// Purpose: Turn the layered engine on for this configuration.
+    ///
+    /// Serves: a caller enabling ADR-0017 without touching the rest of the config.
+    /// Design: `docs/design/kernel-loop.md` §2.
+    /// Up: `crates/cli/src/server.rs` and the turn tests.
+    /// Down: `KernelConfig.context_engine`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::the_layered_engine_puts_a_map_in_front_of_the_model`.
     /// Turn the layered memory on (ADR-0017). Off is the default, and off is the
     /// rollback path: the old compaction behaviour, byte for byte.
     pub fn with_context_engine(
@@ -232,6 +298,13 @@ impl KernelConfig {
     }
 }
 
+/// Purpose: The Landlock PEP, installed with `pre_exec` so it lands in the child and never in the server.
+///
+/// Serves: a confinement that cannot leak into the server or a sibling tool.
+/// Design: `docs/design/tools-permissions.md` §4.
+/// Up: `Kernel::build`, which chooses it when the workspace policy can be built.
+/// Down: `Confinement::confine` in `turn/confinement.rs` and `WorkspacePolicy`.
+/// Verify: `cargo test -p loong-kernel turn::tests::the_pep_stops_an_escape_the_classifier_cannot_see`.
 /// The Landlock PEP, installed with `pre_exec` so the restriction lands in the
 /// forked child and can never leak into the server (or into a sibling tool).
 struct LandlockConfinement {
@@ -241,6 +314,13 @@ struct LandlockConfinement {
     policy: WorkspacePolicy,
 }
 
+/// Purpose: The strictest of the caller's budget, the session's budget and any configured model's cap.
+///
+/// Serves: a model cap that actually bounds the session that routes to it.
+/// Design: `docs/design/kernel-loop.md` §4.
+/// Up: `Kernel::build`; `crates/cli/src/server.rs` checks whether a budget exists; the turn tests.
+/// Down: `narrow_budget` and the declared `ModelSpec.budget_tokens` values.
+/// Verify: `cargo test -p loong-kernel turn::tests::a_budget_a_model_declares_is_the_sessions_budget`.
 /// The strictest of a caller's budget and the configuration's: `None` means
 /// unbounded, which is the widest, so a limit from either side holds.
 /// The context budget a session runs with.
@@ -260,6 +340,9 @@ pub fn effective_budget(caller: Option<u64>, settings: &Profile) -> Option<u64> 
     narrow_budget(narrow_budget(caller, settings.budget_tokens), declared)
 }
 
+/// Purpose: The stricter of two optional budgets; `None` is unbounded and widest.
+///
+/// Contract: `turn.rs` budget arithmetic.
 fn narrow_budget(caller: Option<u64>, configured: Option<u64>) -> Option<u64> {
     match (caller, configured) {
         (Some(a), Some(b)) => Some(a.min(b)),
@@ -269,6 +352,13 @@ fn narrow_budget(caller: Option<u64>, configured: Option<u64>) -> Option<u64> {
     }
 }
 
+/// Purpose: The kernel: one session's log, ledger, tools, models, gate, hooks and memory.
+///
+/// Serves: a fixed core whose state is private and whose every write is a recorded step.
+/// Design: `docs/design/kernel-loop.md` §1–§5.
+/// Up: `crates/cli/src/server.rs` and `crates/server` hold it; the turn tests build it.
+/// Down: the `turn` submodules, `Ledger`, `SessionLog`, `Pdp`, `Registry`, `Model` and `HookRunner`.
+/// Verify: `cargo test -p loong-kernel turn::`.
 pub struct Kernel {
     log: SessionLog,
     ledger: Ledger,
@@ -342,6 +432,13 @@ pub struct Kernel {
     map_index: Option<usize>,
 }
 impl Kernel {
+    /// Purpose: Fire the hooks registered for an event, record every answer, and report the aggregate verdict.
+    ///
+    /// Serves: a hook channel that is auditable and cannot act silently.
+    /// Design: `docs/design/kernel-loop.md` §3.
+    /// Up: `Kernel::submit_with` (`user_prompt_submit`), `Kernel::dispatch` (`pre_tool`, `post_tool`, `permission_requested`) and `Kernel::respond_to_approval` (`permission_decided`).
+    /// Down: `HookRunner::fire`, `payload` and `Kernel::append` for each `hook.fired`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_pre_tool_hook_can_deny_what_the_policy_would_allow`.
     /// Fire the hooks registered for `event`, record every answer, and report the
     /// aggregate verdict (deny > ask > allow).
     fn fire_hooks(
@@ -374,6 +471,13 @@ impl Kernel {
 
     // --------------------------------------------------- recording helpers
 
+    /// Purpose: Write one event to the log, mirror it into the index, and announce it to the live sink.
+    ///
+    /// Serves: the single write path that makes the log, the index and the stream agree.
+    /// Design: `docs/design/kernel-loop.md` §3; `docs/design/events-storage.md` §3–§4.
+    /// Up: every recording helper in `Kernel` and the turn's submodules.
+    /// Down: `SessionLog::append`, `Index::insert` and the `event_sink`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_tool_runs_and_the_turn_finishes`.
     fn append<T: serde::Serialize>(&mut self, kind: &str, payload: &T) -> Result<u64, KernelError> {
         let data = serde_json::to_value(payload)?;
         let envelope = self.log.append(kind, data)?;
@@ -394,6 +498,13 @@ impl Kernel {
         Ok(envelope.seq)
     }
 
+    /// Purpose: Record a user message as both an event and a ledger/`messages` pair.
+    ///
+    /// Serves: the lockstep that lets the ledger be the model's view.
+    /// Design: `docs/design/context-ledger.md` §1 and §6.
+    /// Up: `Kernel::submit_with` after command expansion and the prompt hook.
+    /// Down: `Kernel::append` and `Ledger::add`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::the_ledger_and_the_conversation_stay_in_step`.
     fn record_user(&mut self, text: &str) -> Result<u64, KernelError> {
         let seq = self.append(
             gen::event::MESSAGE_APPENDED,
@@ -412,6 +523,13 @@ impl Kernel {
         Ok(seq)
     }
 
+    /// Purpose: Record an assistant message once, accounting for its text and tool-call payloads.
+    ///
+    /// Serves: a turn whose calls and answer both count against the context.
+    /// Design: `docs/design/context-ledger.md` §1 and §6.
+    /// Up: `Kernel::run_inner`, for an answer and for a message with calls.
+    /// Down: `Kernel::append` and `Ledger::add`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_turn_with_several_tool_calls_replays_every_one_of_them`.
     fn record_assistant(
         &mut self,
         text: Option<&str>,
@@ -449,6 +567,13 @@ impl Kernel {
         Ok(seq)
     }
 
+    /// Purpose: Record a tool result with its turn-scoped lifetime.
+    ///
+    /// Serves: a result the model can read and compaction can clear first.
+    /// Design: `docs/design/context-ledger.md` §1–§4.
+    /// Up: `Kernel::run_inner` for skipped calls, `Kernel::dispatch` and `Kernel::respond_to_approval`.
+    /// Down: `Kernel::append` and `Ledger::add` with `Lifetime::Turn`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::compaction_clears_stale_tool_output_before_dropping_anything`.
     fn record_tool_result(
         &mut self,
         call_id: &str,
@@ -480,6 +605,13 @@ impl Kernel {
         Ok(seq)
     }
 
+    /// Purpose: Record that this session runs on a control-plane pack.
+    ///
+    /// Serves: provenance: what policy was in force for a session that already happened.
+    /// Design: `docs/design/control-plane.md` §2.
+    /// Up: `crates/cli/src/server.rs`'s startup path.
+    /// Down: `SessionLog::append` (deliberately not the live sink: this is startup provenance).
+    /// Verify: `cargo test -p loong-kernel turn::tests`.
     /// Record that a session is running on a control-plane pack (ADR-0016 §7). This
     /// is provenance, not configuration: it answers "what policy was in force?" for a
     /// session that has already happened.
@@ -505,6 +637,13 @@ impl Kernel {
             .seq)
     }
 
+    /// Purpose: Record the named profile a session runs and what the user was told about it.
+    ///
+    /// Serves: a session whose configuration can be explained after the fact.
+    /// Design: `docs/design/config-routing.md` §1.
+    /// Up: `crates/cli/src/server.rs`'s startup path.
+    /// Down: `SessionLog::append` with the profile's name, description and models.
+    /// Verify: `cargo test -p loong-kernel turn::tests`.
     /// Record the named profile a session runs, with what the user was told about it.
     pub fn record_profile_selected(
         &mut self,
@@ -529,6 +668,13 @@ impl Kernel {
             .seq)
     }
 
+    /// Purpose: Record a model switch with the rule, the previous model, the context size and the step.
+    ///
+    /// Serves: the same auditable answer to 'why this model?' for a rule and for a person.
+    /// Design: `docs/design/kernel-loop.md` §2; `docs/design/config-routing.md` §2.
+    /// Up: `Kernel::run_inner` when routing changes the model; `Kernel::select_model`.
+    /// Down: `Kernel::append` (through the live sink, so a watcher sees the switch as it happens).
+    /// Verify: `cargo test -p loong-kernel turn::tests::the_router_can_switch_models_and_the_log_says_why`.
     fn record_model_selected(
         &mut self,
         model: &str,
@@ -553,6 +699,9 @@ impl Kernel {
         )
     }
 
+    /// Purpose: Record the model call's token usage as a cost event, with USD left at zero until pricing lands.
+    ///
+    /// Contract: `turn.rs` cost accounting.
     fn record_cost(&mut self, usage: &Usage) -> Result<u64, KernelError> {
         // usd_micros stays 0 until pricing/profiles land; tokens are real.
         self.append(
@@ -566,6 +715,13 @@ impl Kernel {
         )
     }
 
+    /// Purpose: The tool descriptions the next request will carry, plus `recall` only when memory exists.
+    ///
+    /// Serves: a model that is not offered a tool which cannot answer.
+    /// Design: `docs/design/context-ledger.md` §5.
+    /// Up: `Kernel::run_inner`'s request; `Kernel::context_explain`.
+    /// Down: `Registry::specs` and `recall_parameters`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::recall_is_offered_only_when_there_is_memory_behind_it`.
     fn tool_specs(&self) -> Vec<loong_providers::ToolSpec> {
         let mut specs: Vec<loong_providers::ToolSpec> = self
             .tools

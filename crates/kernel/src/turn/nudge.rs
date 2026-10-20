@@ -1,3 +1,21 @@
+//! Purpose: Recognise the two measured text-only failures — a file pasted into chat and a tool call printed as text — so the loop can object once.
+//!
+//! Serves: a turn that actually changes the workspace instead of ending with prose
+//! that reads like success (`kernel-loop.md` §4).
+//!
+//! # Contract
+//! - **Design:** `docs/design/kernel-loop.md` §4.
+//! - **Upstream:** `Kernel::run_inner`'s no-tool-call branch.
+//! - **Downstream:** the correction text it enables; no other kernel module.
+//! - **Verify:** `cargo test -p loong-kernel turn::tests::a_pasted_file_is_recognised_and_a_snippet_is_not` · `./scripts/check.sh`.
+
+/// Purpose: Recognise a tool call printed as text and return the tool's name.
+///
+/// Serves: a correction that names the tool the model meant, instead of guessing another.
+/// Design: `docs/design/kernel-loop.md` §4.
+/// Up: `Kernel::run_inner`'s no-tool-call branch; the turn tests.
+/// Down: the `KNOWN` tool list; no other callee.
+/// Verify: `cargo test -p loong-kernel turn::tests::a_printed_tool_call_is_recognised_and_prose_is_not`.
 /// Whether a reply is a **tool call printed as text** rather than emitted.
 ///
 /// Measured in this project's own log (`47x75pvh.jsonl`, `qwen2.5:7b-instruct` on
@@ -50,6 +68,13 @@ pub(super) fn leaked_tool_call(text: &str) -> Option<String> {
     None
 }
 
+/// Purpose: Recognise a whole file pasted into chat rather than written.
+///
+/// Serves: objecting once to a reply that reads like success while the workspace is unchanged.
+/// Design: `docs/design/kernel-loop.md` §4.
+/// Up: `Kernel::run_inner`, only when no tool has run yet; the turn tests.
+/// Down: no callee; it inspects the reply's fences.
+/// Verify: `cargo test -p loong-kernel turn::tests::a_pasted_file_is_recognised_and_a_snippet_is_not`.
 /// Whether a reply is a file pasted into chat rather than a report.
 ///
 /// Deliberately narrow: a fenced block whose opening line names a file, or a shell

@@ -1,6 +1,27 @@
+//! Purpose: Rebuild a session's conversation and lineage: replay the ancestor prefix and this log's events, and refuse a chain that cannot be honoured.
+//!
+//! Serves: a resumed session whose model sees the history it had, and a fork whose
+//! context is its parent's prefix plus its own events (ADR-0014, ADR-0015).
+//!
+//! # Contract
+//! - **Design:** `docs/design/sessions-lineage.md` §2–§5;
+//!   `docs/design/events-storage.md` §5 owns the tree records.
+//! - **Upstream:** `Kernel::build` calls `replay_history`; `Kernel::lineage` is the
+//!   other half of the same read.
+//! - **Downstream:** `loong_eventlog::replay_lenient`, `Ledger`, and the compaction
+//!   replay in `Kernel::replay_compaction`.
+//! - **Verify:** `cargo test -p loong-kernel turn::tests::a_reopened_session_hands_the_model_its_own_history` · `./scripts/check.sh`.
+
 use super::*;
 
 impl Kernel {
+    /// Purpose: Rebuild the conversation from the ancestor prefix and this log's events.
+    ///
+    /// Serves: a resumed or forked session whose model sees the history it had.
+    /// Design: `docs/design/sessions-lineage.md` §2–§5; `docs/design/events-storage.md` §5.
+    /// Up: `Kernel::build`.
+    /// Down: `Kernel::lineage`, `loong_eventlog::replay_lenient`, `flush_pending` and `replay_compaction`; replay writes no event.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_reopened_session_hands_the_model_its_own_history`.
     /// Rebuild the conversation the log already holds, plus any ancestor prefix.
     ///
     /// The log is the record (ADR-0003), so a kernel that starts with empty `messages`
@@ -31,6 +52,14 @@ impl Kernel {
             // each call's events in order (call, verdict, result, call, verdict, result…),
             // so calls and results both accumulate here and are flushed together when the
             // tool phase ends. Flushing at the first result would strand the second call.
+
+            /// Purpose: The assistant turn held back until its tool calls and results are known.
+            ///
+            /// Serves: a replay that never emits a tool result without its call.
+            /// Design: `docs/design/sessions-lineage.md` §2.
+            /// Up: `Kernel::replay_history`'s event loop.
+            /// Down: `flush_pending` and the three-tuple it carries.
+            /// Verify: `cargo test -p loong-kernel turn::tests::a_turn_with_several_tool_calls_replays_every_one_of_them`.
             type Pending = (
                 Option<String>,
                 Vec<loong_providers::ToolCallRequest>,
@@ -151,6 +180,13 @@ impl Kernel {
         Ok(())
     }
 
+    /// Purpose: Push the held assistant turn, then its results, in provider order.
+    ///
+    /// Serves: a replayed conversation that is valid to every provider.
+    /// Design: `docs/design/sessions-lineage.md` §2.
+    /// Up: `Kernel::replay_history` at a message boundary, a compaction or the end of a log.
+    /// Down: `push_assistant` and `push_tool_result`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_turn_with_several_tool_calls_replays_every_one_of_them`.
     /// Push the assistant turn that was being held, now that its calls are known.
     fn flush_pending(
         &mut self,
@@ -169,6 +205,13 @@ impl Kernel {
         Ok(())
     }
 
+    /// Purpose: Push a replayed assistant message with the same ledger accounting the live turn uses.
+    ///
+    /// Serves: a replayed session and a live one that cannot drift.
+    /// Design: `docs/design/context-ledger.md` §1 and §6.
+    /// Up: `flush_pending`.
+    /// Down: `Ledger::add` and the `messages`/`entry_of` vectors.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_reopened_session_hands_the_model_its_own_history`.
     /// The same ledger accounting, message push and index bookkeeping the live turn
     /// does — one implementation, so a replayed session and a live one cannot drift.
     fn push_assistant(
@@ -203,6 +246,13 @@ impl Kernel {
         });
     }
 
+    /// Purpose: Push a replayed tool result with its turn-scoped entry and per-ancestor source.
+    ///
+    /// Serves: history that can still say where a result came from.
+    /// Design: `docs/design/context-ledger.md` §1–§2.
+    /// Up: `flush_pending`.
+    /// Down: `Ledger::add` and the `messages`/`entry_of` vectors.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_chain_of_children_is_stitched_oldest_first`.
     fn push_tool_result(&mut self, from: Option<&str>, call_id: &str, output: &str) {
         let source = match from {
             Some(ancestor) => format!("tool:{call_id} from {ancestor}"),
@@ -218,6 +268,13 @@ impl Kernel {
         });
     }
 
+    /// Purpose: Reproduce a recorded compaction exactly: clear the same count and drop the same count.
+    ///
+    /// Serves: a replay that does not guess at a policy which may since have changed.
+    /// Design: `docs/design/context-ledger.md` §4 and §7.
+    /// Up: `Kernel::replay_history` on a `compaction.applied` event.
+    /// Down: `Ledger::clear_tool_outputs` and `drop_oldest_exchange`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::compaction_drops_the_oldest_exchange_when_clearing_is_not_enough`.
     /// Reproduce a compaction exactly: the event records how many tool outputs were
     /// cleared and how many messages dropped, so a replay does not have to guess at a
     /// policy that may since have changed.
@@ -255,6 +312,13 @@ impl Kernel {
         }
     }
 
+    /// Purpose: Walk the session's parent chain, oldest ancestor first, or refuse a missing ancestor or cycle.
+    ///
+    /// Serves: a child that is either runnable with its prefix or explicitly inoperable.
+    /// Design: `docs/design/sessions-lineage.md` §3; `docs/design/events-storage.md` §5.
+    /// Up: `Kernel::replay_history`; the lineage tests.
+    /// Down: `loong_eventlog::replay_lenient` and `Path::exists`; no other kernel callee.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_child_without_its_parent_says_which_chain_is_broken`.
     /// Where this session came from, oldest ancestor first. A child stores the
     /// reference (ADR-0015), so the chain is read from the child's own first event and
     /// each ancestor's own first event after it. A missing ancestor is fatal and named:

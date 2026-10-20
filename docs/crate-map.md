@@ -21,7 +21,7 @@ listed is a violation. The middle column is each crate's own `//!` header.
 | `loong-hooks` | Lifecycle hooks: the deterministic veto channel around the loop, allow / ask / deny only (ADR-0007 §7). | `loong-http`, `loong-manifest`, `loong-proc`, `loong-schema` |
 | `loong-http` | Carry one JSON request over HTTP/1.1, plain or TLS, with bounded timeouts and a streamed reply. | — |
 | `loong-index` | Answer tree, search and count queries from a disposable SQLite copy of the JSONL log. | `loong-eventlog`, `loong-schema` |
-| `loong-kernel` | The fixed kernel (ADR-0004): the model+tool loop, the context ledger that is | `loong-config`, `loong-context`, `loong-eventlog`, `loong-hooks`, `loong-index`, `loong-mcp`, `loong-providers`, `loong-sandbox`, `loong-schema`, `loong-skills`, `loong-tools` |
+| `loong-kernel` | The fixed kernel (ADR-0004): the model+tool loop and the context ledger that is its only write path. | `loong-config`, `loong-context`, `loong-eventlog`, `loong-hooks`, `loong-index`, `loong-mcp`, `loong-providers`, `loong-sandbox`, `loong-schema`, `loong-skills`, `loong-tools` |
 | `loong-manifest` | Gate repository manifests behind a human trust decision and a change-detection hash. | — |
 | `loong-mcp` | MCP: external tools behind the same `Tool` interface as the built-ins. | `loong-manifest`, `loong-protocol`, `loong-schema`, `loong-tools` |
 | `loong-pack` | Sign and verify the one envelope every distributed artifact travels in. | — |

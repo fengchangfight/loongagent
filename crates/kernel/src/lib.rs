@@ -1,9 +1,15 @@
-//! The fixed kernel (ADR-0004): the model+tool loop, the context ledger that is
-//! the only write path to the model (ADR-0006), and the wiring to the PDP
-//! (ADR-0007) and the tool registry.
+//! Purpose: The fixed kernel (ADR-0004): the model+tool loop and the context ledger that is its only write path.
 //!
-//! Everything here is deliberately *not* pluggable: behavior cannot hide in a
-//! replaced core, which is what makes the event stream trustworthy.
+//! Serves: a session a person can audit: every step is an event, every context block
+//! is accounted for, and one PDP gates every registry tool call.
+//!
+//! # Contract
+//! - **Design:** `docs/design/kernel-loop.md`; `docs/design/context-ledger.md` owns
+//!   the ledger and `docs/design/tools-permissions.md` owns the gate.
+//! - **Upstream:** `crates/cli/src/server.rs` builds a `Kernel`; `crates/server` runs
+//!   it and `crates/tui-app` reaches it through that server.
+//! - **Downstream:** `ledger`, `context_engine` and `turn`, re-exported here.
+//! - **Verify:** `cargo test -p loong-kernel` · `./scripts/check.sh`.
 
 pub mod context_engine;
 pub mod ledger;

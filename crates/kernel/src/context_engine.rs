@@ -1,73 +1,15 @@
-//! The context engine as the kernel sees it (ADR-0017 §5, §11).
+//! Purpose: The kernel's handle on the layered context engine: open the sidecar, derive the L4 map at a step boundary, and keep semantic enrichment off the turn's critical path.
 //!
-//! One small struct rather than three fields on [`Kernel`](crate::Kernel): the
-//! engine is optional, its two switches have to move together, and "is the layered
-//! memory on?" is a question a reader should be able to answer at a glance.
+//! Serves: ADR-0017's reversible memory without lengthening a turn or hiding which
+//! mode the session is in.
 //!
-//! # What "on" changes
-//!
-//! * The foreground carries an **L4 global map** — a few hundred tokens that say
-//!   what the project is and where it stands — refreshed before each model call
-//!   from the derived store.
-//! * Compaction **stops dropping messages**. Stale tool output is still cleared
-//!   because it is the bulk of a long session and re-runnable; an exchange is never
-//!   thrown away, because the design's whole claim is that the original stays
-//!   reachable. Turning the engine off restores the old behaviour exactly, which is
-//!   the rollback path the owner asked for.
-//!
-//! # The two halves of the work, and why they are in different places (§4.6)
-//!
-//! `refresh()` runs at every step boundary, in the foreground's critical path, and
-//! does only the **deterministic** derivation: ingest the new bytes, digest the
-//! episodes, roll up the domain maps. That has to be synchronous — the L4 map the
-//! *current* turn puts in front of the model is built from it, and a one-step-stale
-//! map is a map that lies about the turn in progress.
-//!
-//! The **model** call is not on that path. Semantic enrichment is the slow part, it
-//! is not needed for the current turn's map (which is deterministic), and putting it
-//! in `refresh` is exactly the "background work lengthens the turn" failure §4.6
-//! forbids. It runs on a worker thread instead, in bounded **idle windows**, against
-//! a **second [`Store`]** on the same sidecar file.
-//!
-//! A second `Store` rather than `Arc<Mutex<Store>>` is deliberate: sharing the
-//! foreground's connection behind a mutex would make the foreground wait for
-//! whichever model call the worker happened to be inside — the same failure one
-//! layer down. Two connections serialise on SQLite's own short write transactions
-//! (`busy_timeout`, WAL) and never on a model request; the model call happens with
-//! no transaction open at all.
-//!
-//! # Thread ownership
-//!
-//! The thread belongs to the engine, and therefore to the `Kernel`, and therefore to
-//! the session: `Kernel::build` opens the engine, `session.new` replaces the whole
-//! kernel, and dropping the engine stops the worker. It is deliberately *not* owned
-//! by the server or the CLI. Both of those build kernels through the same factory
-//! (`crates/cli/src/main.rs`), a one-shot CLI run has no session lifecycle object at
-//! all, and a kernel test constructs an engine directly — so putting the lifecycle
-//! in either surface would mean the other forgot to start or stop it. The engine is
-//! the one component that knows its own log, its own store and its own foreground
-//! signal, which is what the thread needs.
-//!
-//! # The foreground signal
-//!
-//! A whole **turn** counts as busy, and the worker yields at the next call boundary
-//! when that changes: it checks [`Foreground::is_busy`] before opening a window and
-//! [`Store::synthesize_window`] checks again before every model call. So a new turn
-//! stops the background from starting anything, and stops a window already in
-//! progress after the request it is inside — never in the middle of one, because a
-//! request in flight cannot be recalled.
-//!
-//! What the foreground is guaranteed is that it never *waits* for the worker: two
-//! connections, no shared mutex, and the in-flight request lives in Ollama's own
-//! process. That is why a turn cannot be lengthened by enrichment, and it is measured
-//! and gated (see the tests at the bottom of this file).
-//!
-//! The finer window the design also mentions (enriching during a tool call's wait) is
-//! a refinement to make once a measurement shows the coarse rule leaves useful work
-//! undone; it is not needed to keep the model off the critical path. The consequence
-//! is stated rather than hidden: a single-shot headless run has no idle window, so it
-//! does not enrich (its digests are still complete and its store is still
-//! rebuildable).
+//! # Contract
+//! - **Design:** `docs/design/context-ledger.md` §3–§7.
+//! - **Upstream:** `Kernel::build` opens it, `Kernel::refresh_map` refreshes it, and
+//!   `Kernel::run` sets the foreground-busy flag.
+//! - **Downstream:** `loong_context::Store`, `Summarizer` and the enrichment worker
+//!   thread; `Kernel::recall_tool` reads the same store.
+//! - **Verify:** `cargo test -p loong-kernel context_engine::` · `./scripts/check.sh`.
 
 use loong_context::{Foreground, NoSummarizer, OllamaSummarizer, Store, Summarizer, WindowBudget};
 use std::path::PathBuf;
@@ -93,6 +35,9 @@ const WORKER_ACTIVE: u8 = 2;
 const WORKER_DEFERRED: u8 = 3;
 const WORKER_STOPPED: u8 = 4;
 
+/// Purpose: The status word for a worker-state byte, with an unknown state named rather than folded in.
+///
+/// Contract: `context_engine.rs` status reporting.
 fn worker_state_name(state: u8) -> &'static str {
     match state {
         WORKER_OFF => "off",
@@ -106,6 +51,13 @@ fn worker_state_name(state: u8) -> &'static str {
     }
 }
 
+/// Purpose: How the engine runs: the master switch, the sidecar paths, the worker knobs and the optional summariser.
+///
+/// Serves: a session choosing layered memory explicitly, with off as the rollback path.
+/// Design: `docs/design/context-ledger.md` §3.
+/// Up: `KernelConfig.context_engine`; `crates/cli/src/server.rs` builds one with `new`.
+/// Down: `ContextEngine::open`, `WorkerConfig` and `SummarizerChoice`.
+/// Verify: `cargo test -p loong-kernel context_engine::`.
 /// How the engine runs. `enabled` is the master switch: with it off, nothing here
 /// is consulted and the kernel behaves as it did before ADR-0017.
 #[derive(Debug, Clone)]
@@ -126,6 +78,13 @@ pub struct ContextEngineConfig {
     pub summarizer: Option<SummarizerChoice>,
 }
 
+/// Purpose: When background enrichment runs: events per sync and the idle sleep.
+///
+/// Serves: bounded background work that never lengthens a turn.
+/// Design: `docs/design/context-ledger.md` §3.
+/// Up: `ContextEngineConfig.worker`.
+/// Down: `ContextEngine::refresh` (`max_events`) and `spawn_worker` (`idle_sleep`).
+/// Verify: `cargo test -p loong-kernel context_engine::tests::refresh_never_calls_the_model`.
 /// The worker's timing knobs. Kept as its own type because they are about *when*
 /// background work happens, not *what* it does.
 #[derive(Debug, Clone)]
@@ -138,6 +97,9 @@ pub struct WorkerConfig {
 }
 
 impl Default for WorkerConfig {
+    /// Purpose: The shipped worker timing: 256 events per sync and a 250 ms idle sleep.
+    ///
+    /// Contract: `context_engine.rs` worker defaults.
     fn default() -> Self {
         Self {
             max_events: 256,
@@ -146,6 +108,13 @@ impl Default for WorkerConfig {
     }
 }
 
+/// Purpose: Which local model fills semantic fields, and the two window budgets.
+///
+/// Serves: a background pass that cannot run away with the machine.
+/// Design: `docs/design/context-ledger.md` §3.
+/// Up: `ContextEngineConfig::with_summarizer` and `crates/cli/src/server.rs`'s engine config.
+/// Down: `ContextEngine::open` builds the `OllamaSummarizer`; `window_budget` reads the budgets.
+/// Verify: `cargo test -p loong-kernel context_engine::tests::semantic_mode_enriches_in_the_background_and_records_the_answer`.
 /// Which local model, resolved from configuration by the caller.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SummarizerChoice {
@@ -162,6 +131,13 @@ pub struct SummarizerChoice {
 }
 
 impl ContextEngineConfig {
+    /// Purpose: An engine config whose master switch is off: the documented rollback.
+    ///
+    /// Serves: a caller that can ask for the old compaction behaviour explicitly.
+    /// Design: `docs/design/context-ledger.md` §3.
+    /// Up: the turn tests; callers that build a config before deciding.
+    /// Down: no callee; the fields are defaulted.
+    /// Verify: `cargo test -p loong-kernel turn::tests::with_the_engine_off_compaction_still_drops_exchanges`.
     pub fn off() -> Self {
         Self {
             enabled: false,
@@ -173,6 +149,13 @@ impl ContextEngineConfig {
         }
     }
 
+    /// Purpose: An enabled config for a sidecar store and its log.
+    ///
+    /// Serves: one construction path for the engine the CLI and tests open.
+    /// Design: `docs/design/context-ledger.md` §3.
+    /// Up: `crates/cli/src/server.rs` and the turn and engine tests.
+    /// Down: `ContextEngine::open`.
+    /// Verify: `cargo test -p loong-kernel context_engine::`.
     pub fn new(store_path: impl Into<PathBuf>, log_path: impl Into<PathBuf>) -> Self {
         Self {
             enabled: true,
@@ -184,6 +167,13 @@ impl ContextEngineConfig {
         }
     }
 
+    /// Purpose: Attach the semantic summariser choice to this config.
+    ///
+    /// Serves: a record-mode config that can become semantic without a second constructor.
+    /// Design: `docs/design/context-ledger.md` §3.
+    /// Up: the engine tests and `turn::tests::a_semantic_session_names_its_model_in_the_explain_view`; `crates/cli/src/server.rs` sets the `summarizer` field directly.
+    /// Down: `SummarizerChoice`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_semantic_session_names_its_model_in_the_explain_view`.
     /// Turn on the local summariser. Separate from `new` because `record` mode is
     /// a legitimate, useful configuration with no model at all.
     pub fn with_summarizer(mut self, choice: SummarizerChoice) -> Self {
@@ -192,6 +182,13 @@ impl ContextEngineConfig {
     }
 }
 
+/// Purpose: One derived layer's scope, count and carried tokens, for a status surface.
+///
+/// Serves: an honest layer list where retrieval reports zero because it is not carried.
+/// Design: `docs/design/context-ledger.md` §6.
+/// Up: `ContextEngine::memory_status`.
+/// Down: `MemoryStatus.layers` and `Kernel::context_explain`'s `ContextLayer` view.
+/// Verify: `cargo test -p loong-kernel turn::tests::the_context_view_says_which_memory_is_on_even_before_it_produces_a_map`.
 /// One layer of the derived memory, for a status surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayerStatus {
@@ -204,6 +201,13 @@ pub struct LayerStatus {
     pub tokens: u64,
 }
 
+/// Purpose: What the background worker has done, as counters it kept itself.
+///
+/// Serves: a status surface that never infers work from 'is there a map yet?'.
+/// Design: `docs/design/context-ledger.md` §6.
+/// Up: `ContextEngine::memory_status`; `ContextEngine`'s `Debug`.
+/// Down: `MemoryStatus.worker` and `Kernel::context_explain`'s `ContextWorker` view.
+/// Verify: `cargo test -p loong-kernel context_engine::tests::semantic_mode_enriches_in_the_background_and_records_the_answer`.
 /// What the background enrichment worker has done. Every field is a counter the
 /// worker itself keeps, or a count read from the store — never an inference from
 /// "is there a map yet?".
@@ -227,6 +231,13 @@ pub struct WorkerSnapshot {
     pub last_error: String,
 }
 
+/// Purpose: The honest answer to 'what is the memory doing?' for a status surface.
+///
+/// Serves: distinguishing off from on-but-nothing-derived-yet.
+/// Design: `docs/design/context-ledger.md` §6.
+/// Up: `ContextEngine::memory_status`.
+/// Down: `Kernel::context_explain`, which copies mode, summariser, layers and worker.
+/// Verify: `cargo test -p loong-kernel turn::tests::the_context_view_says_which_memory_is_on_even_before_it_produces_a_map`.
 /// The honest answer to "what is the memory doing?" (ADR-0017 §10, §11.1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryStatus {
@@ -243,6 +254,13 @@ pub struct MemoryStatus {
     pub worker: WorkerSnapshot,
 }
 
+/// Purpose: State shared between the foreground and the enrichment thread.
+///
+/// Serves: two threads touching counters, a wake flag and a stop flag without a lock across a model call.
+/// Design: `docs/design/context-ledger.md` §3.
+/// Up: `ContextEngine` holds it; `spawn_worker` clones the `Arc`.
+/// Down: `ContextEngine::memory_status`, `degraded` and the worker loop.
+/// Verify: `cargo test -p loong-kernel context_engine::`.
 /// Shared engine state. It is shared because two threads touch it: the foreground
 /// sets the busy flag and reads the status, the worker writes its accounting and its
 /// failures. No lock is held across a model call.
@@ -267,20 +285,32 @@ struct EngineShared {
 }
 
 impl EngineShared {
+    /// Purpose: Remember why the memory is degraded, first reason winning.
+    ///
+    /// Contract: `context_engine.rs` status.
     fn degrade(&self, reason: impl Into<String>) {
         *self.degraded.lock().unwrap() = Some(reason.into());
     }
 
+    /// Purpose: Remember the most recent enrichment failure.
+    ///
+    /// Contract: `context_engine.rs` status.
     fn set_error(&self, reason: impl Into<String>) {
         *self.last_error.lock().unwrap() = Some(reason.into());
     }
 
+    /// Purpose: Wake the worker so a new window opens now.
+    ///
+    /// Contract: `context_engine.rs` worker handshake.
     /// Ask the worker to open a window now.
     fn wake(&self) {
         *self.wake.lock().unwrap() = true;
         self.wake_cv.notify_all();
     }
 
+    /// Purpose: Sleep until woken or the interval passes, then clear the wake flag.
+    ///
+    /// Contract: `context_engine.rs` worker loop.
     /// Sleep until woken or the interval passes, then clear the wake flag.
     fn sleep(&self, interval: Duration) {
         let mut woken = self.wake.lock().unwrap();
@@ -291,11 +321,17 @@ impl EngineShared {
         *woken = false;
     }
 
+    /// Purpose: Tell `Drop` the worker has finished.
+    ///
+    /// Contract: `context_engine.rs` shutdown.
     fn finish(&self) {
         *self.done.lock().unwrap() = true;
         self.done_cv.notify_all();
     }
 
+    /// Purpose: Wait up to `limit` for the worker; `false` means let the detached thread go.
+    ///
+    /// Contract: `context_engine.rs` shutdown.
     /// Wait for the worker to finish, up to `limit`. `false` means it is still
     /// running and the caller should let it go rather than block on it.
     fn wait_done(&self, limit: Duration) -> bool {
@@ -308,6 +344,13 @@ impl EngineShared {
     }
 }
 
+/// Purpose: The engine, once it has a store: the foreground handle and the optional worker.
+///
+/// Serves: a session whose memory is either genuinely on or deliberately absent.
+/// Design: `docs/design/context-ledger.md` §3.
+/// Up: `Kernel::build` opens it; `Kernel::refresh_map`, `run` and `recall_tool` use it.
+/// Down: `Store`, `EngineShared`, `Foreground` and the worker thread.
+/// Verify: `cargo test -p loong-kernel context_engine::`.
 /// The engine, once it has a store. A store that cannot be opened is **not**
 /// silently ignored: the session runs without the map and says so, because
 /// "the memory did not load" is something a person needs to know before they rely
@@ -328,6 +371,9 @@ pub struct ContextEngine {
 }
 
 impl std::fmt::Debug for ContextEngine {
+    /// Purpose: Print mode, degradation, summariser and worker counters without locking across a model call.
+    ///
+    /// Contract: `context_engine.rs` diagnostics.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ContextEngine")
             .field("mode", &self.mode)
@@ -339,6 +385,13 @@ impl std::fmt::Debug for ContextEngine {
 }
 
 impl ContextEngine {
+    /// Purpose: Open the engine, or report why it could not be opened.
+    ///
+    /// Serves: a store failure that is reported once at session start instead of discovered later.
+    /// Design: `docs/design/context-ledger.md` §3.
+    /// Up: `Kernel::build`.
+    /// Down: `Store::open`, `open_with` and `OllamaSummarizer::new`.
+    /// Verify: `cargo test -p loong-kernel context_engine::tests::r_mode_asks_no_model_and_still_produces_summaries`.
     /// Open the engine, or report why it could not be opened. The caller decides
     /// whether a degraded engine is acceptable.
     pub fn open(config: ContextEngineConfig) -> Result<Self, String> {
@@ -358,6 +411,13 @@ impl ContextEngine {
         Self::open_with(config, summarizer)
     }
 
+    /// Purpose: Open with a caller-supplied summariser, or none for record mode.
+    ///
+    /// Serves: tests and embedders supplying their own model while `open` handles configuration.
+    /// Design: `docs/design/context-ledger.md` §3.
+    /// Up: `ContextEngine::open` and `open_with_summarizer`.
+    /// Down: `Store::open`, `window_budget` and `spawn_worker`.
+    /// Verify: `cargo test -p loong-kernel context_engine::tests::refresh_never_calls_the_model`.
     /// Open with a caller-supplied summariser. Separate from [`ContextEngine::open`]
     /// so an embedder (and a test that must count calls) can supply its own instead
     /// of going through configuration.
@@ -396,6 +456,13 @@ impl ContextEngine {
         Ok(engine)
     }
 
+    /// Purpose: Start the enrichment thread, or record why it could not start.
+    ///
+    /// Serves: model calls that stay off the turn's critical path.
+    /// Design: `docs/design/context-ledger.md` §3.
+    /// Up: `open_with`, when a summariser is configured.
+    /// Down: `Store::synthesize_window`, `EngineShared` and `std::thread::Builder`.
+    /// Verify: `cargo test -p loong-kernel context_engine::tests::the_foreground_flag_is_what_defers_the_worker`.
     /// Start the enrichment thread. The thread owns the second store and the
     /// summariser; the engine keeps only the wake/stop handles and the counters, so
     /// there is no mutable state for the two threads to fight over.
@@ -489,10 +556,24 @@ impl ContextEngine {
         }
     }
 
+    /// Purpose: The derived store, for recall and status queries.
+    ///
+    /// Serves: the kernel reading memory through the engine rather than owning a second store.
+    /// Design: `docs/design/context-ledger.md` §5.
+    /// Up: `Kernel::recall_tool` and `ContextEngine::memory_status`.
+    /// Down: `loong_context::Store`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::recall_finds_earlier_work_and_cites_it`.
     pub fn store(&self) -> &Store {
         &self.store
     }
 
+    /// Purpose: Keep the derived state current with the log: sync, digest episodes, roll domains, then wake the worker.
+    ///
+    /// Serves: a deterministic map for the current turn with no model call inside a step.
+    /// Design: `docs/design/context-ledger.md` §4–§5.
+    /// Up: `Kernel::refresh_map` at every step boundary.
+    /// Down: `Store::sync`, `digest_pending`, `digest_domains` and `EngineShared::wake`.
+    /// Verify: `cargo test -p loong-kernel context_engine::tests::refresh_never_calls_the_model`.
     /// Keep the derived state current with the log. Called at a step boundary; a
     /// failure degrades rather than aborting the turn — a stale map must never
     /// stop a person from working.
@@ -515,6 +596,13 @@ impl ContextEngine {
         self.shared.wake();
     }
 
+    /// Purpose: Tell the worker whether a turn is running, and wake it when the turn ends.
+    ///
+    /// Serves: background enrichment that never competes with the foreground.
+    /// Design: `docs/design/context-ledger.md` §5.
+    /// Up: `Kernel::run` around `run_inner`.
+    /// Down: `EngineShared::wake`.
+    /// Verify: `cargo test -p loong-kernel context_engine::tests::the_foreground_flag_is_what_defers_the_worker`.
     /// Tell the worker whether a turn is running. The kernel sets this around
     /// [`Kernel::submit`](crate::Kernel), `respond_to_approval` included.
     pub fn set_foreground_busy(&self, busy: bool) {
@@ -526,31 +614,73 @@ impl ContextEngine {
         }
     }
 
+    /// Purpose: Whether a turn is currently running, as the engine sees it.
+    ///
+    /// Serves: the test and status surface checking the flag the worker obeys.
+    /// Design: `docs/design/context-ledger.md` §5.
+    /// Up: the engine tests; no production caller.
+    /// Down: the `busy` atomic.
+    /// Verify: `cargo test -p loong-kernel context_engine::tests::the_foreground_flag_is_what_defers_the_worker`.
     /// Whether the engine is running a turn (for tests and status surfaces).
     pub fn foreground_is_busy(&self) -> bool {
         self.busy.load(Ordering::SeqCst)
     }
 
+    /// Purpose: Ask the worker to look for work now.
+    ///
+    /// Serves: an embedder or test that does not want to wait for the idle sleep.
+    /// Design: `docs/design/context-ledger.md` §5.
+    /// Up: no in-tree caller; the engine tests do not need it.
+    /// Down: `EngineShared::wake`.
+    /// Verify: `cargo test -p loong-kernel context_engine::`.
     /// Ask the worker to look for work now.
     pub fn wake_worker(&self) {
         self.shared.wake();
     }
 
+    /// Purpose: Why the memory is degraded, if it is.
+    ///
+    /// Serves: a status surface that can say the engine lost its store or a pass failed.
+    /// Design: `docs/design/context-ledger.md` §6.
+    /// Up: `ContextEngine::memory_status` and the `Debug` impl.
+    /// Down: `EngineShared.degraded`.
+    /// Verify: `cargo test -p loong-kernel context_engine::tests::an_unreachable_model_degrades_the_episode_not_the_session`.
     /// Why the memory is degraded, if it is.
     pub fn degraded(&self) -> Option<String> {
         self.shared.degraded.lock().unwrap().clone()
     }
 
+    /// Purpose: `record` or `semantic`, non-empty for as long as the engine exists.
+    ///
+    /// Serves: distinguishing off from on even before a map exists.
+    /// Design: `docs/design/context-ledger.md` §6.
+    /// Up: `ContextEngine::memory_status`; the engine tests.
+    /// Down: the `mode` field.
+    /// Verify: `cargo test -p loong-kernel context_engine::tests::r_mode_asks_no_model_and_still_produces_summaries`.
     /// `record` or `semantic`. Non-empty for as long as the engine exists.
     pub fn memory_mode(&self) -> &'static str {
         self.mode
     }
 
+    /// Purpose: The summariser's name, or `None` in record mode.
+    ///
+    /// Serves: a status surface naming which model enriches the memory.
+    /// Design: `docs/design/context-ledger.md` §6.
+    /// Up: the engine tests; `memory_status` reads the field directly.
+    /// Down: the `summarizer_name` field.
+    /// Verify: `cargo test -p loong-kernel context_engine::tests::semantic_mode_enriches_in_the_background_and_records_the_answer`.
     /// Whether semantic enrichment is configured, for a status surface.
     pub fn summarizer_name(&self) -> Option<String> {
         self.summarizer_name.clone()
     }
 
+    /// Purpose: The honest snapshot a status surface draws: mode, degradation, layers and worker.
+    ///
+    /// Serves: the explain view reporting memory state instead of guessing from the ledger.
+    /// Design: `docs/design/context-ledger.md` §6.
+    /// Up: `Kernel::context_explain`.
+    /// Down: `Store::{layer_stats, global_map, pending_synthesis, degraded_synthesis}` and `EngineShared`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::the_context_view_says_which_memory_is_on_even_before_it_produces_a_map`.
     /// The honest snapshot a status surface draws (ADR-0017 §10, §11.1).
     ///
     /// `&self`, because the caller is an explain query: it must not need a mutable
@@ -628,6 +758,13 @@ impl ContextEngine {
         }
     }
 
+    /// Purpose: The L4 map to put in front of the model, or `None` when there is nothing worth carrying.
+    ///
+    /// Serves: not spending tokens on an empty map in a session's first turns.
+    /// Design: `docs/design/context-ledger.md` §6.
+    /// Up: `Kernel::refresh_map`.
+    /// Down: `Store::global_map`; a failure degrades the engine rather than failing the turn.
+    /// Verify: `cargo test -p loong-kernel turn::tests::the_layered_engine_puts_a_map_in_front_of_the_model`.
     /// The L4 map to put in front of the model, or `None` when there is nothing
     /// worth carrying yet. A session's first few events have no map, and inventing
     /// an empty one would spend tokens to say nothing.
@@ -645,6 +782,9 @@ impl ContextEngine {
         }
     }
 
+    /// Purpose: Open an engine with a caller-supplied summariser, for tests and embedders.
+    ///
+    /// Contract: `context_engine.rs` tests.
     /// A test/embedder seam: an engine whose model is supplied by the caller.
     #[cfg(test)]
     fn open_with_summarizer(
@@ -656,6 +796,9 @@ impl ContextEngine {
 }
 
 impl Drop for ContextEngine {
+    /// Purpose: Stop and bounded-wait for the worker, then drop its handle so `session.new` need not wait out a model request.
+    ///
+    /// Contract: `context_engine.rs` lifecycle.
     fn drop(&mut self) {
         let Some(handle) = self.worker.take() else {
             return;
@@ -669,6 +812,9 @@ impl Drop for ContextEngine {
     }
 }
 
+/// Purpose: The configured window budget, or the shipped default when none was named.
+///
+/// Contract: `context_engine.rs` worker config.
 /// The window budget for a configuration, or the shipped default when the caller
 /// named none.
 fn window_budget(choice: Option<&SummarizerChoice>) -> WindowBudget {
@@ -687,6 +833,13 @@ mod tests {
 
     static N: AtomicU64 = AtomicU64::new(0);
 
+    /// Purpose: A test summariser that counts its calls.
+    ///
+    /// Serves: measuring 'the model was actually asked' rather than assuming the wiring.
+    /// Design: `docs/design/context-ledger.md` §6.
+    /// Up: the engine tests.
+    /// Down: the `Summarizer` trait; `ContextEngine::open_with_summarizer`.
+    /// Verify: `cargo test -p loong-kernel context_engine::tests::refresh_never_calls_the_model`.
     /// A summariser that counts its calls, so "the model is actually asked" is a
     /// measurable claim rather than a wiring hope.
     #[derive(Default)]
@@ -695,10 +848,16 @@ mod tests {
     }
 
     impl Summarizer for Counting {
+        /// Purpose: The counting summariser's name.
+        ///
+        /// Contract: `context_engine.rs` tests.
         fn name(&self) -> String {
             "counting".to_string()
         }
 
+        /// Purpose: Count one call and return a deterministic edit, so 'the model was asked' is measurable.
+        ///
+        /// Contract: `context_engine.rs` tests.
         fn summarize(&mut self, _input: &DigestInput) -> Result<Synthesis, SummarizerError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(Synthesis {
@@ -708,6 +867,13 @@ mod tests {
         }
     }
 
+    /// Purpose: A test summariser that takes measurable wall-clock time.
+    ///
+    /// Serves: proving the foreground does not wait for a slow model.
+    /// Design: `docs/design/context-ledger.md` §6.
+    /// Up: the ignored measurement test.
+    /// Down: the `Summarizer` trait.
+    /// Verify: `cargo test -p loong-kernel context_engine::tests::measurement -- --ignored`.
     /// A summariser that takes a measurable amount of wall-clock time, for the
     /// measurement that the foreground does not wait on it.
     struct Slow {
@@ -716,10 +882,16 @@ mod tests {
     }
 
     impl Summarizer for Slow {
+        /// Purpose: The slow summariser's name.
+        ///
+        /// Contract: `context_engine.rs` tests.
         fn name(&self) -> String {
             "slow".to_string()
         }
 
+        /// Purpose: Sleep a measurable time and count the call, for the foreground-wait measurement.
+        ///
+        /// Contract: `context_engine.rs` tests.
         fn summarize(&mut self, _input: &DigestInput) -> Result<Synthesis, SummarizerError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             std::thread::sleep(Duration::from_millis(self.millis));
@@ -730,6 +902,9 @@ mod tests {
         }
     }
 
+    /// Purpose: A fresh temporary store and log path per test.
+    ///
+    /// Contract: `context_engine.rs` tests.
     fn temp_log() -> (PathBuf, PathBuf) {
         let dir = std::env::temp_dir().join(format!(
             "loong-engine-{}-{}",
@@ -740,6 +915,9 @@ mod tests {
         (dir.join("session.context.db"), dir.join("session.jsonl"))
     }
 
+    /// Purpose: Poll a worker-thread result for up to five seconds.
+    ///
+    /// Contract: `context_engine.rs` tests.
     /// A fast poll, because a worker is a thread: the shell of the test is
     /// deterministic, the arrival of its result is not.
     fn wait_until(mut check: impl FnMut() -> bool) -> bool {
@@ -753,6 +931,13 @@ mod tests {
         check()
     }
 
+    /// Purpose: Append one small task's events to a test log.
+    ///
+    /// Serves: giving the digest something real to summarise.
+    /// Design: `docs/design/context-ledger.md` §6.
+    /// Up: the engine tests.
+    /// Down: `SessionLog::open` and `append`.
+    /// Verify: `cargo test -p loong-kernel context_engine::`.
     fn write_task(log: &std::path::Path, index: usize) {
         if !log.exists() {
             std::fs::File::create(log).unwrap();
@@ -797,10 +982,14 @@ mod tests {
         }
     }
 
+    /// Purpose: Make a test engine's worker poll quickly.
+    ///
+    /// Contract: `context_engine.rs` tests.
     fn fast_worker(engine: &mut ContextEngine) {
         engine.config.worker.idle_sleep = Duration::from_millis(5);
     }
 
+    /// Purpose: Record mode produces deterministic summaries without asking a model, and reports no worker.
     #[test]
     fn r_mode_asks_no_model_and_still_produces_summaries() {
         // The honest version of "the model is optional": with no summariser the
@@ -826,6 +1015,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(db.parent().unwrap());
     }
 
+    /// Purpose: A step boundary (`refresh`) never calls the model; the worker does once the foreground is idle.
     #[test]
     fn refresh_never_calls_the_model() {
         // The structural form of §4.6's promise: the foreground path cannot be slow
@@ -867,6 +1057,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(db.parent().unwrap());
     }
 
+    /// Purpose: Semantic mode enriches in the background and records the model's answer and provenance.
     #[test]
     fn semantic_mode_enriches_in_the_background_and_records_the_answer() {
         let (db, log) = temp_log();
@@ -915,6 +1106,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(db.parent().unwrap());
     }
 
+    /// Purpose: An unreachable model degrades the episode's semantic fields, not the session, and the status says why.
     #[test]
     fn an_unreachable_model_degrades_the_episode_not_the_session() {
         // A local model that is not running is the normal case for anyone who has
@@ -962,6 +1154,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(db.parent().unwrap());
     }
 
+    /// Purpose: An unknown summariser kind fails closed to no model instead of shipping history somewhere.
     #[test]
     fn an_unknown_summariser_kind_fails_closed() {
         // A misspelled kind must not become a default that ships history somewhere.
@@ -1012,6 +1205,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(db.parent().unwrap());
     }
 
+    /// Purpose: A busy foreground defers the worker; releasing the turn lets the work through.
     #[test]
     fn the_foreground_flag_is_what_defers_the_worker() {
         // The engine's own contract with the kernel: while a turn is running the
@@ -1044,6 +1238,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(db.parent().unwrap());
     }
 
+    /// Purpose: A slow model is measured on the worker, proving the foreground path does not wait for it.
     /// ADR-0017 verification ④, measured rather than argued: the foreground path is
     /// `refresh()`, which every step boundary runs, and a model that takes real time
     /// must not be inside it. Ignored because it is a measurement, not a gate.

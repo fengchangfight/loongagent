@@ -1,6 +1,26 @@
+//! Purpose: The read-only `recall` tool: search this session's derived memory and expand a summary into the events it cites.
+//!
+//! Serves: a thin foreground that can still answer "what did we do?" with evidence
+//! rather than a derived summary taken on faith (`context-ledger.md` §5).
+//!
+//! # Contract
+//! - **Design:** `docs/design/context-ledger.md` §5.
+//! - **Upstream:** `Kernel::dispatch` answers `recall` before the registry;
+//!   `Kernel::execute` has the matching arm; `Kernel::tool_specs` advertises it.
+//! - **Downstream:** `loong_context::Store::{expand, recall_at, search}` and its
+//!   `Summary`, `Hit` and `Expansion` views.
+//! - **Verify:** `cargo test -p loong-kernel turn::tests::recall_finds_earlier_work_and_cites_it` · `./scripts/check.sh`.
+
 use super::*;
 
 impl Kernel {
+    /// Purpose: Answer a `recall` call: expand one summary, or search the memory and cite the record.
+    ///
+    /// Serves: a read-only retrieval tool that never materialises or writes.
+    /// Design: `docs/design/context-ledger.md` §5.
+    /// Up: `Kernel::dispatch` (before the registry) and `Kernel::execute` (the matching arm); the turn tests.
+    /// Down: `ContextEngine::store`, `Store::{expand, recall_at, search}`, `render_recall`, `render_expansion` and `cap_chars`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::recall_finds_earlier_work_and_cites_it`.
     /// The `recall` tool: search the derived memory, or expand one summary into the
     /// evidence beneath it.
     ///
@@ -99,6 +119,13 @@ pub(super) const RECALL_TOOL: &str = "recall";
 /// evidence") only works if the tool tells the model how it is meant to be used.
 pub(super) const RECALL_DESCRIPTION: &str = "Search this session's memory for earlier work. Returns summaries with citations ([seq]) into the raw record. Pass \"expand\" with a summary id to get the summary together with the original events it rests on — do that before asserting that something was verified or fixed. Summaries are a derived index, not the record: when they disagree with the evidence, the evidence is right.";
 
+/// Purpose: The JSON schema the model is offered for `recall`.
+///
+/// Serves: a tool whose arguments match what `recall_tool` actually reads.
+/// Design: `docs/design/context-ledger.md` §5.
+/// Up: `Kernel::tool_specs` when memory exists.
+/// Down: `json!`; no other callee.
+/// Verify: `cargo test -p loong-kernel turn::tests::recall_is_offered_only_when_there_is_memory_behind_it`.
 /// The tool's schema. Every field is optional except that `expand` stands alone.
 pub(super) fn recall_parameters() -> Json {
     json!({
@@ -131,6 +158,13 @@ pub(super) fn recall_parameters() -> Json {
 /// budget like everything else, so this is a ceiling rather than a hope.
 pub(super) const RECALL_MAX_CHARS: usize = 4_800;
 
+/// Purpose: Split a query into search terms, keeping two-character Chinese words.
+///
+/// Serves: recall matching the words a person would recognise.
+/// Design: `docs/design/context-ledger.md` §5.
+/// Up: `Kernel::recall_tool`.
+/// Down: `char::is_whitespace` and the punctuation list; no other callee.
+/// Verify: `cargo test -p loong-kernel turn::tests::recall_finds_earlier_work_and_cites_it`.
 /// Split a query into terms. Whitespace and the punctuation that would otherwise
 /// glue words together; the two-character Chinese word is preserved, which is the
 /// case a trigram index gets silently wrong.
@@ -164,6 +198,9 @@ fn split_terms(query: &str) -> Vec<String> {
         .collect()
 }
 
+/// Purpose: Truncate a reply and say so, so a shortened answer never reads as the whole truth.
+///
+/// Contract: `turn/recall.rs` retrieval cap.
 /// Truncate and say so. A silently shortened answer would read as "that is all
 /// there was", which is the one thing a retrieval result must never imply.
 fn cap_chars(text: &str, max: usize) -> String {
@@ -174,6 +211,13 @@ fn cap_chars(text: &str, max: usize) -> String {
     format!("{kept}\n…[truncated — narrow the query for the rest]")
 }
 
+/// Purpose: Render summaries with seq citations, or raw events when summaries did not match.
+///
+/// Serves: a reply the model can trace, with the record distinguished from the index.
+/// Design: `docs/design/context-ledger.md` §5.
+/// Up: `Kernel::recall_tool`.
+/// Down: `Summary`, `Hit` and their citations; no other callee.
+/// Verify: `cargo test -p loong-kernel turn::tests::recall_finds_earlier_work_and_cites_it`.
 /// Render summaries as an index the model can jump from. The citation is part of
 /// every line on purpose: a summary the model cannot trace is a claim, not memory.
 fn render_recall(summaries: &[loong_context::Summary], events: &[loong_context::Hit]) -> String {
@@ -229,6 +273,13 @@ fn render_recall(summaries: &[loong_context::Summary], events: &[loong_context::
     out
 }
 
+/// Purpose: Render one summary together with the original events it cites.
+///
+/// Serves: expansion returning evidence, not just a derived claim.
+/// Design: `docs/design/context-ledger.md` §5.
+/// Up: `Kernel::recall_tool`'s `expand` arm.
+/// Down: `Expansion`, `Summary` and the evidence atoms; no other callee.
+/// Verify: `cargo test -p loong-kernel turn::tests::expand_returns_the_summary_with_its_original_events`.
 /// Render a summary *with* the evidence it cites. The evidence is not a footnote:
 /// returning it in the same response is the mechanism that stops a derived index
 /// from being read as the record.

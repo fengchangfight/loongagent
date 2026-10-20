@@ -1,5 +1,26 @@
+//! Purpose: Build a session's kernel: open the log, engine, models, MCP servers, skills, hooks, PDP ladder and confinement, then seat and replay its context.
+//!
+//! Serves: one construction path, so the live kernel and a later `session.new` cannot
+//! disagree about what the session may do (ADR-0004, ADR-0007, ADR-0018).
+//!
+//! # Contract
+//! - **Design:** `docs/design/kernel-loop.md` §2; `docs/design/tools-permissions.md`
+//!   §4 owns the PEP and `docs/design/extension-model.md` the MCP and skill wiring.
+//! - **Upstream:** `crates/cli/src/server.rs`'s kernel factory; the server and turn
+//!   tests that build a kernel directly.
+//! - **Downstream:** `ContextEngine::open`, `SessionLog`, `Index`, `Registry`,
+//!   `McpClient`, `SkillSet`, `Pdp`, `HookRunner` and `Kernel::seat_system_prompt`.
+//! - **Verify:** `cargo test -p loong-kernel turn::tests` · `./scripts/check.sh`.
+
 use super::*;
 
+/// Purpose: The bridge from `mcp` hooks to this session's live MCP servers.
+///
+/// Serves: hook kinds that call a server without the hook engine learning MCP.
+/// Design: `docs/design/extension-model.md` §3.
+/// Up: `Kernel::build` builds it; `HookRunner::with_mcp` and `SkillTool::with_fetcher` hold it.
+/// Down: `McpClient::{name, get_prompt, call_tool}`.
+/// Verify: `cargo test -p loong-kernel turn::tests::an_mcp_hook_can_gate_a_builtin_tool`.
 /// The bridge from `mcp` hooks to this session's servers. The hook engine stays
 /// ignorant of MCP; the kernel, which owns the servers, supplies the capability.
 pub(super) struct KernelMcp {
@@ -7,6 +28,13 @@ pub(super) struct KernelMcp {
 }
 
 impl PromptFetcher for KernelMcp {
+    /// Purpose: Fetch one prompt body from the named server, mapping the invocation's arguments.
+    ///
+    /// Serves: a command whose body lives on an MCP server loading like any other skill.
+    /// Design: `docs/design/extension-model.md` §3.
+    /// Up: `SkillTool` through the `PromptFetcher` trait; `Kernel::fetch_mcp_prompt` reaches it.
+    /// Down: `McpClient::get_prompt` and `loong_mcp::map_prompt_arguments`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::the_model_can_fetch_an_mcp_prompt_body_with_the_tool`.
     fn fetch(
         &self,
         server: &str,
@@ -30,6 +58,9 @@ impl PromptFetcher for KernelMcp {
 }
 
 impl McpCaller for KernelMcp {
+    /// Purpose: Call an MCP tool through the named server for an `mcp` hook.
+    ///
+    /// Contract: `turn/build.rs` hook bridge.
     fn call(&self, server: &str, tool: &str, args: &Json) -> Result<String, String> {
         let client = self
             .clients
@@ -43,6 +74,13 @@ impl McpCaller for KernelMcp {
     }
 }
 
+/// Purpose: What attaching MCP produced: a note, the live clients and the prompts that became commands.
+///
+/// Serves: one build step returning server state without a second query.
+/// Design: `docs/design/extension-model.md` §3.
+/// Up: `attach_mcp` returns it; `Kernel::build` destructures it.
+/// Down: the `KernelMcp` bridge and the prompt skills.
+/// Verify: `cargo test -p loong-kernel turn::tests::an_mcp_tool_is_just_another_tool`.
 /// Start the trusted MCP servers and register their tools.
 ///
 /// A server that is `required` (the default) and cannot be used is fatal: the
@@ -54,6 +92,13 @@ struct AttachedMcp {
     prompt_skills: Vec<Skill>,
 }
 
+/// Purpose: Start the trusted MCP servers and register their tools and prompts.
+///
+/// Serves: external tools behind the same registry and gate as the built-ins, with a required server fatal when unusable.
+/// Design: `docs/design/extension-model.md` §3.
+/// Up: `Kernel::build`.
+/// Down: `McpSet::load`, `McpClient::start`, `list_tools`, `list_prompts` and `Registry::register`.
+/// Verify: `cargo test -p loong-kernel turn::tests::a_required_server_that_cannot_start_is_fatal`.
 fn attach_mcp(workspace: &Path, tools: &mut Registry) -> Result<AttachedMcp, KernelError> {
     let set = McpSet::load(workspace).map_err(|e| KernelError::Mcp(e.to_string()))?;
     let mut note = set.summary();
@@ -149,6 +194,13 @@ fn attach_mcp(workspace: &Path, tools: &mut Registry) -> Result<AttachedMcp, Ker
     })
 }
 impl Kernel {
+    /// Purpose: Create a fresh session log and a kernel with one model.
+    ///
+    /// Serves: the simplest construction a caller or a test needs.
+    /// Design: `docs/design/kernel-loop.md` §1.
+    /// Up: `crates/server`'s tests and the turn tests; no production caller (`crates/cli/src/server.rs` uses `create_with_models`).
+    /// Down: `SessionLog::create` and `Kernel::build`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_tool_runs_and_the_turn_finishes`.
     pub fn create(
         log_path: impl AsRef<Path>,
         config: KernelConfig,
@@ -161,6 +213,13 @@ impl Kernel {
         )
     }
 
+    /// Purpose: Open an existing session log and a kernel with one model.
+    ///
+    /// Serves: resume for a caller or a test that has one model.
+    /// Design: `docs/design/sessions-lineage.md` §5.
+    /// Up: `crates/server`'s tests and the turn tests; no production caller (`crates/cli/src/server.rs` uses `open_with_models`).
+    /// Down: `SessionLog::open` and `Kernel::build`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_reopened_session_hands_the_model_its_own_history`.
     pub fn open(
         log_path: impl AsRef<Path>,
         config: KernelConfig,
@@ -173,6 +232,13 @@ impl Kernel {
         )
     }
 
+    /// Purpose: Create a fresh session log and a kernel with the profile's models.
+    ///
+    /// Serves: the CLI's one construction path for a new session.
+    /// Design: `docs/design/kernel-loop.md` §1.
+    /// Up: `crates/cli/src/server.rs`'s kernel factory; the server tests.
+    /// Down: `SessionLog::create` and `Kernel::build`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::the_router_can_switch_models_and_the_log_says_why`.
     /// A session with several models and the router that chooses between them.
     pub fn create_with_models(
         log_path: impl AsRef<Path>,
@@ -182,6 +248,13 @@ impl Kernel {
         Self::build(SessionLog::create(log_path)?, config, models)
     }
 
+    /// Purpose: Open an existing session log and a kernel with the profile's models.
+    ///
+    /// Serves: resume from the CLI with the same model set a new session would get.
+    /// Design: `docs/design/sessions-lineage.md` §5.
+    /// Up: `crates/cli/src/server.rs`'s kernel factory; the server tests.
+    /// Down: `SessionLog::open` and `Kernel::build`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_reopened_session_hands_the_model_its_own_history`.
     pub fn open_with_models(
         log_path: impl AsRef<Path>,
         config: KernelConfig,
@@ -190,6 +263,13 @@ impl Kernel {
         Self::build(SessionLog::open(log_path)?, config, models)
     }
 
+    /// Purpose: Build the kernel: open the engine, resolve models and limits, wire tools, skills, hooks and confinement, seat the prompt and replay history.
+    ///
+    /// Serves: one place where every capability is chosen and every narrowing is applied.
+    /// Design: `docs/design/kernel-loop.md` §1–§2; `docs/design/tools-permissions.md` §4.
+    /// Up: the four public constructors.
+    /// Down: `ContextEngine::open`, `Ledger::new`, `Index::rebuild_into`, `attach_mcp`, `SkillSet::load_in`, `Pdp::tighten_from`, `HookSet::load`, `seat_system_prompt` and `replay_history`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_profile_narrows_the_ladder_and_the_rule_names_the_layer`.
     fn build(
         log: SessionLog,
         mut config: KernelConfig,
@@ -421,20 +501,48 @@ impl Kernel {
         Ok(kernel)
     }
 
+    /// Purpose: What MCP servers are in play, as a status note.
+    ///
+    /// Serves: a startup surface saying which servers started, were disabled or were unavailable.
+    /// Design: `docs/design/extension-model.md` §3.
+    /// Up: the turn tests only; no production caller (the CLI prints `McpSet::summary` instead).
+    /// Down: `Kernel.mcp_note`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::an_optional_server_is_only_a_note`.
     /// What MCP servers are in play, for the startup log and `mcp list`.
     pub fn mcp_note(&self) -> &str {
         &self.mcp_note
     }
 
+    /// Purpose: How many MCP servers this session started.
+    ///
+    /// Serves: a status surface counting live servers without listing them.
+    /// Design: `docs/design/extension-model.md` §3.
+    /// Up: the turn tests only; no production caller.
+    /// Down: `Kernel.mcp_clients`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::an_untrusted_mcp_manifest_starts_nothing`.
     pub fn mcp_servers(&self) -> usize {
         self.mcp_clients.len()
     }
 
+    /// Purpose: The skills and commands this workspace offers.
+    ///
+    /// Serves: a caller reading the same catalogue the system prompt was built from.
+    /// Design: `docs/design/extension-model.md` §2.
+    /// Up: the turn tests only; no production caller (`/help` in the CLI uses its own session).
+    /// Down: `Kernel.skills`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_server_without_prompts_contributes_none`.
     /// The skills and commands this workspace offers.
     pub fn skills(&self) -> &SkillSet {
         &self.skills
     }
 
+    /// Purpose: Fetch an MCP prompt's body for a command invocation, with its token estimate.
+    ///
+    /// Serves: a `/mcp__server__prompt` invocation whose body is not in the local catalogue.
+    /// Design: `docs/design/extension-model.md` §3.
+    /// Up: `Kernel::submit_with`'s command path.
+    /// Down: `SkillSet::get`, the `KernelMcp` bridge and `loong_skills::estimate_tokens`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::an_mcp_prompt_becomes_a_command_with_its_body_fetched_on_invoke`.
     /// Fetch an MCP prompt's body for a command invocation, naming its arguments.
     pub(super) fn fetch_mcp_prompt(&self, name: &str, args: &str) -> Result<(String, u64), String> {
         let skill = self
@@ -458,6 +566,13 @@ impl Kernel {
         Ok((body.clone(), loong_skills::estimate_tokens(&body)))
     }
 
+    /// Purpose: Build and seat the one pinned system prompt: frame, skill catalogue, and any plugin bootstrap bodies.
+    ///
+    /// Serves: a model that is told how to work and which skills exist before the first turn.
+    /// Design: `docs/design/context-ledger.md` §6; `docs/design/extension-model.md` §2.
+    /// Up: `Kernel::build`, before history replay.
+    /// Down: `Ledger::add` (pinned, Persistent), `SkillSet::catalogue`, `Skill::body` and `Kernel::append` (`skills.loaded`).
+    /// Verify: `cargo test -p loong-kernel turn::tests::the_catalogue_is_in_context_and_the_body_is_not`.
     /// The one place the system prompt is built: a short frame, the description-only
     /// skill catalogue (ADR-0006 progressive disclosure), and the bodies of any skills
     /// an installed plugin asked to have seated here (ADR-0018).

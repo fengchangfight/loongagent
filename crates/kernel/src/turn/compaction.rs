@@ -1,6 +1,26 @@
+//! Purpose: Keep the prompt inside its ceiling: clear stale tool output first, drop whole exchanges only with the engine off, and explain what the request will carry.
+//!
+//! Serves: a long session that keeps working without silently losing the prompt being
+//! answered or the map that says where it stands (ADR-0006, ADR-0017).
+//!
+//! # Contract
+//! - **Design:** `docs/design/context-ledger.md` §3–§4, §6.
+//! - **Upstream:** `Kernel::run_inner` calls `refresh_map` and `compact_if_needed`
+//!   every step; `crates/server` reads `context_explain`.
+//! - **Downstream:** `Ledger::clear_tool_outputs`, `Ledger::forget`,
+//!   `ContextEngine::refresh` and `ContextEngine::map_text`.
+//! - **Verify:** `cargo test -p loong-kernel turn::tests::compaction_clears_stale_tool_output_before_dropping_anything` · `./scripts/check.sh`.
+
 use super::*;
 
 impl Kernel {
+    /// Purpose: The wire view of what the next request will carry, and why.
+    ///
+    /// Serves: a context panel that answers tokens, categories, entries, tools and memory state without changing anything.
+    /// Design: `docs/design/context-ledger.md` §6.
+    /// Up: `crates/server`'s `context.explain` handler; the turn tests.
+    /// Down: `Ledger::{total_tokens, budget, tokens_by_category, entries}`, `Kernel::tool_specs`, `Index::kinds` and `ContextEngine::memory_status`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::the_context_view_says_what_the_next_request_will_carry`.
     pub fn context_explain(&self) -> gen::ContextExplain {
         let by_category = self.ledger.tokens_by_category();
         let mut categories: Vec<gen::ContextCategory> = by_category
@@ -109,6 +129,13 @@ impl Kernel {
         }
     }
 
+    /// Purpose: Put the current L4 map in front of the model, refreshing it in place.
+    ///
+    /// Serves: a map that is always present, always current, and costs one ledger entry.
+    /// Design: `docs/design/context-ledger.md` §6–§7.
+    /// Up: `Kernel::run_inner`, after the stop check and before compaction, at every step.
+    /// Down: `ContextEngine::refresh`, `ContextEngine::map_text`, `Ledger::add`/`replace`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::the_layered_engine_puts_a_map_in_front_of_the_model`.
     /// Put the current L4 map in front of the model, refreshing it in place.
     ///
     /// Placed as its own message rather than folded into the system prompt: the
@@ -157,6 +184,13 @@ impl Kernel {
         }
     }
 
+    /// Purpose: How much input one request may carry now: the stricter of the budget and the model window.
+    ///
+    /// Serves: compaction firing before a provider refuses the prompt.
+    /// Design: `docs/design/context-ledger.md` §3.
+    /// Up: `Kernel::compact_if_needed`.
+    /// Down: `Ledger::budget`, `current_window` and `KernelConfig.compact_at_percent` / `reserved_context_size`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::the_models_window_bounds_the_context_when_no_budget_does`.
     /// ADR-0006 §4: compaction, in a fixed order, and visible.
     ///
     /// Clearing comes first because stale tool output is the bulk of a long
@@ -195,6 +229,9 @@ impl Kernel {
         }
     }
 
+    /// Purpose: The selected model's context window, or `None` when it declares none.
+    ///
+    /// Contract: `turn/compaction.rs` ceiling.
     /// The window of the model this session is on. Routing is picked per step and the
     /// selection is recorded before the call, so a switch is picked up on the next step;
     /// the reserve makes one stale step harmless.
@@ -204,6 +241,13 @@ impl Kernel {
             .and_then(|model| model.context_window())
     }
 
+    /// Purpose: Clear stale tool output, then drop whole exchanges only when the engine is off.
+    ///
+    /// Serves: a long session that frees context without losing a tool pair or the prompt being answered.
+    /// Design: `docs/design/context-ledger.md` §4.
+    /// Up: `Kernel::run_inner` at every step boundary.
+    /// Down: `input_ceiling`, `Ledger::clear_tool_outputs`, `drop_oldest_exchange` and `Kernel::append` (`compaction.applied`).
+    /// Verify: `cargo test -p loong-kernel turn::tests::compaction_clears_stale_tool_output_before_dropping_anything`.
     pub(super) fn compact_if_needed(&mut self, events: &mut Vec<u64>) -> Result<(), KernelError> {
         let Some(ceiling) = self.input_ceiling() else {
             return Ok(());
@@ -276,6 +320,13 @@ impl Kernel {
         Ok(())
     }
 
+    /// Purpose: Drop the oldest exchange and forget its ledger entries, returning how many messages went.
+    ///
+    /// Serves: a well-formed conversation after phase 2, with the current prompt kept.
+    /// Design: `docs/design/context-ledger.md` §4.
+    /// Up: `Kernel::compact_if_needed` and `Kernel::replay_compaction`.
+    /// Down: `Ledger::forget` and the `messages`/`entry_of` vectors.
+    /// Verify: `cargo test -p loong-kernel turn::tests::compaction_drops_the_oldest_exchange_when_clearing_is_not_enough`.
     /// Drop the oldest exchange (a user message and everything up to the next
     /// user message) so the conversation stays well-formed. Returns how many
     /// messages went.

@@ -1,6 +1,26 @@
+//! Purpose: Which model runs the session: list the offerings, switch, record the choice, and describe what a status bar needs.
+//!
+//! Serves: a person choosing a model and a router choosing per step, both leaving the
+//! same auditable `model.selected` fact (ADR-0008).
+//!
+//! # Contract
+//! - **Design:** `docs/design/kernel-loop.md` §2; `docs/design/config-routing.md`
+//!   owns the router and the model list.
+//! - **Upstream:** `crates/server`'s `model.list` and `model.select`; the turn tests.
+//! - **Downstream:** `Router`, `Kernel.selected_model`, `Ledger::total_tokens` and
+//!   `Kernel::record_model_selected`.
+//! - **Verify:** `cargo test -p loong-kernel turn::tests::the_model_list_is_the_profile_order_and_a_person_can_choose_from_it` · `./scripts/check.sh`.
+
 use super::*;
 
 impl Kernel {
+    /// Purpose: The models this session can switch to, in the profile's declaration order.
+    ///
+    /// Serves: a status bar numbering models the way the profile ranked them, not alphabetically.
+    /// Design: `docs/design/config-routing.md` §2.
+    /// Up: `Kernel::model_list`; the turn tests.
+    /// Down: `Kernel.models` and `Profile.models`; no fallible callee.
+    /// Verify: `cargo test -p loong-kernel turn::tests::the_model_list_is_the_profile_order_and_a_person_can_choose_from_it`.
     /// What the next request will actually carry, and why — the debug view behind a
     /// "context" panel. It changes nothing: no event, no ledger movement.
     /// The models this session can switch to, in the order the configuration declared
@@ -36,11 +56,25 @@ impl Kernel {
         names
     }
 
+    /// Purpose: The model currently running the session.
+    ///
+    /// Serves: a surface showing what a switch changed.
+    /// Design: `docs/design/config-routing.md` §2.
+    /// Up: `crates/server`'s `model.list` answer; the turn tests.
+    /// Down: `Kernel.selected_model`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::choosing_the_model_already_running_records_nothing`.
     /// What the session is running, which is what a switch changes.
     pub fn selected_model(&self) -> &str {
         &self.selected_model
     }
 
+    /// Purpose: The model offerings a status bar draws: name, provider, window and wire name.
+    ///
+    /// Serves: one list that agrees with what routing can actually pick.
+    /// Design: `docs/design/config-routing.md` §2.
+    /// Up: `crates/server`'s `model.list` and `model.select` answers.
+    /// Down: `model_names` and `Profile.models`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::the_model_list_is_the_profile_order_and_a_person_can_choose_from_it`.
     /// Everything a status bar needs about the models on offer.
     pub fn model_list(&self) -> Vec<gen::ModelOffering> {
         let declared: std::collections::BTreeMap<&str, &loong_config::ModelSpec> = self
@@ -66,6 +100,13 @@ impl Kernel {
             .collect()
     }
 
+    /// Purpose: Switch the session's model, recording the choice and making it the router's default.
+    ///
+    /// Serves: a person's choice that survives the next turn and is visible in the log.
+    /// Design: `docs/design/kernel-loop.md` §2; `docs/design/config-routing.md` §2.
+    /// Up: `crates/server`'s `model.select` handler; the CLI/TUI through the server; the turn tests.
+    /// Down: `record_model_selected`, `Router.default` and `model_names`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::the_model_list_is_the_profile_order_and_a_person_can_choose_from_it`.
     /// Switch the model this session uses, from now on.
     ///
     /// Recorded as a `model.selected` event with the same shape a routing rule writes,

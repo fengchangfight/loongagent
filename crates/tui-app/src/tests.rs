@@ -1,7 +1,18 @@
+//! Purpose: Prove the full-screen surface's rendering promises: what the screen shows for keys, events, folds, decisions, models and the first-run forms.
+//!
+//! # Contract
+//! - **Serves:** the rendering contract in `docs/design/surfaces.md` §3 and §6; this file is the acceptance test for the screen.
+//! - **Design:** `docs/design/surfaces.md` §3 and §6; `docs/design/sessions-lineage.md` §5 for the reattach, resend and new-session paths.
+//! - **Upstream:** no production caller; `cargo test -p loong-tui-app` runs the file.
+//! - **Downstream:** `App`, `wizard`, `mention`, `setup` and `worker`, and ratatui's `TestBackend`.
+//! - **Verify:** `cargo test -p loong-tui-app` · `./scripts/check.sh`
+
 use super::*;
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 
+/// Purpose: Every drawn box's title line, so a state assertion names the box and not the transcript.
+/// Contract: called by the prompt-title tests; filters `┌` rows and calls `despaced`.
 /// Every drawn box's title line.
 ///
 /// The tick lives in two places — the transcript line, which is history, and the
@@ -16,6 +27,8 @@ fn box_titles(screen: &str) -> String {
         .join("\n")
 }
 
+/// Purpose: Feed one worker message to the app, as the draw loop would.
+/// Contract: called by the approval, tick and failure tests; builds a channel and calls `App::drain`.
 /// Feed one message to the app as though the worker had sent it.
 fn fed(app: &mut App, message: FromWorker) {
     let (says, worker) = channel();
@@ -23,14 +36,24 @@ fn fed(app: &mut App, message: FromWorker) {
     app.drain(&worker);
 }
 
+/// Purpose: A key event with no modifiers.
+/// Contract: test helper; every keyboard test uses it.
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
 
+/// Purpose: A character key with the Control modifier.
+/// Contract: test helper; the control-chord tests use it.
 fn ctrl(c: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
 }
 
+/// Purpose: Render the app into a fixed `TestBackend` and return the text rows the assertions read.
+/// Serves: the drawing tests in this file.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: the drawing tests.
+/// Down: `App::draw` and ratatui's `TestBackend`.
+/// Verify: `cargo test -p loong-tui-app`.
 fn draw(app: &mut App, width: u16, height: u16) -> String {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     terminal.draw(|frame| app.draw(frame)).unwrap();
@@ -48,12 +71,15 @@ fn draw(app: &mut App, width: u16, height: u16) -> String {
         .join("\n")
 }
 
+/// Purpose: Type each character of a string through the key handler.
+/// Contract: test helper; the prompt and wizard tests use it.
 fn type_text(app: &mut App, text: &str) {
     for c in text.chars() {
         app.handle_key(key(KeyCode::Char(c)));
     }
 }
 
+/// Purpose: Typing `@` opens the picker, narrows it and inserts a real path on Enter.
 #[test]
 fn an_at_sign_opens_a_picker_and_enter_inserts_the_file() {
     let mut app = App::new("s-1", "0.1.0");
@@ -83,6 +109,7 @@ fn an_at_sign_opens_a_picker_and_enter_inserts_the_file() {
     assert_eq!(app.input, "@src/kernel/view.rs ");
 }
 
+/// Purpose: Esc closes the picker and leaves the draft exactly as it was.
 #[test]
 fn escape_closes_the_picker_without_touching_the_line() {
     let mut app = App::new("s-1", "0.1.0");
@@ -97,6 +124,7 @@ fn escape_closes_the_picker_without_touching_the_line() {
     assert_eq!(app.input, before, "esc cancels the picker, not the draft");
 }
 
+/// Purpose: Backspacing over `@` closes the picker, because the text is the only state.
 #[test]
 fn deleting_the_at_sign_closes_the_picker() {
     let mut app = App::new("s-1", "0.1.0");
@@ -112,6 +140,7 @@ fn deleting_the_at_sign_closes_the_picker() {
     assert_eq!(app.input, "");
 }
 
+/// Purpose: An `@` inside an email address never opens the picker.
 #[test]
 fn an_at_sign_inside_a_word_is_not_a_reference() {
     let mut app = App::new("s-1", "0.1.0");
@@ -126,6 +155,7 @@ fn an_at_sign_inside_a_word_is_not_a_reference() {
     assert!(app.picker.is_none(), "an address is not a reference");
 }
 
+/// Purpose: A closed picker takes no transcript rows and an open one takes only its matches.
 #[test]
 fn the_picker_takes_only_the_rows_it_needs() {
     let mut app = App::new("s-1", "0.1.0");
@@ -138,6 +168,7 @@ fn the_picker_takes_only_the_rows_it_needs() {
     assert_eq!(app.picker_rows(), 2);
 }
 
+/// Purpose: One frame shows the session title, the transcript and the prompt together.
 #[test]
 fn the_screen_shows_the_conversation_the_input_and_the_session() {
     let mut app = App::new("s-1", "0.1.0");
@@ -152,6 +183,7 @@ fn the_screen_shows_the_conversation_the_input_and_the_session() {
     assert!(screen.contains("prompt"), "{screen}");
 }
 
+/// Purpose: Enter sends a non-empty prompt, clears the box and marks the turn busy; an empty one sends nothing.
 #[test]
 fn enter_submits_a_non_empty_prompt_and_clears_the_input() {
     let mut app = App::new("s", "v");
@@ -174,6 +206,7 @@ fn enter_submits_a_non_empty_prompt_and_clears_the_input() {
     );
 }
 
+/// Purpose: Backspace edits the prompt, a plain `d` types, and Ctrl-C leaves.
 #[test]
 fn backspace_edits_and_ctrl_c_quits() {
     let mut app = App::new("s", "v");
@@ -192,6 +225,7 @@ fn backspace_edits_and_ctrl_c_quits() {
     assert!(app.quit);
 }
 
+/// Purpose: A pending approval draws a menu instead of the input line and answers it with the chosen scope.
 #[test]
 fn an_approval_repurposes_the_input_line_and_answers_it() {
     let mut app = App::new("s", "v");
@@ -228,6 +262,7 @@ fn an_approval_repurposes_the_input_line_and_answers_it() {
     );
 }
 
+/// Purpose: A leading `/` shows the command hint while the text stays an ordinary prompt.
 #[test]
 fn typing_a_slash_says_where_the_commands_are_listed() {
     let mut app = App::new("s", "v");
@@ -240,6 +275,7 @@ fn typing_a_slash_says_where_the_commands_are_listed() {
     assert_eq!(app.input, "/rev");
 }
 
+/// Purpose: A long shell command is flattened to one row, so all three answers stay in the panel.
 #[test]
 fn a_long_command_does_not_push_the_answers_out_of_the_box() {
     // Reported from a real session: a shell command with newlines in it wrapped until
@@ -281,6 +317,7 @@ fn a_long_command_does_not_push_the_answers_out_of_the_box() {
     );
 }
 
+/// Purpose: A CJK command is clipped by display columns, visibly, and all answers stay in the panel.
 #[test]
 fn a_command_full_of_cjk_does_not_push_the_answers_out_of_the_box() {
     // The same report, one session later: the first decision was readable and the second
@@ -331,6 +368,7 @@ fn a_command_full_of_cjk_does_not_push_the_answers_out_of_the_box() {
     );
 }
 
+/// Purpose: On every short terminal, the details give way before any answer does.
 #[test]
 fn a_squeezed_panel_gives_up_its_details_before_its_answers() {
     // A question you cannot answer is worse than one without context, so the details are
@@ -356,6 +394,7 @@ fn a_squeezed_panel_gives_up_its_details_before_its_answers() {
     }
 }
 
+/// Purpose: The decision panel is drawn after the transcript and before the prompt.
 #[test]
 fn the_decision_comes_after_the_work_it_is_about() {
     // The flow reads downwards: events, then the question they raised, then the box you
@@ -376,6 +415,7 @@ fn the_decision_comes_after_the_work_it_is_about() {
     );
 }
 
+/// Purpose: Arrows move the approval highlight, Enter sends the highlighted scope, and a new question resets it.
 #[test]
 fn the_decision_is_a_menu_that_the_keyboard_drives() {
     use loong_schema::generated::ApprovalScope;
@@ -428,6 +468,7 @@ fn the_decision_is_a_menu_that_the_keyboard_drives() {
     assert!(app.approval.is_some(), "and the detail is there to draw");
 }
 
+/// Purpose: Denying is an answer: it sends a refusal and says so in the transcript.
 #[test]
 fn a_denial_is_an_answer_too() {
     let mut app = App::new("s", "v");
@@ -446,6 +487,7 @@ fn a_denial_is_an_answer_too() {
         .any(|l| l.contains("denied") && l.contains("appr-2")));
 }
 
+/// Purpose: Paging moves the transcript window, Ctrl-End returns to the end, and new output follows.
 #[test]
 fn scrolling_moves_the_window_and_new_output_returns_to_the_bottom() {
     let mut app = App::new("s", "v");
@@ -467,6 +509,7 @@ fn scrolling_moves_the_window_and_new_output_returns_to_the_bottom() {
     assert!(draw(&mut app, 40, 20).contains("a new answer"));
 }
 
+/// Purpose: Scrolling up in a short transcript never pushes the newest lines off the end.
 #[test]
 fn scrolling_back_cannot_push_the_newest_lines_off_the_end() {
     let startup = [
@@ -495,6 +538,7 @@ fn scrolling_back_cannot_push_the_newest_lines_off_the_end() {
     assert_eq!(app.scroll, 0, "and the count says what the screen says");
 }
 
+/// Purpose: Bookkeeping lines use the terminal's dimmed foreground, not a colour that is the background.
 #[test]
 fn the_bookkeeping_lines_are_not_drawn_into_the_wall() {
     // `DarkGray` is bright black: on a dark theme it *is* the background, so the lines
@@ -519,6 +563,7 @@ fn the_bookkeeping_lines_are_not_drawn_into_the_wall() {
     );
 }
 
+/// Purpose: Every answer in the decision menu is readable, not just the highlighted one.
 #[test]
 fn the_answers_that_are_not_chosen_are_still_readable() {
     // The same colour, in the one place it decides something: every answer but the
@@ -537,6 +582,8 @@ fn the_answers_that_are_not_chosen_are_still_readable() {
     );
 }
 
+/// Purpose: Push the transcript the client writes for two summarised tool results.
+/// Contract: called by the fold tests; the fixture every fold assertion starts from.
 /// The transcript the client writes for two summarised tool results: the summary
 /// lines, then the marker that stands for the rest.
 fn two_folds(app: &mut App) {
@@ -552,6 +599,7 @@ fn two_folds(app: &mut App) {
     ]);
 }
 
+/// Purpose: Tab walks the fold markers and marks the selected one, Enter opens it, and Esc closes it without leaving.
 #[test]
 fn tab_walks_the_folds_and_enter_shows_what_they_hide() {
     let mut app = App::new("s", "v");
@@ -623,6 +671,7 @@ fn tab_walks_the_folds_and_enter_shows_what_they_hide() {
     );
 }
 
+/// Purpose: A selected fold never stops Enter from sending a non-empty prompt.
 #[test]
 fn a_fold_never_takes_enter_away_from_a_prompt() {
     let mut app = App::new("s", "v");
@@ -644,6 +693,7 @@ fn a_fold_never_takes_enter_away_from_a_prompt() {
     assert_eq!(app.fold, None, "sending is a return to the prompt");
 }
 
+/// Purpose: A fold whose text the turn already sent opens without a log read; an unheld one asks for it.
 #[test]
 fn enter_opens_a_fold_the_turn_sent_without_asking_the_log() {
     let mut app = App::new("s", "v");
@@ -670,6 +720,7 @@ fn enter_opens_a_fold_the_turn_sent_without_asking_the_log() {
     );
 }
 
+/// Purpose: Server stderr notes are drawn in the interface, with repeats collapsed.
 #[test]
 fn server_notes_are_drawn_instead_of_corrupting_the_screen() {
     let mut app = App::new("s", "v");
@@ -681,6 +732,7 @@ fn server_notes_are_drawn_instead_of_corrupting_the_screen() {
     assert!(screen.contains("[hooks] no hooks"), "{screen}");
 }
 
+/// Purpose: A turn failure clears busy and is visible on screen, and a following state message still lands.
 #[test]
 fn a_failure_is_visible_and_does_not_wedge_the_screen() {
     let (to_app, from_worker) = channel::<FromWorker>();
@@ -701,6 +753,7 @@ fn a_failure_is_visible_and_does_not_wedge_the_screen() {
     assert!(draw(&mut app, 80, 16).contains("the server closed the connection"));
 }
 
+/// Purpose: A streamed answer longer than the window shows its newest line, not its first.
 #[test]
 fn the_answer_being_written_stays_visible_to_its_last_line() {
     let (to_app, from_worker) = channel::<FromWorker>();
@@ -725,6 +778,7 @@ fn the_answer_being_written_stays_visible_to_its_last_line() {
     );
 }
 
+/// Purpose: The working title turns through the spinner frames and still names what the turn is doing.
 #[test]
 fn the_working_title_turns_so_a_wait_does_not_look_like_a_hang() {
     // The frame is read from the clock, so a missed redraw cannot freeze the mark — and
@@ -755,6 +809,7 @@ fn the_working_title_turns_so_a_wait_does_not_look_like_a_hang() {
     );
 }
 
+/// Purpose: A streamed fragment is shown once, and the recorded message replaces it without duplication.
 #[test]
 fn the_answer_appears_while_it_is_written_and_then_settles() {
     let (to_app, from_worker) = channel::<FromWorker>();
@@ -789,6 +844,7 @@ fn the_answer_appears_while_it_is_written_and_then_settles() {
     );
 }
 
+/// Purpose: The setup form collects three fields, refuses an incomplete one, and wraps its caret.
 #[test]
 fn the_first_run_form_collects_three_fields_and_refuses_an_incomplete_one() {
     let mut form = SetupForm::new();
@@ -824,6 +880,12 @@ fn the_first_run_form_collects_three_fields_and_refuses_an_incomplete_one() {
     assert!(form.public_key.ends_with('x'));
 }
 
+/// Purpose: A canned `ContextExplain` with every memory field populated, for the panel tests.
+/// Serves: the context-panel tests, directly or through `panel`.
+/// Design: `docs/design/surfaces.md` §3; `docs/context/status.md` §11.1.
+/// Up: the context-panel tests.
+/// Down: the generated schema types.
+/// Verify: `cargo test -p loong-tui-app`.
 fn explained() -> Box<loong_schema::generated::ContextExplain> {
     use loong_schema::generated::{
         ContextCategory, ContextEntry, ContextExplain, ContextLayer, ContextWorker,
@@ -906,6 +968,12 @@ fn explained() -> Box<loong_schema::generated::ContextExplain> {
     })
 }
 
+/// Purpose: A semantic engine that has not produced an L4 map yet: the state that must not be drawn as off.
+/// Serves: the test that separates an off engine from one that has produced nothing yet.
+/// Design: `docs/design/surfaces.md` §3; `docs/context/status.md` §11.1.
+/// Up: `an_engine_that_is_off_is_not_shown_as_a_memory_that_has_produced_nothing`.
+/// Down: `explained`.
+/// Verify: `cargo test -p loong-tui-app`.
 /// A semantic engine that has not produced a map yet — the state that must not
 /// be drawn as "off".
 fn explained_fresh() -> Box<loong_schema::generated::ContextExplain> {
@@ -922,6 +990,12 @@ fn explained_fresh() -> Box<loong_schema::generated::ContextExplain> {
     explained
 }
 
+/// Purpose: An engine that is off: an empty `memory_mode`, whatever the ledger holds.
+/// Serves: the off-versus-fresh panel test.
+/// Design: `docs/design/surfaces.md` §3; `docs/context/status.md` §11.1.
+/// Up: `an_engine_that_is_off_is_not_shown_as_a_memory_that_has_produced_nothing`.
+/// Down: `explained`.
+/// Verify: `cargo test -p loong-tui-app`.
 /// An engine that is off: `memory_mode` empty, whatever the ledger holds.
 fn explained_off() -> Box<loong_schema::generated::ContextExplain> {
     let mut explained = explained();
@@ -941,6 +1015,7 @@ fn explained_off() -> Box<loong_schema::generated::ContextExplain> {
     explained
 }
 
+/// Purpose: `/exit`, `/quit` and `/q` leave locally and never reach the agent.
 #[test]
 fn exit_and_quit_leave_the_interface_without_asking_the_agent() {
     for command in ["/exit", "/quit", "/q", " /exit ", "/EXIT"] {
@@ -959,6 +1034,7 @@ fn exit_and_quit_leave_the_interface_without_asking_the_agent() {
     }
 }
 
+/// Purpose: Only an exact local command is taken locally; everything else goes to the server.
 #[test]
 fn only_an_exact_command_is_taken_locally() {
     // The boundary matters: anything else is a skill invocation or a prompt, and
@@ -973,6 +1049,7 @@ fn only_an_exact_command_is_taken_locally() {
     }
 }
 
+/// Purpose: The prompt hint says what Enter will do for an exact command and lists the commands while ambiguous.
 #[test]
 fn the_hint_says_what_exit_will_do() {
     let mut app = App::new("s", "v");
@@ -990,6 +1067,7 @@ fn the_hint_says_what_exit_will_do() {
     assert!(screen.contains("/exit"), "{screen}");
 }
 
+/// Purpose: F2 opens the context panel by asking for its data, and closing asks for nothing.
 #[test]
 fn f2_opens_the_context_panel_and_asks_for_its_data() {
     let mut app = App::new("s", "v");
@@ -1007,6 +1085,7 @@ fn f2_opens_the_context_panel_and_asks_for_its_data() {
     assert!(!app.debug);
 }
 
+/// Purpose: The context panel shows totals, categories, entries and the legend beside the conversation.
 #[test]
 fn the_context_panel_shows_where_the_tokens_went() {
     let (to_app, from_worker) = channel::<FromWorker>();
@@ -1029,6 +1108,7 @@ fn the_context_panel_shows_where_the_tokens_went() {
     assert!(screen.contains("loongagent — session"), "{screen}");
 }
 
+/// Purpose: The context panel is absent until F2, whose hint is always advertised.
 #[test]
 fn the_panel_stays_closed_until_it_is_asked_for() {
     let mut app = App::new("s", "v");
@@ -1037,6 +1117,8 @@ fn the_panel_stays_closed_until_it_is_asked_for() {
     assert!(screen.contains("f2"), "the hint advertises it: {screen}");
 }
 
+/// Purpose: Draw the F2 panel over one canned context view.
+/// Contract: called by the panel tests; opens the panel and calls `App::drain` and `draw`.
 /// Draw the F2 panel over one canned context view.
 fn panel(context: Box<loong_schema::generated::ContextExplain>) -> String {
     let (to_app, from_worker) = channel::<FromWorker>();
@@ -1047,6 +1129,7 @@ fn panel(context: Box<loong_schema::generated::ContextExplain>) -> String {
     draw(&mut app, 200, 40)
 }
 
+/// Purpose: The panel names the memory mode, summarizer, L1-L4 counts and worker totals.
 #[test]
 fn the_panel_shows_the_layers_the_worker_and_the_mode() {
     let screen = panel(explained());
@@ -1068,6 +1151,7 @@ fn the_panel_shows_the_layers_the_worker_and_the_mode() {
     assert!(screen.contains("3 deferred"), "{screen}");
 }
 
+/// Purpose: A degraded memory states its reason in the panel and marks the bar with `mem degraded`.
 #[test]
 fn a_degraded_memory_says_why_in_the_panel_and_on_the_bar() {
     let mut context = explained();
@@ -1095,6 +1179,7 @@ fn a_degraded_memory_says_why_in_the_panel_and_on_the_bar() {
     assert!(screen.contains("mem ⚠ degraded"), "{screen}");
 }
 
+/// Purpose: An engine that is off and one that has produced nothing yet are drawn differently.
 #[test]
 fn an_engine_that_is_off_is_not_shown_as_a_memory_that_has_produced_nothing() {
     // The whole reason `memory_mode` exists. "Off" and "on, but the first turns
@@ -1119,6 +1204,7 @@ fn an_engine_that_is_off_is_not_shown_as_a_memory_that_has_produced_nothing() {
     );
 }
 
+/// Purpose: Record mode says it has no summarizer model.
 #[test]
 fn record_mode_says_it_has_no_model() {
     let mut context = explained();
@@ -1129,6 +1215,7 @@ fn record_mode_says_it_has_no_model() {
     assert!(screen.contains("none (record mode)"), "{screen}");
 }
 
+/// Purpose: The bar names the memory mode with the panel closed and stays silent when the engine is off.
 #[test]
 fn the_bar_names_the_mode_while_the_panel_is_closed() {
     let (to_app, from_worker) = channel::<FromWorker>();
@@ -1147,6 +1234,7 @@ fn the_bar_names_the_mode_while_the_panel_is_closed() {
     assert!(!screen.contains("mem "), "{screen}");
 }
 
+/// Purpose: The setup form draws three labelled boxes, the typed values and a hint below them.
 #[test]
 fn the_first_run_form_shows_three_labelled_fields_and_a_hint() {
     use ratatui::backend::TestBackend;
@@ -1193,6 +1281,7 @@ fn the_first_run_form_shows_three_labelled_fields_and_a_hint() {
     assert!(!screen.contains("required"), "{screen}");
 }
 
+/// Purpose: The setup form is leavable with Esc or Ctrl-C, while a plain `c` is still text.
 #[test]
 fn the_first_run_form_is_skippable_with_escape_or_ctrl_c() {
     let mut form = SetupForm::new();
@@ -1209,6 +1298,7 @@ fn the_first_run_form_is_skippable_with_escape_or_ctrl_c() {
     assert_eq!(form.url, "c");
 }
 
+/// Purpose: Caret movement and the readline chords edit the prompt where the caret is.
 #[test]
 fn the_caret_moves_and_edits_in_the_middle_of_the_line() {
     let mut app = App::new("s", "v");
@@ -1237,6 +1327,7 @@ fn the_caret_moves_and_edits_in_the_middle_of_the_line() {
     assert_eq!(app.cursor, 0);
 }
 
+/// Purpose: Editing removes and inserts whole characters, never broken UTF-8 bytes.
 #[test]
 fn utf8_is_edited_by_character_not_by_byte() {
     let mut app = App::new("s", "v");
@@ -1254,6 +1345,7 @@ fn utf8_is_edited_by_character_not_by_byte() {
     assert_eq!(app.cursor, 2);
 }
 
+/// Purpose: A long prompt wraps and the caret is placed on the row where editing happens.
 #[test]
 fn a_long_prompt_wraps_instead_of_running_off_the_edge() {
     let mut app = App::new("s", "v");
@@ -1278,6 +1370,7 @@ fn a_long_prompt_wraps_instead_of_running_off_the_edge() {
     assert_eq!(caret, (0, 0), "the caret moved, the layout did not");
 }
 
+/// Purpose: Wrapping counts display columns, so CJK text and wide characters stay inside the border.
 #[test]
 fn wrapping_counts_display_columns_so_cjk_fits_the_border() {
     // Two columns each: four of them are eight columns, which is two rows of four
@@ -1298,6 +1391,7 @@ fn wrapping_counts_display_columns_so_cjk_fits_the_border() {
     assert_eq!(lines, vec!["ab".to_string(), "中".to_string()]);
 }
 
+/// Purpose: A pasted newline is drawn as a hard line break.
 #[test]
 fn a_pasted_newline_is_a_hard_break() {
     let mut app = App::new("s", "v");
@@ -1307,6 +1401,7 @@ fn a_pasted_newline_is_a_hard_break() {
     assert_eq!(caret, (1, 6));
 }
 
+/// Purpose: The input box caps its rows and shows the window that contains the caret.
 #[test]
 fn the_input_box_stops_growing_and_keeps_the_caret_on_screen() {
     let mut app = App::new("s", "v");
@@ -1329,6 +1424,7 @@ fn the_input_box_stops_growing_and_keeps_the_caret_on_screen() {
     );
 }
 
+/// Purpose: A wheel notch scrolls three lines and stops at the bottom.
 #[test]
 fn the_wheel_scrolls_the_conversation() {
     let mut app = App::new("s", "v");
@@ -1341,6 +1437,12 @@ fn the_wheel_scrolls_the_conversation() {
     assert_eq!(app.scroll, 0, "and it stops at the bottom");
 }
 
+/// Purpose: The foreground colour of the cell under a needle, read from the terminal buffer.
+/// Serves: the colour tests, which need styles that `draw` throws away.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: the colour tests.
+/// Down: `App::draw` and ratatui's `TestBackend`.
+/// Verify: `cargo test -p loong-tui-app`.
 /// The foreground a line is drawn in, read from the cell buffer (the text helper
 /// throws styles away, which is the point of having this one).
 fn color_of(app: &mut App, width: u16, height: u16, needle: &str) -> Option<ratatui::style::Color> {
@@ -1367,6 +1469,7 @@ fn color_of(app: &mut App, width: u16, height: u16, needle: &str) -> Option<rata
     None
 }
 
+/// Purpose: Each rendered line class is classified and the palette differs between the classes that matter.
 #[test]
 fn every_kind_of_line_has_its_own_colour() {
     for (line, expected) in [
@@ -1401,6 +1504,7 @@ fn every_kind_of_line_has_its_own_colour() {
     );
 }
 
+/// Purpose: Every marked line the real renderer produces is classified as something other than an answer.
 #[test]
 fn the_renderer_and_the_classifier_agree() {
     // The classifier reads the vocabulary `loong_tui::render_event` writes. Rendered
@@ -1433,6 +1537,7 @@ fn the_renderer_and_the_classifier_agree() {
     }
 }
 
+/// Purpose: The drawn screen puts red on failures, cyan on tool calls, green on results, magenta on policy, and leaves the person's words plain.
 #[test]
 fn errors_are_red_and_work_is_blue_in_the_drawn_screen() {
     let mut app = App::new("s", "v");
@@ -1477,6 +1582,7 @@ fn errors_are_red_and_work_is_blue_in_the_drawn_screen() {
     );
 }
 
+/// Purpose: Ctrl-C interrupts a running turn, leaves when idle, and a surface with no process says it cannot interrupt.
 #[test]
 fn control_c_stops_a_running_turn_and_otherwise_leaves() {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1526,6 +1632,7 @@ fn control_c_stops_a_running_turn_and_otherwise_leaves() {
     );
 }
 
+/// Purpose: An interrupted turn renders as a stop the person caused.
 #[test]
 fn the_interrupted_event_renders_as_a_stop_the_person_caused() {
     use loong_schema::generated::event;
@@ -1538,6 +1645,7 @@ fn the_interrupted_event_renders_as_a_stop_the_person_caused() {
     assert_eq!(classify(&line), LineKind::Stopped);
 }
 
+/// Purpose: A stopped turn is its own class and yellow, not an error or a completion.
 #[test]
 fn a_stopped_turn_is_its_own_colour() {
     assert_eq!(
@@ -1556,6 +1664,7 @@ fn a_stopped_turn_is_its_own_colour() {
     );
 }
 
+/// Purpose: The person's own message is identified by its user role, so it is not rendered twice.
 #[test]
 fn the_person_s_own_line_is_matched_by_its_event_not_printed_twice() {
     // The screen push happens on enter; the event that comes back is the same line.
@@ -1581,6 +1690,7 @@ fn the_person_s_own_line_is_matched_by_its_event_not_printed_twice() {
     );
 }
 
+/// Purpose: `/yolo` asks the server and the off state is always visible, with the sandbox note.
 #[test]
 fn yolo_is_a_command_and_is_never_invisible() {
     let mut app = App::new("s", "v");
@@ -1617,6 +1727,7 @@ fn yolo_is_a_command_and_is_never_invisible() {
     assert!(screen.contains("/yolo"), "{screen}");
 }
 
+/// Purpose: `/copy` writes the transcript to a session-named file and returns the copy action.
 #[test]
 fn copy_puts_the_transcript_on_the_clipboard_and_in_a_file() {
     let mut app = App::new("s", "v");
@@ -1633,6 +1744,7 @@ fn copy_puts_the_transcript_on_the_clipboard_and_in_a_file() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// Purpose: The clipboard encoder produces standard base64 padding.
 #[test]
 fn base64_is_base64() {
     assert_eq!(base64(b""), "");
@@ -1643,6 +1755,7 @@ fn base64_is_base64() {
     assert_eq!(base64(b"hello world"), "aGVsbG8gd29ybGQ=");
 }
 
+/// Purpose: The mouse is off until `/mouse`, which says what it costs and what comes back.
 #[test]
 fn the_mouse_can_be_handed_back_to_the_terminal() {
     let mut app = App::new("s", "v");
@@ -1671,6 +1784,7 @@ fn the_mouse_can_be_handed_back_to_the_terminal() {
     );
 }
 
+/// Purpose: The mark draws its frame, the character and the fitting inscription, shortens in narrow terminals, and `/logo` puts it away.
 #[test]
 fn the_mark_is_drawn_and_can_be_put_away() {
     let mut app = App::new("s", "v");
@@ -1721,6 +1835,7 @@ fn the_mark_is_drawn_and_can_be_put_away() {
     );
 }
 
+/// Purpose: A terminal too small for the mark gets no mark and keeps the keys.
 #[test]
 fn a_small_terminal_gets_no_mark() {
     // A logo that squeezes the conversation costs more than it gives.
@@ -1730,6 +1845,7 @@ fn a_small_terminal_gets_no_mark() {
     assert!(screen.contains("enter send"), "{screen}");
 }
 
+/// Purpose: The input box grows for a long prompt and stays one row for a short one.
 #[test]
 fn the_drawn_box_grows_with_a_long_prompt() {
     let mut app = App::new("s", "v");
@@ -1771,6 +1887,7 @@ fn the_drawn_box_grows_with_a_long_prompt() {
     );
 }
 
+/// Purpose: The caret column follows Home and the end of the typed text.
 #[test]
 fn the_caret_is_drawn_where_the_next_character_goes() {
     // The terminal cursor is not part of the rendered buffer, so this checks the
@@ -1784,6 +1901,7 @@ fn the_caret_is_drawn_where_the_next_character_goes() {
     assert_eq!(caret, (0, 0));
 }
 
+/// Purpose: A pushed line with newlines becomes separate transcript lines.
 #[test]
 fn a_line_with_embedded_newlines_keeps_its_shape() {
     let mut app = App::new("s", "v");
@@ -1791,6 +1909,7 @@ fn a_line_with_embedded_newlines_keeps_its_shape() {
     assert_eq!(app.lines, vec!["header".to_string(), "body".to_string()]);
 }
 
+/// Purpose: Alt+digit travels through the worker and client to the server, and the switch comes back to the bar and the transcript.
 #[test]
 fn alt_digit_reaches_the_server_and_comes_back_to_the_bar() {
     // The whole chain, not just the key: key → action → worker → client → server →
@@ -1798,16 +1917,30 @@ fn alt_digit_reaches_the_server_and_comes_back_to_the_bar() {
     // where a break would hide.
     use std::sync::{Arc, Mutex};
 
+    /// Purpose: A transport that records every request line and answers with a fixed two-model list.
+    /// Serves: `alt_digit_reaches_the_server_and_comes_back_to_the_bar`.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: that test builds it and the client calls it.
+    /// Down: no call; the `loong_tui::Transport` impl below answers.
+    /// Verify: `cargo test -p loong-tui-app`.
     #[derive(Clone, Default)]
     struct Recorder {
         sent: Arc<Mutex<Vec<String>>>,
     }
 
     impl loong_tui::Transport for Recorder {
+        /// Purpose: Record the request line the client writes.
+        /// Contract: called by `loong_tui::Client`; pushes the line onto the shared `sent` list.
         fn send(&mut self, line: &str) -> Result<(), String> {
             self.sent.lock().unwrap().push(line.to_string());
             Ok(())
         }
+        /// Purpose: Answer every request with the post-switch two-model list, so the full round trip can be asserted.
+        /// Serves: the alt-digit end-to-end test.
+        /// Design: `docs/design/surfaces.md` §3.
+        /// Up: `loong_tui::Client` reads it.
+        /// Down: no call; it returns a canned JSON line.
+        /// Verify: `cargo test -p loong-tui-app`.
         fn recv_line(&mut self) -> Result<Option<String>, String> {
             // Whatever was asked, answer with the state *after* a switch: two models,
             // the second one current.
@@ -1883,15 +2016,26 @@ fn alt_digit_reaches_the_server_and_comes_back_to_the_bar() {
     assert!(said.contains("此前 a"), "and names what it was: {said:?}");
 }
 
+/// Purpose: A worker command produces a state update the screen drains.
 #[test]
 fn the_worker_turns_commands_into_screen_lines() {
     // A transport that answers everything with one canned line: the worker's
     // contract is that a command produces lines plus a state update.
+    /// Purpose: A transport that answers every request with one accepted-turn result.
+    /// Serves: `the_worker_turns_commands_into_screen_lines`.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: that test builds it and the client calls it.
+    /// Down: no call; the `loong_tui::Transport` impl below answers.
+    /// Verify: `cargo test -p loong-tui-app`.
     struct Echo;
     impl loong_tui::Transport for Echo {
+        /// Purpose: Accept the request line; the answer is canned.
+        /// Contract: called by `loong_tui::Client`.
         fn send(&mut self, _line: &str) -> Result<(), String> {
             Ok(())
         }
+        /// Purpose: Answer any request with one canned accepted-turn result.
+        /// Contract: called by `loong_tui::Client`; returns a fixed JSON line.
         fn recv_line(&mut self) -> Result<Option<String>, String> {
             Ok(Some(
                 serde_json::json!({
@@ -1918,14 +2062,29 @@ fn the_worker_turns_commands_into_screen_lines() {
     assert!(!app.busy, "the worker reported a state change");
 }
 
+/// Purpose: The worker fetches the selected fold from the log and the screen shows the hidden text.
 #[test]
 fn the_worker_fetches_the_fold_the_keyboard_picked() {
+    /// Purpose: A transport whose replay holds one summarised 50-line tool result.
+    /// Serves: `the_worker_fetches_the_fold_the_keyboard_picked`.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: that test builds it and the client calls it.
+    /// Down: no call; the `loong_tui::Transport` impl below answers.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// Answers every request with a log holding one summarised tool result.
     struct Log;
     impl loong_tui::Transport for Log {
+        /// Purpose: Accept the request line; the answer is canned.
+        /// Contract: called by `loong_tui::Client`.
         fn send(&mut self, _line: &str) -> Result<(), String> {
             Ok(())
         }
+        /// Purpose: Answer any request with a log holding one 50-line tool result, so the fold can be fetched.
+        /// Serves: the fold-fetch worker test.
+        /// Design: `docs/design/surfaces.md` §3.
+        /// Up: `loong_tui::Client` reads it.
+        /// Down: no call; it returns a canned JSON line.
+        /// Verify: `cargo test -p loong-tui-app`.
         fn recv_line(&mut self) -> Result<Option<String>, String> {
             let output = (1..=50)
                 .map(|n| format!("hidden {n}"))
@@ -1967,6 +2126,7 @@ fn the_worker_fetches_the_fold_the_keyboard_picked() {
     );
 }
 
+/// Purpose: The second approval of a resumed turn reaches the panel with its own detail.
 #[test]
 fn the_second_question_of_a_session_reaches_the_screen() {
     // Reported twice: the first approval was fine and the second was invisible. Answering
@@ -1974,11 +2134,21 @@ fn the_second_question_of_a_session_reaches_the_screen() {
     // but the client cleared whatever was pending after every answer, so the question it
     // had just met was thrown away and the worker reported "nothing pending". The panel
     // was never drawn; the transcript still showed the `! approval required` line for it.
+    /// Purpose: A transport that answers from a queue of canned JSON-RPC lines.
+    /// Serves: `the_second_question_of_a_session_reaches_the_screen`.
+    /// Design: `docs/design/surfaces.md` §3; `docs/design/sessions-lineage.md` §5.
+    /// Up: that test builds it and the client calls it.
+    /// Down: no call; the `loong_tui::Transport` impl below answers.
+    /// Verify: `cargo test -p loong-tui-app`.
     struct Queue(std::cell::RefCell<std::collections::VecDeque<String>>);
     impl loong_tui::Transport for Queue {
+        /// Purpose: Accept the request line; the answer comes from the queue.
+        /// Contract: called by `loong_tui::Client`.
         fn send(&mut self, _line: &str) -> Result<(), String> {
             Ok(())
         }
+        /// Purpose: Pop the next canned line, or `None` when the queue is empty.
+        /// Contract: called by `loong_tui::Client`.
         fn recv_line(&mut self) -> Result<Option<String>, String> {
             Ok(self.0.borrow_mut().pop_front())
         }
@@ -2069,8 +2239,15 @@ fn the_second_question_of_a_session_reaches_the_screen() {
     }
 }
 
+/// Purpose: A fold the turn streamed is openable while the turn still owns the connection.
 #[test]
 fn a_fold_the_turn_wrote_is_readable_while_the_turn_is_still_running() {
+    /// Purpose: A transport that streams one summarised tool result and then blocks until the test releases it, keeping the turn live.
+    /// Serves: `a_fold_the_turn_wrote_is_readable_while_the_turn_is_still_running`.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: that test builds it and the client calls it.
+    /// Down: no call; the `loong_tui::Transport` impl below answers.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// A turn that streams one summarised result and then keeps working — saying
     /// nothing more — until the test lets it finish. This is the quiet stretch a real
     /// long tool spends, and the one a reader has time to look around in.
@@ -2079,9 +2256,17 @@ fn a_fold_the_turn_wrote_is_readable_while_the_turn_is_still_running() {
         release: std::sync::Arc<std::sync::atomic::AtomicBool>,
     }
     impl loong_tui::Transport for SlowStream {
+        /// Purpose: Accept the request line; the answer is streamed next.
+        /// Contract: called by `loong_tui::Client`.
         fn send(&mut self, _line: &str) -> Result<(), String> {
             Ok(())
         }
+        /// Purpose: Stream one 50-line tool result, then hold the connection open until the test releases it.
+        /// Serves: the mid-turn fold test, which needs a turn that keeps owning the client.
+        /// Design: `docs/design/surfaces.md` §3.
+        /// Up: `loong_tui::Client` reads it.
+        /// Down: `std::sync::atomic::AtomicBool` as the release signal.
+        /// Verify: `cargo test -p loong-tui-app`.
         fn recv_line(&mut self) -> Result<Option<String>, String> {
             if !self.streamed {
                 self.streamed = true;
@@ -2158,6 +2343,12 @@ fn a_fold_the_turn_wrote_is_readable_while_the_turn_is_still_running() {
 
 // ---------------------------------------------------------- the local wizard
 
+/// Purpose: The three-provider fixture (DeepSeek, Moonshot, DashScope) the wizard tests choose from.
+/// Serves: the wizard tests.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: the wizard tests.
+/// Down: `ProviderChoice`.
+/// Verify: `cargo test -p loong-tui-app`.
 fn providers() -> Vec<ProviderChoice> {
     vec![
         ProviderChoice {
@@ -2178,6 +2369,12 @@ fn providers() -> Vec<ProviderChoice> {
     ]
 }
 
+/// Purpose: Render the wizard into a fixed `TestBackend` and return the text rows.
+/// Serves: the wizard drawing tests.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: the wizard drawing tests.
+/// Down: `draw_local_wizard` and ratatui's `TestBackend`.
+/// Verify: `cargo test -p loong-tui-app`.
 fn drawn_wizard(wizard: &LocalWizard, width: u16, height: u16) -> String {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     terminal
@@ -2197,6 +2394,12 @@ fn drawn_wizard(wizard: &LocalWizard, width: u16, height: u16) -> String {
         .join("\n")
 }
 
+/// Purpose: Screen text with whitespace removed, so text containing wide characters can be matched.
+/// Serves: the wizard and mark tests, where `TestBackend` pads a CJK glyph with a blank cell.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: the wizard and mark tests.
+/// Down: no call; it filters characters.
+/// Verify: `cargo test -p loong-tui-app`.
 /// Screen text with whitespace removed, for matching text that contains wide
 /// characters. `TestBackend` stores a CJK glyph in one cell and leaves the next
 /// blank, so a drawn `阿里云百炼` reads back as `阿 里 云 百 炼`. Comparing
@@ -2205,6 +2408,7 @@ fn despaced(text: &str) -> String {
     text.chars().filter(|c| !c.is_whitespace()).collect()
 }
 
+/// Purpose: A refusal reorders providers by the hint, invents nothing and keeps an empty hint inert.
 #[test]
 fn a_refusal_can_re_rank_the_list_without_asking_anyone_again() {
     // The hint must cost nothing: reordering sends the key nowhere new, which is
@@ -2238,6 +2442,7 @@ fn a_refusal_can_re_rank_the_list_without_asking_anyone_again() {
     assert_eq!(wizard.provider, 2, "an empty hint is not a hint");
 }
 
+/// Purpose: A provider that needs no key is ready with an empty field, says so, and restores the rules when switched away.
 #[test]
 fn a_provider_that_needs_no_key_neither_asks_for_one_nor_refuses_an_empty_one() {
     // A loopback server has no secret, and a form that demanded eight characters for
@@ -2288,6 +2493,12 @@ fn a_provider_that_needs_no_key_neither_asks_for_one_nor_refuses_an_empty_one() 
 
 // ------------------------------------------------------------ the picker
 
+/// Purpose: A picker opened with nothing ticked, as the wizard actually opens one.
+/// Serves: the picker tests about ticking and filtering.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: the picker tests.
+/// Down: `LocalWizard::new` and the `WizardState::Choosing` fields.
+/// Verify: `cargo test -p loong-tui-app`.
 /// A picker as the wizard actually opens one: **nothing ticked**.
 fn choosing(names: &[&str]) -> LocalWizard {
     let mut wizard = LocalWizard::new(providers());
@@ -2303,6 +2514,8 @@ fn choosing(names: &[&str]) -> LocalWizard {
     wizard
 }
 
+/// Purpose: A picker with every row already ticked, for the tests about unticking.
+/// Contract: called by `toggle_all_means_all_of_what_is_on_screen` and `filtering_narrows_the_view_without_changing_what_is_ticked`.
 /// A picker with everything already ticked, for the tests about *unticking*.
 fn choosing_all(names: &[&str]) -> LocalWizard {
     let mut wizard = choosing(names);
@@ -2312,6 +2525,7 @@ fn choosing_all(names: &[&str]) -> LocalWizard {
     wizard
 }
 
+/// Purpose: Nothing starts ticked, so one model out of forty costs a filter and a tick.
 #[test]
 fn wanting_one_id_out_of_a_long_list_costs_two_keys_and_not_forty() {
     // The complaint this default exists for. A real vendor returns a few dozen ids,
@@ -2338,6 +2552,7 @@ fn wanting_one_id_out_of_a_long_list_costs_two_keys_and_not_forty() {
     assert_eq!(chosen[0].0, "qwen-3.8-17");
 }
 
+/// Purpose: Ctrl-A ticks exactly what the filter is showing.
 #[test]
 fn wanting_all_of_a_narrowed_list_is_still_one_key() {
     // The other half: somebody who *does* want several should not have to tick each.
@@ -2355,6 +2570,7 @@ fn wanting_all_of_a_narrowed_list_is_still_one_key() {
     );
 }
 
+/// Purpose: For any list length, reaching one chosen model costs the same two keys.
 #[test]
 fn a_long_list_is_never_a_wall_of_ticks_to_undo() {
     // Stated as a property: however long the list, the number of keys to reach a
@@ -2375,6 +2591,7 @@ fn a_long_list_is_never_a_wall_of_ticks_to_undo() {
     }
 }
 
+/// Purpose: Filtering narrows the picker to one id and ticking writes only that id.
 #[test]
 fn the_picker_can_narrow_to_one_id_out_of_a_long_list() {
     let mut wizard = choosing(&[
@@ -2395,6 +2612,7 @@ fn the_picker_can_narrow_to_one_id_out_of_a_long_list() {
     assert_eq!(chosen[0].0, "qwen-coder-plus");
 }
 
+/// Purpose: A filter hides rows without unticking them, and clearing it brings them back.
 #[test]
 fn filtering_narrows_the_view_without_changing_what_is_ticked() {
     // The ticks live beside the full list, so a filter that hid a row must not have
@@ -2412,6 +2630,7 @@ fn filtering_narrows_the_view_without_changing_what_is_ticked() {
     assert_eq!(wizard.visible(), vec![0, 1, 2], "and come back");
 }
 
+/// Purpose: Ctrl-A selects the visible list and again gives it back.
 #[test]
 fn toggle_all_means_all_of_what_is_on_screen() {
     let mut wizard = choosing(&["qwen-flash", "qwen-max", "kimi-k3"]);
@@ -2426,6 +2645,7 @@ fn toggle_all_means_all_of_what_is_on_screen() {
     assert!(wizard.chosen().is_empty(), "and `a` again gives it back");
 }
 
+/// Purpose: The picker refuses to finish with nothing ticked and submits once a row is ticked.
 #[test]
 fn the_picker_will_not_finish_with_nothing_ticked() {
     let mut wizard = choosing(&["a", "b"]);
@@ -2438,6 +2658,7 @@ fn the_picker_will_not_finish_with_nothing_ticked() {
     assert_eq!(wizard.handle_key(key(KeyCode::Enter)), WizardAction::Submit);
 }
 
+/// Purpose: The picker cursor stays in range and reaches the last row.
 #[test]
 fn the_picker_moves_and_stops_at_the_ends() {
     let mut wizard = choosing(&["a", "b", "c"]);
@@ -2453,6 +2674,7 @@ fn the_picker_moves_and_stops_at_the_ends() {
     assert_eq!(chosen[0].0, "c", "the far end of the list was reachable");
 }
 
+/// Purpose: Esc leaves the picker for the form, keeping the key; a second Esc cancels the form.
 #[test]
 fn escape_from_the_picker_goes_back_to_the_form_not_out_of_it() {
     // The key is typed and the provider is chosen; escaping the list should cost a
@@ -2468,6 +2690,7 @@ fn escape_from_the_picker_goes_back_to_the_form_not_out_of_it() {
     assert_eq!(wizard.handle_key(key(KeyCode::Esc)), WizardAction::Cancel);
 }
 
+/// Purpose: The picker shows its tick count and the next key, before and after ticking.
 #[test]
 fn the_picker_says_what_is_ticked_and_what_to_press() {
     let mut wizard = choosing(&["qwen-flash", "qwen-max", "kimi-k3"]);
@@ -2496,6 +2719,7 @@ fn the_picker_says_what_is_ticked_and_what_to_press() {
     );
 }
 
+/// Purpose: A long list scrolls so the row being ticked is the row on screen.
 #[test]
 fn a_list_longer_than_the_screen_scrolls_to_keep_the_cursor_visible() {
     // Forty ids on a twenty-row terminal: walking down has to walk the window, or the
@@ -2522,6 +2746,8 @@ fn a_list_longer_than_the_screen_scrolls_to_keep_the_cursor_visible() {
     );
 }
 
+/// Purpose: One offered key, built the way the CLI builds it.
+/// Contract: called by the offered-key wizard tests.
 fn offering(provider: &str, var: &str, key: &str) -> OfferedKey {
     OfferedKey {
         provider: provider.to_string(),
@@ -2530,6 +2756,7 @@ fn offering(provider: &str, var: &str, key: &str) -> OfferedKey {
     }
 }
 
+/// Purpose: An offered key is named by its variable, never drawn, and typed input replaces it.
 #[test]
 fn a_key_this_machine_already_has_is_named_on_the_form_and_not_typed_in() {
     // The bug: the offer used to be *written into the field*. That looks like a form
@@ -2565,6 +2792,7 @@ fn a_key_this_machine_already_has_is_named_on_the_form_and_not_typed_in() {
     );
 }
 
+/// Purpose: Switching provider switches which offered key applies, and a provider with none needs typing.
 #[test]
 fn the_offer_follows_the_provider_being_chosen() {
     let mut wizard = LocalWizard::new(providers());
@@ -2593,6 +2821,7 @@ fn the_offer_follows_the_provider_being_chosen() {
     assert_eq!(wizard.effective_key(), "");
 }
 
+/// Purpose: No control chord reaches the API-key field, while ordinary typing does.
 #[test]
 fn a_control_chord_never_lands_in_the_api_key_field() {
     // The same rule as the picker's, one screen earlier: a chord is a command, not
@@ -2613,6 +2842,7 @@ fn a_control_chord_never_lands_in_the_api_key_field() {
     assert_eq!(wizard.key, format!("{before}z"));
 }
 
+/// Purpose: Every character a model id can contain, including `a` and space, is filter text and ticks nothing.
 #[test]
 fn the_filter_field_takes_every_character_a_model_id_can_have() {
     // The bug this locks down, and it was the worst kind: `a` toggled everything and
@@ -2644,6 +2874,7 @@ fn the_filter_field_takes_every_character_a_model_id_can_have() {
     assert!(wizard.chosen().is_empty());
 }
 
+/// Purpose: A plain `a` is text and Ctrl-A is the select-all command.
 #[test]
 fn ctrl_a_is_a_command_and_a_plain_a_is_a_letter() {
     let mut wizard = choosing(&["qwen-flash", "qwen-max"]);
@@ -2666,6 +2897,7 @@ fn ctrl_a_is_a_command_and_a_plain_a_is_a_letter() {
     );
 }
 
+/// Purpose: An empty filter result is drawn as an explanation, not an empty box.
 #[test]
 fn the_picker_says_so_when_a_filter_matches_nothing() {
     let mut wizard = choosing(&["alpha", "beta"]);
@@ -2680,6 +2912,7 @@ fn the_picker_says_so_when_a_filter_matches_nothing() {
     );
 }
 
+/// Purpose: The wizard masks the key's body and never draws it on screen.
 #[test]
 fn the_local_wizard_never_draws_the_key_it_was_given() {
     let mut wizard = LocalWizard::new(providers());
@@ -2705,6 +2938,7 @@ fn the_local_wizard_never_draws_the_key_it_was_given() {
     );
 }
 
+/// Purpose: A too-short key is refused with a reason and a long-enough one submits.
 #[test]
 fn the_local_wizard_refuses_a_key_too_short_to_be_one() {
     let mut wizard = LocalWizard::new(providers());
@@ -2727,6 +2961,7 @@ fn the_local_wizard_refuses_a_key_too_short_to_be_one() {
     assert_eq!(wizard.handle_key(key(KeyCode::Enter)), WizardAction::Submit);
 }
 
+/// Purpose: Provider selection moves both ways and wraps in both directions.
 #[test]
 fn the_local_wizard_moves_between_providers_in_both_directions_and_wraps() {
     let mut wizard = LocalWizard::new(providers());
@@ -2749,6 +2984,7 @@ fn the_local_wizard_moves_between_providers_in_both_directions_and_wraps() {
     assert_eq!(wizard.selected().unwrap().id, "moonshot");
 }
 
+/// Purpose: The wizard freezes input and Enter while a validation is in flight.
 #[test]
 fn the_local_wizard_ignores_typing_while_a_validation_is_in_flight() {
     // Otherwise a keystroke lands in the field and the key that was checked is
@@ -2765,6 +3001,7 @@ fn the_local_wizard_ignores_typing_while_a_validation_is_in_flight() {
     assert_eq!(wizard.handle_key(key(KeyCode::Enter)), WizardAction::None);
 }
 
+/// Purpose: A refusal keeps the typed key on screen so a typo can be corrected.
 #[test]
 fn the_local_wizard_keeps_the_key_when_the_vendor_refuses_it() {
     // A typo is the common case, and retyping 35 characters to fix one of them
@@ -2785,6 +3022,7 @@ fn the_local_wizard_keeps_the_key_when_the_vendor_refuses_it() {
     );
 }
 
+/// Purpose: The wizard draws every provider label, marks only the current one, and shows the keys and the way out.
 #[test]
 fn the_local_wizard_draws_the_providers_and_says_what_to_press() {
     let mut wizard = LocalWizard::new(providers());
@@ -2820,6 +3058,7 @@ fn the_local_wizard_draws_the_providers_and_says_what_to_press() {
     );
 }
 
+/// Purpose: A network failure is shown as not being a bad key.
 #[test]
 fn the_local_wizard_shows_the_reason_a_network_failure_is_not_a_bad_key() {
     // The probe already refuses to conflate these; the wizard must not undo that
@@ -2837,6 +3076,7 @@ fn the_local_wizard_shows_the_reason_a_network_failure_is_not_a_bad_key() {
     );
 }
 
+/// Purpose: Esc, Ctrl-C and Ctrl-D all leave the wizard.
 #[test]
 fn the_local_wizard_is_leavable_with_escape_or_ctrl_c() {
     for escape in [
@@ -2855,6 +3095,12 @@ fn the_local_wizard_is_leavable_with_escape_or_ctrl_c() {
 
 // ------------------------------------------------------------ the model bar
 
+/// Purpose: A `ModelList` fixture in the given declaration order.
+/// Serves: the model-bar tests.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: the model-bar tests.
+/// Down: the generated schema type.
+/// Verify: `cargo test -p loong-tui-app`.
 fn model_list(names: &[&str]) -> loong_schema::generated::ModelList {
     loong_schema::generated::ModelList {
         models: names
@@ -2870,16 +3116,21 @@ fn model_list(names: &[&str]) -> loong_schema::generated::ModelList {
     }
 }
 
+/// Purpose: An app already holding a model list.
+/// Contract: called by the model-bar, shortcut and resend tests.
 fn app_with_models(names: &[&str]) -> App {
     let mut app = App::new("s", "v");
     app.set_models(model_list(names));
     app
 }
 
+/// Purpose: A character key with the Alt modifier.
+/// Contract: test helper; the Alt-shortcut tests use it.
 fn alt(c: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT)
 }
 
+/// Purpose: The bar numbers models left to right in the profile's declaration order.
 #[test]
 fn the_model_bar_numbers_the_models_in_the_order_the_profile_declared_them() {
     // Not alphabetically, and not by the map's order: that order is the user's own
@@ -2904,6 +3155,7 @@ fn the_model_bar_numbers_the_models_in_the_order_the_profile_declared_them() {
     }
 }
 
+/// Purpose: Only the current model is marked, and the mark follows a switch.
 #[test]
 fn the_model_bar_marks_the_current_model_and_only_that_one() {
     let mut app = app_with_models(&["cheap", "strong"]);
@@ -2923,6 +3175,7 @@ fn the_model_bar_marks_the_current_model_and_only_that_one() {
     assert!(!bar.contains("▸[1]"), "{bar:?}");
 }
 
+/// Purpose: Done, stopped and failed have different words, colours and marks.
 #[test]
 fn the_tick_says_how_the_turn_ended_and_which_way() {
     let done = Finished {
@@ -2963,6 +3216,7 @@ fn the_tick_says_how_the_turn_ended_and_which_way() {
     );
 }
 
+/// Purpose: The prompt title keeps the last ending until a new task starts, and a command hint outranks it when idle.
 #[test]
 fn the_prompt_title_shows_the_tick_until_the_next_task_starts() {
     // The complaint this answers: "我常常不知道任务是否完成了". The closing line in the
@@ -3029,6 +3283,8 @@ fn the_prompt_title_shows_the_tick_until_the_next_task_starts() {
     );
 }
 
+/// Purpose: The foreground colour of each cell under a needle, on whichever row it appears.
+/// Contract: called by the prompt-colour tests; delegates to `colours_of_where`.
 /// The foreground colour of each cell under `needle`, on whichever row it appears.
 /// `draw()` drops styles (it keeps symbols), and this bug was a *style* leak: the
 /// status colour belonged on the box title and was landing on the typed text.
@@ -3040,12 +3296,20 @@ fn colours_of(app: &mut App, needle: &str) -> Vec<Color> {
     colours_of_where(app, needle, false)
 }
 
+/// Purpose: The same, restricted to the box title row, so the transcript's copy is not found instead.
+/// Contract: called by the prompt-colour tests; delegates to `colours_of_where`.
 /// The same, restricted to the box's title row — the transcript carries the same
 /// closing line, so an unrestricted search would find that one instead.
 fn title_colours_of(app: &mut App, needle: &str) -> Vec<Color> {
     colours_of_where(app, needle, true)
 }
 
+/// Purpose: Find a needle's non-space characters in the drawn buffer and return the foreground colour of each cell that holds one.
+/// Serves: `colours_of` and `title_colours_of`, for the style-leak tests.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `colours_of` and `title_colours_of`.
+/// Down: `App::draw` and ratatui's `TestBackend`.
+/// Verify: `cargo test -p loong-tui-app`.
 fn colours_of_where(app: &mut App, needle: &str, border_only: bool) -> Vec<Color> {
     let mut terminal = Terminal::new(TestBackend::new(140, 24)).unwrap();
     terminal.draw(|frame| app.draw(frame)).unwrap();
@@ -3095,6 +3359,7 @@ fn colours_of_where(app: &mut App, needle: &str, border_only: bool) -> Vec<Color
     Vec::new()
 }
 
+/// Purpose: The typed text keeps its own colour; the turn outcome colours only the title.
 #[test]
 fn the_prompt_box_does_not_wear_the_last_turn_outcome() {
     // Reported from a real session: after a task succeeded the *textarea* turned
@@ -3127,6 +3392,7 @@ fn the_prompt_box_does_not_wear_the_last_turn_outcome() {
     );
 }
 
+/// Purpose: A busy turn colours only the working title, never the typed text.
 #[test]
 fn a_working_prompt_box_does_not_tint_what_is_typed_either() {
     // Same leak, different status: cyan while a turn runs is the state a person
@@ -3145,6 +3411,7 @@ fn a_working_prompt_box_does_not_tint_what_is_typed_either() {
     assert!(title.contains(&Color::Cyan), "{title:?}");
 }
 
+/// Purpose: A failed turn is drawn as a failure and never as a completion.
 #[test]
 fn a_turn_that_ends_badly_does_not_get_a_tick() {
     let mut app = App::new("s-tick-bad", "v");
@@ -3162,6 +3429,7 @@ fn a_turn_that_ends_badly_does_not_get_a_tick() {
     );
 }
 
+/// Purpose: A stopped turn says stopped and never shows the completion tick.
 #[test]
 fn a_turn_the_person_stopped_says_so_rather_than_showing_a_tick() {
     let mut app = App::new("s-tick-stop", "v");
@@ -3181,6 +3449,7 @@ fn a_turn_the_person_stopped_says_so_rather_than_showing_a_tick() {
     );
 }
 
+/// Purpose: `/new`, `/clear` and `/reset` ask for a fresh session rather than wiping the view.
 #[test]
 fn new_and_clear_both_ask_for_a_fresh_session() {
     // `/clear` is not a screen wipe. When people ask for a clean start they mean the
@@ -3199,6 +3468,7 @@ fn new_and_clear_both_ask_for_a_fresh_session() {
     }
 }
 
+/// Purpose: A new session clears the old transcript, folds, question and tick, and says where the old log went.
 #[test]
 fn a_new_session_clears_the_screen_because_that_log_is_no_longer_the_live_one() {
     let mut app = App::new("s-old", "v");
@@ -3248,6 +3518,7 @@ fn a_new_session_clears_the_screen_because_that_log_is_no_longer_the_live_one() 
     assert!(!screen.contains("something long"), "{screen}");
 }
 
+/// Purpose: Ctrl-N and Ctrl-P step through models and wrap in both directions.
 #[test]
 fn ctrl_n_and_ctrl_p_step_through_the_models_and_wrap() {
     // The keys that work in every terminal. `alt+<digit>` does not: tmux and some
@@ -3278,6 +3549,7 @@ fn ctrl_n_and_ctrl_p_step_through_the_models_and_wrap() {
     );
 }
 
+/// Purpose: Plain `n` and `p` are letters, not model shortcuts.
 #[test]
 fn plain_n_and_p_still_type_letters() {
     let mut app = app_with_models(&["a", "b"]);
@@ -3286,6 +3558,7 @@ fn plain_n_and_p_still_type_letters() {
     assert_eq!(app.input, "np");
 }
 
+/// Purpose: The bar hint names the always-delivered keys first and still offers the numbered ones.
 #[test]
 fn the_bar_hint_leads_with_the_keys_that_always_arrive() {
     let mut app = app_with_models(&["a", "b", "c"]);
@@ -3301,6 +3574,7 @@ fn the_bar_hint_leads_with_the_keys_that_always_arrive() {
     );
 }
 
+/// Purpose: The current model is reversed as a block and the others are not.
 #[test]
 fn the_current_model_is_drawn_as_a_block_and_not_only_a_marker() {
     // "Did that switch?" is the one question the bar exists to answer, and a `▸` in a
@@ -3328,6 +3602,7 @@ fn the_current_model_is_drawn_as_a_block_and_not_only_a_marker() {
     );
 }
 
+/// Purpose: The bar advertises both the Alt shortcut and the slash fallback.
 #[test]
 fn the_model_bar_shows_how_to_switch_without_being_asked() {
     // The bar is the whole discoverability story: a shortcut nobody is told about is
@@ -3345,6 +3620,7 @@ fn the_model_bar_shows_how_to_switch_without_being_asked() {
     );
 }
 
+/// Purpose: With one model the bar promises no shortcut.
 #[test]
 fn a_single_model_needs_no_shortcut_advertised() {
     let mut app = app_with_models(&["only"]);
@@ -3357,6 +3633,7 @@ fn a_single_model_needs_no_shortcut_advertised() {
     );
 }
 
+/// Purpose: A session with no models draws no bar.
 #[test]
 fn a_session_with_no_models_draws_no_bar_at_all() {
     let mut app = App::new("s", "v");
@@ -3367,6 +3644,7 @@ fn a_session_with_no_models_draws_no_bar_at_all() {
     );
 }
 
+/// Purpose: Alt+digit sends the model in that slot.
 #[test]
 fn alt_digit_switches_to_that_slot() {
     let mut app = app_with_models(&["cheap", "mid", "strong"]);
@@ -3380,6 +3658,7 @@ fn alt_digit_switches_to_that_slot() {
     );
 }
 
+/// Purpose: `/N` sends the same model switch as Alt+digit and does not reach the agent.
 #[test]
 fn slash_digit_is_the_same_shortcut_for_a_terminal_that_eats_alt() {
     // tmux and some macOS setups never deliver Alt to the program. The fallback has
@@ -3395,6 +3674,7 @@ fn slash_digit_is_the_same_shortcut_for_a_terminal_that_eats_alt() {
     assert!(app.input.is_empty(), "the command does not reach the agent");
 }
 
+/// Purpose: An empty model slot explains itself on screen instead of silently doing nothing.
 #[test]
 fn a_slot_with_no_model_says_so_instead_of_doing_nothing() {
     let mut app = app_with_models(&["cheap", "strong"]);
@@ -3407,6 +3687,7 @@ fn a_slot_with_no_model_says_so_instead_of_doing_nothing() {
     );
 }
 
+/// Purpose: Switching to the current model asks the server nothing and says so.
 #[test]
 fn switching_to_the_model_already_running_does_not_ask_the_server() {
     // A round trip to be told nothing changed would put a line in the log for a
@@ -3417,6 +3698,7 @@ fn switching_to_the_model_already_running_does_not_ask_the_server() {
     assert!(said.contains("already on [1] cheap"), "{said:?}");
 }
 
+/// Purpose: Ctrl+digit never switches models.
 #[test]
 fn ctrl_digit_is_deliberately_not_a_shortcut() {
     // In a VT terminal Ctrl+2..Ctrl+8 arrive as control *characters* — Ctrl+3 as
@@ -3439,6 +3721,7 @@ fn ctrl_digit_is_deliberately_not_a_shortcut() {
     }
 }
 
+/// Purpose: A narrow bar stays within its row, keeps the current model, and says it dropped models.
 #[test]
 fn a_narrow_terminal_gives_up_models_before_it_gives_up_the_mark() {
     // A bar that pushes the conversation off the screen has stopped being a status
@@ -3464,6 +3747,7 @@ fn a_narrow_terminal_gives_up_models_before_it_gives_up_the_mark() {
     );
 }
 
+/// Purpose: The bar follows a `model` line, ignores unknown names and ignores unrelated lines.
 #[test]
 fn the_bar_follows_a_switch_a_rule_made_mid_turn() {
     // A rule can change the model without the interface asking for anything, and it
@@ -3498,6 +3782,8 @@ fn the_bar_follows_a_switch_a_rule_made_mid_turn() {
 
 // ---------------------------------------------------------------- the resend
 
+/// Purpose: Ask a prompt, then mark the turn finished: the state a person is in when deciding to resend.
+/// Contract: called by the resend tests; type, Enter and clear `busy`.
 /// Ask something, then let the turn finish — the state a person is in when they
 /// decide the model was not up to it.
 fn asked_and_finished(app: &mut App, prompt: &str) {
@@ -3509,6 +3795,7 @@ fn asked_and_finished(app: &mut App, prompt: &str) {
     app.busy = false;
 }
 
+/// Purpose: Alt-R resubmits the exact last prompt.
 #[test]
 fn alt_r_asks_the_same_question_again() {
     let mut app = app_with_models(&["cheap", "strong"]);
@@ -3520,6 +3807,7 @@ fn alt_r_asks_the_same_question_again() {
     );
 }
 
+/// Purpose: A resend uses the model selected now and names it with its slot.
 #[test]
 fn the_resend_uses_the_model_selected_now_and_says_so() {
     let mut app = app_with_models(&["cheap", "strong"]);
@@ -3537,6 +3825,7 @@ fn the_resend_uses_the_model_selected_now_and_says_so() {
     );
 }
 
+/// Purpose: A resend grows the transcript and drops nothing.
 #[test]
 fn the_resend_keeps_the_history_rather_than_rewinding_it() {
     // The design, stated as a test: the model that takes over can see what the
@@ -3559,6 +3848,7 @@ fn the_resend_keeps_the_history_rather_than_rewinding_it() {
     }
 }
 
+/// Purpose: Alt-R with nothing asked says there is nothing to resend.
 #[test]
 fn resending_before_anything_was_asked_says_there_is_nothing_to_resend() {
     let mut app = app_with_models(&["cheap"]);
@@ -3567,6 +3857,7 @@ fn resending_before_anything_was_asked_says_there_is_nothing_to_resend() {
     assert!(said.contains("还没有可以重发"), "{said:?}");
 }
 
+/// Purpose: Alt-R while busy is refused and says the turn is still running.
 #[test]
 fn resending_while_a_turn_is_running_is_refused_rather_than_queued() {
     // A second turn starting on top of a running one is the failure this prevents.
@@ -3579,6 +3870,7 @@ fn resending_while_a_turn_is_running_is_refused_rather_than_queued() {
     assert!(said.contains("还在跑"), "{said:?}");
 }
 
+/// Purpose: `/r` resends like Alt-R and does not reach the agent.
 #[test]
 fn slash_r_is_the_fallback_for_a_terminal_that_eats_alt() {
     let mut app = app_with_models(&["cheap", "strong"]);
@@ -3592,6 +3884,7 @@ fn slash_r_is_the_fallback_for_a_terminal_that_eats_alt() {
     assert!(app.input.is_empty(), "the command does not reach the agent");
 }
 
+/// Purpose: The bar advertises the resend only after there is something to resend.
 #[test]
 fn the_resend_is_advertised_only_once_there_is_something_to_resend() {
     let mut app = app_with_models(&["cheap", "strong"]);
@@ -3611,6 +3904,7 @@ fn the_resend_is_advertised_only_once_there_is_something_to_resend() {
     );
 }
 
+/// Purpose: `/exit` leaves without reaching the agent.
 #[test]
 fn slash_exit_leaves() {
     let mut app = app_with_models(&["cheap"]);
@@ -3620,6 +3914,7 @@ fn slash_exit_leaves() {
     assert!(app.input.is_empty(), "the command does not reach the agent");
 }
 
+/// Purpose: A plain `r` is a letter, not a resend.
 #[test]
 fn a_plain_r_still_types_an_r() {
     // Alt+R is a shortcut; `r` is a letter. An interface where the letters stopped
@@ -3629,6 +3924,7 @@ fn a_plain_r_still_types_an_r() {
     assert_eq!(app.input, "r");
 }
 
+/// Purpose: A failed model check marks the model with a reason and keeps every slot in place.
 #[test]
 fn a_model_that_failed_its_check_is_marked_and_keeps_its_slot() {
     // Marked, not removed. A key revoked at midnight and a network hiccup look
@@ -3669,6 +3965,7 @@ fn a_model_that_failed_its_check_is_marked_and_keeps_its_slot() {
     );
 }
 
+/// Purpose: A failed check never blocks choosing the model.
 #[test]
 fn a_failed_check_still_lets_the_model_be_chosen() {
     // The check is advice. Refusing the key press would mean a transient probe
@@ -3685,6 +3982,7 @@ fn a_failed_check_still_lets_the_model_be_chosen() {
     );
 }
 
+/// Purpose: A typed `/N` or `/r` describes what Enter will do, or says there is nothing to do.
 #[test]
 fn the_status_line_says_what_a_model_command_will_do_before_it_is_pressed() {
     let mut app = app_with_models(&["cheap", "strong"]);

@@ -499,7 +499,7 @@ fn human_ms(ms: u64) -> String {
 /// Unix delivers `SIGINT` to one pid. Windows has no `kill`, so the same intent is
 /// carried by a console control event sent to the child's **process group** — which is
 /// why the launcher spawns the server with `CREATE_NEW_PROCESS_GROUP`
-/// (`crates/cli/src/main.rs`). `CTRL_C_EVENT` cannot be aimed at a group (Microsoft
+/// (`crates/cli/src/tui.rs`). `CTRL_C_EVENT` cannot be aimed at a group (Microsoft
 /// documents that it is delivered console-wide), so the child is sent `CTRL_BREAK_EVENT`
 /// and its server installs a `SIGBREAK` handler instead of a `SIGINT` one
 /// (`crates/server/src/lib.rs`). The user-visible behaviour is identical on both
@@ -551,9 +551,9 @@ extern "system" {
 
 impl<T: Transport> Client<T> {
     /// Purpose: A client over a transport, with its next request id and no pending question.
-    /// Serves: `crates/tui-app`'s worker.
+    /// Serves: `crates/cli/src/tui.rs`, `repl.rs` and `headless.rs`, plus the tests in both crates.
     /// Design: `docs/design/surfaces.md` §3.
-    /// Up: `crates/tui-app/src/worker.rs`.
+    /// Up: `crates/cli/src/{tui,repl,headless}.rs` and `crates/tui-app`'s tests; the worker receives a built `Client`.
     /// Down: no call; the fields it sets are read by the methods.
     /// Verify: `cargo test -p loong-tui`.
     pub fn new(transport: T, session_id: impl Into<String>) -> Self {
@@ -568,7 +568,7 @@ impl<T: Transport> Client<T> {
     }
 
     /// Purpose: The session this client currently names in its requests.
-    /// Serves: `crates/tui-app`'s worker for its headers.
+    /// Serves: no in-tree caller; the tests assert on it.
     /// Design: `docs/design/surfaces.md` §3.
     /// Up: no in-tree caller; it exposes the field every request names.
     /// Down: no call.

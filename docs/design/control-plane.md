@@ -163,13 +163,18 @@ Two claims that are easy to conflate, kept apart here as ADR-0012 §1 keeps them
   property.
 
 The runbooks start at [control-plane.md](../runbooks/control-plane.md) — bootstrap, operate
-and security. Two deployment facts belong here as well:
+and security. Three deployment facts belong here as well:
 
 - **There is no TLS listener.** The plane speaks plain HTTP; a non-loopback client refuses
   `http://` because a pack decides where prompts go. Expose it behind a TLS reverse proxy or an
   SSH tunnel, not by binding `0.0.0.0`.
 - **The served pack is a file.** The service user needs read access to the key and tokens and
   write access to `--dir`; there is no Postgres, object store or queue to operate.
+- **The binary guards against leaking key material by accident.** `keygen` refuses to write a
+  signing key inside a git work tree, and `publish` refuses to run while a secret is tracked
+  beside the draft (it warns about one that is merely unignored); `--force` overrides either
+  check. These are local guards against an easy mistake, not a substitute for file ownership
+  or for rotating a key that leaked.
 
 ## 7. What is not built
 

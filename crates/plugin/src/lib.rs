@@ -256,9 +256,9 @@ impl Plugin {
     }
 
     /// Purpose: The manifest file inside the checkout.
-    /// Serves: `read_manifest`, `write_manifest` and `install`.
+    /// Serves: `write_manifest` and the tests.
     /// Design: `docs/design/extension-model.md` §4.
-    /// Up: `read_manifest`, `write_manifest` and `install`.
+    /// Up: `write_manifest` and the tests call it; `read_manifest` and `install` join the file name directly.
     /// Down: `MANIFEST_FILE` joined to the root; no further call.
     /// Verify: `cargo test -p loong-plugin`.
     pub fn manifest_path(&self) -> PathBuf {
@@ -517,7 +517,7 @@ fn installed_dirs(root: &Path) -> Result<Vec<PathBuf>> {
 }
 
 /// Purpose: Read one manifest and refuse a skills directory that leaves the checkout.
-/// Serves: `discover`, `install`, `update`, `look_in` and `crates/cli/src/plugin.rs`.
+/// Serves: `discover`, `install`, `update` and `look_in`.
 /// Design: `docs/design/extension-model.md` §4.
 /// Up: `discover`, `install`, `update`, `look_in` and the tests.
 /// Down: `resolve_inside`, the TOML parse and the filesystem read.
@@ -616,7 +616,7 @@ impl Source {
 }
 
 /// Purpose: Turn a `plugin add` argument into a git source or a directory.
-/// Serves: `install` and `crates/cli/src/plugin.rs`.
+/// Serves: `install` and the tests.
 /// Design: `docs/design/extension-model.md` §4.
 /// Up: `install` and the tests.
 /// Down: `catalog`, `split_ref`, `existing_dir` and `git_url`.

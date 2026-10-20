@@ -43,7 +43,8 @@ pub const CLIENT_SYNC_TIMEOUT: Duration = Duration::from_secs(5);
 /// Verify: `cargo test -p loong-control`.
 #[derive(Debug)]
 pub enum ControlError {
-    /// No control plane is configured yet: the first-run state, not a failure.
+    /// Reserved for a first-run state; nothing in the tree constructs it, because
+    /// `crates/cli/src/control.rs` reports a missing control plane itself.
     NotConfigured,
     /// The address is not something we will send a token to.
     BadUrl(String),

@@ -315,7 +315,7 @@ impl Server {
     }
 
     /// Purpose: The session this server currently owns.
-    /// Serves: `dispatch` and the tests.
+    /// Serves: the tests only.
     /// Design: `docs/design/sessions-lineage.md` §1.
     /// Up: no production caller; the tests assert on it.
     /// Down: no call; it borrows the stored id.

@@ -1,16 +1,12 @@
-//! L2/L3/L4 summaries: the derived comprehension layer (ADR-0017).
+//! Purpose: L2/L3/L4 summaries: the derived comprehension layer, written in one place and always tied to citations and lineage.
 //!
-//! Four tables have to agree for a summary to exist — `summary`, `citation`,
-//! `summary_entity`, `summary_inputs` — so they are written in exactly one place
-//! ([`Store::put_summary`]) and read back through one shape ([`Summary`]).
+//! Serves: a summary that is re-derived from its children, never from its own previous version, and that a reader can always expand to the evidence.
 //!
-//! The rule this module exists to enforce is in `docs/06-context-engineering.md`
-//! §4.2.1: **a summary is always re-derived from its current children, never from
-//! its own previous version.** Doing the latter would compound error once per
-//! level and make it unattributable. [`Summary::inputs`] is the record that makes
-//! the rule checkable after the fact: for an L2 it points at an event range, and
-//! for L3/L4 it will point at child summaries — never at a prior version of
-//! itself.
+//! # Contract
+//! - **Design:** `docs/context/data-model.md` §5.2 and `docs/context/pipeline.md` §6.2–§6.4; `docs/design/context-ledger.md` §5.
+//! - **Upstream:** `crate::digest`, `crate::synthesis` and the kernel's enrichment worker call its `Store` methods.
+//! - **Downstream:** `loong-kernel`'s `turn/recall.rs` and `context_explain`, and `loongagent context status/verify`.
+//! - **Verify:** `cargo test -p loong-context` · `./scripts/check.sh`.
 
 use crate::materialize::EntityKind;
 use crate::store::{SearchQuery, Store, StoreError};
@@ -20,6 +16,12 @@ use rusqlite::{params, params_from_iter};
 /// rather than silently mixed with a new one.
 pub const SUMMARY_SCHEMA_VERSION: u32 = 1;
 
+/// Purpose: The call and token budget one idle enrichment window may spend.
+/// Serves: a dead or slow endpoint never turning one window into a sweep over the session.
+/// Design: `docs/context/config.md` §11; `docs/context/status.md` §11.1.
+/// Up: `Store::synthesize_window` and the kernel's `window_budget`.
+/// Down: `WindowBudget::calls` and `WindowBudget::new`.
+/// Verify: `cargo test -p loong-context --test semantic a_window_stops_at_its_token_budget`.
 /// What one idle window of semantic enrichment may spend (ADR-0017 §4.6).
 ///
 /// Both bounds are hard. `calls` counts **attempts**, not successes, so an
@@ -33,6 +35,12 @@ pub struct WindowBudget {
 }
 
 impl WindowBudget {
+    /// Purpose: A window bounded by calls alone.
+    /// Serves: the historical `synthesize` behavior expressed as the same budget type.
+    /// Design: `docs/context/config.md` §11.
+    /// Up: `Store::synthesize` and the semantic tests.
+    /// Down: `WindowBudget::new`; no other callee.
+    /// Verify: `cargo test -p loong-context --test semantic the_call_budget_is_respected`.
     /// A window bounded by calls alone — the historical `synthesize` behaviour.
     pub fn calls(calls: usize) -> Self {
         Self {
@@ -41,11 +49,23 @@ impl WindowBudget {
         }
     }
 
+    /// Purpose: A window with explicit call and token bounds.
+    /// Serves: the configuration keys `window_calls`/`window_tokens` having one landing point.
+    /// Design: `docs/context/config.md` §11.
+    /// Up: The kernel's `window_budget` and the window-cost measurement.
+    /// Down: Constructs the struct; no callee.
+    /// Verify: `cargo test -p loong-context --test semantic one_window_enriches_at_most_its_call_budget`.
     pub fn new(calls: usize, tokens: u64) -> Self {
         Self { calls, tokens }
     }
 }
 
+/// Purpose: What one idle window actually did.
+/// Serves: background spend being a queryable fact rather than an inference.
+/// Design: `docs/context/status.md` §11.1.
+/// Up: `Store::synthesize_window` and the kernel's worker statistics.
+/// Down: `WindowOutcome::did_work`.
+/// Verify: `cargo test -p loong-context --test semantic a_model_that_breaks_mid_pass`.
 /// What one window actually did. The worker accumulates this so "what has the
 /// background cost me?" is a query rather than an inference (ADR-0017 §10).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -65,12 +85,24 @@ pub struct WindowOutcome {
 }
 
 impl WindowOutcome {
+    /// Purpose: Whether a window did any model work.
+    /// Serves: a caller being able to branch on "the window was empty".
+    /// Design: `docs/context/status.md` §11.1.
+    /// Up: No caller in the tree today.
+    /// Down: Reads `calls`; no callee.
+    /// Verify: `cargo test -p loong-context --test semantic`.
     /// Did this window do anything at all?
     pub fn did_work(&self) -> bool {
         self.calls > 0
     }
 }
 
+/// Purpose: One stored summary at one level, with citations and lineage.
+/// Serves: the single shape every summary reader sees, so the four tables cannot disagree at the boundary.
+/// Design: `docs/context/data-model.md` §5.2.
+/// Up: `Store::summary`, `Store::summaries_at` and `Store::recall_at`; `crate::synthesis` builds rows.
+/// Down: `loong-kernel`'s `turn/recall.rs`, `crate::synthesis::domains_of` and the tests.
+/// Verify: `cargo test -p loong-context --test summaries a_summary_records_its_lineage`.
 /// One derived summary at one level.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Summary {
@@ -102,6 +134,12 @@ pub struct Summary {
     pub inputs: Vec<SummaryInput>,
 }
 
+/// Purpose: Where one summary came from: a child summary or a raw event range.
+/// Serves: the "never summarise a summary's own previous version" rule being checkable after the fact.
+/// Design: `docs/context/data-model.md` §5.2; `docs/context/pipeline.md` §6.4.
+/// Up: `crate::summaries::tail_summary`, `crate::synthesis::l3_summary` and the tests.
+/// Down: `Store::put_summary` and `Store::inputs_of`.
+/// Verify: `cargo test -p loong-context --test summaries a_summary_records_its_lineage`.
 /// Where a summary came from: a child summary, or a range of raw events.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SummaryInput {
@@ -111,6 +149,12 @@ pub struct SummaryInput {
     pub seq_to: Option<u64>,
 }
 
+/// Purpose: A summary plus the raw evidence it cites.
+/// Serves: the only shape handed to a model, so a summary is never mistaken for the record.
+/// Design: `docs/context/recall.md` §7.2.
+/// Up: `Store::expand` and `loong-kernel`'s `turn/recall.rs`.
+/// Down: `render_expansion` in `turn/recall.rs`; the tests read its fields.
+/// Verify: `cargo test -p loong-context --test summaries expand_returns_the_summary`.
 /// A summary together with the raw evidence it cites — the only shape a caller
 /// should hand to a model, because it cannot then mistake the summary for the
 /// record.
@@ -120,6 +164,12 @@ pub struct Expansion {
     pub evidence: Vec<AtomView>,
 }
 
+/// Purpose: The narrow atom view the digest is allowed to depend on.
+/// Serves: a rebuild reproducing the summaries, because the digest cannot read anything the store did not record.
+/// Design: `docs/context/data-model.md` §5.2.
+/// Up: `Store::atom_views` fills it; `crate::digest::build` and `DigestInput` read it.
+/// Down: `crate::digest::build`.
+/// Verify: `cargo test -p loong-context --test summaries a_digest_is_deterministic`.
 /// The part of an atom the digest needs.
 ///
 /// A deliberately narrow view rather than the whole `Atom`: the digest must not
@@ -145,6 +195,12 @@ pub struct AtomView {
 }
 
 impl Store {
+    /// Purpose: Load the narrow atom views for a `seq` range.
+    /// Serves: one query shape for the digest, the full rebuild and the window.
+    /// Design: `docs/context/data-model.md` §5.2.
+    /// Up: `Store::digest`, `Store::digest_pending`, `Store::synthesize_window` and `Store::expand`.
+    /// Down: `Store::entities_of`, `entity_kind_from_str` and SQL over `atom`.
+    /// Verify: `cargo test -p loong-context --test summaries a_digest_is_deterministic`.
     /// Load the narrow view the digest needs, for a span of `seq`.
     pub fn atom_views(&self, seq_from: u64, seq_to: u64) -> Result<Vec<AtomView>, StoreError> {
         let mut stmt = self.conn_ref().prepare(
@@ -203,6 +259,12 @@ impl Store {
     }
 }
 
+/// Purpose: Turn a stored entity kind back into `EntityKind`.
+/// Serves: the atom view carrying typed entities rather than strings.
+/// Design: `docs/context/data-model.md` §5.4.
+/// Up: `Store::atom_views`.
+/// Down: `EntityKind::as_str`; no other callee.
+/// Verify: `cargo test -p loong-context --test summaries a_summary_can_be_looked_up`.
 fn entity_kind_from_str(value: &str) -> Option<EntityKind> {
     [
         EntityKind::Path,
@@ -218,6 +280,12 @@ fn entity_kind_from_str(value: &str) -> Option<EntityKind> {
 }
 
 impl Store {
+    /// Purpose: Insert or replace a summary and all four derived representations.
+    /// Serves: citations, entity links and lineage never disagreeing with the summary row.
+    /// Design: `docs/context/data-model.md` §5.2.
+    /// Up: `Store::digest`, `Store::digest_pending`, `crate::synthesis::digest_domains` and the tests.
+    /// Down: `Store::entity_ids_for_range` and the transaction's SQL.
+    /// Verify: `cargo test -p loong-context --test summaries superseding_a_conclusion_keeps_the_old_one`.
     /// Insert or replace a summary and its derived rows: citations, entity links
     /// and lineage. One function, so the four representations can never
     /// disagree.
@@ -298,6 +366,12 @@ impl Store {
         Ok(())
     }
 
+    /// Purpose: The entity ids referenced by a `seq` range.
+    /// Serves: linking a summary to the entities its evidence mentions.
+    /// Design: `docs/context/data-model.md` §5.4.
+    /// Up: `Store::put_summary`.
+    /// Down: SQL over `atom_entity`; no other callee.
+    /// Verify: `cargo test -p loong-context --test summaries a_summary_can_be_looked_up_by_a_module`.
     fn entity_ids_for_range(&self, seq_from: u64, seq_to: u64) -> Result<Vec<i64>, StoreError> {
         let mut stmt = self
             .conn_ref()
@@ -306,6 +380,12 @@ impl Store {
         Ok(rows.collect::<Result<Vec<i64>, _>>()?)
     }
 
+    /// Purpose: Build the L2 digests for every episode in one pass.
+    /// Serves: the deterministic baseline a rebuild and an incremental resume are compared against.
+    /// Design: `docs/context/pipeline.md` §6.2.
+    /// Up: `loongagent context rebuild`; the tests.
+    /// Down: `crate::digest::segment`, `Store::atom_views`, `crate::digest::build`, `tail_summary` and `Store::put_summary`.
+    /// Verify: `cargo test -p loong-context --test summaries a_digest_is_deterministic`.
     /// Build the L2 digests for every episode from the atoms. Deterministic and
     /// idempotent: running it twice replaces summaries with identical rows.
     pub fn digest(&mut self) -> Result<u64, StoreError> {
@@ -325,6 +405,12 @@ impl Store {
         Ok(written)
     }
 
+    /// Purpose: Derive every episode that is behind, oldest first, up to a bound.
+    /// Serves: catching up a backlog without re-deriving closed episodes or spinning on an unchanged tail.
+    /// Design: `docs/context/pipeline.md` §6.2.
+    /// Up: `crate::worker::step` and the kernel's `ContextEngine::refresh`.
+    /// Down: `crate::digest::segment`, `Store::atom_views`, `crate::digest::build`, `Store::summary`, `Store::replace_overlapping` and `Store::put_summary`.
+    /// Verify: `cargo test -p loong-context --test synthesis an_idle_synthesis_pass_writes_nothing`.
     /// Derive every summary that is behind, oldest first, up to `max_episodes`.
     ///
     /// Not just the tail: a store that has never been digested has a whole backlog
@@ -386,6 +472,12 @@ impl Store {
         Ok(written)
     }
 
+    /// Purpose: The `seq` through which episodes have been derived.
+    /// Serves: resuming an interrupted backlog instead of skipping it.
+    /// Design: `docs/context/pipeline.md` §6.2.
+    /// Up: `Store::digest_pending`.
+    /// Down: `Store::meta`; no other callee.
+    /// Verify: `cargo test -p loong-context --test synthesis the_worker_keeps_the_maps_current`.
     /// The `seq` through which episodes have been derived.
     fn digested_through(&self) -> Result<u64, StoreError> {
         Ok(self
@@ -394,6 +486,12 @@ impl Store {
             .unwrap_or(0))
     }
 
+    /// Purpose: Remove summaries whose citations overlap a newly derived digest.
+    /// Serves: bounded cleanup instead of a scan over every summary in the session.
+    /// Design: `docs/context/pipeline.md` §6.2.
+    /// Up: `Store::digest_pending`.
+    /// Down: `Store::citations_of` and SQL over `summary`/`citation`.
+    /// Verify: `cargo test -p loong-context --test synthesis the_worker_keeps_the_maps_current`.
     /// Remove stored summaries whose citations fall inside the digest being
     /// written — bounded, not a scan of every summary in the session.
     ///
@@ -451,6 +549,12 @@ impl Store {
         Ok(())
     }
 
+    /// Purpose: Ask a model for the semantic fields of the pending L2 summaries.
+    /// Serves: the historical one-call-per-episode entry point, now a window with unbounded tokens.
+    /// Design: `docs/context/pipeline.md` §6.2.
+    /// Up: The semantic tests; the kernel calls `synthesize_window` directly.
+    /// Down: `Store::synthesize_window`.
+    /// Verify: `cargo test -p loong-context --test semantic`.
     /// Ask a model for the semantic fields of the L2 summaries that lack them.
     ///
     /// One call per episode, bounded by `max_calls`, and every call is charged
@@ -477,6 +581,12 @@ impl Store {
             .enriched)
     }
 
+    /// Purpose: One idle window of semantic enrichment, bounded by calls and tokens.
+    /// Serves: the model never running on the turn's critical path and never being able to sweep the session.
+    /// Design: `docs/context/pipeline.md` §6.6; `docs/context/status.md` §11.1.
+    /// Up: The kernel's enrichment thread, `Store::synthesize` and the semantic/window-cost tests.
+    /// Down: `Store::pending_synthesis`, `Store::summary`, `Store::atom_views`, `crate::digest::build`, `DigestInput`, `record_synthesis` and `crate::digest::merge_synthesis`.
+    /// Verify: `cargo test -p loong-context --test semantic one_window_enriches_at_most_its_call_budget`.
     /// One **idle window** of semantic enrichment (ADR-0017 §4.6).
     ///
     /// The same work as [`Store::synthesize`], with the bounds the design actually
@@ -617,6 +727,12 @@ impl Store {
         Ok(outcome)
     }
 
+    /// Purpose: Record a model's contribution only if the episode is still the one it answered about.
+    /// Serves: a foreground re-derivation never being overwritten by a stale answer, with the check and write atomic.
+    /// Design: `docs/context/status.md` §11.1.
+    /// Up: `Store::synthesize_window`.
+    /// Down: One conditional `UPDATE` over `summary`.
+    /// Verify: `cargo test -p loong-context --test semantic a_summary_replaced_while_the_model_answers_is_not_overwritten`.
     /// Record a model's contribution **only if the episode is still the one the
     /// model was asked about**, and report whether the write happened.
     ///
@@ -643,6 +759,12 @@ impl Store {
         Ok(changed == 1)
     }
 
+    /// Purpose: L2 episodes that still lack semantic fields.
+    /// Serves: the worker's queue depth, kept distinct from "enrichment was tried and failed".
+    /// Design: `docs/context/status.md` §11.1.
+    /// Up: `Store::synthesize_window`; the kernel's `context_explain`; `loongagent context status`.
+    /// Down: SQL over `summary`; no other callee.
+    /// Verify: `cargo test -p loong-context --test semantic a_failed_episode_is_not_asked_again`.
     /// L2 episodes that still lack semantic fields — the worker's queue depth.
     ///
     /// An episode a model attempted (successfully or not) is not pending: the
@@ -658,6 +780,12 @@ impl Store {
         Ok(n as u64)
     }
 
+    /// Purpose: L2 episodes whose enrichment failed and was recorded as such.
+    /// Serves: degradation being reportable rather than silent.
+    /// Design: `docs/context/status.md` §11.1.
+    /// Up: The kernel's `context_explain`; `loongagent context status`; the semantic tests.
+    /// Down: SQL over `summary`; no other callee.
+    /// Verify: `cargo test -p loong-context --test semantic a_failed_episode_is_not_asked_again`.
     /// L2 episodes whose enrichment failed and was recorded as such.
     pub fn degraded_synthesis(&self) -> Result<u64, StoreError> {
         let n: i64 = self.conn_ref().query_row(
@@ -668,6 +796,12 @@ impl Store {
         Ok(n as u64)
     }
 
+    /// Purpose: `(count, tokens)` for one summary layer.
+    /// Serves: the honesty surface reporting every layer, with an absent layer as `(0, 0)`.
+    /// Design: `docs/context/status.md` §11.1.
+    /// Up: The kernel's `context_explain`; `loongagent context status`.
+    /// Down: SQL over `summary`; no other callee.
+    /// Verify: `cargo test -p loong-context --test synthesis`.
     /// `(count, tokens)` for one layer, for the honesty surface. A layer the store
     /// has no rows for is `(0, 0)` rather than an error.
     pub fn layer_stats(&self, level: u32) -> Result<(u64, u64), StoreError> {
@@ -679,6 +813,12 @@ impl Store {
         Ok((count as u64, tokens.unwrap_or(0).max(0) as u64))
     }
 
+    /// Purpose: Discard every derived summary and rebuild the L2 rows.
+    /// Serves: proving that summaries are derived, not archived.
+    /// Design: `docs/context/pipeline.md` §6.2.
+    /// Up: `crate::summaries` tests; no caller in `crates/kernel` or `crates/cli`.
+    /// Down: `Store::digest`.
+    /// Verify: `cargo test -p loong-context --test summaries a_digest_is_deterministic`.
     /// Discard every derived summary and rebuild it from the atoms.
     pub fn rebuild_summaries(&mut self) -> Result<u64, StoreError> {
         {
@@ -694,6 +834,12 @@ impl Store {
         self.digest()
     }
 
+    /// Purpose: Load one summary with its citations and lineage.
+    /// Serves: the one lookup that returns a complete `Summary`.
+    /// Design: `docs/context/data-model.md` §5.2.
+    /// Up: `Store::digest_pending`, `Store::synthesize_window` and the tests.
+    /// Down: `row_to_summary`, `Store::citations_of` and `Store::inputs_of`.
+    /// Verify: `cargo test -p loong-context --test summaries a_summary_records_its_lineage`.
     pub fn summary(&self, id: &str) -> Result<Option<Summary>, StoreError> {
         let mut stmt = self.conn_ref().prepare(
             "SELECT id, level, scope, title, content, status, producer, schema_ver,
@@ -711,6 +857,12 @@ impl Store {
         Ok(Some(summary))
     }
 
+    /// Purpose: The citation ranges of one summary.
+    /// Serves: overlap cleanup and the evidence `expand` returns.
+    /// Design: `docs/context/recall.md` §7.2.
+    /// Up: `Store::replace_overlapping`, `Store::summary`, `Store::summaries_at` and `Store::recall_at`.
+    /// Down: SQL over `citation`; no other callee.
+    /// Verify: `cargo test -p loong-context --test summaries every_citation_resolves`.
     fn citations_of(&self, id: &str) -> Result<Vec<(u64, u64)>, StoreError> {
         let mut stmt = self.conn_ref().prepare(
             "SELECT seq_from, seq_to FROM citation WHERE summary_id = ?1 ORDER BY seq_from",
@@ -721,6 +873,12 @@ impl Store {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// Purpose: The lineage inputs of one summary.
+    /// Serves: the "derived from children, never itself" rule being readable.
+    /// Design: `docs/context/data-model.md` §5.2.
+    /// Up: `Store::summary`, `Store::summaries_at` and `Store::recall_at`.
+    /// Down: SQL over `summary_inputs`; no other callee.
+    /// Verify: `cargo test -p loong-context --test summaries a_summary_records_its_lineage`.
     fn inputs_of(&self, id: &str) -> Result<Vec<SummaryInput>, StoreError> {
         let mut stmt = self.conn_ref().prepare(
             "SELECT input_id, seq_from, seq_to FROM summary_inputs WHERE summary_id = ?1",
@@ -735,6 +893,12 @@ impl Store {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// Purpose: Summaries at one level, newest first.
+    /// Serves: the foreground and the honesty surface reading an ordered layer.
+    /// Design: `docs/context/data-model.md` §5.2.
+    /// Up: `crate::synthesis::digest_domains`, `Store::global_map`, `loongagent context status` and the tests.
+    /// Down: `row_to_summary`, `Store::citations_of` and `Store::inputs_of`.
+    /// Verify: `cargo test -p loong-context --test summaries recall_can_be_restricted_to_a_level`.
     /// Summaries at one level, newest first.
     pub fn summaries_at(&self, level: u32, limit: usize) -> Result<Vec<Summary>, StoreError> {
         let mut stmt = self.conn_ref().prepare(
@@ -751,6 +915,12 @@ impl Store {
         Ok(summaries)
     }
 
+    /// Purpose: How many summaries exist at one level.
+    /// Serves: a status line that does not load every row to count them.
+    /// Design: `docs/context/status.md` §11.1.
+    /// Up: `loongagent context status` and the tests.
+    /// Down: SQL over `summary`; no other callee.
+    /// Verify: `cargo test -p loong-context --test summaries recall_can_be_restricted_to_a_level`.
     pub fn summary_count(&self, level: u32) -> Result<u64, StoreError> {
         let n: i64 = self.conn_ref().query_row(
             "SELECT COUNT(*) FROM summary WHERE level = ?1",
@@ -760,6 +930,12 @@ impl Store {
         Ok(n as u64)
     }
 
+    /// Purpose: Search summaries by keyword across all levels.
+    /// Serves: the summary-first half of `recall`.
+    /// Design: `docs/context/recall.md` §7.2.
+    /// Up: The summaries tests; the kernel calls `recall_at` directly.
+    /// Down: `Store::recall_at`.
+    /// Verify: `cargo test -p loong-context --test summaries a_two_character_chinese_word_is_findable_in_summaries`.
     /// Search summaries by keyword.
     ///
     /// Every term is its own `LIKE` and all of them must match. The same rule as
@@ -772,6 +948,12 @@ impl Store {
         self.recall_at(None, query)
     }
 
+    /// Purpose: Search summaries restricted to one level.
+    /// Serves: `recall`'s `level` argument and the tests that pin it.
+    /// Design: `docs/context/recall.md` §7.2.
+    /// Up: `loong-kernel`'s `turn/recall.rs` and `Store::recall`.
+    /// Down: `row_to_summary`, `Store::citations_of` and `Store::inputs_of`.
+    /// Verify: `cargo test -p loong-context --test summaries recall_can_be_restricted_to_a_level`.
     /// The same, restricted to one level (2, 3 or 4).
     pub fn recall_at(
         &self,
@@ -817,6 +999,12 @@ impl Store {
         Ok(summaries)
     }
 
+    /// Purpose: Expand one summary into its text plus the evidence it cites.
+    /// Serves: a derived index never being mistaken for the record.
+    /// Design: `docs/context/recall.md` §7.2.
+    /// Up: `loong-kernel`'s `turn/recall.rs`.
+    /// Down: `Store::summary` and `Store::atom_views`.
+    /// Verify: `cargo test -p loong-context --test summaries expand_returns_the_summary`.
     /// Expand a summary: its full text **plus the original evidence it cites**.
     ///
     /// Returning the raw evidence is not a convenience — it is the mechanism that
@@ -842,6 +1030,12 @@ impl Store {
     }
 }
 
+/// Purpose: Whether two stored summaries are the same, timestamps excluded.
+/// Serves: an unchanged episode staying unchanged when the worker looks again.
+/// Design: `docs/context/pipeline.md` §6.2.
+/// Up: `Store::digest_pending`.
+/// Down: Compares the fields; no other callee.
+/// Verify: `cargo test -p loong-context --test synthesis an_idle_synthesis_pass_writes_nothing`.
 /// Whether two stored summaries say the same thing. Timestamps are excluded on
 /// purpose: they are derived from the evidence, and an episode whose events have
 /// not changed must not look changed because a worker looked at it again.
@@ -855,6 +1049,12 @@ fn same_summary(a: &Summary, b: &Summary) -> bool {
         && a.superseded_by == b.superseded_by
 }
 
+/// Purpose: The L2 row for a digest.
+/// Serves: the incremental and full paths producing the same summary for the same episode.
+/// Design: `docs/context/pipeline.md` §6.2.
+/// Up: `Store::digest` and `Store::digest_pending`.
+/// Down: `crate::synthesis::domain_of` and `SummaryInput`.
+/// Verify: `cargo test -p loong-context --test summaries a_digest_is_deterministic`.
 /// The L2 row for a digest. One constructor, so the incremental and the full path
 /// cannot produce different summaries for the same episode.
 fn tail_summary(digest: &crate::digest::Digest) -> Summary {
@@ -898,6 +1098,12 @@ fn tail_summary(digest: &crate::digest::Digest) -> Summary {
     }
 }
 
+/// Purpose: Read a SQL row into a `Summary`.
+/// Serves: one column order shared by every summary query.
+/// Design: `docs/context/data-model.md` §5.2.
+/// Up: `Store::summary`, `Store::summaries_at` and `Store::recall_at`.
+/// Down: Maps the columns; no other callee.
+/// Verify: `cargo test -p loong-context --test summaries`.
 fn row_to_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<Summary> {
     Ok(Summary {
         id: row.get(0)?,

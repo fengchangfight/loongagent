@@ -1,24 +1,27 @@
-//! L1 — atomic records, extracted deterministically from raw events.
+//! Purpose: L1 atomic records: each event turned deterministically into a searchable, citable `Atom`.
 //!
-//! An [`Atom`] is *not* a short summary. It is a near-original materialisation of
-//! one event, built to be searchable and citable: a stable id (the event's own
-//! `seq`), the tool it came from, the extracted file/module/command/test/error
-//! entities, and a length-capped text body. The full payload stays in the JSONL
-//! log and in `loong-index`'s `events` table; this never copies it wholesale.
+//! Serves: the retrieval layer that always exists without a model, so "the original is never lost" is a mechanism rather than a hope.
 //!
-//! Everything here is pure and deterministic: the same event always yields the
-//! same atom and the same entities. No model, no clock, no randomness. That is
-//! what makes "delete the database and rebuild it" a real answer rather than a
-//! hopeful one, and there is a test for it.
+//! # Contract
+//! - **Design:** `docs/context/data-model.md` §5.2–§5.4; `docs/design/context-ledger.md` §5.
+//! - **Upstream:** `Store::ingest` and `Store::absorb` call `materialize` for every event read from the log.
+//! - **Downstream:** `Store::insert_atom` writes the result; `crate::summaries::AtomView` and `digest::build` read it.
+//! - **Verify:** `cargo test -p loong-context` · `./scripts/check.sh`.
 
 use loong_schema::generated::EventEnvelope;
 use std::collections::BTreeSet;
 
 /// How much of an event's text body is kept in the searchable extract. The rest
 /// is reachable through the citation, not through this table — see the disk
-/// budget reasoning in `docs/06-context-engineering.md` §5.3.
+/// budget reasoning in `docs/context/data-model.md` §5.3.
 pub const MAX_TEXT_CHARS: usize = 512;
 
+/// Purpose: What kind of thing an entity name refers to.
+/// Serves: namespaced entities, so `test:merge` and `module:merge` never collide.
+/// Design: `docs/context/data-model.md` §5.4.
+/// Up: `extract_entities` inserts them on every atom.
+/// Down: `EntityKind::as_str`, `Atom.entities` and `AtomView.entities`.
+/// Verify: `cargo test -p loong-context --test retrieval entities_are_extracted`.
 /// What kind of thing an entity name refers to. `kind` is part of the identity,
 /// so `test:merge` and `module:merge` never collide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -40,6 +43,12 @@ pub enum EntityKind {
 }
 
 impl EntityKind {
+    /// Purpose: The wire name of an entity kind.
+    /// Serves: one spelling shared by the store, search filters and the digest.
+    /// Design: `docs/context/data-model.md` §5.4.
+    /// Up: `Store::insert_atom` and `crate::summaries::entity_kind_from_str`.
+    /// Down: Matches the enum; no callee.
+    /// Verify: `cargo test -p loong-context --test retrieval entities_are_extracted`.
     pub fn as_str(self) -> &'static str {
         match self {
             EntityKind::Path => "path",
@@ -53,12 +62,24 @@ impl EntityKind {
     }
 }
 
+/// Purpose: One extracted entity: its kind and normalised name.
+/// Serves: the deterministic filter key behind `SearchQuery::entity`.
+/// Design: `docs/context/data-model.md` §5.4.
+/// Up: `extract_entities` builds them.
+/// Down: `Store::insert_atom` writes them and `Atom::names_of` reads them.
+/// Verify: `cargo test -p loong-context --test retrieval entity_filters`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Entity {
     pub kind: EntityKind,
     pub name: String,
 }
 
+/// Purpose: One event, made searchable: stable id, tool, extracted text and entities.
+/// Serves: a near-original view that is citable by `seq` and cheap to rebuild.
+/// Design: `docs/context/data-model.md` §5.2–§5.3.
+/// Up: `materialize` returns it.
+/// Down: `Store::insert_atom` stores it; `crate::summaries::atom_views` narrows it.
+/// Verify: `cargo test -p loong-context --test retrieval the_same_event_always_materialises`.
 /// One event, made searchable. `seq` is the event's sequence number — a stable
 /// id that also *is* the citation, so no second identifier scheme is invented.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,6 +111,12 @@ pub struct Atom {
 }
 
 impl Atom {
+    /// Purpose: Entities of one kind on this atom.
+    /// Serves: a deterministic filter helper (`entity = "src/config"`).
+    /// Design: `docs/context/data-model.md` §5.4.
+    /// Up: No caller in the tree; `digest.rs` has its own `names_of` over `AtomView` for the same purpose.
+    /// Down: Filters `entities`; no callee.
+    /// Verify: `cargo test -p loong-context --test retrieval entities_are_extracted`.
     /// Entities of one kind, for a deterministic filter (`entity = "src/config"`).
     pub fn names_of(&self, kind: EntityKind) -> Vec<&str> {
         self.entities
@@ -100,6 +127,12 @@ impl Atom {
     }
 }
 
+/// Purpose: Turn one event into an atom, or `None` when it carries nothing searchable.
+/// Serves: a pure function: the same event always yields the same atom, so a rebuild reproduces the store.
+/// Design: `docs/context/data-model.md` §5.2–§5.3.
+/// Up: `Store::ingest` and `Store::absorb`.
+/// Down: `classify_write`, `write_attempt_opt`, `extract_entities`, `cap`, `fnv1a64`, `str_field`, `compact_json` and `join_nonempty`.
+/// Verify: `cargo test -p loong-context --test retrieval the_same_event_always_materialises`.
 /// Turn one event into an atom. Returns `None` for kinds that carry no
 /// searchable content at all — recording them would inflate the store without
 /// ever answering a question.
@@ -207,6 +240,12 @@ const WRITE_TOOLS: &[&str] = &[
     "patch",
 ];
 
+/// Purpose: What a write attempt actually was, in a few words.
+/// Serves: distinguishing one attempt from another, which is what an explanation of an abandoned approach needs.
+/// Design: `docs/context/pipeline.md` §6.2.
+/// Up: `materialize`.
+/// Down: Reads the tool arguments; no callee.
+/// Verify: `cargo test -p loong-context --test summaries touched_files`.
 /// What a write attempt actually was, in a few words: the new text, or the patch,
 /// truncated. This is the part a model needs to tell one attempt from another —
 /// measured: an attempt described only as "changed merge.rs" leaves a 7B model with
@@ -235,6 +274,12 @@ fn write_attempt_opt(args: Option<&serde_json::Value>) -> Option<String> {
     None
 }
 
+/// Purpose: Whether a tool call changes a file.
+/// Serves: write detection by name and by argument shape, so an unseen tool that writes is still recognised.
+/// Design: `docs/context/data-model.md` §5.4.
+/// Up: `materialize`.
+/// Down: Checks `WRITE_TOOLS` and the argument keys; no callee.
+/// Verify: `cargo test -p loong-context --test summaries touched_files`.
 /// Whether a tool call changes a file: by name, or by carrying the arguments a
 /// write carries. The second signal is what keeps this working for a tool whose
 /// name we have never seen (`fs__put` with a `content` argument).
@@ -257,8 +302,14 @@ fn classify_write(tool: &str, args: Option<&serde_json::Value>) -> bool {
     }
 }
 
+/// Purpose: The deterministic entities an event refers to.
+/// Serves: the module assignment L3 rolls up by, computed rather than chosen by a model.
+/// Design: `docs/context/data-model.md` §5.4.
+/// Up: `materialize`.
+/// Down: `scan_text`, `insert_path_like` and `insert_command`.
+/// Verify: `cargo test -p loong-context --test retrieval entities_are_extracted`.
 /// The entities an event refers to. Deterministic rules only — see the table in
-/// `docs/06-context-engineering.md` §5.4. The module assignment (L3's rollup
+/// `docs/context/data-model.md` §5.4. The module assignment (L3's rollup
 /// unit) is deliberately computed here rather than asked of a model, so the
 /// "dirty set" that drives incremental updates is exactly computable.
 fn extract_entities(env: &EventEnvelope, text: &str, tool: Option<&str>) -> Vec<Entity> {
@@ -293,6 +344,12 @@ fn extract_entities(env: &EventEnvelope, text: &str, tool: Option<&str>) -> Vec<
     out.into_iter().collect()
 }
 
+/// Purpose: Path-ish tokens, error codes and test names in free text.
+/// Serves: extraction from prose when an event carries no structured argument.
+/// Design: `docs/context/data-model.md` §5.4.
+/// Up: `extract_entities`.
+/// Down: `error_code`, `insert_path_like`, `test_names` and `is_token_separator`.
+/// Verify: `cargo test -p loong-context --test retrieval entities_are_extracted`.
 /// Path-ish tokens and error codes in free text.
 fn scan_text(out: &mut BTreeSet<Entity>, text: &str) {
     for raw in text.split(is_token_separator) {
@@ -317,6 +374,12 @@ fn scan_text(out: &mut BTreeSet<Entity>, text: &str) {
     }
 }
 
+/// Purpose: Record a path and its two-segment module.
+/// Serves: the path/module pair every file filter and L3 rollup is built on.
+/// Design: `docs/context/data-model.md` §5.4.
+/// Up: `extract_entities` and `scan_text`.
+/// Down: `error_code`, `looks_like_path` and `has_known_extension`.
+/// Verify: `cargo test -p loong-context --test retrieval entities_are_extracted`.
 fn insert_path_like(out: &mut BTreeSet<Entity>, raw: &str) {
     let token = raw.trim();
     if token.is_empty() || token.len() > 200 {
@@ -361,6 +424,8 @@ fn insert_path_like(out: &mut BTreeSet<Entity>, raw: &str) {
     }
 }
 
+/// Purpose: Whether a bare token has a file extension this crate recognises.
+/// Contract: `materialize.rs` path extraction.
 /// A bare name that names a file we recognise (`turn.rs`), as opposed to a
 /// directory-like token (`kernel`) that is worth a module entity on its own.
 fn has_known_extension(token: &str) -> bool {
@@ -368,6 +433,12 @@ fn has_known_extension(token: &str) -> bool {
     KNOWN_EXTENSIONS.contains(&ext)
 }
 
+/// Purpose: Record the head of a command line.
+/// Serves: "which commands ran" answered without parsing the whole command.
+/// Design: `docs/context/data-model.md` §5.4.
+/// Up: `extract_entities`.
+/// Down: Skips leading `VAR=value` words; no callee.
+/// Verify: `cargo test -p loong-context --test retrieval entities_are_extracted`.
 fn insert_command(out: &mut BTreeSet<Entity>, command: &str) {
     // The head of the command is what anybody greps for; the arguments are in
     // the text and in the raw event. Leading `VAR=value` assignments are
@@ -383,6 +454,12 @@ fn insert_command(out: &mut BTreeSet<Entity>, command: &str) {
     }
 }
 
+/// Purpose: Recognise a compiler or runtime error code in a token.
+/// Serves: the `error:E0308` entity a failure search relies on.
+/// Design: `docs/context/data-model.md` §5.4.
+/// Up: `scan_text` and `insert_path_like`.
+/// Down: Normalises the token; no callee.
+/// Verify: `cargo test -p loong-context --test retrieval entities_are_extracted`.
 /// `E0308`, `error[E0308]`, `TS2345`, `ERR_MODULE_NOT_FOUND`.
 fn error_code(token: &str) -> Option<String> {
     let t = token.trim_matches(|c: char| c == '[' || c == ']' || c == '(' || c == ')' || c == ',');
@@ -410,6 +487,12 @@ const KNOWN_EXTENSIONS: &[&str] = &[
     "exs", "lua", "pl", "r", "scala", "clj", "hs", "ml", "vue", "svelte",
 ];
 
+/// Purpose: Whether a token looks like a file path rather than prose.
+/// Serves: keeping `a/b` prose and URLs out of the path entity table.
+/// Design: `docs/context/data-model.md` §5.4.
+/// Up: `insert_path_like`.
+/// Down: Checks `KNOWN_EXTENSIONS`; no callee.
+/// Verify: `cargo test -p loong-context --test retrieval entities_are_extracted`.
 fn looks_like_path(token: &str) -> bool {
     if token.contains("://") || token.starts_with("--") {
         return false;
@@ -426,6 +509,12 @@ fn looks_like_path(token: &str) -> bool {
     KNOWN_EXTENSIONS.contains(&ext)
 }
 
+/// Purpose: Test names mentioned as `test <name> ... ok`.
+/// Serves: the `test:` entity behind the `failed→ok` transition.
+/// Design: `docs/context/data-model.md` §5.4.
+/// Up: `scan_text`.
+/// Down: Reads `KNOWN_EXTENSIONS`; no callee.
+/// Verify: `cargo test -p loong-context --test summaries a_test_that_failed_then_passed`.
 fn test_names(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut tokens = text.split_whitespace().peekable();
@@ -448,6 +537,12 @@ fn test_names(text: &str) -> Vec<String> {
     out
 }
 
+/// Purpose: Which characters separate tokens in free text.
+/// Serves: CJK punctuation splitting correctly, so `任务 2：src/kernel/a.rs` does not produce a bogus module.
+/// Design: `docs/context/data-model.md` §5.4.
+/// Up: `scan_text` via `str::split`.
+/// Down: Matches punctuation; no callee.
+/// Verify: `cargo test -p loong-context --test retrieval entities_are_extracted`.
 fn is_token_separator(c: char) -> bool {
     c.is_whitespace()
         || matches!(
@@ -502,12 +597,16 @@ fn is_token_separator(c: char) -> bool {
         )
 }
 
+/// Purpose: A string field of an event's JSON data.
+/// Contract: `materialize.rs` event parsing.
 fn str_field(data: &serde_json::Value, key: &str) -> Option<String> {
     data.get(key)
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
 }
 
+/// Purpose: Compact JSON for the text of an event that has no dedicated shape.
+/// Contract: `materialize.rs` event parsing.
 fn compact_json(value: Option<&serde_json::Value>) -> String {
     match value {
         Some(v) => serde_json::to_string(v).unwrap_or_default(),
@@ -515,6 +614,8 @@ fn compact_json(value: Option<&serde_json::Value>) -> String {
     }
 }
 
+/// Purpose: Join the non-empty parts of an atom text with a separator.
+/// Contract: `materialize.rs` event parsing.
 fn join_nonempty(sep: &str, parts: &[String]) -> String {
     parts
         .iter()
@@ -524,6 +625,8 @@ fn join_nonempty(sep: &str, parts: &[String]) -> String {
         .join(sep)
 }
 
+/// Purpose: Truncate on a character boundary and say that it was truncated.
+/// Contract: `materialize.rs` event parsing.
 /// Truncate on a character boundary and say so, so a reader (human or model)
 /// never mistakes a cut-off extract for the whole output.
 fn cap(text: &str, max: usize) -> String {
@@ -534,6 +637,12 @@ fn cap(text: &str, max: usize) -> String {
     format!("{kept}…[truncated]")
 }
 
+/// Purpose: FNV-1a (64-bit) over the searchable text.
+/// Serves: a duplicate-detection hash that is stable across runs, so a rebuild is byte-reproducible.
+/// Design: `docs/context/data-model.md` §5.2.
+/// Up: `materialize` sets `Atom.content_hash` with it.
+/// Down: Hashes bytes; no callee.
+/// Verify: `cargo test -p loong-context --test retrieval a_deleted_store_rebuilds`.
 /// FNV-1a, 64-bit. Chosen deliberately over a `sha2` dependency: the hash is
 /// only used to spot duplicates, and it must be *stable across runs* so that a
 /// rebuild is byte-reproducible — which is the property a test actually needs.

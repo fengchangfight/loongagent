@@ -1,41 +1,12 @@
-//! Layered, reversible context memory (ADR-0017).
+//! Purpose: Layered, reversible context memory: a disposable derived store over the event log.
 //!
-//! The event log (ADR-0003) is the truth; this crate builds a **derived**,
-//! disposable memory over it. Deleting the sidecar database loses nothing but
-//! the cost already spent deriving it — [`Store::rebuild`] reconstitutes it from
-//! the log alone, and a test asserts exactly that.
+//! Serves: the ADR-0017 promise that the original is never lost — delete the sidecar and `Store::rebuild` reconstitutes it, while the comprehension layer always carries citations.
 //!
-//! The design separates two things that are easy to conflate:
-//!
-//! * the **retrieval layer** — L1 atomic records, entities and keywords. It is
-//!   deterministic, needs no model, and always exists. This is what makes
-//!   "the original is never lost" true rather than aspirational.
-//! * the **comprehension layer** — L2/L3/L4 summaries. It is model-produced,
-//!   therefore fallible, therefore always carries citations and never replaces
-//!   the record it was derived from.
-//!
-//! Implemented so far (`docs/06-context-engineering.md` §13):
-//!
-//! * **P1** — the retrieval layer: [`materialize`] turns an event into an
-//!   [`Atom`]; [`Store`] keeps the atoms, entities and keywords, with an ingest
-//!   watermark, [`Store::rebuild`] and [`Store::verify`].
-//! * **P2** — the deterministic half of the comprehension layer: [`digest`]
-//!   segments episodes and computes an L2 summary whose *computable* fields are
-//!   computed rather than generated; [`Store::recall`] finds summaries and
-//!   [`Store::expand`] hands back the raw evidence alongside one.
-//!
-//! * **P3** — the background worker: [`tail`] reads only what was appended,
-//!   [`Store::sync`] and [`Store::digest_pending`] keep the derived state current
-//!   without re-reading the session, and [`worker`] runs one bounded, yielding
-//!   step at a time.
-//!
-//! * **P4** — the maps: [`synthesis`] rolls L2 episodes up into L3 domain maps
-//!   and a bounded L4 global map, which the kernel carries in the foreground.
-//!
-//! * **P5** — the optional local model: [`summarizer`] asks Ollama for the fields a
-//!   deterministic pass cannot compute, and [`Store::synthesize_window`] bounds how
-//!   much one idle window may ask. Nothing here depends on a model being installed;
-//!   without one the memory is complete, just free of opinions.
+//! # Contract
+//! - **Design:** `docs/design/context-ledger.md`; the mechanism detail is owned by `docs/context/data-model.md` and `docs/context/pipeline.md`.
+//! - **Upstream:** `loong-kernel`'s `ContextEngine` and `turn/recall.rs`, and `loongagent context status/verify/rebuild`; the crate itself reads `loong-eventlog`.
+//! - **Downstream:** the re-exports below: `Store`, `Summary`, the `Summarizer` contract, the worker, and the maps the kernel carries in the foreground.
+//! - **Verify:** `cargo test -p loong-context` · `./scripts/check.sh`.
 
 pub mod digest;
 pub mod materialize;

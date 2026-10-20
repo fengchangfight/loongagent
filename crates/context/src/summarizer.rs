@@ -1,33 +1,23 @@
-//! The optional small model: the semantic fields a deterministic pass cannot fill.
+//! Purpose: The optional local model: the few semantic fields a deterministic pass cannot fill, and the budget around asking.
 //!
-//! Everything else in this crate computes. This module is the one place that asks
-//! a model for an opinion, and the shape of the asking is the design:
+//! Serves: the "additive, never authoritative" rule: a model may explain, but it cannot overwrite status, citations or boundaries.
 //!
-//! * **The model is handed facts, not events.** [`DigestInput`] is the rendered
-//!   `D`, with confirmed facts on labelled lines. Measured on this machine, a 0.6B
-//!   model handed a raw event list copies the list into `rejected[]`; handed
-//!   labelled facts and asked one question, it answers correctly. Input quality
-//!   decides the outcome far more than model size does.
-//! * **It answers only what cannot be computed.** `rejected`, `open_questions`,
-//!   `why`, `conclusion`. Status, files, commands, test results and citations are
-//!   already decided — the design note records a 3B model calling a committed,
-//!   passing task `open`, so those fields are never delegated again.
-//! * **Additive, never authoritative.** A synthesis is merged *into* the digest; it
-//!   cannot overwrite a fact or remove a citation. Worst case it adds a claim, which
-//!   the citation structure lets a reader check.
-//! * **Structured output is enforced by the runtime**, not requested in prose:
-//!   the Ollama request carries a JSON schema, so "please answer in JSON" is not a
-//!   hope.
-//! * **Thinking is off.** Measured: `/v1/chat/completions` ignores `think:false` and
-//!   spends the whole budget on a reasoning trace, leaving half a sentence. The
-//!   native `/api/chat` honours it.
-//! * **Its cost is counted.** Every call is charged against a budget, because the
-//!   design note requires the background spend to be queryable.
+//! # Contract
+//! - **Design:** `docs/context/pipeline.md` §6.2 and `docs/context/config.md` §11; `docs/design/context-ledger.md` §5.
+//! - **Upstream:** `loong-kernel`'s `ContextEngine` chooses an implementation; `Store::synthesize_window` calls it off the critical path.
+//! - **Downstream:** `crate::digest::merge_synthesis` merges the answer; the `producer` column records which model (if any) wrote it.
+//! - **Verify:** `cargo test -p loong-context` · `./scripts/check.sh`.
 
 use crate::digest::{Digest, TestRecord};
 use serde_json::{json, Value};
 use std::time::Duration;
 
+/// Purpose: A factual brief for the model: the digest's computed facts plus the question.
+/// Serves: input quality deciding the answer, because the model is handed labelled facts rather than raw events.
+/// Design: `docs/context/pipeline.md` §6.2.
+/// Up: `DigestInput::from_digest` builds it from a digest; `Store::synthesize_window` asks with it.
+/// Down: `DigestInput::prompt` and `DigestInput::schema`.
+/// Verify: `cargo test -p loong-context summarizer::tests::the_request_disables_thinking_and_carries_the_schema`.
 /// A factual brief for the model: the digest, plus the question.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DigestInput {
@@ -47,6 +37,12 @@ pub struct DigestInput {
 }
 
 impl DigestInput {
+    /// Purpose: Build the brief from a rendered digest.
+    /// Serves: the model receiving the same computed facts the digest already established.
+    /// Design: `docs/context/pipeline.md` §6.2.
+    /// Up: `Store::synthesize_window`.
+    /// Down: Reads `Digest`'s fields; no other callee.
+    /// Verify: `cargo test -p loong-context summarizer::tests::the_request_disables_thinking`.
     pub fn from_digest(digest: &Digest) -> Self {
         Self {
             request: digest
@@ -64,6 +60,12 @@ impl DigestInput {
         }
     }
 
+    /// Purpose: The prompt: few labelled facts and one question.
+    /// Serves: a small model answering correctly instead of copying a raw event list.
+    /// Design: `docs/context/pipeline.md` §6.2.
+    /// Up: `OllamaSummarizer::body`.
+    /// Down: Reads the brief's fields; no callee.
+    /// Verify: `cargo test -p loong-context summarizer::tests::the_request_disables_thinking_and_carries_the_schema`.
     /// The prompt. Short on purpose: a small model does better with few, labelled
     /// facts and one question than with a transcript and an essay of instructions.
     pub fn prompt(&self) -> String {
@@ -115,6 +117,12 @@ impl DigestInput {
         out
     }
 
+    /// Purpose: The JSON schema handed to the runtime.
+    /// Serves: structured output enforced rather than requested in prose.
+    /// Design: `docs/context/pipeline.md` §6.2.
+    /// Up: `OllamaSummarizer::body`.
+    /// Down: Builds the schema value; no callee.
+    /// Verify: `cargo test -p loong-context summarizer::tests::the_request_disables_thinking_and_carries_the_schema`.
     /// The JSON schema handed to the runtime, so the shape is enforced rather than
     /// hoped for.
     pub fn schema() -> Value {
@@ -133,6 +141,12 @@ impl DigestInput {
     }
 }
 
+/// Purpose: What the model is allowed to contribute.
+/// Serves: a field a model can fill wrongly is not in the contract, so `rejected` and the facts stay computed.
+/// Design: `docs/context/pipeline.md` §6.2.
+/// Up: `Synthesis::from_json` builds it; `Summarizer::summarize` returns it.
+/// Down: `crate::digest::merge_synthesis` and `Synthesis::is_empty`/`estimated_tokens`.
+/// Verify: `cargo test -p loong-context summarizer::tests::a_schema_shaped_answer_becomes_a_synthesis`.
 /// What the model is allowed to contribute. Everything else in a summary is
 /// computed, and there is deliberately no field here for it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -144,6 +158,12 @@ pub struct Synthesis {
 }
 
 impl Synthesis {
+    /// Purpose: Whether the model said nothing.
+    /// Serves: an empty answer being recorded as asked instead of laundered into a confident one.
+    /// Design: `docs/context/pipeline.md` §6.2.
+    /// Up: `Synthesis::from_json` and `Store::synthesize_window`.
+    /// Down: Reads the fields; no callee.
+    /// Verify: `cargo test -p loong-context summarizer::tests::an_answer_with_none_of_the_fields_is_refused`.
     pub fn is_empty(&self) -> bool {
         self.rejected.is_empty()
             && self.open_questions.is_empty()
@@ -151,6 +171,12 @@ impl Synthesis {
             && self.conclusion.is_none()
     }
 
+    /// Purpose: The window cost of the fields a model is allowed to fill.
+    /// Serves: charging the window for the model's addition, not for the digest it already had.
+    /// Design: `docs/context/status.md` §11.1.
+    /// Up: `Store::synthesize_window`.
+    /// Down: `crate::digest::estimate_tokens`.
+    /// Verify: `cargo test -p loong-context --test semantic a_window_stops_at_its_token_budget`.
     /// What this answer is likely to cost the window's token budget. The same
     /// estimate the rest of the crate uses, summed over the fields a model is
     /// allowed to fill — not the merged summary, which would charge the window for
@@ -165,6 +191,12 @@ impl Synthesis {
             .sum()
     }
 
+    /// Purpose: Accept a model's JSON answer, keeping only the fields it may fill.
+    /// Serves: refusing an empty or off-schema answer instead of inventing confidence.
+    /// Design: `docs/context/pipeline.md` §6.2.
+    /// Up: `OllamaSummarizer::parse_response`.
+    /// Down: Reads the JSON value; no callee.
+    /// Verify: `cargo test -p loong-context summarizer::tests::a_schema_shaped_answer_becomes_a_synthesis`.
     /// Accept a model's answer, keeping only what it is allowed to say and
     /// refusing to launder an empty answer into a confident one.
     pub fn from_json(value: &Value) -> Result<Self, SummarizerError> {
@@ -212,6 +244,12 @@ impl Synthesis {
     }
 }
 
+/// Purpose: Why an enrichment call could not be used.
+/// Serves: an absent model degrading to the digest while a broken one is reported.
+/// Design: `docs/context/status.md` §11.1.
+/// Up: `Summarizer::summarize` and the kernel's enrichment loop.
+/// Down: The `Display` impl below.
+/// Verify: `cargo test -p loong-context --test semantic a_model_that_breaks_mid_pass`.
 #[derive(Debug)]
 pub enum SummarizerError {
     /// The endpoint could not be reached or answered with a non-200.
@@ -225,6 +263,12 @@ pub enum SummarizerError {
 }
 
 impl std::fmt::Display for SummarizerError {
+    /// Purpose: Render a summarizer error as the message recorded in `producer`.
+    /// Serves: the reason an episode degraded travelling with the summary rather than being swallowed.
+    /// Design: `docs/context/status.md` §11.1.
+    /// Up: `SummarizerError`'s `Display` contract.
+    /// Down: Writes each variant; no callee.
+    /// Verify: `cargo test -p loong-context --test semantic a_model_that_breaks_mid_pass`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SummarizerError::Transport(m) => write!(f, "transport: {m}"),
@@ -236,19 +280,33 @@ impl std::fmt::Display for SummarizerError {
 
 impl std::error::Error for SummarizerError {}
 
+/// Purpose: The one thing this crate asks of a model.
+/// Serves: the enrichment thread being able to own the client, so no model call sits on the foreground path.
+/// Design: `docs/context/pipeline.md` §6.6.
+/// Up: `Store::synthesize_window` and the kernel's enrichment thread.
+/// Down: `name` and `summarize` below.
+/// Verify: `cargo test -p loong-context --test semantic`.
 /// The one thing this crate asks of a model.
 ///
 /// `Send` because the enrichment worker runs on its own thread: a summariser that
 /// could not be moved there would put the model call back in the foreground's
 /// critical path, which is the one thing ADR-0017 §4.6 forbids.
 pub trait Summarizer: Send {
+    /// Purpose: Name the model for `producer` provenance, and for the "different model, different question" rule.
     /// Name, for `producer` provenance: a summary has to say *which* model wrote
     /// the parts a model wrote.
     fn name(&self) -> String;
 
+    /// Purpose: Answer the brief with the semantic fields the model is allowed to contribute.
     fn summarize(&mut self, input: &DigestInput) -> Result<Synthesis, SummarizerError>;
 }
 
+/// Purpose: The Ollama-native client, using `/api/chat` with `think: false`.
+/// Serves: the measured endpoint that honours structured output and does not spend the budget on a reasoning trace.
+/// Design: `docs/context/config.md` §11.
+/// Up: The kernel's `ContextEngine` and the faithfulness/window-cost measurements.
+/// Down: `new`, the builders, `body`, `parse_response` and the `Summarizer` impl.
+/// Verify: `cargo test -p loong-context summarizer::tests`.
 /// The Ollama-native client (ADR-0017: owner's choice, and the measured one).
 ///
 /// `/api/chat`, not `/v1/chat/completions`: the OpenAI-compatible shim ignored
@@ -268,6 +326,12 @@ pub struct OllamaSummarizer {
 }
 
 impl OllamaSummarizer {
+    /// Purpose: A client for one endpoint and model.
+    /// Serves: the measured defaults (`think: false`, a 60 s timeout, 400 answer tokens) in one place.
+    /// Design: `docs/context/config.md` §11.
+    /// Up: The kernel's `ContextEngine` and the faithfulness/window-cost tests.
+    /// Down: `with_timeout`, `with_max_tokens` and the `Summarizer` impl.
+    /// Verify: `cargo test -p loong-context summarizer::tests::the_request_disables_thinking`.
     pub fn new(base: impl Into<String>, model: impl Into<String>) -> Self {
         Self {
             base: base.into().trim_end_matches('/').to_string(),
@@ -278,24 +342,54 @@ impl OllamaSummarizer {
         }
     }
 
+    /// Purpose: Override the request timeout.
+    /// Serves: a slow local model being bounded without changing the rest of the client.
+    /// Design: `docs/context/config.md` §11.
+    /// Up: The kernel's `ContextEngine`.
+    /// Down: Mutates the client; no other callee.
+    /// Verify: `cargo test -p loong-context summarizer::tests`.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
     }
 
+    /// Purpose: Bound the answer length.
+    /// Serves: a background summariser not writing an essay.
+    /// Design: `docs/context/config.md` §11.
+    /// Up: The faithfulness and window-cost measurements.
+    /// Down: Mutates the client; no other callee.
+    /// Verify: `cargo test -p loong-context --test window_cost`.
     pub fn with_max_tokens(mut self, max_tokens: u64) -> Self {
         self.max_tokens = max_tokens;
         self
     }
 
+    /// Purpose: How many requests this client has sent.
+    /// Serves: the measurement reporting its own cost.
+    /// Design: `docs/context/status.md` §11.1.
+    /// Up: The faithfulness measurement; no caller in production code.
+    /// Down: Reads the counter; no callee.
+    /// Verify: `cargo test -p loong-context --test faithfulness`.
     pub fn calls(&self) -> u64 {
         self.calls
     }
 
+    /// Purpose: The chat endpoint for this client.
+    /// Serves: one place that builds the URL.
+    /// Design: `docs/context/config.md` §11.
+    /// Up: `OllamaSummarizer::summarize`.
+    /// Down: Formats the base and path; no callee.
+    /// Verify: `cargo test -p loong-context summarizer::tests`.
     pub fn endpoint(&self) -> String {
         format!("{}/api/chat", self.base)
     }
 
+    /// Purpose: The request body: model, `think: false`, the schema, the prompt.
+    /// Serves: the measured requirements of the local endpoint expressed as one value.
+    /// Design: `docs/context/config.md` §11.
+    /// Up: `OllamaSummarizer::summarize`.
+    /// Down: `DigestInput::schema` and `DigestInput::prompt`.
+    /// Verify: `cargo test -p loong-context summarizer::tests::the_request_disables_thinking_and_carries_the_schema`.
     pub fn body(&self, input: &DigestInput) -> Value {
         json!({
             "model": self.model,
@@ -316,6 +410,12 @@ impl OllamaSummarizer {
         })
     }
 
+    /// Purpose: Parse an Ollama response into a `Synthesis`, ignoring `thinking`.
+    /// Serves: a prose or off-schema answer being rejected rather than guessed at.
+    /// Design: `docs/context/config.md` §11.
+    /// Up: `OllamaSummarizer::summarize`.
+    /// Down: `Synthesis::from_json`.
+    /// Verify: `cargo test -p loong-context summarizer::tests::the_response_parser_reads_content_and_ignores_thinking`.
     /// Pull the answer out of an Ollama chat response. `content` is what the model
     /// said; `thinking` is its reasoning and is deliberately not read.
     pub fn parse_response(body: &str) -> Result<Synthesis, SummarizerError> {
@@ -335,10 +435,18 @@ impl OllamaSummarizer {
 }
 
 impl Summarizer for OllamaSummarizer {
+    /// Purpose: The provenance name `ollama:<model>`.
+    /// Contract: `summarizer.rs` trait impl.
     fn name(&self) -> String {
         format!("ollama:{}", self.model)
     }
 
+    /// Purpose: Send the brief and parse one answer.
+    /// Serves: the single network call this crate makes, charged before it is sent.
+    /// Design: `docs/context/config.md` §11.
+    /// Up: `Store::synthesize_window` through `Summarizer`.
+    /// Down: `body`, `endpoint`, `parse_response` and `loong_http::post_json`.
+    /// Verify: `cargo test -p loong-context --test window_cost`.
     fn summarize(&mut self, input: &DigestInput) -> Result<Synthesis, SummarizerError> {
         self.calls += 1;
         let body = self.body(input).to_string();
@@ -356,6 +464,12 @@ impl Summarizer for OllamaSummarizer {
     }
 }
 
+/// Purpose: The deliberate absence of a model.
+/// Serves: R mode working with no installation, and the absence being a fact rather than an error.
+/// Design: `docs/context/status.md` §11.1.
+/// Up: The kernel's `ContextEngine` fallback and the faithfulness test.
+/// Down: The `Summarizer` impl.
+/// Verify: `cargo test -p loong-context --test faithfulness an_absent_summarizer_is_not_an_error`.
 /// A summarizer that is deliberately not there. Used when the user has not
 /// installed a model: the session keeps working in R mode, and the absence is a
 /// fact rather than an error.
@@ -363,10 +477,14 @@ impl Summarizer for OllamaSummarizer {
 pub struct NoSummarizer;
 
 impl Summarizer for NoSummarizer {
+    /// Purpose: The provenance name `none`.
+    /// Contract: `summarizer.rs` trait impl.
     fn name(&self) -> String {
         "none".to_string()
     }
 
+    /// Purpose: Answer every call with `Unavailable`.
+    /// Contract: `summarizer.rs` trait impl.
     fn summarize(&mut self, _input: &DigestInput) -> Result<Synthesis, SummarizerError> {
         Err(SummarizerError::Unavailable(
             "no summarizer is configured".to_string(),
@@ -378,6 +496,7 @@ impl Summarizer for NoSummarizer {
 mod tests {
     use super::*;
 
+    /// Purpose: Pin that a schema-shaped answer becomes a `Synthesis` with the allowed fields.
     #[test]
     fn a_schema_shaped_answer_becomes_a_synthesis() {
         let value = json!({
@@ -395,6 +514,7 @@ mod tests {
         );
     }
 
+    /// Purpose: Pin that "无法判断" is dropped instead of becoming an invented reason.
     #[test]
     fn a_model_that_admits_it_cannot_tell_says_nothing() {
         // "无法判断" is an honest answer, and turning it into a `why` would be
@@ -405,6 +525,7 @@ mod tests {
         assert_eq!(synthesis.conclusion.as_deref(), Some("改完了"));
     }
 
+    /// Purpose: Pin that an answer carrying none of the asked fields is refused.
     #[test]
     fn an_answer_with_none_of_the_fields_is_refused() {
         let value = json!({"summary": "我总结了一下"});
@@ -414,6 +535,7 @@ mod tests {
         ));
     }
 
+    /// Purpose: Pin that the request carries `think: false`, the schema and the labelled facts.
     #[test]
     fn the_request_disables_thinking_and_carries_the_schema() {
         let input = DigestInput {
@@ -459,6 +581,7 @@ mod tests {
         assert!(prompt.contains("深拷贝后再合并"), "{prompt}");
     }
 
+    /// Purpose: Pin that `content` is parsed and `thinking` is ignored.
     #[test]
     fn the_response_parser_reads_content_and_ignores_thinking() {
         let body = json!({
@@ -475,6 +598,7 @@ mod tests {
         assert_eq!(synthesis.why, vec!["根因是深拷贝"]);
     }
 
+    /// Purpose: Pin that a prose answer is malformed rather than guessed at.
     #[test]
     fn a_prose_answer_is_malformed_rather_than_guessed_at() {
         let body = json!({"message": {"content": "我总结了以下三点：第一……"}}).to_string();

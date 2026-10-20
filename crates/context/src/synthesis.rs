@@ -1,25 +1,12 @@
-//! L3 and L4 synthesis — the part of the "map" a deterministic pass can build.
+//! Purpose: L3 domain maps and the L4 global map, built deterministically from the L2 episodes.
 //!
-//! L3 answers "how does this subsystem work, and what happened to it?"; L4 answers
-//! "what is this project and where are we?". Both are built here **without a
-//! model**, from the L2 digests beneath them, so:
+//! Serves: a map that exists in R mode, whose domain membership is a rule rather than a model's opinion, and whose L4 block has a hard token ceiling.
 //!
-//! * the maps exist in R mode (no model installed), which is what makes the
-//!   optional-model story honest rather than a euphemism for "unusable without
-//!   Ollama";
-//! * the *membership* of a domain is a deterministic rule over `module` entities,
-//!   not a model's opinion, which is what makes the dirty set computable and the
-//!   whole thing testable;
-//! * P5 can later add a model-written *narrative* on top of these facts without
-//!   changing which parts are facts.
-//!
-//! # Granularity (the open question in the design note §14, made cheap to change)
-//!
-//! A domain is the first **two** path segments of a file (`src/kernel`,
-//! `crates/context`) — the same rule [`crate::materialize`] uses for its `module`
-//! entity, so the index and the map agree by construction. [`domain_of`] is the
-//! single place that rule lives; finer granularity is one edit plus a re-derive,
-//! and re-deriving is mechanical.
+//! # Contract
+//! - **Design:** `docs/context/pipeline.md` §6.4; `docs/context/recall.md` §7.1; `docs/design/context-ledger.md` §2.
+//! - **Upstream:** `crate::worker::step` and the kernel's `ContextEngine::refresh` call `Store::digest_domains`; `context_explain` and `loongagent context status` call `Store::global_map`.
+//! - **Downstream:** The kernel carries `GlobalMap.content` in the foreground; `crate::summaries::put_summary` stores the L3 rows.
+//! - **Verify:** `cargo test -p loong-context` · `./scripts/check.sh`.
 
 use crate::store::{Store, StoreError};
 use crate::summaries::{Summary, SummaryInput, SUMMARY_SCHEMA_VERSION};
@@ -37,6 +24,12 @@ pub const L4_MAX_TOKENS: u64 = 400;
 /// The scope string for the global map.
 pub const GLOBAL_SCOPE: &str = "global";
 
+/// Purpose: The domain a file or module belongs to: its first two path segments.
+/// Serves: one deterministic rollup rule, so changing granularity is one edit rather than a migration.
+/// Design: `docs/context/pipeline.md` §6.4 and `docs/context/data-model.md` §5.4.
+/// Up: `crate::summaries::tail_summary` and the synthesis tests.
+/// Down: Formats the segments; no callee.
+/// Verify: `cargo test -p loong-context --test synthesis a_domain_is_the_first_two_path_segments`.
 /// The domain a file or module belongs to. One function, so changing the
 /// granularity is one edit rather than a migration.
 pub fn domain_of(module: &str) -> String {
@@ -49,6 +42,12 @@ pub fn domain_of(module: &str) -> String {
     }
 }
 
+/// Purpose: One domain's rollup: its episodes, modules, status tally and span.
+/// Serves: L3 being an index of its children rather than a claim about the subsystem.
+/// Design: `docs/context/pipeline.md` §6.4.
+/// Up: `domains_of` builds it; `render_domain` and `global_map` read it.
+/// Down: `render_domain` and `GlobalMap.domains`.
+/// Verify: `cargo test -p loong-context --test synthesis episodes_roll_up_into_a_domain_map`.
 /// One domain's rollup: what it is made of and where it stands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DomainMap {
@@ -68,6 +67,12 @@ pub struct DomainMap {
     pub tokens: u64,
 }
 
+/// Purpose: Group episodes into domains by their stored `domain` field.
+/// Serves: membership coming from derivation, never re-parsed out of prose.
+/// Design: `docs/context/pipeline.md` §6.4.
+/// Up: `Store::digest_domains`, `Store::global_map` and the synthesis tests.
+/// Down: Reads `Summary`'s fields; no other callee.
+/// Verify: `cargo test -p loong-context --test synthesis two_domains_stay_separate`.
 /// Group episodes into domains. Membership comes from the stored `domain` field,
 /// which is set when the episode is derived — never re-parsed out of prose.
 pub fn domains_of(episodes: &[Summary]) -> Vec<DomainMap> {
@@ -121,6 +126,12 @@ pub fn domains_of(episodes: &[Summary]) -> Vec<DomainMap> {
     out
 }
 
+/// Purpose: Render an L3 map: module list, status tally and episode index.
+/// Serves: a map a reader can jump from to the episodes it names.
+/// Design: `docs/context/pipeline.md` §6.4.
+/// Up: `Store::digest_domains`.
+/// Down: Reads `DomainMap`'s fields; no callee.
+/// Verify: `cargo test -p loong-context --test synthesis episodes_roll_up_into_a_domain_map`.
 /// Render an L3 map: a module list, a status tally, and the episode index a reader
 /// (or a model) can jump from.
 pub fn render_domain(map: &DomainMap) -> String {
@@ -150,6 +161,12 @@ pub fn render_domain(map: &DomainMap) -> String {
     out
 }
 
+/// Purpose: The L4 map: the project's domains and state in one bounded block.
+/// Serves: the one block always in the foreground, and therefore the one with a hard ceiling.
+/// Design: `docs/context/recall.md` §7.1.
+/// Up: `global_map` builds it; the kernel's `context_explain` and `loongagent context status` read it.
+/// Down: The kernel's foreground message and the status surface.
+/// Verify: `cargo test -p loong-context --test synthesis the_global_map_is_small_and_always_available`.
 /// The L4 map: what this project is and where it stands, in one small block.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GlobalMap {
@@ -160,6 +177,12 @@ pub struct GlobalMap {
     pub seq_to: u64,
 }
 
+/// Purpose: Build the L4 map from the domain maps, cutting it at the token ceiling.
+/// Serves: a global map that reflects the session now instead of growing into a second history.
+/// Design: `docs/context/recall.md` §7.1.
+/// Up: `Store::global_map`.
+/// Down: `crate::digest::estimate_tokens` and `DomainMap`'s fields.
+/// Verify: `cargo test -p loong-context --test synthesis the_global_map_is_small_and_always_available`.
 /// Build the global map from the domain maps. Deliberately bounded: it names the
 /// busiest domains and their state, and stops — an L4 that grows with the session
 /// is not a global map, it is a second history.
@@ -237,6 +260,12 @@ pub fn global_map(domains: &[DomainMap]) -> GlobalMap {
 }
 
 impl Store {
+    /// Purpose: Build L3 maps for domains that have changed and write them as summaries.
+    /// Serves: the same "only re-derive what is behind" rule as L2, one level up.
+    /// Design: `docs/context/pipeline.md` §6.4.
+    /// Up: `crate::worker::step`, the kernel's `ContextEngine::refresh` and `loongagent context rebuild`.
+    /// Down: `Store::summaries_at`, `domains_of`, `render_domain`, `l3_summary`, `same_l3` and `Store::put_summary`.
+    /// Verify: `cargo test -p loong-context --test synthesis the_worker_keeps_the_maps_current`.
     /// Build the L3 maps from the L2 episodes and write them as summaries.
     ///
     /// A domain's L3 is re-derived when its episodes have changed and not
@@ -269,6 +298,12 @@ impl Store {
         Ok(written)
     }
 
+    /// Purpose: Build the L4 map from the current L2 episodes, or `None` when there are none.
+    /// Serves: the foreground having a map before any domain map exists.
+    /// Design: `docs/context/recall.md` §7.1.
+    /// Up: The kernel's `context_explain` and `loongagent context status`.
+    /// Down: `Store::summaries_at`, `domains_of` and `global_map`.
+    /// Verify: `cargo test -p loong-context --test synthesis the_global_map_exists_before_any_domain_does`.
     /// Build the L4 global map from the L3 maps. `None` until there is anything
     /// to map.
     pub fn global_map(&self) -> Result<Option<GlobalMap>, StoreError> {
@@ -281,6 +316,12 @@ impl Store {
     }
 }
 
+/// Purpose: The L3 summary row for one domain map.
+/// Serves: an L3 derived from its L2 children, never from its own previous version.
+/// Design: `docs/context/pipeline.md` §6.4.
+/// Up: `Store::digest_domains`.
+/// Down: `crate::digest::estimate_tokens` and `SummaryInput`.
+/// Verify: `cargo test -p loong-context --test synthesis a_domain_map_records_its_children`.
 fn l3_summary(id: &str, map: &DomainMap, content: String) -> Summary {
     // Computed, like every other field here: an L3's cost is the length of the map
     // it wrote. Leaving it at `map.tokens` (which is 0) would make the honesty
@@ -319,6 +360,12 @@ fn l3_summary(id: &str, map: &DomainMap, content: String) -> Summary {
     }
 }
 
+/// Purpose: Whether an L3 candidate says the same thing as the stored row.
+/// Serves: an unchanged domain map being skipped, so the worker can idle.
+/// Design: `docs/context/pipeline.md` §6.4.
+/// Up: `Store::digest_domains`.
+/// Down: Compares the fields; no other callee.
+/// Verify: `cargo test -p loong-context --test synthesis an_idle_synthesis_pass_writes_nothing`.
 fn same_l3(a: &Summary, b: &Summary) -> bool {
     // `tokens` is compared so an L3 written before the token was computed is
     // re-derived once rather than staying wrong forever.
@@ -329,6 +376,12 @@ fn same_l3(a: &Summary, b: &Summary) -> bool {
         && a.inputs == b.inputs
 }
 
+/// Purpose: Turn a domain name into a safe summary id.
+/// Serves: an L3 id that is stable and usable as a scope.
+/// Design: `docs/context/pipeline.md` §6.4.
+/// Up: `Store::digest_domains`.
+/// Down: Maps characters; no other callee.
+/// Verify: `cargo test -p loong-context --test synthesis episodes_roll_up_into_a_domain_map`.
 fn sanitize(name: &str) -> String {
     name.chars()
         .map(|c| {

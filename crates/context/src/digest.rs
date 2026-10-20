@@ -1,25 +1,12 @@
-//! L2 — episode digests, built deterministically.
+//! Purpose: L2 episode digests, built deterministically from atoms so the record survives even when no model is installed.
 //!
-//! This is the half of L2 that **does not need a model** (design note §6.2). It
-//! answers, from the atoms alone: what was asked, which files were touched, which
-//! commands ran, how the tests went, and whether the episode reached a
-//! conclusion. Every one of those is computed, not guessed — and that matters,
-//! because the local model was measured getting exactly these wrong when it was
-//! asked to infer them (see the acceptance-gate findings in the design note §14).
+//! Serves: "what was asked, changed, run and verified" as computed facts, each traceable to a `seq` (ADR-0006, ADR-0017).
 //!
-//! The other half — *why* a change was made, which approach was rejected — is
-//! the model's job, in P5. The two coexist in one summary: if the model is absent
-//! or fails, the digest is still there, and the summary is marked degraded rather
-//! than lost.
-//!
-//! # Why the last episode is provisional
-//!
-//! A conversation's current episode is still growing: the next message may
-//! continue it. So [`segment`] only closes an episode at a boundary it can *prove*
-//! — a new user message once the current episode has enough material — and always
-//! leaves the final span open. Digesting the tail on every pass is therefore the
-//! normal case, and re-deriving it produces the same id and the same text, which
-//! is what makes the whole layer idempotent.
+//! # Contract
+//! - **Design:** `docs/context/pipeline.md` §6.2–§6.3; `docs/design/context-ledger.md` §5.
+//! - **Upstream:** `Store::digest`, `Store::digest_pending` and `Store::synthesize_window` build segments and digests.
+//! - **Downstream:** `crate::summaries::tail_summary` stores the result, and `render` produces the text `Store::recall`/`expand` return.
+//! - **Verify:** `cargo test -p loong-context --test summaries` · `./scripts/check.sh`.
 
 use crate::materialize::EntityKind;
 use crate::summaries::AtomView;
@@ -32,6 +19,12 @@ pub const SEGMENT_MIN_EVENTS: usize = 4;
 pub const SEGMENT_GAP_MS: i64 = 10 * 60 * 1000;
 /// Tool names (or argument shapes) that count as changing a file.
 
+/// Purpose: One contiguous span of events that reads as a single unit of work.
+/// Serves: a stable episode identity that survives the open tail growing, so recall can cite a boundary rather than a guess.
+/// Design: `docs/context/pipeline.md` §6.3.
+/// Up: `segment` builds it; `Store::digest` and `Store::digest_pending` consume it.
+/// Down: `Segment::episode_id` and `Digest.segment`.
+/// Verify: `cargo test -p loong-context --test summaries episodes_split`.
 /// One contiguous span of events that reads as a single unit of work.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Segment {
@@ -44,6 +37,12 @@ pub struct Segment {
 }
 
 impl Segment {
+    /// Purpose: The episode's id: the seed `seq` plus the end `seq`.
+    /// Serves: an id that stays the same while the last episode grows, and cannot collide with another segmentation.
+    /// Design: `docs/context/pipeline.md` §6.3.
+    /// Up: `Digest::build` and `Store::digest_pending`.
+    /// Down: Formats the two `seq` values; no callee.
+    /// Verify: `cargo test -p loong-context --test summaries a_digest_is_deterministic`.
     /// The episode's id: derived from the seed and the end, so growing the last
     /// episode keeps its id while a different segmentation would not collide.
     pub fn episode_id(&self) -> String {
@@ -51,6 +50,12 @@ impl Segment {
     }
 }
 
+/// Purpose: What a digest says about one test: how often it failed and passed.
+/// Serves: keeping the `failed→ok` transition, the evidence that a fix was actually verified.
+/// Design: `docs/context/pipeline.md` §6.2.
+/// Up: `Digest::build` fills it from `tool.result` atoms; `render` and `DigestInput::prompt` read it.
+/// Down: `TestRecord::result`.
+/// Verify: `cargo test -p loong-context --test summaries a_test_that_failed_then_passed`.
 /// What a digest says about a test: it may have failed first and passed later,
 /// and that *transition* is the evidence that a fix was verified. Collapsing it
 /// to "ok" would throw away the most valuable fact in the episode.
@@ -62,6 +67,12 @@ pub struct TestRecord {
 }
 
 impl TestRecord {
+    /// Purpose: The `failed→ok`/`failed`/`ok` label for a test record.
+    /// Serves: one wording shared by the rendered digest and the model prompt.
+    /// Design: `docs/context/pipeline.md` §6.2.
+    /// Up: `render` and `DigestInput::prompt`.
+    /// Down: Matches on `failures`/`passes`; no callee.
+    /// Verify: `cargo test -p loong-context --test summaries a_test_that_failed_then_passed`.
     pub fn result(&self) -> &'static str {
         match (self.failures > 0, self.passes > 0) {
             (true, true) => "failed→ok",
@@ -72,6 +83,12 @@ impl TestRecord {
     }
 }
 
+/// Purpose: One attempt at changing a file, with the verification that followed it.
+/// Serves: the sequence that lets a model tell an abandoned approach from an adopted one, instead of inventing one.
+/// Design: `docs/context/pipeline.md` §6.2.
+/// Up: `Digest::build` fills it from write calls and the next test result.
+/// Down: `Digest.edits`, `render` and `DigestInput::prompt`.
+/// Verify: `cargo test -p loong-context --test summaries touched_files`.
 /// One attempt at changing a file, with whatever verification followed it.
 ///
 /// This exists because of a measured failure. A digest carrying only *final state*
@@ -94,6 +111,12 @@ pub struct Edit {
     pub outcome_seq: Option<u64>,
 }
 
+/// Purpose: The deterministic half of an L2 summary: rendered facts plus citations.
+/// Serves: a summary that exists without a model and whose computed fields cannot be overwritten by one.
+/// Design: `docs/context/pipeline.md` §6.2.
+/// Up: `Digest::build` returns it; `Store::digest_pending` re-derives it.
+/// Down: `Digest::rendered_tokens`, `crate::summaries::tail_summary` and `DigestInput::from_digest`.
+/// Verify: `cargo test -p loong-context --test summaries`.
 /// The deterministic half of an L2 summary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Digest {
@@ -121,18 +144,36 @@ pub struct Digest {
 }
 
 impl Digest {
+    /// Purpose: The token cost of a digest, title included.
+    /// Serves: charging a summary for everything a reader actually receives, not only its body.
+    /// Design: `docs/context/pipeline.md` §6.2.
+    /// Up: `Digest::build` sets `Digest.tokens`.
+    /// Down: `estimate_tokens` twice; no other callee.
+    /// Verify: `cargo test -p loong-context --test summaries a_digest_is_deterministic`.
     /// Rendered text plus the title, which is what a token count must cover.
     pub fn rendered_tokens(&self) -> u64 {
         estimate_tokens(&self.title) + estimate_tokens(&self.content)
     }
 }
 
+/// Purpose: The crate's four-characters-per-token estimate.
+/// Serves: one conservative counter for digests, windows and the L4 map, so budgets agree.
+/// Design: `docs/design/context-ledger.md` §2.
+/// Up: `Digest::build`, `Store::synthesize_window`, `global_map`, `l3_summary` and `Synthesis::estimated_tokens`.
+/// Down: Counts characters and rounds up; no callee.
+/// Verify: `cargo test -p loong-context --test summaries`.
 /// The same ~4-chars-per-token rule the context ledger uses, deliberately
 /// conservative so a digest is never under-counted when it competes for budget.
 pub fn estimate_tokens(text: &str) -> u64 {
     (text.chars().count() as u64 + 3) / 4
 }
 
+/// Purpose: Split atoms into episodes at provable boundaries only.
+/// Serves: a pure segmenter: the same atoms always give the same spans, and the open tail is always left open.
+/// Design: `docs/context/pipeline.md` §6.3.
+/// Up: `Store::digest` and `Store::digest_pending`.
+/// Down: `span_of`.
+/// Verify: `cargo test -p loong-context --test summaries episodes_split`.
 /// Split atoms into episodes. Pure: the same atoms always give the same spans.
 pub fn segment(events: &[(u64, i64, String, Option<String>)]) -> Vec<Segment> {
     let mut segments: Vec<Segment> = Vec::new();
@@ -163,6 +204,12 @@ pub fn segment(events: &[(u64, i64, String, Option<String>)]) -> Vec<Segment> {
     segments
 }
 
+/// Purpose: Build one `Segment` from a list of event indices.
+/// Serves: the span arithmetic lives in one place, so a boundary cannot run backwards.
+/// Design: `docs/context/pipeline.md` §6.3.
+/// Up: `segment`.
+/// Down: Constructs a `Segment`; no other callee.
+/// Verify: `cargo test -p loong-context --test summaries episodes_split`.
 fn span_of(
     events: &[(u64, i64, String, Option<String>)],
     indices: &[usize],
@@ -179,6 +226,12 @@ fn span_of(
     }
 }
 
+/// Purpose: Build the digest for one segment from its atoms.
+/// Serves: computing files, commands, tests, attempts, status and citations instead of asking a model to infer them.
+/// Design: `docs/context/pipeline.md` §6.2 and `docs/context/data-model.md` §5.3.
+/// Up: `Store::digest`, `Store::digest_pending` and `Store::synthesize_window`.
+/// Down: `names_of`, `derive_status`, `title_from`, `render`, `merge_runs` and `estimate_tokens`.
+/// Verify: `cargo test -p loong-context --test summaries`.
 /// Build the digest for one segment. `atoms` must be that segment's atoms, in
 /// `seq` order; `ok`/`tool` come from each atom.
 pub fn build(segment: Segment, atoms: &[AtomView]) -> Digest {
@@ -364,6 +417,12 @@ pub fn build(segment: Segment, atoms: &[AtomView]) -> Digest {
     digest
 }
 
+/// Purpose: The episode status computed from evidence: blocked, open, done or unknown.
+/// Serves: the field a small model was measured getting wrong; it is derived here, never generated.
+/// Design: `docs/context/pipeline.md` §6.2.
+/// Up: `Digest::build`.
+/// Down: Reads `TestRecord`, touched files and the approval marker; no callee.
+/// Verify: `cargo test -p loong-context --test summaries status_is_computed_from_evidence`.
 /// What an episode looks like as a fact. Computed from evidence, never guessed —
 /// the measured failure mode was a 3B model calling a committed, passing task
 /// `open`.
@@ -396,6 +455,12 @@ pub fn derive_status(
     "unknown".to_string()
 }
 
+/// Purpose: The human-readable title: the first request plus the first touched file.
+/// Serves: a title a person or a model can recognise without expanding the summary.
+/// Design: `docs/context/pipeline.md` §6.2.
+/// Up: `Digest::build`.
+/// Down: Truncates the first ask; no callee.
+/// Verify: `cargo test -p loong-context --test summaries episodes_split`.
 fn title_from(first_ask: Option<&String>, touched_files: &BTreeSet<String>) -> String {
     let base = match first_ask {
         Some(ask) if !ask.is_empty() => {
@@ -415,6 +480,12 @@ fn title_from(first_ask: Option<&String>, touched_files: &BTreeSet<String>) -> S
     }
 }
 
+/// Purpose: Render a digest as labelled plain text.
+/// Serves: one format that both the model prompt and `recall`'s expanded answer read.
+/// Design: `docs/context/pipeline.md` §6.2 and `docs/context/recall.md` §7.2.
+/// Up: `Digest::build`.
+/// Down: Writes the labelled lines; no callee.
+/// Verify: `cargo test -p loong-context --test summaries`.
 /// Render the digest. Deliberately plain: a model reads this in P5 as its input,
 /// and a person reads it in `recall`. Both do better with labelled facts than
 /// with prose.
@@ -512,6 +583,12 @@ pub fn render(
     out
 }
 
+/// Purpose: Append a model's answer to a rendered digest, strictly additively.
+/// Serves: the model may add a reason, never remove or rewrite a computed fact.
+/// Design: `docs/context/pipeline.md` §6.2.
+/// Up: `Store::synthesize_window`.
+/// Down: Reads `Synthesis`'s fields and extends the text; no callee.
+/// Verify: `cargo test -p loong-context --test semantic a_models_answer_is_added`.
 /// Append a model's answer to a rendered digest.
 ///
 /// Strictly additive: no deterministic line is edited or removed, because those
@@ -539,6 +616,12 @@ pub fn merge_synthesis(content: &str, synthesis: &crate::summarizer::Synthesis) 
     out
 }
 
+/// Purpose: Collapse ascending `seq` values into inclusive runs.
+/// Serves: a citation list that stays readable instead of one row per event.
+/// Design: `docs/context/recall.md` §7.2.
+/// Up: `Digest::build`.
+/// Down: Groups the input; no callee.
+/// Verify: `cargo test -p loong-context --test summaries every_citation_resolves`.
 /// Collapse ascending `seq` values into inclusive runs, so a citation list stays
 /// readable instead of turning into one row per event.
 pub fn merge_runs(seqs: &[u64]) -> Vec<(u64, u64)> {
@@ -552,6 +635,8 @@ pub fn merge_runs(seqs: &[u64]) -> Vec<(u64, u64)> {
     runs
 }
 
+/// Purpose: Entity names of one kind, owned so the caller can mutate its own collections.
+/// Contract: `digest.rs` helpers.
 /// Entity names of one kind, owned so the caller can hold them while it mutates
 /// its own collections.
 fn names_of(atom: &AtomView, kind: EntityKind) -> Vec<String> {

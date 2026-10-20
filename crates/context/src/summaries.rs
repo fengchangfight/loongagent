@@ -800,8 +800,8 @@ impl Store {
     /// Serves: the honesty surface reporting every layer, with an absent layer as `(0, 0)`.
     /// Design: `docs/context/status.md` §11.1.
     /// Up: The kernel's `context_explain`; no context test calls it.
-    /// Down: SQL over `summary`; no other callee.
-    /// Verify: `cargo test -p loong-context --test synthesis`.
+    /// Down: SQL over `summary`; no other callee, and no test covers it.
+    /// Verify: `cargo test -p loong-context` (module target; no test covers it).
     /// `(count, tokens)` for one layer, for the honesty surface. A layer the store
     /// has no rows for is `(0, 0)` rather than an error.
     pub fn layer_stats(&self, level: u32) -> Result<(u64, u64), StoreError> {

@@ -101,6 +101,11 @@ CREATE TABLE summary_entity (
 CREATE INDEX summary_entity_e ON summary_entity(entity_id);
 ```
 
+`atom.is_write` 与 `write_attempt` 同样是确定性判定：`classify_write` 按 `WRITE_TOOLS`
+（含 `write`/`create`/`apply`/`patch`/`edit`/`str_replace` 前缀）或写入型参数
+（`content`/`new_string`/`new_text`/`patch`）判定，`write_attempt` 取其短文本，
+让 digest 能区分不同尝试。
+
 两点与早期草案的实质差别：
 
 - **L4 不存成 `level = 4` 的行。** 全局地图每次从当前全部 L2 摘要现算

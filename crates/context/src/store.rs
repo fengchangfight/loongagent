@@ -186,7 +186,7 @@ impl SearchQuery {
     /// Purpose: A query for the given terms with the default limit.
     /// Serves: one constructor so callers never spell the term list by hand.
     /// Design: `docs/context/recall.md` §7.2.
-    /// Up: The retrieval and search-cost tests; the kernel builds a struct literal instead.
+    /// Up: The retrieval, summaries and search-cost tests; the kernel builds a struct literal instead.
     /// Down: `SearchQuery::default`; no other callee.
     /// Verify: `cargo test -p loong-context --test retrieval`.
     pub fn new(terms: impl IntoIterator<Item = impl Into<String>>) -> Self {
@@ -200,7 +200,7 @@ impl SearchQuery {
     /// Purpose: Set the result limit.
     /// Serves: bounding a recall answer in one place.
     /// Design: `docs/context/recall.md` §7.2.
-    /// Up: The retrieval and search-cost tests; no other caller.
+    /// Up: The retrieval, summaries and search-cost tests; no production caller.
     /// Down: Mutates the query; no callee.
     /// Verify: `cargo test -p loong-context --test retrieval results_are_newest_first`.
     pub fn limit(mut self, limit: usize) -> Self {

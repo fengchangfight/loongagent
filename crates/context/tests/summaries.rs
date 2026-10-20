@@ -417,7 +417,7 @@ fn superseding_a_conclusion_keeps_the_old_one() {
     );
 }
 
-/// Purpose: Pin that the module entity behind an episode is queryable through the atom-entity index, the lookup L3 will use.
+/// Purpose: Pin that the module entity behind an episode is queryable through the atom-entity index.
 #[test]
 fn a_summary_can_be_looked_up_by_a_module_it_mentions() {
     let tmp = TempLog::new();

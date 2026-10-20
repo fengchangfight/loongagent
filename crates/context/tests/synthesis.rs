@@ -5,7 +5,7 @@
 //! # Contract
 //! - **Design:** `docs/context/pipeline.md` §6.4; `docs/context/recall.md` §7.1; `docs/design/context-ledger.md` §2.
 //! - **Upstream:** `loong_context::{domain_of, Store, SyncOutcome}` and the task fixture below.
-//! - **Downstream:** `Store::digest`, `Store::digest_domains` and `Store::global_map`; `crate::synthesis::{domain_of, global_map}`.
+//! - **Downstream:** `Store::digest`, `Store::digest_domains` and `Store::global_map`; `crate::synthesis::domain_of` directly (`global_map` is reached through `Store::global_map`).
 //! - **Verify:** `cargo test -p loong-context --test synthesis`.
 
 use loong_context::{domain_of, Store, SyncOutcome};

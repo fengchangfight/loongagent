@@ -437,7 +437,6 @@ impl Ledger {
     /// Up: no kernel path calls it; the ledger tests pin it.
     /// Down: `Category::eviction_priority` and `EvictionReport`.
     /// Verify: `cargo test -p loong-kernel ledger::tests::pinned_entries_are_never_evicted_and_the_report_says_so`.
-    /// Drop non-pinned entries by eviction priority until the budget is met.
     /// Whole entries only — a half-evicted message is worse than a missing one.
     pub fn evict_to_budget(&mut self) -> EvictionReport {
         let mut report = EvictionReport::default();

@@ -148,7 +148,7 @@ L2 退化成"改了哪些文件、跑了什么、结果如何"的事实清单 �
 
 **线程归谁。** 线程属于引擎，因此属于 `Kernel`，因此属于会话：`Kernel::build` 打开它，
 `session.new` 换掉整个 kernel，drop 引擎就停掉 worker。它不属于 server 或 CLI：两者
-都走同一个工厂（`crates/cli/src/main.rs`），一次性 CLI 运行根本没有会话生命周期对象，
+都走同一个工厂（`crates/cli/src/server.rs` 的 `build_kernel`），一次性 CLI 运行根本没有会话生命周期对象，
 而 kernel 测试直接构造引擎；放在任一表层，另一边就会忘记启动或停止。
 
 **前台信号。** 整个 **turn** 算忙：`Kernel::run` 在 `run_inner` 前后置位，worker 在开窗口前

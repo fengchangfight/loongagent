@@ -219,9 +219,9 @@ impl McpSet {
     }
 
     /// Purpose: A one-line trust summary for startup logs and `mcp list`.
-    /// Serves: `crates/cli/src/mcp.rs` and the kernel's `attach_mcp` startup note.
+    /// Serves: `crates/cli/src/mcp.rs`, `crates/cli/src/server.rs` and the kernel's `attach_mcp` startup note.
     /// Design: `docs/design/extension-model.md` §3.
-    /// Up: `crates/cli/src/mcp.rs` and `crates/kernel/src/turn/build.rs`.
+    /// Up: `crates/cli/src/mcp.rs`, `crates/cli/src/server.rs` and `crates/kernel/src/turn/build.rs`.
     /// Down: `trust` and `loong_manifest::inert_message`.
     /// Verify: `cargo test -p loong-mcp`.
     pub fn summary(&self) -> String {

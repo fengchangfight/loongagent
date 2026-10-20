@@ -174,7 +174,7 @@ pub trait Model: Send {
     /// default delivers the whole text in one delta, so a model that cannot stream
     /// still works behind every surface.
     /// Purpose: The same call, reporting text as it is written.
-    /// Serves: the kernel's step loop, which forwards deltas as transient notifications; the returned response is still the record.
+    /// Serves: the kernel's step loop, which forwards deltas; `crates/server` turns them into transient `model.delta` notifications, and the returned response is still the record.
     /// Design: `docs/design/config-routing.md` §8.
     /// Up: `crates/kernel/src/turn/loop.rs`; surfaces see deltas through the protocol, not by calling this.
     /// Down: `Model::complete` by default; `OpenAiCompat` overrides it.

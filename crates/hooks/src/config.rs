@@ -428,9 +428,9 @@ impl HookSet {
 
     /// A one-line summary for startup logs and `hooks list`.
     /// Purpose: A one-line trust summary for startup logs and `hooks list`.
-    /// Serves: `crates/cli/src/hooks.rs` and the kernel's startup note.
+    /// Serves: `crates/cli/src/hooks.rs`, `crates/cli/src/server.rs` and the kernel's startup note.
     /// Design: `docs/design/extension-model.md` §1.
-    /// Up: `crates/cli/src/hooks.rs` and `crates/kernel/src/turn/build.rs`.
+    /// Up: `crates/cli/src/hooks.rs`, `crates/cli/src/server.rs` and `crates/kernel/src/turn/build.rs`.
     /// Down: `trust` and the spec count.
     /// Verify: `cargo test -p loong-hooks`.
     pub fn summary(&self) -> String {

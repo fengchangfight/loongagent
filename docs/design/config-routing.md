@@ -193,8 +193,8 @@ router appears only if the user's profile declares one, and the model gateway is
 ## 8. Providers behind one trait
 
 `crates/providers/src/lib.rs` is the whole interface the kernel sees: `Model` has `complete`,
-`complete_streaming` (the same call with an `on_delta` callback) and `context_window`. They
-return `Result<CompletionResponse, ModelError>`; streaming defaults to one whole-answer delta
+`complete_streaming` (the same call with an `on_delta` callback) and `context_window`. The first
+two return `Result<CompletionResponse, ModelError>`; streaming defaults to one whole-answer delta
 and `context_window` to `None`.
 
 **First-run probe.** `crates/providers/src/probe.rs` asks a vendor's own `/models` route

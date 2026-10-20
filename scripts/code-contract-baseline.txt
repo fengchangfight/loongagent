@@ -57,7 +57,6 @@ crates/kernel/src/turn/nudge.rs
 crates/kernel/src/turn/recall.rs
 crates/kernel/src/turn/session.rs
 crates/kernel/src/turn/tests.rs
-crates/server/src/lib.rs
 crates/tui-app/src/lib.rs
 crates/tui-app/src/mention.rs
 crates/tui-app/src/setup.rs
@@ -65,4 +64,3 @@ crates/tui-app/src/surface.rs
 crates/tui-app/src/tests.rs
 crates/tui-app/src/wizard.rs
 crates/tui-app/src/worker.rs
-crates/tui/src/lib.rs

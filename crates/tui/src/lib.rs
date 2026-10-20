@@ -1,3 +1,12 @@
+//! Purpose: The terminal client: render the server's event stream and send intents, holding no agent logic.
+//!
+//! # Contract
+//! - **Serves:** `crates/tui-app` (the ratatui screen) and the CLI's tui, repl and headless surfaces.
+//! - **Design:** `docs/design/surfaces.md` §3 and §7; `docs/design/sessions-lineage.md` §5.
+//! - **Upstream:** `crates/cli/src/tui.rs` builds a `Client` and hands it to `loong_tui_app::run`; `crates/cli/src/{repl,headless}.rs` use one directly, and `crates/tui-app`'s tests build one.
+//! - **Downstream:** `loong_protocol` for requests, responses and notifications, `loong_schema` for method and event names, and the `Transport` a caller supplies.
+//! - **Verify:** `cargo test -p loong-tui` · `./scripts/check.sh`
+//!
 //! Terminal client (ADR-0009): renders the event stream and sends intents.
 //!
 //! It holds **no agent logic** — no routing, no permissions, no context
@@ -11,12 +20,26 @@ use loong_schema::generated as gen;
 use loong_schema::generated::{ApprovalScope, Json};
 use serde_json::{json, Value};
 
+/// Purpose: Whatever carries protocol lines: a child process's pipes, a socket or a test double.
+/// Serves: `Client`, `crates/tui-app`'s `run` and the CLI's child transport.
+/// Design: `docs/design/surfaces.md` §3 and §7.
+/// Up: `crates/cli/src/tui.rs` implements it; `repl.rs` and `headless.rs` use that transport; `crates/tui-app`'s tests implement it.
+/// Down: `Client::call_with`, which sends and receives through it.
+/// Verify: `cargo test -p loong-tui`.
 /// Whatever carries the lines: a child process's pipes, a socket, a test double.
 pub trait Transport {
+    /// Purpose: Write one request line to the transport.
     fn send(&mut self, line: &str) -> Result<(), String>;
+    /// Purpose: Read one line, or `None` at end of stream.
     fn recv_line(&mut self) -> Result<Option<String>, String>;
 }
 
+/// Purpose: The protocol client: one session id, the pending question, and the last call and acceptance.
+/// Serves: `crates/cli/src/tui.rs`, which hands it to `loong_tui_app::run`, and the CLI's repl and headless surfaces.
+/// Design: `docs/design/surfaces.md` §7.
+/// Up: `crates/cli/src/{tui,repl,headless}.rs` and `crates/tui-app`'s tests.
+/// Down: the methods below and the `Transport` it owns.
+/// Verify: `cargo test -p loong-tui`.
 pub struct Client<T: Transport> {
     transport: T,
     session_id: String,
@@ -28,6 +51,12 @@ pub struct Client<T: Transport> {
     last_accepted: bool,
 }
 
+/// Purpose: A question the session is waiting on, with the detail needed to answer it.
+/// Serves: `Client::pending_decision` and `crates/tui-app`'s approval panel.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `Client::call_with` assembles it from the event stream; `crates/tui-app` reads it.
+/// Down: no call; it is data.
+/// Verify: `cargo test -p loong-tui`.
 /// A decision the session is waiting for, with the detail needed to make one.
 ///
 /// Assembled from the events as they are parsed rather than by whoever asked, because a
@@ -47,6 +76,12 @@ pub struct PendingDecision {
     pub args: String,
 }
 
+/// Purpose: One event as a human line, with long tool output summarised.
+/// Serves: `Client` and `crates/tui-app`'s worker.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `Client::call_with` and the tests in both crates.
+/// Down: `render_event_with`.
+/// Verify: `cargo test -p loong-tui`.
 /// Presentation only: turn one event into a line for a human.
 ///
 /// Free rather than a method so a caller can render **inside** the notification
@@ -56,11 +91,23 @@ pub fn render_event(envelope: &Value) -> Option<String> {
     render_event_with(envelope, false)
 }
 
+/// Purpose: The same event with nothing summarised, for `/expand`.
+/// Serves: `Client::expand_last_tool_result` and `crates/tui-app`'s worker.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `Client::expand_last_tool_result` and `crates/tui-app/src/worker.rs`.
+/// Down: `render_event_with`.
+/// Verify: `cargo test -p loong-tui`.
 /// The same event, with nothing summarised.
 pub fn render_event_full(envelope: &Value) -> Option<String> {
     render_event_with(envelope, true)
 }
 
+/// Purpose: The one event match: each kind's vocabulary, summarised or in full.
+/// Serves: `render_event` and `render_event_full`.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `render_event` and `render_event_full`.
+/// Down: `call_text`, `collapse_result` and the schema's event constants.
+/// Verify: `cargo test -p loong-tui`.
 fn render_event_with(envelope: &Value, full: bool) -> Option<String> {
     let kind = envelope.get("kind")?.as_str()?;
     let data = envelope.get("data").cloned().unwrap_or(Value::Null);
@@ -218,11 +265,23 @@ fn render_event_with(envelope: &Value, full: bool) -> Option<String> {
 pub const FOLD_PREFIX: &str = "  … ";
 pub const FOLD_POINTER: &str = "· /expand";
 
+/// Purpose: Whether a line is the marker a summarised tool result ends with.
+/// Serves: `crates/tui-app`'s keyboard navigation and `folded_output`.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `crates/tui-app/src/{surface,lib,tests}.rs` and `folded_output`.
+/// Down: `FOLD_PREFIX` and `FOLD_POINTER`.
+/// Verify: `cargo test -p loong-tui`.
 /// The line a summarised result ends with.
 pub fn is_fold_marker(line: &str) -> bool {
     line.starts_with(FOLD_PREFIX) && line.ends_with(FOLD_POINTER)
 }
 
+/// Purpose: Whether a rendered result was summarised and so has a marker to walk to.
+/// Serves: `Client::folded_results` and `crates/tui-app`'s worker.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `Client::folded_results` and `crates/tui-app/src/worker.rs`.
+/// Down: `is_fold_marker`.
+/// Verify: `cargo test -p loong-tui`.
 /// Whether this rendered result was summarised (and so has a marker to move to).
 pub fn folded_output(text: &str) -> bool {
     text.lines().any(is_fold_marker)
@@ -239,6 +298,12 @@ const RESULT_ROWS: usize = 10;
 /// so rather than claiming zero lines were hidden.
 const RESULT_COLUMNS: usize = 160;
 
+/// Purpose: Bound a tool result's output and say what was hidden or clipped.
+/// Serves: `render_event_with`.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `render_event_with`.
+/// Down: `truncate`, `human_bytes` and the fold constants.
+/// Verify: `cargo test -p loong-tui`.
 /// A tool result, bounded. A chatty command must not turn the transcript into a wall of
 /// text, so a long one is summarised with the count and the way to see the rest.
 fn collapse_result(ok: bool, output: &str) -> String {
@@ -285,6 +350,12 @@ const CALL_ROWS: usize = 8;
 /// How wide a call's line may be before it is clipped. Commands are read, not parsed.
 const CALL_COLUMNS: usize = 160;
 
+/// Purpose: A tool call in its own arguments' words, including the text an edit carries.
+/// Serves: `render_event_with`.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `render_event_with`.
+/// Down: `truncate` and the call-window constants.
+/// Verify: `cargo test -p loong-tui`.
 /// A tool call, in the words of its own arguments.
 ///
 /// The first line says what the call **is** — a command, a path, a pattern. What it
@@ -341,6 +412,8 @@ fn call_text(tool: &str, args: &Value) -> String {
     text
 }
 
+/// Purpose: A byte count as `B` or `KiB`, for a fold's summary.
+/// Contract: called by `collapse_result`.
 fn human_bytes(bytes: usize) -> String {
     if bytes < 1024 {
         format!("{bytes} B")
@@ -349,6 +422,12 @@ fn human_bytes(bytes: usize) -> String {
     }
 }
 
+/// Purpose: A renderer that adds a tool's elapsed time, taken from the event's `time_ms`.
+/// Serves: `crates/tui-app`'s worker.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `crates/tui-app/src/worker.rs`.
+/// Down: `render_event` and `human_ms`.
+/// Verify: `cargo test -p loong-tui`.
 /// Turns a stream of events into lines, remembering the one timing a person cares about:
 /// how long a tool took. The envelopes carry `time_ms`, so the answer comes from the
 /// record rather than from a stopwatch in the interface.
@@ -358,6 +437,12 @@ pub struct Renderer {
 }
 
 impl Renderer {
+    /// Purpose: Render one event, adding the elapsed time to the tool result that follows a call.
+    /// Serves: `crates/tui-app`'s worker.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `crates/tui-app/src/worker.rs` and the tests.
+    /// Down: `render_event` and `human_ms`.
+    /// Verify: `cargo test -p loong-tui`.
     pub fn render(&mut self, envelope: &Value) -> Option<String> {
         let kind = envelope.get("kind").and_then(|k| k.as_str())?;
         let at = envelope.get("time_ms").and_then(|v| v.as_u64());
@@ -391,6 +476,8 @@ impl Renderer {
     }
 }
 
+/// Purpose: A duration as milliseconds below a second, and seconds above it.
+/// Contract: called by `Renderer::render`.
 fn human_ms(ms: u64) -> String {
     if ms < 1000 {
         format!("{ms}ms")
@@ -399,6 +486,12 @@ fn human_ms(ms: u64) -> String {
     }
 }
 
+/// Purpose: Ask the server child to stop its turn, with a signal rather than a message.
+/// Serves: `crates/cli/src/tui.rs`.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `crates/cli/src/tui.rs`.
+/// Down: `libc::kill` on Unix and `GenerateConsoleCtrlEvent` on Windows.
+/// Verify: `cargo test -p loong-tui`.
 /// Ask the server process to stop the turn it is running. The process is our own child,
 /// so this is a signal rather than a protocol message: the client is blocked reading the
 /// turn's own stream, and a signal does not need the transport to be free.
@@ -449,12 +542,20 @@ pub fn interrupt(pid: u32) {
 
 #[cfg(windows)]
 extern "system" {
+    /// Purpose: The kernel32 routine that sends a control event to a console process group.
     /// `kernel32` — send a control event to a console process group.
     fn GenerateConsoleCtrlEvent(ctrl_event: u32, process_group_id: u32) -> i32;
+    /// Purpose: The kernel32 routine that returns the calling thread's last error code.
     fn GetLastError() -> u32;
 }
 
 impl<T: Transport> Client<T> {
+    /// Purpose: A client over a transport, with its next request id and no pending question.
+    /// Serves: `crates/tui-app`'s worker.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `crates/tui-app/src/worker.rs`.
+    /// Down: no call; the fields it sets are read by the methods.
+    /// Verify: `cargo test -p loong-tui`.
     pub fn new(transport: T, session_id: impl Into<String>) -> Self {
         Self {
             transport,
@@ -466,31 +567,67 @@ impl<T: Transport> Client<T> {
         }
     }
 
+    /// Purpose: The session this client currently names in its requests.
+    /// Serves: `crates/tui-app`'s worker for its headers.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: no in-tree caller; it exposes the field every request names.
+    /// Down: no call.
+    /// Verify: `cargo test -p loong-tui`.
     pub fn session_id(&self) -> &str {
         &self.session_id
     }
 
+    /// Purpose: The request id of the question waiting for an answer.
+    /// Serves: the CLI's repl and headless surfaces, and `crates/tui-app`'s worker.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `crates/cli/src/{repl,headless}.rs`, `crates/tui-app/src/worker.rs` and `respond`.
+    /// Down: `pending_decision`.
+    /// Verify: `cargo test -p loong-tui`.
     pub fn pending_approval(&self) -> Option<&str> {
         self.pending
             .as_ref()
             .map(|pending| pending.request_id.as_str())
     }
 
+    /// Purpose: The waiting question with its class, reason, tool and arguments.
+    /// Serves: `crates/tui-app`'s approval panel.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `crates/tui-app/src/worker.rs` and the tests.
+    /// Down: the `PendingDecision` it borrows.
+    /// Verify: `cargo test -p loong-tui`.
     /// The same question with the detail a person needs to answer it — however it was met.
     pub fn pending_decision(&self) -> Option<&PendingDecision> {
         self.pending.as_ref()
     }
 
+    /// Purpose: Whether the last submitted prompt was accepted, rather than refused by a hook.
+    /// Serves: `crates/cli/src/headless.rs`.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `crates/cli/src/headless.rs` and the tests.
+    /// Down: no call.
+    /// Verify: `cargo test -p loong-tui`.
     /// False when a `user_prompt_submit` hook refused the turn. The reason
     /// arrived as a `hook.fired` event in the same stream.
     pub fn last_accepted(&self) -> bool {
         self.last_accepted
     }
 
+    /// Purpose: Give the transport back, so a caller keeps the connection after the client.
+    /// Serves: no in-tree caller.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: no in-tree caller.
+    /// Down: no call.
+    /// Verify: `cargo test -p loong-tui`.
     pub fn into_transport(self) -> T {
         self.transport
     }
 
+    /// Purpose: Attach to the server's session and adopt the id it reports.
+    /// Serves: `crates/cli/src/tui.rs`, `repl.rs` and `headless.rs`.
+    /// Design: `docs/design/surfaces.md` §3; `docs/design/sessions-lineage.md` §5.
+    /// Up: the CLI's three surfaces and the tests.
+    /// Down: `Client::call` and `SessionAttachResult`.
+    /// Verify: `cargo test -p loong-tui`.
     pub fn attach(&mut self, cwd: &str, client: &str) -> Result<gen::SessionAttachResult, String> {
         let params = gen::SessionAttachParams {
             cwd: cwd.to_string(),
@@ -506,6 +643,12 @@ impl<T: Transport> Client<T> {
         Ok(attached)
     }
 
+    /// Purpose: The most recent tool result in full, as `/expand` shows.
+    /// Serves: `crates/tui-app`'s worker.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `crates/tui-app/src/worker.rs` and the tests.
+    /// Down: `tool_results` and `render_event_full`.
+    /// Verify: `cargo test -p loong-tui`.
     /// The most recent tool result, in full — what `/expand` shows. It comes from the
     /// session's log through `session.replay`, so the summary in the transcript is never
     /// the only copy of anything.
@@ -519,6 +662,12 @@ impl<T: Transport> Client<T> {
         )
     }
 
+    /// Purpose: Every summarised tool result in the log, in full, oldest first.
+    /// Serves: `crates/tui-app`'s surface and worker.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `crates/tui-app/src/surface.rs`.
+    /// Down: `tool_results` and `folded_output`.
+    /// Verify: `cargo test -p loong-tui`.
     /// Every **summarised** tool result in this session's log, in full, oldest first.
     ///
     /// This is the list both sides count. The transcript names a fold by where it sits
@@ -535,6 +684,12 @@ impl<T: Transport> Client<T> {
             .collect())
     }
 
+    /// Purpose: One summarised result in full, counted from the oldest fold.
+    /// Serves: `crates/tui-app`'s worker.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `crates/tui-app/src/worker.rs` and the tests.
+    /// Down: `folded_results`.
+    /// Verify: `cargo test -p loong-tui`.
     /// One summarised tool result in full, by its place counting from the **oldest** fold,
     /// which is the order the transcript draws them in.
     ///
@@ -550,6 +705,12 @@ impl<T: Transport> Client<T> {
         })
     }
 
+    /// Purpose: Every tool-result event the log holds, oldest first, read through `session.replay`.
+    /// Serves: `expand_last_tool_result` and `folded_results`.
+    /// Design: `docs/design/sessions-lineage.md` §5.
+    /// Up: `Client::expand_last_tool_result` and `folded_results`.
+    /// Down: `Client::call` and `SessionReplayResult`.
+    /// Verify: `cargo test -p loong-tui`.
     /// Every tool result this session's log holds, oldest first.
     fn tool_results(&mut self) -> Result<Vec<Value>, String> {
         let params = gen::SessionOnlyParams {
@@ -570,6 +731,12 @@ impl<T: Transport> Client<T> {
             .collect())
     }
 
+    /// Purpose: Turn this session's approval prompts off or on.
+    /// Serves: `crates/tui-app`'s `/yolo` and worker.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `crates/tui-app/src/worker.rs`.
+    /// Down: `Client::call` and `PermissionsState`.
+    /// Verify: `cargo test -p loong-tui`.
     /// Turn this session's approval prompts off or on. The sandbox is a different axis and
     /// is untouched (ADR-0007 §5).
     pub fn set_auto_approve(&mut self, on: bool) -> Result<bool, String> {
@@ -586,6 +753,12 @@ impl<T: Transport> Client<T> {
         Ok(state.auto_approve)
     }
 
+    /// Purpose: The session so far, rendered the way live events are.
+    /// Serves: `crates/tui-app`'s surface and the CLI's repl.
+    /// Design: `docs/design/sessions-lineage.md` §5.
+    /// Up: `crates/tui-app/src/surface.rs` and `crates/cli/src/repl.rs`.
+    /// Down: `Client::call` and `render_event`.
+    /// Verify: `cargo test -p loong-tui`.
     /// The session so far, rendered exactly the way live events are. Attaching to a
     /// session that already has a past should show that past; an empty screen that is
     /// quietly appending to yesterday's conversation is worse than useless.
@@ -606,6 +779,12 @@ impl<T: Transport> Client<T> {
             .collect())
     }
 
+    /// Purpose: What the model is about to be sent and why; a read that records nothing.
+    /// Serves: `crates/tui-app`'s context panel.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `crates/tui-app/src/worker.rs`.
+    /// Down: `Client::call` and `ContextExplain`.
+    /// Verify: `cargo test -p loong-tui`.
     /// What the model is about to be sent, and why. Read-only: the kernel records
     /// nothing for it, so a debug panel cannot alter the thing it is showing.
     pub fn context(&mut self) -> Result<gen::ContextExplain, String> {
@@ -619,6 +798,12 @@ impl<T: Transport> Client<T> {
         serde_json::from_value(result).map_err(|e| format!("context.explain: {e}"))
     }
 
+    /// Purpose: The models this session offers and the one selected now.
+    /// Serves: `crates/tui-app`'s model picker.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `crates/tui-app/src/{worker,surface}.rs`.
+    /// Down: `Client::call` and `ModelList`.
+    /// Verify: `cargo test -p loong-tui`.
     /// The models this session offers, in the profile's own order, and which is
     /// current. Read-only: asking which models exist changes nothing.
     pub fn models(&mut self) -> Result<gen::ModelList, String> {
@@ -632,6 +817,12 @@ impl<T: Transport> Client<T> {
         serde_json::from_value(result).map_err(|e| format!("model.list: {e}"))
     }
 
+    /// Purpose: Switch the model and return the state afterwards.
+    /// Serves: `crates/tui-app`'s model picker.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `crates/tui-app/src/worker.rs`.
+    /// Down: `Client::call` and `ModelList`.
+    /// Verify: `cargo test -p loong-tui`.
     /// Switch the model, and get back the new state — the same shape `models()`
     /// returns, so a caller never has to ask twice to find out what happened.
     pub fn select_model(&mut self, name: &str) -> Result<gen::ModelList, String> {
@@ -646,6 +837,12 @@ impl<T: Transport> Client<T> {
         serde_json::from_value(result).map_err(|e| format!("model.select: {e}"))
     }
 
+    /// Purpose: Start a fresh session, move the client onto it and clear stale question state.
+    /// Serves: `crates/tui-app`'s `/new`.
+    /// Design: `docs/design/sessions-lineage.md` §1 and §5.
+    /// Up: `crates/tui-app/src/worker.rs`.
+    /// Down: `Client::call`.
+    /// Verify: `cargo test -p loong-tui`.
     /// Start a fresh session on the server and move onto it.
     ///
     /// The session id is the client's, and it changes here: every request that carries one
@@ -670,11 +867,23 @@ impl<T: Transport> Client<T> {
         Ok(started.session_id)
     }
 
+    /// Purpose: Submit one turn and return the lines to display.
+    /// Serves: `crates/cli/src/headless.rs` and the tests.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `crates/cli/src/headless.rs` and the tests.
+    /// Down: `submit_with`.
+    /// Verify: `cargo test -p loong-tui`.
     /// Submit a turn; returns the lines to display (events, then the answer).
     pub fn submit(&mut self, text: &str) -> Result<Vec<String>, String> {
         self.submit_with(text, &mut |_, _| {})
     }
 
+    /// Purpose: Submit one turn, handing each notification to the caller as it arrives.
+    /// Serves: `crates/tui-app`'s worker and the CLI's repl.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `crates/tui-app/src/worker.rs` and `crates/cli/src/repl.rs`.
+    /// Down: `call_with`.
+    /// Verify: `cargo test -p loong-tui`.
     /// Submit a turn, handing every notification to `on_notification` **as it
     /// arrives** — which is how a surface shows text being written
     /// (`model.delta`) instead of only the finished message. The returned lines are
@@ -701,6 +910,12 @@ impl<T: Transport> Client<T> {
         Ok(lines)
     }
 
+    /// Purpose: Answer a pending approval and clear only the question it answered.
+    /// Serves: `crates/tui-app`'s worker and the CLI's repl.
+    /// Design: `docs/design/surfaces.md` §3; `docs/design/security-trust.md` §1.
+    /// Up: `crates/tui-app/src/worker.rs` and `crates/cli/src/repl.rs`.
+    /// Down: `call_with` and `pending_approval`.
+    /// Verify: `cargo test -p loong-tui`.
     /// Answer a pending approval (ADR-0007 §6: the decision is an event).
     pub fn respond(
         &mut self,
@@ -732,10 +947,18 @@ impl<T: Transport> Client<T> {
         Ok(lines)
     }
 
+    /// Purpose: Send a request with no notification observer.
+    /// Contract: called by every `Client` method that does not stream.
     fn call(&mut self, method: &str, params: Json) -> Result<(Vec<String>, Json), String> {
         self.call_with(method, params, &mut |_, _| {})
     }
 
+    /// Purpose: Send a request, render every notification on the way and return the response.
+    /// Serves: `submit_with`, `respond` and every `Client` method.
+    /// Design: `docs/design/surfaces.md` §7.
+    /// Up: every `Client` method.
+    /// Down: `Transport::send`, `Transport::recv_line`, `render_event` and `PendingDecision`.
+    /// Verify: `cargo test -p loong-tui`.
     /// Send a request and read until its response arrives, rendering every
     /// notification on the way and reporting each one raw.
     fn call_with(
@@ -820,6 +1043,8 @@ impl<T: Transport> Client<T> {
     }
 }
 
+/// Purpose: Flatten a string onto one line and clip it to a width.
+/// Contract: called by `collapse_result` and `call_text`.
 fn truncate(text: &str, max: usize) -> String {
     let flat = text.replace('\n', " ");
     if flat.chars().count() <= max {
@@ -830,11 +1055,23 @@ fn truncate(text: &str, max: usize) -> String {
     }
 }
 
+/// Purpose: Build a request line for a caller outside this crate.
+/// Serves: no in-tree caller.
+/// Design: `docs/design/surfaces.md` §7.
+/// Up: no in-tree caller.
+/// Down: `Request::new`.
+/// Verify: `cargo test -p loong-tui`.
 /// A request builder for callers outside this crate (kept tiny on purpose).
 pub fn intent(id: u64, method: &str, params: Json) -> String {
     Request::new(id, method, params).to_line()
 }
 
+/// Purpose: The params for `prompt.submit`.
+/// Serves: no in-tree caller.
+/// Design: `docs/design/surfaces.md` §7.
+/// Up: no in-tree caller.
+/// Down: no call; it builds a JSON value.
+/// Verify: `cargo test -p loong-tui`.
 pub fn prompt_params(session_id: &str, text: &str) -> Json {
     json!({"session_id": session_id, "text": text})
 }
@@ -844,6 +1081,12 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
 
+    /// Purpose: A transport that replays canned lines and records what the client sent.
+    /// Serves: every client test in this module.
+    /// Design: `docs/design/surfaces.md` §7.
+    /// Up: the tests.
+    /// Down: `Transport` and its two impl methods.
+    /// Verify: `cargo test -p loong-tui`.
     /// A transport that replays canned server lines and records what the client
     /// sent — enough to test the protocol conversation without a process.
     #[derive(Default)]
@@ -853,6 +1096,8 @@ mod tests {
     }
 
     impl Fake {
+        /// Purpose: A fake preloaded with inbound lines.
+        /// Contract: test helper for the client tests.
         fn with(lines: Vec<Value>) -> Self {
             Self {
                 inbound: lines.into_iter().map(|v| v.to_string()).collect(),
@@ -862,29 +1107,41 @@ mod tests {
     }
 
     impl Transport for Fake {
+        /// Purpose: Record an outbound request line.
+        /// Contract: the `Transport` impl for `Fake`.
         fn send(&mut self, line: &str) -> Result<(), String> {
             self.outbound.push(line.to_string());
             Ok(())
         }
+        /// Purpose: Pop the next canned line.
+        /// Contract: the `Transport` impl for `Fake`.
         fn recv_line(&mut self) -> Result<Option<String>, String> {
             Ok(self.inbound.pop_front())
         }
     }
 
+    /// Purpose: A server event notification for the fake.
+    /// Contract: test fixture for the client tests.
     fn event(seq: u64, kind: &str, data: Value) -> Value {
         json!({"jsonrpc": "2.0", "method": "event", "params": {"seq": seq, "id": format!("e{seq}"), "kind": kind, "ignorable": false, "time_ms": 0, "data": data}})
     }
 
+    /// Purpose: A successful response line for the fake.
+    /// Contract: test fixture for the client tests.
     fn response(id: u64, result: Value) -> Value {
         json!({"jsonrpc": "2.0", "id": id, "result": result})
     }
 
+    /// Purpose: A replayed event envelope without the notification wrapper.
+    /// Contract: test fixture for the fold tests.
     /// An event the way `session.replay` returns it: the envelope's params, not the
     /// notification wrapped around them.
     fn bare(seq: u64, kind: &str, data: Value) -> Value {
         json!({"seq": seq, "id": format!("e{seq}"), "kind": kind, "ignorable": false, "time_ms": 0, "data": data})
     }
 
+    /// Purpose: Pin the declared attach method, the params it sends and the session it adopts.
+    /// Verify: `cargo test -p loong-tui`.
     #[test]
     fn attach_sends_the_declared_method_and_learns_the_session() {
         let fake = Fake::with(vec![response(
@@ -900,6 +1157,8 @@ mod tests {
         assert_eq!(sent["params"]["cwd"], "/work");
     }
 
+    /// Purpose: Pin that a model switch is drawn with both models and the rule that caused it.
+    /// Verify: `cargo test -p loong-tui`.
     #[test]
     fn a_model_switch_is_visible_and_says_what_caused_it() {
         // It used to render as nothing at all, so a routing rule could move a session
@@ -937,6 +1196,8 @@ mod tests {
         );
     }
 
+    /// Purpose: Pin the result window, both fold markers and that short output is left alone.
+    /// Verify: `cargo test -p loong-tui`.
     #[test]
     fn long_tool_output_is_summarised_and_expandable() {
         let noisy = (1..=200)
@@ -1008,6 +1269,8 @@ mod tests {
         assert_eq!(render_event(&short).unwrap(), "← ok hello");
     }
 
+    /// Purpose: Pin the elapsed time on a tool result and its absence without a preceding call.
+    /// Verify: `cargo test -p loong-tui`.
     #[test]
     fn a_tool_result_says_how_long_the_tool_took() {
         let mut renderer = Renderer::default();
@@ -1035,6 +1298,8 @@ mod tests {
         assert_eq!(renderer.render(&quick).unwrap(), "← ok hi");
     }
 
+    /// Purpose: Pin that a call shows the text it carries, bounded, without looking like a fold.
+    /// Verify: `cargo test -p loong-tui`.
     #[test]
     fn a_call_shows_what_it_carries_not_just_where_it_points() {
         // An edit is a change: the transcript should read like one, because "what did it
@@ -1087,6 +1352,8 @@ mod tests {
         assert_eq!(render_event(&shell).unwrap(), "→ shell cargo test");
     }
 
+    /// Purpose: Pin the order of a turn's rendered lines, ending with the answer.
+    /// Verify: `cargo test -p loong-tui`.
     #[test]
     fn a_turn_renders_the_events_then_the_answer() {
         let fake = Fake::with(vec![
@@ -1132,6 +1399,8 @@ mod tests {
         );
     }
 
+    /// Purpose: Pin that a resumed question carries the detail of the call it is about.
+    /// Verify: `cargo test -p loong-tui`.
     #[test]
     fn a_question_met_while_resuming_carries_its_detail_too() {
         // The second question of a session is usually met while *resuming* from the answer to
@@ -1181,6 +1450,8 @@ mod tests {
         assert!(second.args.contains("game.html"), "{second:?}");
     }
 
+    /// Purpose: Pin that an approval request is rendered and captured as pending.
+    /// Verify: `cargo test -p loong-tui`.
     #[test]
     fn an_approval_request_is_captured() {
         let fake = Fake::with(vec![
@@ -1197,6 +1468,8 @@ mod tests {
         assert_eq!(client.pending_approval(), Some("appr-1"));
     }
 
+    /// Purpose: Pin that a command invocation and an unknown command are both visible.
+    /// Verify: `cargo test -p loong-tui`.
     #[test]
     fn a_command_invocation_and_an_unknown_one_are_both_visible() {
         let fake = Fake::with(vec![
@@ -1219,6 +1492,8 @@ mod tests {
         assert!(lines[1].starts_with("! /reveiw"), "{}", lines[1]);
     }
 
+    /// Purpose: Pin that a hook refusal is visible and marks the turn unaccepted.
+    /// Verify: `cargo test -p loong-tui`.
     #[test]
     fn a_hook_refusal_is_visible_and_marks_the_turn_unaccepted() {
         let fake = Fake::with(vec![
@@ -1241,6 +1516,8 @@ mod tests {
         assert!(!client.last_accepted());
     }
 
+    /// Purpose: Pin that a hook which could not answer says so.
+    /// Verify: `cargo test -p loong-tui`.
     #[test]
     fn a_hook_that_could_not_answer_says_so() {
         let fake = Fake::with(vec![
@@ -1256,6 +1533,8 @@ mod tests {
         assert!(lines[0].contains("could not answer"), "{}", lines[0]);
     }
 
+    /// Purpose: Pin that compaction is rendered with its before and after numbers.
+    /// Verify: `cargo test -p loong-tui`.
     #[test]
     fn compaction_is_rendered_with_its_numbers() {
         let fake = Fake::with(vec![
@@ -1276,6 +1555,8 @@ mod tests {
         );
     }
 
+    /// Purpose: Pin that a fold is named by its place from the oldest, not from the end.
+    /// Verify: `cargo test -p loong-tui`.
     #[test]
     fn a_fold_is_found_by_its_place_in_the_log_not_by_its_distance_from_the_end() {
         // Three results: a short one, then two the transcript summarised. The short one
@@ -1313,6 +1594,8 @@ mod tests {
         );
     }
 
+    /// Purpose: Pin that a fold's name still means the same result after the log grows.
+    /// Verify: `cargo test -p loong-tui`.
     #[test]
     fn a_folds_name_survives_the_log_growing_underneath_it() {
         // The same two folds, and then a third the turn has just written. Counting from
@@ -1357,6 +1640,7 @@ mod tests {
         assert!(client.expand_tool_result(2).unwrap()[0].contains("third 1"));
     }
 
+    /// Purpose: Pin the marker predicate and the summary line it must end.
     #[test]
     fn a_marker_is_the_line_the_summary_ends_with() {
         assert!(is_fold_marker("  … 197 more line(s), 5.0 KiB · /expand"));
@@ -1366,6 +1650,7 @@ mod tests {
         assert!(!folded_output("← ok a\nb"));
     }
 
+    /// Purpose: Pin that a JSON-RPC error becomes an error rather than silence.
     #[test]
     fn an_error_response_surfaces_as_an_error() {
         let fake = Fake::with(vec![

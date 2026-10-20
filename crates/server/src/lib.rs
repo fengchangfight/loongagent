@@ -1,3 +1,12 @@
+//! Purpose: The local agent server: one session, JSON-RPC over stdio, every event streamed before the response.
+//!
+//! # Contract
+//! - **Serves:** every surface that attaches to a session, and `crates/cli/src/server.rs`, which runs it.
+//! - **Design:** `docs/design/surfaces.md` §1 and §7; `docs/design/sessions-lineage.md` §1 and §5.
+//! - **Upstream:** `crates/cli/src/server.rs` builds a `Server` and calls `run_stdio`; `crates/cli/src/main.rs` imports it.
+//! - **Downstream:** `loong_kernel` for the turn and the log, `loong_protocol` for envelopes, `loong_eventlog` for replay and `loong_schema` for method and event names.
+//! - **Verify:** `cargo test -p loong-server` · `./scripts/check.sh`
+//!
 //! The local agent server (ADR-0001): sessions live here, clients attach.
 //!
 //! Transport is newline-delimited JSON-RPC over stdio (a unix socket is the same
@@ -15,6 +24,12 @@ use std::cell::RefCell;
 use std::io::{BufRead, Write};
 use std::rc::Rc;
 
+/// Purpose: The outbound side of one connection, shareable so work in progress can write to it.
+/// Serves: `handle_line_streaming`, `run_stdio`, the event sink and the delta callback.
+/// Design: `docs/design/surfaces.md` §1 and §7.
+/// Up: `run_stdio` and the tests.
+/// Down: `stdout`, `memory` and `line`, and the boxed writer they wrap.
+/// Verify: `cargo test -p loong-server`.
 /// The outbound side of one connection, shareable so that work **in progress** can write
 /// to it. A turn runs inside a single call, so a sink borrowed for that call cannot reach
 /// the wire; this can, because it is a handle rather than a borrow.
@@ -22,16 +37,36 @@ use std::rc::Rc;
 pub struct Out(Rc<RefCell<Box<dyn Write>>>);
 
 impl Out {
+    /// Purpose: The process's real stdout as a connection.
+    /// Serves: `run_stdio`.
+    /// Design: `docs/design/surfaces.md` §1.
+    /// Up: `run_stdio`.
+    /// Down: `std::io::stdout`; no further call.
+    /// Verify: `cargo test -p loong-server`.
     pub fn stdout() -> Self {
         Self(Rc::new(RefCell::new(Box::new(std::io::stdout()))))
     }
 
+    /// Purpose: A connection that keeps complete lines, for tests and collecting callers.
+    /// Serves: `handle_line` and the tests.
+    /// Design: `docs/design/surfaces.md` §7.
+    /// Up: `handle_line` and the tests.
+    /// Down: the nested `Lines` writer it boxed.
+    /// Verify: `cargo test -p loong-server`.
     /// A connection that keeps what was written, for tests and for callers that would
     /// rather collect than stream.
     pub fn memory() -> (Self, Rc<RefCell<Vec<String>>>) {
         let collected: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        /// Purpose: The writer behind `Out::memory`: bytes in, complete lines collected.
+        /// Serves: `Out::memory`.
+        /// Design: `docs/design/surfaces.md` §7.
+        /// Up: `Out::memory` constructs it.
+        /// Down: its `write` and `flush` impls, and the shared line buffer.
+        /// Verify: `cargo test -p loong-server`.
         struct Lines(Rc<RefCell<Vec<String>>>, String);
         impl Write for Lines {
+            /// Purpose: Buffer bytes and push each complete line into the collector.
+            /// Contract: the `Write` impl of `Lines`, driven by `writeln!` in `Out::line`.
             fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
                 self.1.push_str(&String::from_utf8_lossy(buf));
                 while let Some(index) = self.1.find('\n') {
@@ -41,6 +76,8 @@ impl Out {
                 }
                 Ok(buf.len())
             }
+            /// Purpose: The no-op flush: lines are already pushed as they complete.
+            /// Contract: the `Write` impl of `Lines`.
             fn flush(&mut self) -> std::io::Result<()> {
                 Ok(())
             }
@@ -52,6 +89,12 @@ impl Out {
         (out, collected)
     }
 
+    /// Purpose: Write one line and flush it, so a watching person sees it before the turn ends.
+    /// Serves: the kernel event sink, the delta callback and `stream_drained`.
+    /// Design: `docs/design/surfaces.md` §1 and §7.
+    /// Up: `dispatch`'s event sink, its delta callback and `stream_drained`.
+    /// Down: the boxed writer; no further call.
+    /// Verify: `cargo test -p loong-server`.
     /// One line, on the wire now. Flushing matters more than batching here: the point of
     /// streaming is that a person watching sees it before the turn ends.
     pub fn line(&self, line: &str) {
@@ -61,6 +104,12 @@ impl Out {
     }
 }
 
+/// Purpose: Why the server could not start: an I/O failure or an interrupt handler that would not install.
+/// Serves: `run_stdio`, `catch_interrupts` and `crates/cli/src/server.rs`.
+/// Design: `docs/design/surfaces.md` §1.
+/// Up: `run_stdio` and `catch_interrupts` return it; `crates/cli/src/server.rs` maps it to a string.
+/// Down: its `Display` impl and `From<std::io::Error>`.
+/// Verify: `cargo test -p loong-server`.
 #[derive(Debug)]
 pub enum ServerError {
     Io(std::io::Error),
@@ -78,6 +127,8 @@ pub enum ServerError {
 static INTERRUPT: std::sync::OnceLock<std::sync::Arc<std::sync::atomic::AtomicBool>> =
     std::sync::OnceLock::new();
 
+/// Purpose: Set the process-wide interrupt flag from a handler, allocating and locking nothing.
+/// Contract: called by both platform `handle_interrupt` bodies.
 /// The one thing a handler is allowed to do: store into an atomic that lives for the
 /// process. Called from a signal handler on Unix and from a console control thread on
 /// Windows, so it allocates nothing and locks nothing.
@@ -87,11 +138,15 @@ fn raise_interrupt() {
     }
 }
 
+/// Purpose: The Unix `SIGINT` handler: record the interrupt and return.
+/// Contract: installed by `install_interrupt_handler_once` on unix.
 #[cfg(unix)]
 extern "C" fn handle_interrupt(_signal: libc::c_int) {
     raise_interrupt();
 }
 
+/// Purpose: The Windows console handler for `CTRL_BREAK`: record the interrupt and claim the event.
+/// Contract: registered by `install_interrupt_handler_once` on Windows.
 /// Windows: the console control handler. The launcher sends `CTRL_BREAK_EVENT` to the
 /// server's process group (`crates/tui/src/lib.rs::interrupt`), not `CTRL_C_EVENT` —
 /// Microsoft documents that a `CTRL_C_EVENT` cannot be aimed at one process group, so it
@@ -112,14 +167,18 @@ unsafe extern "system" fn handle_interrupt(event: u32) -> i32 {
 
 #[cfg(windows)]
 extern "system" {
+    /// Purpose: The kernel32 routine that registers a console control handler.
     /// `kernel32` — register the console control routine above.
     fn SetConsoleCtrlHandler(
         handler: Option<unsafe extern "system" fn(u32) -> i32>,
         add: i32,
     ) -> i32;
+    /// Purpose: The kernel32 routine that returns the calling thread's last error code.
     fn GetLastError() -> u32;
 }
 
+/// Purpose: Install the platform handler once per process and remember the first result.
+/// Contract: called by `catch_interrupts`; the `OnceLock` makes later calls cheap.
 /// Install the handler exactly once per process. Registering it twice would be harmless
 /// on Unix (the second call replaces the first) but on Windows it would run the routine
 /// twice, so the result of the first attempt is what every later caller sees.
@@ -131,6 +190,8 @@ fn install_interrupt_handler() -> Result<(), ServerError> {
         .map_err(ServerError::Signal)
 }
 
+/// Purpose: Point `SIGINT` at the process-wide flag on Unix.
+/// Contract: the unix arm of `install_interrupt_handler`.
 #[cfg(unix)]
 fn install_interrupt_handler_once() -> Result<(), String> {
     // Safety: the handler only stores into an atomic that lives for the process.
@@ -143,6 +204,8 @@ fn install_interrupt_handler_once() -> Result<(), String> {
     Ok(())
 }
 
+/// Purpose: Register the `CTRL_BREAK` console handler on Windows.
+/// Contract: the windows arm of `install_interrupt_handler`.
 #[cfg(windows)]
 fn install_interrupt_handler_once() -> Result<(), String> {
     // Safety: a pointer to a routine whose whole body is one atomic store.
@@ -155,12 +218,16 @@ fn install_interrupt_handler_once() -> Result<(), String> {
     Ok(())
 }
 
+/// Purpose: Report that this platform has no interrupt mechanism.
+/// Contract: the fallback arm of `install_interrupt_handler`.
 #[cfg(not(any(unix, windows)))]
 fn install_interrupt_handler_once() -> Result<(), String> {
     Err("this platform has no interrupt mechanism wired up".to_string())
 }
 
 impl std::fmt::Display for ServerError {
+    /// Purpose: Render a server failure for the CLI's error output.
+    /// Contract: the `Display` half of `ServerError`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ServerError::Io(e) => write!(f, "io: {e}"),
@@ -172,11 +239,19 @@ impl std::fmt::Display for ServerError {
 impl std::error::Error for ServerError {}
 
 impl From<std::io::Error> for ServerError {
+    /// Purpose: Convert an I/O failure into `ServerError::Io`.
+    /// Contract: lets `?` in `run_stdio` produce a `ServerError`.
     fn from(e: std::io::Error) -> Self {
         ServerError::Io(e)
     }
 }
 
+/// Purpose: A closure that builds a fresh session id and kernel for `session.new`.
+/// Serves: `Server::with_factory` and `crates/cli/src/server.rs`.
+/// Design: `docs/design/surfaces.md` §1; `docs/design/sessions-lineage.md` §1.
+/// Up: `crates/cli/src/server.rs` and the session-new test.
+/// Down: the `(id, kernel)` pair consumed by `dispatch`.
+/// Verify: `cargo test -p loong-server`.
 /// Builds a kernel for a session this server has not been given one for.
 ///
 /// A closure rather than a config struct because building a kernel is the caller's
@@ -184,6 +259,12 @@ impl From<std::io::Error> for ServerError {
 /// needs to be able to ask for another one.
 pub type KernelFactory = Box<dyn FnMut() -> Result<(String, Kernel), String>>;
 
+/// Purpose: One process serving one session: the kernel, the id it owns and the stream bookkeeping.
+/// Serves: `run_stdio` and `crates/cli/src/server.rs`.
+/// Design: `docs/design/surfaces.md` §1; `docs/design/sessions-lineage.md` §1.
+/// Up: `crates/cli/src/server.rs` builds it; the tests use it directly.
+/// Down: `handle_line`, `handle_line_streaming`, `session_id`, `catch_interrupts` and `run_stdio`.
+/// Verify: `cargo test -p loong-server`.
 pub struct Server {
     kernel: Kernel,
     session_id: String,
@@ -203,6 +284,12 @@ pub struct Server {
 }
 
 impl Server {
+    /// Purpose: A server around one kernel and the session id it already owns.
+    /// Serves: `crates/cli/src/server.rs` and the tests.
+    /// Design: `docs/design/surfaces.md` §1.
+    /// Up: `crates/cli/src/server.rs` and the tests.
+    /// Down: no call; the fields it sets are read by the methods.
+    /// Verify: `cargo test -p loong-server`.
     pub fn new(kernel: Kernel, session_id: impl Into<String>) -> Self {
         Self {
             kernel,
@@ -215,16 +302,34 @@ impl Server {
         }
     }
 
+    /// Purpose: Give the server a way to start a session it was not handed.
+    /// Serves: `crates/cli/src/server.rs` and the session-new test.
+    /// Design: `docs/design/sessions-lineage.md` §1.
+    /// Up: `crates/cli/src/server.rs` and the tests.
+    /// Down: `dispatch`'s `session.new` arm.
+    /// Verify: `cargo test -p loong-server`.
     /// Teach this server how to start a session of its own.
     pub fn with_factory(mut self, factory: KernelFactory) -> Self {
         self.factory = Some(factory);
         self
     }
 
+    /// Purpose: The session this server currently owns.
+    /// Serves: `dispatch` and the tests.
+    /// Design: `docs/design/sessions-lineage.md` §1.
+    /// Up: no production caller; the tests assert on it.
+    /// Down: no call; it borrows the stored id.
+    /// Verify: `cargo test -p loong-server`.
     pub fn session_id(&self) -> &str {
         &self.session_id
     }
 
+    /// Purpose: Handle one inbound line and return every outbound line, the response last.
+    /// Serves: tests and callers that collect instead of streaming.
+    /// Design: `docs/design/surfaces.md` §7.
+    /// Up: no production caller outside the tests; `run_stdio` streams instead.
+    /// Down: `handle_line_streaming` through an in-memory `Out`.
+    /// Verify: `cargo test -p loong-server`.
     /// Handle one inbound line and return the outbound lines, in order:
     /// event notifications first, then exactly one response for a request.
     /// Pure enough to test without any transport at all.
@@ -238,6 +343,12 @@ impl Server {
         lines
     }
 
+    /// Purpose: Handle one line, streaming events and deltas to the connection as they happen.
+    /// Serves: `run_stdio` and the tests.
+    /// Design: `docs/design/surfaces.md` §1 and §7.
+    /// Up: `run_stdio` and the tests.
+    /// Down: `handle_request`, which produces the response lines.
+    /// Verify: `cargo test -p loong-server`.
     /// As [`Server::handle_line`], but writing to the connection **while the turn runs**
     /// and returning only the response.
     ///
@@ -255,6 +366,8 @@ impl Server {
         result
     }
 
+    /// Purpose: Parse one line and dispatch it, or answer the parse error.
+    /// Contract: called by `handle_line_streaming`.
     fn handle_request(&mut self, line: &str) -> Vec<String> {
         match Request::parse(line) {
             Ok(request) => self.dispatch(request),
@@ -262,6 +375,12 @@ impl Server {
         }
     }
 
+    /// Purpose: Route one request method to the kernel, stream what it caused and build the response.
+    /// Serves: `handle_request`.
+    /// Design: `docs/design/surfaces.md` §7; `docs/design/sessions-lineage.md` §1 and §5.
+    /// Up: `handle_request`.
+    /// Down: `respond`, `refuse`, `fail`, `wrong_session`, `model_list`, `stream_drained` and the kernel methods.
+    /// Verify: `cargo test -p loong-server`.
     fn dispatch(&mut self, request: Request) -> Vec<String> {
         let id = request.id.clone().unwrap_or(Value::Null);
         match request.method.as_str() {
@@ -493,6 +612,8 @@ impl Server {
         }
     }
 
+    /// Purpose: Stream what this call drained, then answer with one result.
+    /// Contract: called by every `dispatch` arm that succeeds.
     /// `<T>`: stream the events this call produced, then the response.
     fn respond<T: serde::Serialize>(&mut self, id: Value, result: T, _method: &str) -> Vec<String> {
         self.stream_drained();
@@ -502,6 +623,8 @@ impl Server {
         }
     }
 
+    /// Purpose: Send the events recorded since the last one sent, to the connection or the pending list.
+    /// Contract: called by `respond` and `refuse`.
     /// Events recorded since the last one sent go to the connection now: they are news,
     /// and news arrives when it happens (ADR-0009). A caller with no connection to write
     /// to — `handle_line` collects through an in-memory one — gets them in its list.
@@ -514,6 +637,8 @@ impl Server {
         }
     }
 
+    /// Purpose: Answer in words for a failure that is not the kernel's.
+    /// Contract: `dispatch`'s `session.new` arm uses it when no factory exists.
     /// Say no in words, for the failures that are not the kernel's.
     ///
     /// A kernel error has a shape and a code; "this server was built with one kernel and
@@ -526,6 +651,8 @@ impl Server {
         lines
     }
 
+    /// Purpose: Answer a kernel failure with the JSON-RPC code its kind deserves.
+    /// Contract: every `dispatch` arm that calls a kernel method.
     fn fail(&mut self, id: Value, error: KernelError) -> Vec<String> {
         self.stream_drained();
         let mut lines: Vec<String> = std::mem::take(&mut self.pending_lines);
@@ -537,6 +664,8 @@ impl Server {
         lines
     }
 
+    /// Purpose: The models this session offers and the one selected now.
+    /// Contract: `dispatch`'s `model.list` and `model.select` arms.
     /// The models this session offers and which one is current — the one shape both
     /// `model.list` and `model.select` answer with, so a client that switches does not
     /// have to ask again to find out what happened.
@@ -547,6 +676,12 @@ impl Server {
         }
     }
 
+    /// Purpose: A refusal carrying the request's id when the client names another session.
+    /// Serves: every `dispatch` arm that takes a session id.
+    /// Design: `docs/design/surfaces.md` §7; `docs/design/sessions-lineage.md` §1.
+    /// Up: `dispatch`.
+    /// Down: `Response::err`; no further call.
+    /// Verify: `cargo test -p loong-server`.
     /// A refusal that is still *this request's* answer.
     ///
     /// It used to be built with a null id, which a JSON-RPC client cannot match to
@@ -567,6 +702,12 @@ impl Server {
         })
     }
 
+    /// Purpose: Every event appended since the last one sent, as notification lines.
+    /// Serves: `stream_drained`.
+    /// Design: `docs/design/surfaces.md` §7.
+    /// Up: `stream_drained`.
+    /// Down: `Kernel::events_since` and `Notification::event`.
+    /// Verify: `cargo test -p loong-server`.
     /// Every event appended since the client last heard from us.
     fn drain_events(&mut self) -> Vec<String> {
         let Ok(events) = self.kernel.events_since(self.last_sent) else {
@@ -583,6 +724,12 @@ impl Server {
         out
     }
 
+    /// Purpose: Point the kernel at the process-wide interrupt flag and install the handler.
+    /// Serves: `run_stdio`.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `run_stdio`.
+    /// Down: `Kernel::interruptor`, `Kernel::use_interruptor` and `install_interrupt_handler`.
+    /// Verify: `cargo test -p loong-server`.
     /// Let the platform's interrupt stop the running turn instead of killing the server.
     ///
     /// The TUI spawns this process and signals it when someone presses Ctrl-C, which is
@@ -605,6 +752,12 @@ impl Server {
         install_interrupt_handler()
     }
 
+    /// Purpose: Serve stdin lines until EOF, writing each response and its stream in order.
+    /// Serves: `crates/cli/src/server.rs`.
+    /// Design: `docs/design/surfaces.md` §1.
+    /// Up: `crates/cli/src/server.rs`.
+    /// Down: `catch_interrupts`, `Out::stdout` and `handle_line_streaming`.
+    /// Verify: `cargo test -p loong-server`.
     /// Serve stdio until EOF (the transport the TUI spawns).
     pub fn run_stdio(mut self) -> Result<(), ServerError> {
         // Ctrl-C stops the turn; the process stays for the next one.
@@ -642,8 +795,16 @@ mod tests {
 
     static N: AtomicU64 = AtomicU64::new(0);
 
+    /// Purpose: A temporary directory that removes itself when the test ends.
+    /// Serves: every test in this module.
+    /// Design: `docs/design/surfaces.md` §1.
+    /// Up: the tests.
+    /// Down: its `Drop` impl and the filesystem.
+    /// Verify: `cargo test -p loong-server`.
     struct Temp(PathBuf);
     impl Temp {
+        /// Purpose: Create a unique temporary directory for one test.
+        /// Contract: test helper; paired with `Temp`'s `Drop`.
         fn new() -> Self {
             let dir = std::env::temp_dir().join(format!(
                 "loong-server-{}-{}",
@@ -655,11 +816,19 @@ mod tests {
         }
     }
     impl Drop for Temp {
+        /// Purpose: Remove the temporary directory when the test ends.
+        /// Contract: the `Drop` impl for `Temp`.
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
     }
 
+    /// Purpose: A scripted model that makes one tool call and then answers.
+    /// Serves: the dispatch tests.
+    /// Design: `docs/design/surfaces.md` §7.
+    /// Up: the dispatch tests.
+    /// Down: `ScriptedModel::new`.
+    /// Verify: `cargo test -p loong-server`.
     fn scripted(calls: Vec<ToolCallRequest>, text: Option<&str>) -> ScriptedModel {
         ScriptedModel::new(vec![
             CompletionResponse {
@@ -681,6 +850,8 @@ mod tests {
         ])
     }
 
+    /// Purpose: A well-formed `session.attach` request line.
+    /// Contract: the tests' opening call.
     fn attach_line() -> String {
         Request::new(
             1,
@@ -690,6 +861,8 @@ mod tests {
         .to_line()
     }
 
+    /// Purpose: Handle one line and parse every outbound line as JSON.
+    /// Contract: test helper for the dispatch tests.
     fn lines_of(server: &mut Server, line: &str) -> Vec<Value> {
         server
             .handle_line(line)
@@ -698,6 +871,8 @@ mod tests {
             .collect()
     }
 
+    /// Purpose: Pin that every session-naming method refuses with the request's own id.
+    /// Verify: `cargo test -p loong-server`.
     #[test]
     fn a_refusal_carries_the_id_of_the_request_it_refuses() {
         // Found while wiring `session.new`: `wrong_session` built its error with a null
@@ -733,6 +908,8 @@ mod tests {
         }
     }
 
+    /// Purpose: Pin `/new`'s kernel swap, the kept old log and the refused old id.
+    /// Verify: `cargo test -p loong-server`.
     #[test]
     fn a_new_session_moves_the_server_onto_a_fresh_log_and_keeps_the_old_one() {
         let t = Temp::new();
@@ -789,6 +966,8 @@ mod tests {
         );
     }
 
+    /// Purpose: Pin the honest refusal when a server has no factory for a second session.
+    /// Verify: `cargo test -p loong-server`.
     #[test]
     fn a_server_given_one_kernel_says_it_cannot_start_another() {
         // Not pretending: a server built around a single kernel has no way to make a
@@ -819,6 +998,8 @@ mod tests {
         assert_eq!(server.session_id(), "only", "and nothing changed");
     }
 
+    /// Purpose: Pin attach's result fields and that its opening event precedes the response.
+    /// Verify: `cargo test -p loong-server`.
     #[test]
     fn attach_answers_with_the_session_and_schema_version() {
         let t = Temp::new();
@@ -852,6 +1033,8 @@ mod tests {
         );
     }
 
+    /// Purpose: Pin the turn's event order and the single trailing response.
+    /// Verify: `cargo test -p loong-server`.
     #[test]
     fn a_prompt_streams_events_then_answers() {
         let t = Temp::new();
@@ -911,6 +1094,8 @@ mod tests {
         );
     }
 
+    /// Purpose: Pin the approval round trip over the wire and that nothing happens before the answer.
+    /// Verify: `cargo test -p loong-server`.
     #[test]
     fn an_out_of_bounds_write_asks_over_the_wire_and_resumes() {
         let t = Temp::new();
@@ -977,16 +1162,30 @@ mod tests {
         assert!(!escape.exists());
     }
 
+    /// Purpose: A model that writes its answer in pieces, for the delta path.
+    /// Serves: `deltas_are_written_as_they_arrive_and_never_enter_the_log`.
+    /// Design: `docs/design/surfaces.md` §7.
+    /// Up: that test, through the kernel.
+    /// Down: `Model::complete` and `Model::complete_streaming`.
+    /// Verify: `cargo test -p loong-server`.
     /// A model that writes its answer in pieces, the way a real one does.
     struct StreamingModel;
 
     impl Model for StreamingModel {
+        /// Purpose: The non-streaming path, which this test double never uses.
+        /// Contract: the `Model` impl for `StreamingModel`.
         fn complete(
             &mut self,
             _request: &CompletionRequest,
         ) -> Result<CompletionResponse, ModelError> {
             unreachable!("used only through its streaming path")
         }
+        /// Purpose: Emit the answer in three pieces and return the finished text.
+        /// Serves: `deltas_are_written_as_they_arrive_and_never_enter_the_log`.
+        /// Design: `docs/design/surfaces.md` §7.
+        /// Up: the kernel's turn, through that test.
+        /// Down: the `on_delta` callback.
+        /// Verify: `cargo test -p loong-server`.
         fn complete_streaming(
             &mut self,
             _request: &CompletionRequest,
@@ -1006,6 +1205,8 @@ mod tests {
         }
     }
 
+    /// Purpose: Pin that events stream during the turn, in order, and none twice.
+    /// Verify: `cargo test -p loong-server`.
     #[test]
     fn a_turn_reports_its_work_before_it_is_over() {
         // The difference between watching an agent and waiting for one: the events reach
@@ -1093,6 +1294,8 @@ mod tests {
         );
     }
 
+    /// Purpose: Pin replay as a read that returns the log without moving it.
+    /// Verify: `cargo test -p loong-server`.
     #[test]
     fn a_client_that_attaches_can_replay_what_happened_before_it_arrived() {
         let t = Temp::new();
@@ -1151,6 +1354,8 @@ mod tests {
         );
     }
 
+    /// Purpose: Pin `context.explain` as a read, its shape and the wrong-session refusal.
+    /// Verify: `cargo test -p loong-server`.
     #[test]
     fn a_client_can_ask_what_is_in_the_context_without_changing_it() {
         let t = Temp::new();
@@ -1220,6 +1425,8 @@ mod tests {
         assert!(wrong[0]["error"].is_object(), "{wrong:?}");
     }
 
+    /// Purpose: Pin `model.delta` streaming and that the log keeps only the finished message.
+    /// Verify: `cargo test -p loong-server`.
     #[test]
     fn deltas_are_written_as_they_arrive_and_never_enter_the_log() {
         let t = Temp::new();
@@ -1287,6 +1494,8 @@ mod tests {
         assert!(logged.contains("the answer arrives"));
     }
 
+    /// Purpose: Pin the `hook.fired` event and `accepted: false` on a hook refusal.
+    /// Verify: `cargo test -p loong-server`.
     #[test]
     fn a_hook_refusal_is_reported_as_not_accepted() {
         let t = Temp::new();
@@ -1344,6 +1553,8 @@ mod tests {
         assert_eq!(out.last().unwrap()["result"]["turn_id"], 1);
     }
 
+    /// Purpose: Pin that parse, unknown-method and wrong-session errors are answered, not ignored.
+    /// Verify: `cargo test -p loong-server`.
     #[test]
     fn protocol_errors_are_answered_not_ignored() {
         let t = Temp::new();
@@ -1377,6 +1588,8 @@ mod tests {
         assert_eq!(wrong[0]["error"]["code"], codes::INVALID_PARAMS as i64);
     }
 
+    /// Purpose: The one response line in a batch that may also carry streamed events.
+    /// Contract: test helper for the model-surface tests.
     /// The one response line in a batch that may also carry streamed events.
     fn reply(lines: &[String]) -> Value {
         lines
@@ -1386,6 +1599,8 @@ mod tests {
             .unwrap_or(Value::Null)
     }
 
+    /// Purpose: Pin model list/select results and the recorded `model.selected` event.
+    /// Verify: `cargo test -p loong-server`.
     #[test]
     fn the_model_surface_lists_what_a_session_has_and_switches_on_request() {
         let t = Temp::new();
@@ -1485,6 +1700,8 @@ mod tests {
         assert_eq!(reply(&after)["result"]["selected"], "strong");
     }
 
+    /// Purpose: Pin the wrong-session refusal for both model methods.
+    /// Verify: `cargo test -p loong-server`.
     #[test]
     fn the_model_surface_refuses_a_session_that_is_not_this_one() {
         let t = Temp::new();

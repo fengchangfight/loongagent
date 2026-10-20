@@ -4,7 +4,7 @@
 //! - **Serves:** ADR-0018's install contract, observed through the real binary and a model.
 //! - **Design:** `docs/design/surfaces.md` §2; `docs/design/extension-model.md` §4 and §7.
 //! - **Upstream:** runs `CARGO_BIN_EXE_loongagent`; nothing imports this file.
-//! - **Downstream:** `plugin add|list|update|remove`, `skills list`, and `run` against a recording HTTP model.
+//! - **Downstream:** `plugin add|list|remove`, `skills list`, and `run` against a recording HTTP model.
 //! - **Verify:** `cargo test -p loongagent --test plugins`
 //!
 //! Plugins, end to end, against the real binary (ADR-0018).

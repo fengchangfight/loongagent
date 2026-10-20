@@ -341,7 +341,7 @@ fn build_kernel(
 /// Purpose: Build every model the profile offers, or the one adapter a `--model` flag names.
 /// Serves: `serve` and `build_kernel`.
 /// Design: `docs/design/config-routing.md` §8.
-/// Up: `serve`, `build_kernel` and the final unbounded-context check; no other caller.
+/// Up: `serve` and `build_kernel`; no other caller.
 /// Down: `build_model`, `resolve_reference`, `endpoint_authenticates` and `OpenAiCompat::new`.
 /// Verify: `cargo test -p loongagent --test vertical_slice`.
 /// Which provider to build: the session's choice if it made one, else the

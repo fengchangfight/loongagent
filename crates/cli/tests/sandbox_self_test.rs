@@ -2,7 +2,7 @@
 //!
 //! # Contract
 //! - **Serves:** ADR-0007's pre-flight proof before the first tool call.
-//! - **Design:** `docs/design/surfaces.md` §2; `docs/design/tools-permissions.md` §4 and §6.
+//! - **Design:** `docs/design/surfaces.md` §2; `docs/design/tools-permissions.md` §4.
 //! - **Upstream:** runs `loongagent sandbox self-test` and `probe`; nothing imports this file.
 //! - **Downstream:** `loong_sandbox`'s self-test and probe, through the real binary.
 //! - **Verify:** `cargo test -p loongagent --test sandbox_self_test`

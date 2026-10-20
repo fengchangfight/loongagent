@@ -574,7 +574,7 @@ impl Args {
 
 /// Purpose: The machine's control-plane configuration: address, pinned key and a token reference.
 /// Serves: `control.rs`, which merges and validates it, and `tui.rs`'s first-run form.
-/// Design: `docs/design/control-plane.md` §1 and §5.
+/// Design: `docs/design/control-plane.md` §1 and §4.
 /// Up: `control.rs` reads and writes it; `tui.rs`'s `full_screen` builds one from the form.
 /// Down: no further call; it is data.
 /// Verify: `cargo test -p loongagent`.
@@ -625,7 +625,7 @@ impl PackState {
 }
 
 /// Purpose: The client's one root, `$LOONGAGENT_HOME` or `~/.loongagent`.
-/// Contract: `main.rs` path root; `Args::parse`, `profile_base`, `control.rs` and `session.rs` call it.
+/// Contract: `main.rs` path root; `Args::parse`, `profile_base`, `control.rs`, `local.rs`'s `configure_local` and `session.rs` call it.
 /// The client's one root: `$LOONGAGENT_HOME`, else `~/.loongagent` (defined in the
 /// config crate, because the user-layer path comes from the same rule).
 fn config_dir() -> PathBuf {

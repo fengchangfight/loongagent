@@ -70,7 +70,7 @@ fn read_control_file(path: &Path) -> Result<Option<ControlFile>, String> {
 
 /// Purpose: Merge the machine and user files, letting only the token come from the user.
 /// Serves: `load_control`, and the rule that a user cannot re-pin the key.
-/// Design: `docs/design/control-plane.md` §1 and §5.
+/// Design: `docs/design/control-plane.md` §4.
 /// Up: `load_control`; the `local.rs` tests also call it.
 /// Down: no further call — it only chooses fields.
 /// Verify: `cargo test -p loongagent`.
@@ -108,7 +108,7 @@ pub(crate) fn load_control() -> Result<Option<ControlFile>, String> {
 
 /// Purpose: Write the control file to the chosen scope, explaining the root requirement when the machine file fails.
 /// Serves: `connect`, and so `setup` and the TUI's first-run form.
-/// Design: `docs/design/control-plane.md` §1 and §5.
+/// Design: `docs/design/control-plane.md` §4.
 /// Up: `connect`; no other caller.
 /// Down: `std::fs::create_dir_all`, `toml::to_string` and `std::fs::write`.
 /// Verify: `cargo test -p loongagent`.
@@ -155,7 +155,7 @@ fn pack_cache(config: &loong_control::ControlConfig) -> loong_control::Cache {
 
 /// Purpose: Validate the pinned key and token reference and build the control-plane client configuration.
 /// Serves: every command that talks to the control plane.
-/// Design: `docs/design/control-plane.md` §2 and §5.
+/// Design: `docs/design/control-plane.md` §2 and §4.
 /// Up: `sync_pack`, `cached_pack_state`, `setup`, `control`, `profiles`, `use_profile` and `connect`.
 /// Down: `loong_pack::unhex`, `resolve_reference` and `ControlConfig::check_transport`.
 /// Verify: `cargo test -p loongagent`.
@@ -195,9 +195,9 @@ pub(crate) fn control_config(
 }
 
 /// Purpose: The first non-empty line of a description, for a one-line pack summary.
-/// Serves: `PackState::summary` in `main.rs` and `setup`'s profile list.
+/// Serves: `PackState::summary`, the one-line pack summary every reporting command prints.
 /// Design: `docs/design/control-plane.md` §3.
-/// Up: `main.rs`'s `PackState::summary`; no other caller.
+/// Up: `main.rs`'s `PackState::summary` (main.rs:617); no other caller.
 /// Down: `str::lines`; no further call.
 /// Verify: `cargo test -p loongagent`.
 pub(crate) fn first_line(text: &str) -> String {
@@ -425,7 +425,7 @@ pub(crate) fn setup(args: Args) -> Result<(), String> {
 }
 
 /// Purpose: Print the pack's warnings once, where the TUI's server notes will also carry them.
-/// Contract: `control.rs` diagnostics; `sync_pack`, `cached_pack_state`, `connect`, `control` and `profiles` call it.
+/// Contract: `control.rs` diagnostics; `sync_pack`, `cached_pack_state`, `connect`, `control`, `profiles` and `use_profile` call it.
 /// Say what the pack is carrying, once, where a person will see it. The TUI shows the
 /// server's notes, so this reaches the interface as well as the terminal.
 fn note_pack_warnings(pack: &loong_config::ProfilePack) {

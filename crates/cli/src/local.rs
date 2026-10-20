@@ -1401,7 +1401,7 @@ impl LocalBlock {
 }
 
 /// Purpose: Add or replace one provider's models in `local.toml` by text surgery, keeping everything else byte for byte.
-/// Serves: `adopt_local_model` and `local_delete`.
+/// Serves: `adopt_local_model` and the `local.rs` tests.
 /// Design: `docs/design/config-routing.md` §3.
 /// Up: `adopt_local_model`; the `local.rs` tests.
 /// Down: `read_local_blocks`, `write_local_blocks` and `LocalBlock::render`.

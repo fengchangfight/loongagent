@@ -1,7 +1,22 @@
+//! Purpose: Line mode: the same client as the TUI, reading prompts from stdin and streaming a turn's deltas.
+//!
+//! # Contract
+//! - **Serves:** `loongagent repl`, the surface that works under a pipe or in any terminal.
+//! - **Design:** `docs/design/surfaces.md` §2 and §7.
+//! - **Upstream:** `main.rs`'s `repl` arm parses the flags and calls `repl`.
+//! - **Downstream:** `ChildTransport`, `loong_tui::Client` (`attach`, `replay`, `submit_with`, `respond`) and `print_streaming`.
+//! - **Verify:** `cargo test -p loongagent --test tui_surface` · `./scripts/check.sh`
+
 use super::*;
 
 use crate::tui::ChildTransport;
 
+/// Purpose: Print `model.delta` pieces as they arrive and return the rendered lines that are not already on screen.
+/// Serves: `repl`, which must not show a streamed answer twice.
+/// Design: `docs/design/surfaces.md` §7 (the one transient notification).
+/// Up: `repl` on every prompt; no other caller.
+/// Down: `Client::submit_with` and `std::io::stdout`.
+/// Verify: `cargo test -p loongagent --test tui_surface`.
 /// Print a turn's deltas as they arrive, and return the rendered lines that are
 /// not already on screen. A streamed answer would otherwise appear twice: once as
 /// it was written and once when the turn finished.
@@ -26,6 +41,12 @@ fn print_streaming(client: &mut Client<ChildTransport>, text: &str) -> Result<Ve
     Ok(lines.into_iter().filter(|line| line != &streamed).collect())
 }
 
+/// Purpose: Run the line-mode loop: attach to the session, replay it, then prompt, approve or deny until stdin closes.
+/// Serves: `loongagent repl` and the pipe test that proves a non-TTY surface works.
+/// Design: `docs/design/surfaces.md` §2 and §7.
+/// Up: `main.rs`'s `repl` arm; no other caller.
+/// Down: `Args::ensure_parent`, `ChildTransport::spawn`, `Client::{attach, replay, pending_approval, respond}` and `print_streaming`.
+/// Verify: `cargo test -p loongagent --test tui_surface`.
 pub(crate) fn repl(args: Args) -> Result<(), String> {
     args.ensure_parent()?;
     let (transport, _) = ChildTransport::spawn(&args, false)?;

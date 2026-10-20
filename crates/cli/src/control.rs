@@ -1,7 +1,22 @@
+//! Purpose: The control-plane client configuration: two files, one pinned key, and the verified pack cache.
+//!
+//! # Contract
+//! - **Serves:** `setup`, `control status|sync`, `profiles` and `use`, and every managed run's `Args::settings_with_pack`.
+//! - **Design:** `docs/design/surfaces.md` §2; `docs/design/control-plane.md` §1–§5.
+//! - **Upstream:** `main.rs`'s `setup`, `control`, `profiles` and `use` arms; `Args::settings_with_pack` calls `sync_pack` and `tui.rs` calls `load_control`/`cached_pack_state`.
+//! - **Downstream:** `loong_control::{sync, Cache, ControlConfig}`, `loong_pack::unhex` and `loong_config::{layer_paths, resolve, pack_layer, profiles_from_payload}`.
+//! - **Verify:** `cargo test -p loongagent` · `./scripts/check.sh`
+
 use super::*;
 
 use crate::config_cmd::resolve_reference;
 
+/// Purpose: Ask one question with an optional default, reading the answer from an injected line source.
+/// Serves: `setup`'s interactive path.
+/// Design: `docs/design/control-plane.md` §1.
+/// Up: `setup`; no other caller.
+/// Down: `std::io::stdout` and the caller's line iterator.
+/// Verify: `cargo test -p loongagent`.
 fn ask(prompt: &str, default: Option<&str>, lines: &mut dyn Iterator<Item = String>) -> String {
     print!("{prompt}");
     match default {
@@ -19,6 +34,8 @@ fn ask(prompt: &str, default: Option<&str>, lines: &mut dyn Iterator<Item = Stri
     }
 }
 
+/// Purpose: The machine-wide control file, root-owned and delivered with the image.
+/// Contract: `control.rs` file choice; `load_control`, `save_control`, `setup` and `control` call it.
 /// The machine's control-plane configuration: who this installation talks to, and
 /// the key it pinned. Root-owned and delivered with the binary (image, MDM) — the
 /// one value a user must not be able to change is the pin (ADR-0016 §3).
@@ -30,6 +47,8 @@ fn system_control_path() -> PathBuf {
     loong_config::system_config_dir().join("control.toml")
 }
 
+/// Purpose: The user's own control file, which on a managed install may supply only the token.
+/// Contract: `control.rs` file choice; `load_control` and `save_control` call it.
 /// The user's own file. On an unmanaged install it is the whole configuration; on a
 /// managed one only `token` may come from here, so each user can keep their own copy
 /// of the read token (the machine file lives in a root-only directory).
@@ -37,6 +56,8 @@ fn user_control_path() -> PathBuf {
     config_dir().join("control.toml")
 }
 
+/// Purpose: Parse one control file, or `None` when it does not exist.
+/// Contract: `control.rs` file loading; `load_control` is the only caller.
 fn read_control_file(path: &Path) -> Result<Option<ControlFile>, String> {
     if !path.exists() {
         return Ok(None);
@@ -47,6 +68,12 @@ fn read_control_file(path: &Path) -> Result<Option<ControlFile>, String> {
     Ok(Some(file))
 }
 
+/// Purpose: Merge the machine and user files, letting only the token come from the user.
+/// Serves: `load_control`, and the rule that a user cannot re-pin the key.
+/// Design: `docs/design/control-plane.md` §1 and §5.
+/// Up: `load_control`; the `local.rs` tests also call it.
+/// Down: no further call — it only chooses fields.
+/// Verify: `cargo test -p loongagent`.
 /// Where the two files disagree, the machine file wins for the address and the key,
 /// and the user file may only supply the token. A user who could re-pin the key would
 /// make the pin advisory, and a user who could not supply a token would have to be
@@ -67,12 +94,24 @@ pub(crate) fn merge_control(
     }
 }
 
+/// Purpose: Read both control files and return what this install will use.
+/// Serves: `Args::settings_with_pack`, `sync_pack`, `cached_pack_state`, `setup`, `control`, `profiles`, `use_profile` and `tui.rs`.
+/// Design: `docs/design/control-plane.md` §1.
+/// Up: `sync_pack`, `cached_pack_state`, `setup`, `control`, `profiles`, `use_profile` and `tui.rs`'s `full_screen`.
+/// Down: `system_control_path`, `user_control_path`, `read_control_file` and `merge_control`.
+/// Verify: `cargo test -p loongagent`.
 pub(crate) fn load_control() -> Result<Option<ControlFile>, String> {
     let system = read_control_file(&system_control_path())?;
     let user = read_control_file(&user_control_path())?;
     Ok(merge_control(system, user))
 }
 
+/// Purpose: Write the control file to the chosen scope, explaining the root requirement when the machine file fails.
+/// Serves: `connect`, and so `setup` and the TUI's first-run form.
+/// Design: `docs/design/control-plane.md` §1 and §5.
+/// Up: `connect`; no other caller.
+/// Down: `std::fs::create_dir_all`, `toml::to_string` and `std::fs::write`.
+/// Verify: `cargo test -p loongagent`.
 /// Write the configuration. `system` needs root, and is what an image or a
 /// configuration-management run uses; otherwise it goes to the user's own file.
 fn save_control(file: &ControlFile, system: bool) -> Result<PathBuf, String> {
@@ -105,6 +144,8 @@ fn save_control(file: &ControlFile, system: bool) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+/// Purpose: The cache directory for the verified pack, under the client's one root.
+/// Contract: `control.rs` state; `sync_pack`, `cached_pack_state`, `connect`, `control` and `profiles` call it.
 /// Where the verified pack is cached. State, not configuration.
 fn pack_cache(config: &loong_control::ControlConfig) -> loong_control::Cache {
     // Subdirectories of the same root: the file that the client *writes* goes under
@@ -112,6 +153,12 @@ fn pack_cache(config: &loong_control::ControlConfig) -> loong_control::Cache {
     loong_control::Cache::new(config_dir(), &config.origin())
 }
 
+/// Purpose: Validate the pinned key and token reference and build the control-plane client configuration.
+/// Serves: every command that talks to the control plane.
+/// Design: `docs/design/control-plane.md` §2 and §5.
+/// Up: `sync_pack`, `cached_pack_state`, `setup`, `control`, `profiles`, `use_profile` and `connect`.
+/// Down: `loong_pack::unhex`, `resolve_reference` and `ControlConfig::check_transport`.
+/// Verify: `cargo test -p loongagent`.
 /// The control-plane client configuration, with the token reference resolved.
 pub(crate) fn control_config(
     file: &ControlFile,
@@ -147,6 +194,12 @@ pub(crate) fn control_config(
     Ok((config, token))
 }
 
+/// Purpose: The first non-empty line of a description, for a one-line pack summary.
+/// Serves: `PackState::summary` in `main.rs` and `setup`'s profile list.
+/// Design: `docs/design/control-plane.md` §3.
+/// Up: `main.rs`'s `PackState::summary`; no other caller.
+/// Down: `str::lines`; no further call.
+/// Verify: `cargo test -p loongagent`.
 pub(crate) fn first_line(text: &str) -> String {
     text.lines()
         .find(|line| !line.trim().is_empty())
@@ -155,6 +208,12 @@ pub(crate) fn first_line(text: &str) -> String {
         .to_string()
 }
 
+/// Purpose: Fetch and verify a pack or fall back to the last verified one, then pick the profile this install runs.
+/// Serves: `Args::settings_with_pack`, the one place a managed run consults the control plane.
+/// Design: `docs/design/control-plane.md` §1 and §4.
+/// Up: `Args::settings_with_pack`; no other caller.
+/// Down: `load_control`, `control_config`, `pack_cache`, `loong_control::sync`, `profiles_from_payload` and `ProfilePack::pick`.
+/// Verify: `cargo test -p loongagent`.
 /// Fetch, verify and cache the pack (or fall back to the last verified one), then
 /// pick the profile this install runs.
 ///
@@ -212,6 +271,12 @@ pub(crate) fn sync_pack(args: &Args) -> Result<Option<PackState>, String> {
     }))
 }
 
+/// Purpose: The last verified pack, without touching the network — what a surface shows before a session starts.
+/// Serves: `tui.rs`'s intro, `profiles` and `use_profile`.
+/// Design: `docs/design/control-plane.md` §4.
+/// Up: `tui.rs`'s `full_screen`, `profiles` and `use_profile`.
+/// Down: `load_control`, `control_config`, `Cache::load`, `Envelope::verify` and `ProfilePack::pick`.
+/// Verify: `cargo test -p loongagent`.
 /// The pack this install last verified, without touching the network — what a client
 /// surface shows before a session starts.
 pub(crate) fn cached_pack_state(args: &Args) -> Result<Option<PackState>, String> {
@@ -247,6 +312,12 @@ pub(crate) fn cached_pack_state(args: &Args) -> Result<Option<PackState>, String
     }))
 }
 
+/// Purpose: Ask for the address, the pinned key and an optional token reference, then prove the configuration before saving it.
+/// Serves: `loongagent setup`, the only thing a first managed run needs.
+/// Design: `docs/design/control-plane.md` §1 and §4.
+/// Up: `main.rs`'s `setup` arm; no other caller.
+/// Down: `load_control`, `system_control_path`, `user_control_path`, `ask`, `connect` and `print_profiles`.
+/// Verify: `cargo test -p loongagent`.
 /// Configure the control plane. This is the only thing a first run needs, and the
 /// only thing it may configure: which control plane, and which key this install
 /// trusts. Model endpoints and routing are not a user's to set (T-07, ADR-0016).
@@ -353,6 +424,8 @@ pub(crate) fn setup(args: Args) -> Result<(), String> {
     Ok(())
 }
 
+/// Purpose: Print the pack's warnings once, where the TUI's server notes will also carry them.
+/// Contract: `control.rs` diagnostics; `sync_pack`, `cached_pack_state`, `connect`, `control` and `profiles` call it.
 /// Say what the pack is carrying, once, where a person will see it. The TUI shows the
 /// server's notes, so this reaches the interface as well as the terminal.
 fn note_pack_warnings(pack: &loong_config::ProfilePack) {
@@ -361,6 +434,12 @@ fn note_pack_warnings(pack: &loong_config::ProfilePack) {
     }
 }
 
+/// Purpose: Prove a control-plane configuration, fetch and verify a pack, and only then write the file.
+/// Serves: `setup` and the TUI's first-run form, so the two cannot drift apart.
+/// Design: `docs/design/control-plane.md` §4.
+/// Up: `setup` and `tui.rs`'s `full_screen`; no other caller.
+/// Down: `control_config`, `pack_cache`, `loong_control::sync`, `profiles_from_payload` and `save_control`.
+/// Verify: `cargo test -p loongagent`.
 /// Prove a control-plane configuration before saving it: validate the address, fetch
 /// and verify a pack, and only then write the file. Shared by `loongagent setup` and
 /// the TUI's first-run form, so the two cannot drift apart.
@@ -385,6 +464,12 @@ pub(crate) fn connect(
     Ok((path, synced, pack))
 }
 
+/// Purpose: List the pack's profiles with their models and mark the selected one.
+/// Serves: `setup` and `control`'s `status` and `sync` output.
+/// Design: `docs/design/control-plane.md` §3.
+/// Up: `setup` and `control`; no other caller.
+/// Down: `std::println` over the `ProfilePack` fields; no further call.
+/// Verify: `cargo test -p loongagent`.
 fn print_profiles(pack: &loong_config::ProfilePack, selected: Option<&str>) {
     for profile in &pack.profiles {
         let marker = if Some(profile.name.as_str()) == selected {
@@ -401,6 +486,12 @@ fn print_profiles(pack: &loong_config::ProfilePack, selected: Option<&str>) {
     }
 }
 
+/// Purpose: `control status|sync`: what this install trusts, what it has cached, and whether the plane answers.
+/// Serves: `loongagent control status|sync`.
+/// Design: `docs/design/control-plane.md` §1 and §2.
+/// Up: `main.rs`'s `control` arm; no other caller.
+/// Down: `load_control`, `control_config`, `pack_cache`, `loong_control::sync`, `print_profiles` and `note_pack_warnings`.
+/// Verify: `cargo test -p loongagent`.
 /// `loongagent control status|sync` — what this install trusts, and what it has.
 pub(crate) fn control(rest: &[String]) -> Result<(), String> {
     let sub = rest
@@ -521,6 +612,12 @@ pub(crate) fn control(rest: &[String]) -> Result<(), String> {
     }
 }
 
+/// Purpose: Show the profiles the verified pack offers and which one this install runs.
+/// Serves: `loongagent profiles`.
+/// Design: `docs/design/control-plane.md` §3.
+/// Up: `main.rs`'s `profiles` arm; no other caller.
+/// Down: `cached_pack_state`, `load_control`, `control_config`, `Cache::load` and `print_profiles`.
+/// Verify: `cargo test -p loongagent`.
 /// `loongagent profiles` — what the control plane offers, and what this install runs.
 pub(crate) fn profiles(args: Args) -> Result<(), String> {
     let state = cached_pack_state(&args)?.ok_or_else(|| {
@@ -543,6 +640,12 @@ pub(crate) fn profiles(args: Args) -> Result<(), String> {
     Ok(())
 }
 
+/// Purpose: Refuse a name the pack does not offer, then record the chosen profile in the user layer.
+/// Serves: `loongagent use <name>`, the one profile choice a user owns.
+/// Design: `docs/design/control-plane.md` §3; `docs/design/config-routing.md` §4.
+/// Up: `main.rs`'s `use` arm; no other caller.
+/// Down: `cached_pack_state`, `load_control`, `control_config`, `ProfilePack::pick` and `std::fs::write`.
+/// Verify: `cargo test -p loongagent`.
 /// `loongagent use <name>` — the one profile-related choice a user owns.
 pub(crate) fn use_profile(args: Args, rest: &[String]) -> Result<(), String> {
     // `rest` is everything after `use`, so the first non-flag word *is* the name.

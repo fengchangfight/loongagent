@@ -1,3 +1,12 @@
+//! Purpose: The `server --stdio` command: resolve the layers, build the kernel and run the request loop.
+//!
+//! # Contract
+//! - **Serves:** `loongagent server`, and every surface that spawns it as a child.
+//! - **Design:** `docs/design/surfaces.md` §1 and §2.
+//! - **Upstream:** `main.rs`'s `server` arm; `tui.rs`'s `ChildTransport` starts it as `server --stdio`.
+//! - **Downstream:** `loong_server::Server`, `loong_kernel` for the turn and the log, `loong_hooks`/`loong_mcp`/`loong_skills`/`loong_plugin` for what joins a session, and `loong_sandbox` for the boundary check.
+//! - **Verify:** `cargo test -p loongagent --test vertical_slice` · `./scripts/check.sh`
+
 use super::*;
 
 use crate::config_cmd::resolve_reference;
@@ -6,6 +15,12 @@ use crate::session::session_dir;
 
 // ---------------------------------------------------------------- the server
 
+/// Purpose: Build the configured kernel, record the pack provenance, and run the stdio loop with a factory for new sessions.
+/// Serves: `loongagent server --stdio`, the one process that owns a running session.
+/// Design: `docs/design/surfaces.md` §1 and §2.
+/// Up: `main.rs`'s `server` arm; no other caller.
+/// Down: `Args::settings_with_pack`, `installed_plugins`, `load_catalogue`, `build_models`, `build_kernel`, `Kernel::{record_control_synced, record_profile_selected}` and `Server::run_stdio`.
+/// Verify: `cargo test -p loongagent --test vertical_slice`.
 pub(crate) fn serve(args: Args) -> Result<(), String> {
     args.ensure_parent()?;
     // `--debug-model`: point the provider's raw-exchange dump at a sidecar beside this
@@ -144,6 +159,12 @@ pub(crate) fn serve(args: Args) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// Purpose: Turn the flags and the resolved profile into the one kernel configuration every session build uses.
+/// Serves: `build_kernel`, including a later `session.new` built through the factory.
+/// Design: `docs/design/surfaces.md` §2; `docs/design/config-routing.md` §2.
+/// Up: `build_kernel`; no other caller.
+/// Down: `KernelConfig::new`, `steps_or_unlimited` and `context_engine_config`.
+/// Verify: `cargo test -p loongagent --test vertical_slice`.
 /// The kernel settings this command line and configuration describe.
 ///
 /// Out here rather than inline so that a *second* session built later gets the same ones.
@@ -179,6 +200,12 @@ fn kernel_config(args: &Args, settings: &loong_config::Profile, log: &Path) -> K
     config
 }
 
+/// Purpose: Build the layered-memory configuration when the profile asks for it, and `None` otherwise.
+/// Serves: `kernel_config`; the default is the rollback path with no key set.
+/// Design: `docs/design/context-ledger.md` §4 and §7.
+/// Up: `kernel_config`; no other caller.
+/// Down: `Profile::context_engine`, `ContextEngineConfig::new` and the summariser defaults.
+/// Verify: `cargo test -p loongagent`.
 /// The layered memory, when the resolved configuration asks for it (ADR-0017).
 ///
 /// `None` is the default and the rollback path: no key was set, so the session
@@ -224,6 +251,12 @@ fn context_engine_config(
     Some(config)
 }
 
+/// Purpose: Whether an endpoint is remote enough to need a key; loopback does not.
+/// Serves: `build_models`, which warns about a missing key only where a 401 is real.
+/// Design: `docs/design/config-routing.md` §8.
+/// Up: `build_models`; the module tests call it directly.
+/// Down: the small URL split in this function; no further call.
+/// Verify: `cargo test -p loongagent` (the `endpoint_key_tests` module).
 /// Whether an endpoint needs a credential.
 ///
 /// A loopback address does not: the server is on this machine and has nobody to
@@ -267,6 +300,12 @@ pub(crate) const DEFAULT_SUMMARIZER_URL: &str = "http://127.0.0.1:11434";
 /// can read was measured to fail both ways.
 pub(crate) const DEFAULT_SUMMARIZER_MODEL: &str = "qwen2.5:7b-instruct";
 
+/// Purpose: Open the log at a path or create it, with the models, catalogue and memory a session needs.
+/// Serves: `serve` for the first session and the `KernelFactory` for every later one.
+/// Design: `docs/design/surfaces.md` §1 and §2.
+/// Up: `serve` and the factory closure it installs; no other caller.
+/// Down: `build_models`, `installed_plugins`, `kernel_config`, `Kernel::{open_with_models, create_with_models}` and `Plugin` bootstrap accessors.
+/// Verify: `cargo test -p loongagent --test vertical_slice`.
 /// Open the log at `path` if it is there, and start one if it is not.
 ///
 /// A session **is** its file, so this is also how a session comes into being.
@@ -299,6 +338,12 @@ fn build_kernel(
     .map_err(|e| e.to_string())
 }
 
+/// Purpose: Build every model the profile offers, or the one adapter a `--model` flag names.
+/// Serves: `serve` and `build_kernel`.
+/// Design: `docs/design/config-routing.md` §8.
+/// Up: `serve`, `build_kernel` and the final unbounded-context check; no other caller.
+/// Down: `build_model`, `resolve_reference`, `endpoint_authenticates` and `OpenAiCompat::new`.
+/// Verify: `cargo test -p loongagent --test vertical_slice`.
 /// Which provider to build: the session's choice if it made one, else the
 /// configuration's (T-07: engineers pick a profile, not a model), else the `echo`
 /// double so a fresh checkout runs without keys.
@@ -359,6 +404,12 @@ fn build_models(
     Ok(built)
 }
 
+/// Purpose: Build one named adapter: a provider double, the real OpenAI-compatible client, or the unconfigured stand-in.
+/// Serves: `build_models` for the `--model` case.
+/// Design: `docs/design/config-routing.md` §8.
+/// Up: `build_models`; no other caller.
+/// Down: `resolve_reference`, `OpenAiCompat::new`, `ScriptedModel::new` and the `echo`/`unconfigured` stand-ins.
+/// Verify: `cargo test -p loongagent --test vertical_slice`.
 fn build_model(
     args: &Args,
     settings: &loong_config::Profile,
@@ -457,12 +508,20 @@ fn build_model(
     }
 }
 
+/// Purpose: The model a first run gets when nothing is configured: every call answers with the command that fixes it.
+/// Serves: `build_models` and `build_model`; the TUI shows the error inside a working session.
+/// Design: `docs/design/surfaces.md` §2.
+/// Up: `build_models` and `build_model` construct it.
+/// Down: the `Model` impl's `complete`, which returns a transport error.
+/// Verify: `cargo test -p loongagent`.
 /// The model a first run gets: it answers every call with the one thing the user
 /// needs to know. Refusing to start would be worse — the TUI shows this as an
 /// error line inside a working session, next to the command that fixes it.
 struct UnconfiguredModel;
 
 impl Model for UnconfiguredModel {
+    /// Purpose: Answer every completion with the one error that says no model is configured.
+    /// Contract: `server.rs` `Model` impl for the unconfigured stand-in.
     fn complete(&mut self, _req: &CompletionRequest) -> Result<CompletionResponse, ModelError> {
         Err(ModelError::Transport(
             "no model is configured yet — run `loongagent setup` to pick one, then start again              (or pass --model echo / demo-write / demo-escape to exercise the loop without a model)"
@@ -471,11 +530,23 @@ impl Model for UnconfiguredModel {
     }
 }
 
+/// Purpose: The plainest provider double: repeats the last user message, with no keys and no network.
+/// Serves: `build_model`'s `echo` case and the end-to-end test.
+/// Design: `docs/design/surfaces.md` §2 (MODELS, the provider doubles).
+/// Up: `build_model` constructs it.
+/// Down: the `Model` impl's `complete`.
+/// Verify: `cargo test -p loongagent --test vertical_slice`.
 /// The plainest possible provider double: repeats the last user message. Used by
 /// `run` and by the end-to-end test; needs no keys and no network.
 struct EchoModel;
 
 impl Model for EchoModel {
+    /// Purpose: Repeat the last user message as `echo: <text>` and report trivial usage.
+    /// Serves: the `echo` double and the client test that drives a real server.
+    /// Design: `docs/design/surfaces.md` §2.
+    /// Up: the kernel's turn loop, through the `Model` trait.
+    /// Down: `ChatMessage` matching and `CompletionResponse`; no further call.
+    /// Verify: `cargo test -p loongagent --test vertical_slice`.
     fn complete(&mut self, req: &CompletionRequest) -> Result<CompletionResponse, ModelError> {
         let last_user = req
             .messages
@@ -501,6 +572,7 @@ impl Model for EchoModel {
 mod endpoint_key_tests {
     use super::endpoint_authenticates;
 
+    /// Purpose: A loopback endpoint is never warned about a missing key, whatever form the URL takes.
     #[test]
     fn a_loopback_endpoint_does_not_need_a_key() {
         // The bug this exists for: the warning fired for `ollama/qwen2.5:7b-instruct`
@@ -522,6 +594,7 @@ mod endpoint_key_tests {
         }
     }
 
+    /// Purpose: A remote or unreadable endpoint keeps the missing-key warning.
     #[test]
     fn a_remote_endpoint_still_wants_a_key() {
         // The warning has to keep working where it is true, or it has been deleted

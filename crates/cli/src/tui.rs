@@ -1,3 +1,12 @@
+//! Purpose: The TUI's composition: the child-process transport and the full-screen surface that owns the terminal.
+//!
+//! # Contract
+//! - **Serves:** `loongagent tui` and `session.rs`'s `resume`, which re-enters through the same surface.
+//! - **Design:** `docs/design/surfaces.md` §2 and §3.
+//! - **Upstream:** `main.rs`'s `tui` arm and `session.rs`'s `resume` call `full_screen`; `repl`, `headless` and `web` use `ChildTransport`.
+//! - **Downstream:** `loong_tui::Client` and `interrupt`, `loong_tui_app::{run, setup_form}`, `control.rs`'s pack cache and `local.rs`'s first-run wizard.
+//! - **Verify:** `cargo test -p loongagent --test tui_surface` · `./scripts/check.sh`
+
 use super::*;
 
 use crate::control::{cached_pack_state, connect, load_control};
@@ -6,6 +15,12 @@ use crate::session::session_intro;
 
 // ---------------------------------------------------------------- the client
 
+/// Purpose: The pipe transport to one server child, plus the handle that lets the interface stop a turn.
+/// Serves: `full_screen`, `repl`, `headless` and `web` — every surface that spawns its own server.
+/// Design: `docs/design/surfaces.md` §3 and §7.
+/// Up: `full_screen`, `repl`, `headless` and `web` construct one.
+/// Down: the `std::process::Child`, its stdin/stdout/stderr and the `loong_tui::Transport` impl.
+/// Verify: `cargo test -p loongagent --test tui_surface`.
 /// The TUI's transport: it spawns the server as a child process and talks to it
 /// over pipes. Same binary, different mode (ADR-0009).
 pub(crate) struct ChildTransport {
@@ -15,12 +30,20 @@ pub(crate) struct ChildTransport {
 }
 
 impl ChildTransport {
+    /// Purpose: The child's process id, so the interface can signal a turn without waiting for its blocked read.
+    /// Contract: `tui.rs` transport; `full_screen` is the only caller.
     /// The server process, so the interface can ask it to stop a turn (SIGINT) without the
     /// client's blocked read standing in the way.
     fn pid(&self) -> u32 {
         self.child.id()
     }
 
+    /// Purpose: Start the same binary as `server --stdio`, carrying this run's session layer to it, and optionally pipe its diagnostics.
+    /// Serves: `full_screen`, `repl`, `headless` and `web`.
+    /// Design: `docs/design/surfaces.md` §3 (each surface spawns its own child).
+    /// Up: `full_screen`, `repl`, `headless` and `web`; no other caller.
+    /// Down: `std::process::Command`, `LOONGAGENT_SERVER_BIN` and a reader thread when notes are captured.
+    /// Verify: `cargo test -p loongagent --test tui_surface`.
     /// `capture_notes` pipes the server's stderr instead of inheriting it: a
     /// full-screen UI owns the terminal, so diagnostics must be drawn, not dumped.
     pub(crate) fn spawn(
@@ -119,11 +142,15 @@ impl ChildTransport {
 }
 
 impl Transport for ChildTransport {
+    /// Purpose: Write one complete JSON-RPC line to the child and flush it.
+    /// Contract: `tui.rs` `Transport` impl, driven by `loong_tui::Client`.
     fn send(&mut self, line: &str) -> Result<(), String> {
         writeln!(self.stdin, "{line}").map_err(|e| e.to_string())?;
         self.stdin.flush().map_err(|e| e.to_string())
     }
 
+    /// Purpose: Read one line back, or `None` when the child closed the pipe.
+    /// Contract: `tui.rs` `Transport` impl, driven by `loong_tui::Client`.
     fn recv_line(&mut self) -> Result<Option<String>, String> {
         let mut buf = String::new();
         match self.stdout.read_line(&mut buf) {
@@ -135,12 +162,20 @@ impl Transport for ChildTransport {
 }
 
 impl Drop for ChildTransport {
+    /// Purpose: Kill and reap the child so no server outlives the surface that spawned it.
+    /// Contract: `tui.rs` `Drop` impl for the transport.
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
 }
 
+/// Purpose: Resolve settings, make sure a model exists, spawn the child and hand the client to `loong_tui_app::run`.
+/// Serves: `loongagent tui` and `loongagent resume`.
+/// Design: `docs/design/surfaces.md` §2 and §3.
+/// Up: `main.rs`'s `tui` arm and `session.rs`'s `resume`; no other caller.
+/// Down: `Args::{is_local, settings_with_pack, session_id}`, `ChildTransport::{spawn, pid}`, `Client::{attach, submit}` and `loong_tui_app::run`.
+/// Verify: `cargo test -p loongagent --test tui_surface`.
 /// The full-screen surface: the client here, the screen in `loong-tui-app`.
 pub(crate) fn full_screen(args: Args) -> Result<(), String> {
     args.ensure_parent()?;

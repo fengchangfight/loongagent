@@ -1,3 +1,12 @@
+//! Purpose: The three `context` commands: what the derived memory holds, whether it agrees with the log, and rebuilding it.
+//!
+//! # Contract
+//! - **Serves:** `loongagent context status|verify|rebuild`.
+//! - **Design:** `docs/design/surfaces.md` §2; `docs/design/context-ledger.md` §4 and §7.
+//! - **Upstream:** `main.rs`'s `context` arms dispatch here.
+//! - **Downstream:** `loong_context::Store` (`open`, `ingest`, `verify`, `rebuild`, `digest`, `summary_count`) and the session's JSONL log.
+//! - **Verify:** `cargo test -p loongagent` · `./scripts/check.sh`
+
 use super::*;
 
 /// The three `context` commands, exercised end to end.
@@ -5,6 +14,12 @@ use super::*;
 mod context_command_tests {
     use super::*;
 
+    /// Purpose: Write a small session log whose attempts and abandoned edit the digest can be checked against.
+    /// Serves: the two `context` command tests in this module.
+    /// Design: `docs/design/context-ledger.md` §4 and §7.
+    /// Up: `status_names_the_store_and_says_the_memory_is_off_rather_than_empty` and `rebuild_then_verify_round_trips_and_the_digest_holds_the_attempt_sequence`.
+    /// Down: `std::fs::write` and `std::env::temp_dir`.
+    /// Verify: `cargo test -p loongagent`.
     fn session_with_a_fix(dir: &Path) -> PathBuf {
         let log = dir.join("s.jsonl");
         let events = [
@@ -58,10 +73,13 @@ mod context_command_tests {
         log
     }
 
+    /// Purpose: Parse the minimum argument list for one of the context tests.
+    /// Contract: `context.rs` tests; the two command tests are the only callers.
     fn args_for(session: &Path) -> Args {
         Args::parse(&["--session".to_string(), session.display().to_string()]).expect("args parse")
     }
 
+    /// Purpose: A missing store is reported as the engine being off, not as an empty memory.
     #[test]
     fn status_names_the_store_and_says_the_memory_is_off_rather_than_empty() {
         // The distinction that matters most: "the engine is off" and "the memory is
@@ -80,6 +98,7 @@ mod context_command_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Purpose: Rebuild, verify and the derived digest survive a round trip through the store.
     #[test]
     fn rebuild_then_verify_round_trips_and_the_digest_holds_the_attempt_sequence() {
         let dir = std::env::temp_dir().join(format!("loong-ctx-cli2-{}", std::process::id()));
@@ -108,11 +127,19 @@ mod context_command_tests {
     }
 }
 
+/// Purpose: The sidecar store beside a session's log.
+/// Contract: `context.rs` commands; `open_context_store`, `context_status` and `context_rebuild` call it.
 /// The sidecar store beside a session's log.
 fn context_store_path(session: &Path) -> PathBuf {
     session.with_extension("context.db")
 }
 
+/// Purpose: Open the session's derived store, creating it only when the caller is the writing command.
+/// Serves: all three `context` commands.
+/// Design: `docs/design/context-ledger.md` §4 and §7.
+/// Up: `context_status`, `context_verify` and `context_rebuild`; no other caller.
+/// Down: `context_store_path`, `loong_context::Store::{open, ingest}` and the session file's existence check.
+/// Verify: `cargo test -p loongagent`.
 /// Open the derived store for a session, creating it if the session has one.
 ///
 /// Reading commands do **not** build it if it is missing: a status command that
@@ -140,6 +167,12 @@ fn open_context_store(session: &Path, create: bool) -> Result<loong_context::Sto
     Ok(store)
 }
 
+/// Purpose: Print what the layered memory holds, what has spent tokens getting there, and whether it is healthy.
+/// Serves: `loongagent context status`, the diagnostic that must not diagnose by rebuilding.
+/// Design: `docs/design/context-ledger.md` §4 and §7.
+/// Up: `main.rs`'s `context` → `status` arm; no other caller.
+/// Down: `open_context_store` and `Store::{verify, summary_count, global_map, summaries_at, pending_synthesis}`.
+/// Verify: `cargo test -p loongagent`.
 /// What the layered memory currently holds, and what it has spent getting there.
 pub(crate) fn context_status(args: Args) -> Result<(), String> {
     let session = args.session_path();
@@ -207,6 +240,12 @@ pub(crate) fn context_status(args: Args) -> Result<(), String> {
     Ok(())
 }
 
+/// Purpose: Check the derived store against its own records and every summary's citations against the log.
+/// Serves: `loongagent context verify`.
+/// Design: `docs/design/context-ledger.md` §7.
+/// Up: `main.rs`'s `context` → `verify` arm; no other caller.
+/// Down: `open_context_store` and `Store::{verify, summaries_at, atom}`.
+/// Verify: `cargo test -p loongagent`.
 /// Check the derived state against its own records, and say what is wrong.
 pub(crate) fn context_verify(args: Args) -> Result<(), String> {
     let session = args.session_path();
@@ -250,6 +289,12 @@ pub(crate) fn context_verify(args: Args) -> Result<(), String> {
     )
 }
 
+/// Purpose: Throw the derived store away and rebuild it from the log, leaving the log untouched.
+/// Serves: `loongagent context rebuild`, the one writing context command.
+/// Design: `docs/design/context-ledger.md` §4 and §7.
+/// Up: `main.rs`'s `context` → `rebuild` arm; no other caller.
+/// Down: `open_context_store`, `Store::{rebuild, digest, digest_domains}` and `context_store_path`.
+/// Verify: `cargo test -p loongagent`.
 /// Throw the derived store away and rebuild it from the log. The log is untouched.
 pub(crate) fn context_rebuild(args: Args) -> Result<(), String> {
     let session = args.session_path();

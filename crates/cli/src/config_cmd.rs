@@ -1,5 +1,16 @@
+//! Purpose: The config inspection commands and the reference resolver: every key says which layer set it.
+//!
+//! # Contract
+//! - **Serves:** `config show`, `config explain`, and the environment and credential loading every run does before it resolves anything.
+//! - **Design:** `docs/design/surfaces.md` §2; `docs/design/config-routing.md` §1–§5.
+//! - **Upstream:** `main.rs`'s `config` arms, and `Args::parse`, which loads the env files first.
+//! - **Downstream:** `loong_config::{resolve, layer_paths, explain_all, Kind}` and the environment or credential files it reads.
+//! - **Verify:** `cargo test -p loongagent --test config_layers` · `./scripts/check.sh`
+
 use super::*;
 
+/// Purpose: Resolve a `file:` target as absolute, `~/…`, or relative to the profile in use.
+/// Contract: `config_cmd.rs` reference resolution; `resolve_reference` is the only caller.
 /// Resolve a configuration reference (ADR-0008 §5: config carries a reference, not
 /// a secret). A bare value is passed through only for non-secret keys.
 /// Where a `file:` reference points: absolute, `~/…`, or relative to the profile in
@@ -14,6 +25,12 @@ fn credential_path(path: &str, base: &Path) -> Option<PathBuf> {
     Some(base.join(path))
 }
 
+/// Purpose: The two env files a run reads, in the order that makes the user win over the workspace.
+/// Serves: `load_env_files` and `read_env_files`; a pack may name `env:NAME` and still work.
+/// Design: `docs/design/config-routing.md` §5 (a secret is a reference).
+/// Up: `load_env_files`; the `local.rs` tests also call it.
+/// Down: `Path::join`; no file is read here.
+/// Verify: `cargo test -p loongagent --test config_layers`.
 /// Environment files the client reads, in order, so a pack can name a variable
 /// (`api_key = "env:DEEPSEEK_API_KEY"`) and still work without the operator
 /// exporting anything before every run.
@@ -28,6 +45,12 @@ pub(crate) fn env_file_paths(user_config_dir: &Path, workspace: &Path) -> Vec<Pa
     vec![user_config_dir.join("env"), workspace.join(".env")]
 }
 
+/// Purpose: Parse the env files into name/value pairs, first definition winning.
+/// Serves: `load_env_files`, and the test that pins the precedence.
+/// Design: `docs/design/config-routing.md` §5.
+/// Up: `load_env_files` and the `local.rs` tests; no other caller.
+/// Down: `std::fs::read_to_string` and the line parser in this function.
+/// Verify: `cargo test -p loongagent --test config_layers`.
 /// Parse the files into `(name, value)` pairs, first definition winning.
 pub(crate) fn read_env_files(paths: &[PathBuf]) -> Vec<(String, String)> {
     let mut found: Vec<(String, String)> = Vec::new();
@@ -60,6 +83,12 @@ pub(crate) fn read_env_files(paths: &[PathBuf]) -> Vec<(String, String)> {
     found
 }
 
+/// Purpose: Put the files' variables into this process and name the file each one came from.
+/// Serves: `Args::parse`, so a pack's `env:NAME` resolves without an export in every shell.
+/// Design: `docs/design/config-routing.md` §5.
+/// Up: `Args::parse`; no other caller.
+/// Down: `env_file_paths`, `read_env_files` and `std::env::set_var`.
+/// Verify: `cargo test -p loongagent --test config_layers`.
 /// Apply them to this process, naming the file each variable actually came from.
 /// Names are printed, never values.
 pub(crate) fn load_env_files(user_config_dir: &Path, workspace: &Path) {
@@ -82,6 +111,12 @@ pub(crate) fn load_env_files(user_config_dir: &Path, workspace: &Path) {
     }
 }
 
+/// Purpose: Read one named secret out of a credentials file, naming the keys that exist but never their values.
+/// Serves: the `file:PATH#KEY` shape of `resolve_reference`.
+/// Design: `docs/design/config-routing.md` §5.
+/// Up: `resolve_reference`; the `local.rs` tests call it directly.
+/// Down: `std::fs::read_to_string` and the per-line parser.
+/// Verify: `cargo test -p loongagent --test config_layers`.
 /// Read one named secret out of a file.
 ///
 /// Line-based and forgiving about the separator, because the file is something an
@@ -134,6 +169,12 @@ pub(crate) fn read_credential(path: &Path, key: &str) -> Option<String> {
     None
 }
 
+/// Purpose: Turn `env:` and `file:` references into a value, and refuse to pretend a credential store is wired.
+/// Serves: `control_config` (the token) and `server.rs` (the key and base URL).
+/// Design: `docs/design/config-routing.md` §5.
+/// Up: `control_config`, `server.rs`'s `build_model` and `build_models`, and `local.rs`'s `local_ping`.
+/// Down: `credential_path`, `read_credential` and `std::env::var`.
+/// Verify: `cargo test -p loongagent --test config_layers`.
 pub(crate) fn resolve_reference(value: Option<&str>, base: &Path) -> Option<String> {
     let value = value?;
     if let Some(name) = value.strip_prefix("env:") {
@@ -179,6 +220,12 @@ pub(crate) fn resolve_reference(value: Option<&str>, base: &Path) -> Option<Stri
     Some(value.to_string())
 }
 
+/// Purpose: Print the layer list and one row per key with its kind and the layer that set it.
+/// Serves: `loongagent config show`, the answer to why a value is what it is.
+/// Design: `docs/design/config-routing.md` §2 and §4.
+/// Up: `main.rs`'s `config` → `show` arm; no other caller.
+/// Down: `Args::settings_with_pack`, `loong_config::layer_paths` and `Profile::explain_all`.
+/// Verify: `cargo test -p loongagent --test config_layers`.
 /// Every key answers "why is this the value?" (ADR-0008 §4).
 pub(crate) fn config_show(args: Args) -> Result<(), String> {
     let (settings, pack) = args.settings_with_pack()?;
@@ -259,6 +306,12 @@ pub(crate) fn config_show(args: Args) -> Result<(), String> {
     Ok(())
 }
 
+/// Purpose: Answer the same question for one key, including the values that were set and lost.
+/// Serves: `loongagent config explain KEY`.
+/// Design: `docs/design/config-routing.md` §2.
+/// Up: `main.rs`'s `config` → `explain` arm; no other caller.
+/// Down: `Args::settings_with_pack`, `loong_config::kind_of` and `Profile::explain`.
+/// Verify: `cargo test -p loongagent --test config_layers`.
 /// The same question for one key, including what lost and why.
 pub(crate) fn config_explain(args: Args) -> Result<(), String> {
     let key = args
@@ -306,6 +359,8 @@ pub(crate) fn config_explain(args: Args) -> Result<(), String> {
     Ok(())
 }
 
+/// Purpose: The one-line meaning of each merge kind, for both config commands.
+/// Contract: `config_cmd.rs` explanation text, called only by `config_explain`.
 fn explain_kind(kind: loong_config::Kind) -> &'static str {
     match kind {
         loong_config::Kind::FreeOverride => "the most local layer that sets it wins",

@@ -1,21 +1,6 @@
 # Files whose code contract is not complete yet. The gate skips these and fails
 # on an entry that is missing or now passes, so this list only shrinks.
 # Regenerate with: python3 scripts/check-modules.py --emit-baseline scripts/code-contract-baseline.txt
-crates/cli/src/config_cmd.rs
-crates/cli/src/context.rs
-crates/cli/src/control.rs
-crates/cli/src/headless.rs
-crates/cli/src/hooks.rs
-crates/cli/src/local.rs
-crates/cli/src/main.rs
-crates/cli/src/mcp.rs
-crates/cli/src/plugin.rs
-crates/cli/src/repl.rs
-crates/cli/src/sandbox.rs
-crates/cli/src/server.rs
-crates/cli/src/session.rs
-crates/cli/src/tui.rs
-crates/cli/src/web.rs
 crates/cli/tests/common/mod.rs
 crates/cli/tests/config_layers.rs
 crates/cli/tests/live_probe.rs

@@ -1,7 +1,22 @@
+//! Purpose: The browser surface: the same JSON-RPC lines over a WebSocket, with a token on the handshake.
+//!
+//! # Contract
+//! - **Serves:** `loongagent web`, the localhost page a browser drives.
+//! - **Design:** `docs/design/surfaces.md` §4 and §7.
+//! - **Upstream:** `main.rs`'s `web` arm parses the flags and calls `web`.
+//! - **Downstream:** `ChildTransport` for the server child, `loong_web::{random_token, bind, serve}` and `Profile::explain_all`.
+//! - **Verify:** `cargo test -p loongagent --test web_surface` · `./scripts/check.sh`
+
 use super::*;
 
 use crate::tui::ChildTransport;
 
+/// Purpose: The bridge state: one server child plus the working directory the browser cannot know.
+/// Serves: `web` and the `loong_web::Session` impl it installs.
+/// Design: `docs/design/surfaces.md` §4.
+/// Up: `web` constructs it and hands it to `loong_web::serve`.
+/// Down: `ChildTransport` for the exchange and the `cwd` it fills into `session.attach`.
+/// Verify: `cargo test -p loongagent --test web_surface`.
 /// The browser surface: the same JSON-RPC lines, carried over a WebSocket.
 struct WebSession {
     transport: ChildTransport,
@@ -9,6 +24,12 @@ struct WebSession {
 }
 
 impl loong_web::Session for WebSession {
+    /// Purpose: Carry one browser line to the child, fill the attach cwd, and forward every line until this request's response.
+    /// Serves: the `loong_web::Session` contract; `web` installs the impl.
+    /// Design: `docs/design/surfaces.md` §4 and §7.
+    /// Up: `loong_web::serve`, through the `Session` trait object.
+    /// Down: `ChildTransport::{send, recv_line}` and the `sink` callback.
+    /// Verify: `cargo test -p loongagent --test web_surface`.
     fn exchange(
         &mut self,
         line: &str,
@@ -56,6 +77,12 @@ impl loong_web::Session for WebSession {
     }
 }
 
+/// Purpose: Resolve settings, spawn the server child, bind a port and serve the page until the process ends.
+/// Serves: `loongagent web`.
+/// Design: `docs/design/surfaces.md` §4.
+/// Up: `main.rs`'s `web` arm; no other caller.
+/// Down: `Args::settings_with_pack`, `ChildTransport::spawn`, `loong_web::{random_token, bind, serve}`.
+/// Verify: `cargo test -p loongagent --test web_surface`.
 pub(crate) fn web(args: Args) -> Result<(), String> {
     args.ensure_parent()?;
     let (settings, pack) = args.settings_with_pack()?;

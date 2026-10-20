@@ -1,5 +1,20 @@
+//! Purpose: The two `mcp` commands: which external tool servers would join a session, and the per-repository trust record.
+//!
+//! # Contract
+//! - **Serves:** `loongagent mcp list` and `mcp trust`, the CLI-only half of MCP trust.
+//! - **Design:** `docs/design/surfaces.md` §2; `docs/design/extension-model.md` §3 and §7.
+//! - **Upstream:** `main.rs`'s `mcp` arms dispatch here.
+//! - **Downstream:** `loong_mcp::McpSet` — `load`, `summary`, `trust_now` — and the manifest fields it prints.
+//! - **Verify:** `cargo test -p loongagent` · `./scripts/check.sh`
+
 use super::*;
 
+/// Purpose: Print every configured server, its action class and overrides, and whether the manifest is trusted enough to run.
+/// Serves: `loongagent mcp list`, the read before an `mcp trust` decision.
+/// Design: `docs/design/extension-model.md` §3 and §7.
+/// Up: `main.rs`'s `mcp` → `list` arm; no other caller.
+/// Down: `McpSet::load`, `McpSet::summary` and the `servers`/`trust` fields.
+/// Verify: `cargo test -p loongagent` (no dedicated test; the command is inspection only).
 /// Show which external tools would join the session.
 pub(crate) fn mcp_list(args: Args) -> Result<(), String> {
     let set = loong_mcp::McpSet::load(&args.cwd).map_err(|e| e.to_string())?;
@@ -30,6 +45,12 @@ pub(crate) fn mcp_list(args: Args) -> Result<(), String> {
     Ok(())
 }
 
+/// Purpose: Record a human trust decision over the current `mcp.toml` bytes and say where it was recorded.
+/// Serves: `loongagent mcp trust`; editing the manifest re-arms the question.
+/// Design: `docs/design/extension-model.md` §7.
+/// Up: `main.rs`'s `mcp` → `trust` arm; no other caller.
+/// Down: `McpSet::load` and `McpSet::trust_now`.
+/// Verify: `cargo test -p loongagent` (no dedicated test; trust is a disk write on an explicit command).
 pub(crate) fn mcp_trust(args: Args) -> Result<(), String> {
     let set = loong_mcp::McpSet::load(&args.cwd).map_err(|e| e.to_string())?;
     if set.servers.is_empty() {

@@ -1,5 +1,20 @@
+//! Purpose: The two `hooks` commands: the effective hook set with its trust, and the explicit per-repository opt-in.
+//!
+//! # Contract
+//! - **Serves:** `loongagent hooks list` and `hooks trust`, the human decision ADR-0007 §7 requires.
+//! - **Design:** `docs/design/surfaces.md` §2; `docs/design/extension-model.md` §1 and §7.
+//! - **Upstream:** `main.rs`'s `hooks` arms dispatch here.
+//! - **Downstream:** `loong_hooks::HookSet` — `load`, `summary`, `fingerprints`, `trust_now`.
+//! - **Verify:** `cargo test -p loongagent` · `./scripts/check.sh`
+
 use super::*;
 
+/// Purpose: Show what would run, in what order, and say whether it is inert until trusted.
+/// Serves: `loongagent hooks list`, the read before a trust decision.
+/// Design: `docs/design/extension-model.md` §1 and §7.
+/// Up: `main.rs`'s `hooks` → `list` arm; no other caller.
+/// Down: `HookSet::load`, `HookSet::summary` and the `specs`/`trust` fields.
+/// Verify: `cargo test -p loongagent` (no dedicated test; the command is inspection only).
 /// Show what would run, and whether it is trusted to.
 pub(crate) fn hooks_list(args: Args) -> Result<(), String> {
     let set = loong_hooks::HookSet::load(&args.cwd).map_err(|e| e.to_string())?;
@@ -46,6 +61,12 @@ pub(crate) fn hooks_list(args: Args) -> Result<(), String> {
     Ok(())
 }
 
+/// Purpose: Fingerprint the hook files, record the opt-in and print the hashes so the decision is auditable.
+/// Serves: `loongagent hooks trust`; editing any hook re-arms the question.
+/// Design: `docs/design/extension-model.md` §7.
+/// Up: `main.rs`'s `hooks` → `trust` arm; no other caller.
+/// Down: `HookSet::load`, `HookSet::fingerprints` and `HookSet::trust_now`.
+/// Verify: `cargo test -p loongagent` (no dedicated test; trust is a disk write on an explicit command).
 /// The explicit, per-repository opt-in. Bound to bytes: editing a hook re-arms it.
 pub(crate) fn hooks_trust(args: Args) -> Result<(), String> {
     let set = loong_hooks::HookSet::load(&args.cwd).map_err(|e| e.to_string())?;

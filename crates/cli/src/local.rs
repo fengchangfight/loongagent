@@ -1,8 +1,23 @@
+//! Purpose: Local mode: its own `local.toml`, the first-run wizard, the `local` subcommands and the fixtures their tests need.
+//!
+//! # Contract
+//! - **Serves:** `loongagent local …`, the first run of `tui --local`, and the local-mode integration tests.
+//! - **Design:** `docs/design/surfaces.md` §2; `docs/design/config-routing.md` §1, §3 and §8.
+//! - **Upstream:** `main.rs`'s `local` arm; `tui.rs`'s `full_screen` calls `configure_local`, `session_needs_a_model` and `spawn_model_health`.
+//! - **Downstream:** `loong_config`'s local layer, catalog and profile types, `loong_providers::probe`, and `loong_tui_app`'s wizard and health types.
+//! - **Verify:** `cargo test -p loongagent --test local_mode` · `./scripts/check.sh`
+
 use super::*;
 
 use crate::config_cmd::resolve_reference;
 use crate::server::{DEFAULT_SUMMARIZER_MODEL, DEFAULT_SUMMARIZER_URL};
 
+/// Purpose: Dispatch the `local` subcommands, always resolving the local file whichever mode the caller typed.
+/// Serves: `loongagent local [list|add|delete|edit|check|ping|semantic]`.
+/// Design: `docs/design/config-routing.md` §1 and §3.
+/// Up: `main.rs`'s `local` arm; no other caller.
+/// Down: `local_list`, `configure_local`, `local_delete`, `local_edit`, `local_check`, `local_ping` and `local_semantic`.
+/// Verify: `cargo test -p loongagent --test local_mode`.
 /// The local first run: get a key, prove it, and write the two files that make the
 /// next run uneventful.
 ///
@@ -70,6 +85,12 @@ pub(crate) fn local(mut args: Args) -> Result<(), String> {
     }
 }
 
+/// Purpose: Refuse to open a local session that has nothing to answer with, naming the command that fixes it.
+/// Serves: `tui.rs`'s `full_screen`, before the terminal is taken over.
+/// Design: `docs/design/config-routing.md` §3.
+/// Up: `tui.rs`'s `full_screen`; the `local.rs` tests.
+/// Down: no further call; it reads the resolved profile.
+/// Verify: `cargo test -p loongagent --test local_mode`.
 /// Whether a session may open at all.
 ///
 /// A session with no model cannot answer anything, and its first few minutes are spent
@@ -97,6 +118,12 @@ pub(crate) fn session_needs_a_model(
         .to_string())
 }
 
+/// Purpose: Show what this install will actually run: the semantic switch, the models in slot order, and where the file is.
+/// Serves: `loongagent local`.
+/// Design: `docs/design/config-routing.md` §3.
+/// Up: `local`; no other caller.
+/// Down: `Args::settings_with_pack` and `Profile::{context_engine, default_model}`.
+/// Verify: `cargo test -p loongagent --test local_mode`.
 /// `loongagent local` — what this install will actually run, and where it says so.
 fn local_list(args: &Args, path: &Path) -> Result<(), String> {
     let (settings, _) = args.settings_with_pack()?;
@@ -146,6 +173,12 @@ fn local_list(args: &Args, path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Purpose: The layered memory's switch: status, on with a summariser choice, or off.
+/// Serves: `loongagent local semantic [status|on|off]` (ADR-0017).
+/// Design: `docs/design/surfaces.md` §2; `docs/design/context-ledger.md` §4.
+/// Up: `local`; no other caller.
+/// Down: `semantic_status`, `semantic_on` and `write_semantic_config`.
+/// Verify: `cargo test -p loongagent --test local_mode`.
 /// The layered memory's local switch: `loongagent local semantic [status|on|off]`.
 ///
 /// One command, because the two questions a person actually has are "is it on?" and
@@ -175,6 +208,12 @@ fn local_semantic(args: &Args, path: &Path, words: &[String]) -> Result<(), Stri
     }
 }
 
+/// Purpose: The three states `local semantic` writes, which are not the same setting: off, record-only, semantic.
+/// Serves: `local_semantic`, `semantic_on` and `write_semantic_config`.
+/// Design: `docs/design/context-ledger.md` §4.
+/// Up: `local_semantic` and `semantic_on` build it; `write_semantic_config` consumes it.
+/// Down: no further call; it is data.
+/// Verify: `cargo test -p loongagent`.
 /// What `local semantic` writes. `Off` and `Record` are different states: one is the
 /// old compaction path, the other is the full retrieval layer with no model.
 enum SemanticWrite {
@@ -188,6 +227,12 @@ enum SemanticWrite {
     },
 }
 
+/// Purpose: Say whether the engine is on and whether the chosen model is actually installed, which are different facts.
+/// Serves: `loongagent local semantic`.
+/// Design: `docs/design/context-ledger.md` §4 and §7.
+/// Up: `local_semantic`; no other caller.
+/// Down: `Args::settings_with_pack`, `Profile::context_engine` and `ollama_models`.
+/// Verify: `cargo test -p loongagent`.
 /// `loongagent local semantic` — what is configured, and whether the model is actually
 /// installed. "Configured" and "working" are different facts and the gap between them
 /// is exactly what a person is asking about.
@@ -245,6 +290,12 @@ fn semantic_status(args: &Args, path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Purpose: Pick and write a summariser, then read the file back through the same resolver a session uses.
+/// Serves: `loongagent local semantic on [provider/]<model>`.
+/// Design: `docs/design/context-ledger.md` §4.
+/// Up: `local_semantic`; no other caller.
+/// Down: `parse_summarizer_selector`, `summarizer_base_url`, `ollama_models`, `choose_model`, `write_semantic_config` and `Args::settings_with_pack`.
+/// Verify: `cargo test -p loongagent`.
 /// `loongagent local semantic on [provider/]<model>`.
 fn semantic_on(args: &Args, path: &Path, model_arg: Option<&str>) -> Result<(), String> {
     if args.record {
@@ -302,6 +353,12 @@ fn semantic_on(args: &Args, path: &Path, model_arg: Option<&str>) -> Result<(), 
     Ok(())
 }
 
+/// Purpose: Read `[provider/]model`, refusing a provider the summariser cannot speak and saying why.
+/// Serves: `semantic_on`.
+/// Design: `docs/design/context-ledger.md` §4.
+/// Up: `semantic_on`; the `local.rs` tests.
+/// Down: no further call; it splits the selector.
+/// Verify: `cargo test -p loongagent`.
 /// `[provider/]model` -> `("ollama", Some(model))`.
 ///
 /// Only one provider exists, and that is a fact about the design rather than a stage
@@ -329,6 +386,12 @@ fn parse_summarizer_selector(
     }
 }
 
+/// Purpose: The model to use when none was named: the configured one, the measured default, or the only installed one.
+/// Serves: `semantic_on`.
+/// Design: `docs/design/context-ledger.md` §4.
+/// Up: `semantic_on`; the `local.rs` tests.
+/// Down: no further call; it compares names.
+/// Verify: `cargo test -p loongagent`.
 /// Which model to use when nobody named one: the one already configured, else the
 /// measured default, else the only installed one. With several installed and none of
 /// those, it **refuses and lists them** — guessing between 0.6B and 7B is a quality
@@ -360,6 +423,8 @@ fn choose_model(installed: &[String], existing: Option<&str>) -> Result<String, 
     }
 }
 
+/// Purpose: The summariser endpoint, with the OpenAI shim's `/v1` suffix removed.
+/// Contract: `local.rs` semantic switch; `semantic_on` and its test call it.
 /// The summariser endpoint. Ollama's native API has no `/v1`; a person who types one
 /// (because that is the shim's address) is corrected here rather than at the first
 /// request.
@@ -371,6 +436,8 @@ fn summarizer_base_url(input: Option<&str>) -> String {
     raw.strip_suffix("/v1").unwrap_or(raw).to_string()
 }
 
+/// Purpose: The model names this Ollama can serve, or why it could not be asked.
+/// Contract: `local.rs` semantic switch; `semantic_status` and `semantic_on` call it.
 /// The model names this Ollama can serve, or why it could not be asked.
 fn ollama_models(base: &str) -> Result<Vec<String>, String> {
     let url = format!("{}/api/tags", base.trim_end_matches('/'));
@@ -382,6 +449,8 @@ fn ollama_models(base: &str) -> Result<Vec<String>, String> {
     }
 }
 
+/// Purpose: The `model` already written in this file's `[summarizer]`, so a switch keeps the last choice.
+/// Contract: `local.rs` semantic switch; `semantic_on` is the only caller.
 /// The `model = "…"` already in this file's `[summarizer]`, so switching the engine on
 /// again keeps the model the person chose last time.
 fn existing_summarizer_model(path: &Path) -> Option<String> {
@@ -392,6 +461,12 @@ fn existing_summarizer_model(path: &Path) -> Option<String> {
         .find_map(|line| quoted_value(line.trim(), "model"))
 }
 
+/// Purpose: Write or remove the memory tables in `local.toml` by text surgery, leaving every other byte alone.
+/// Serves: `local semantic on|off|on --record`.
+/// Design: `docs/design/context-ledger.md` §4.
+/// Up: `local_semantic` and `semantic_on`; the `local.rs` tests.
+/// Down: `take_section`, `toml_escape` and `std::fs::write`.
+/// Verify: `cargo test -p loongagent`.
 /// Write (or remove) the `[context_engine]` and `[summarizer]` tables in `local.toml`,
 /// leaving every other byte of the file alone.
 fn write_semantic_config(path: &Path, write: &SemanticWrite) -> Result<(), String> {
@@ -467,6 +542,12 @@ fn write_semantic_config(path: &Path, write: &SemanticWrite) -> Result<(), Strin
     std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))
 }
 
+/// Purpose: Remove one section and return it, keeping comments and keys this command does not own.
+/// Serves: `write_semantic_config` and `existing_summarizer_model`.
+/// Design: `docs/design/context-ledger.md` §4.
+/// Up: `write_semantic_config` and `existing_summarizer_model`; no other caller.
+/// Down: no further call; it walks lines.
+/// Verify: `cargo test -p loongagent`.
 /// Remove one `[header]` table, returning the rest of the text and the section's body
 /// lines that are **not** keys this command owns. Comments, blank lines and unknown
 /// keys come back so a hand-written note in the section is not a casualty of a switch.
@@ -511,6 +592,12 @@ fn take_section(text: &str, header: &str, managed: &[&str]) -> (String, Vec<Stri
     (rest, kept)
 }
 
+/// Purpose: Delete the models a slot, a model name or a provider names, and keep the router default valid.
+/// Serves: `loongagent local delete <slot|model|provider>`.
+/// Design: `docs/design/config-routing.md` §3.
+/// Up: `local`; no other caller.
+/// Down: `read_local_blocks`, `select_local`, `write_local_blocks` and `std::println`.
+/// Verify: `cargo test -p loongagent --test local_mode`.
 /// `loongagent local delete <slot|model|provider>`.
 ///
 /// By three names because all three are things a person has in their head at different
@@ -547,6 +634,12 @@ fn local_delete(path: &Path, selector: &str) -> Result<(), String> {
 /// that was.
 const PING_PROMPT: &str = "只输出一行，格式严格为：<你自称的模型名>/<把 loongagent 倒过来写>\n                           不要解释，不要多余标点。不确定自己叫什么就写 unknown。";
 
+/// Purpose: One model's answer or the reason there was none, with the label and endpoint to print.
+/// Serves: `local_ping`.
+/// Design: `docs/design/config-routing.md` §8.
+/// Up: `local_ping` builds the vector; no other caller.
+/// Down: no further call; it is data.
+/// Verify: `cargo test -p loongagent`.
 /// One model's answer, or the reason there was none.
 struct Ping {
     label: String,
@@ -554,6 +647,12 @@ struct Ping {
     result: Result<(String, u128), String>,
 }
 
+/// Purpose: Ask every configured model the same prompt and print the answers side by side.
+/// Serves: `loongagent local ping [prompt]`, the check a session cannot do.
+/// Design: `docs/design/config-routing.md` §8.
+/// Up: `local`; no other caller.
+/// Down: `resolve_reference` and `loong_providers::probe::complete_once`.
+/// Verify: `cargo test -p loongagent`.
 /// `loongagent local ping [prompt]` — one prompt, every configured model.
 ///
 /// The question "are all four paths working?" has no answer inside a session, because a
@@ -635,6 +734,12 @@ fn local_ping(settings: &loong_config::Profile, prompt: Option<&str>) -> Result<
     }
 }
 
+/// Purpose: Print what each provider's endpoint actually says: the request, the status, the body and what it parsed into.
+/// Serves: `loongagent local check [provider]`.
+/// Design: `docs/design/config-routing.md` §8.
+/// Up: `local`; no other caller.
+/// Down: `loong_config::catalog`, `provider_key` and `loong_providers::probe::{raw_models_answer, parse_models}`.
+/// Verify: `cargo test -p loongagent`.
 /// `loongagent local check [provider]` — what the endpoint actually says.
 ///
 /// The wizard reduces every reply to "worked" or "did not", which is right for a form and
@@ -719,6 +824,12 @@ fn local_check(selector: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
+/// Purpose: Which entries a selector names: a slot, a model name, or every model of a provider.
+/// Serves: `local_delete`.
+/// Design: `docs/design/config-routing.md` §3.
+/// Up: `local_delete` and the `local.rs` tests; no other caller.
+/// Down: no further call; it compares blocks.
+/// Verify: `cargo test -p loongagent`.
 /// Which entries a selector names. Index, then model name, then provider.
 fn select_local(blocks: &[LocalBlock], selector: &str) -> Result<Vec<usize>, String> {
     if let Ok(slot) = selector.parse::<usize>() {
@@ -750,6 +861,12 @@ fn select_local(blocks: &[LocalBlock], selector: &str) -> Result<Vec<usize>, Str
     ))
 }
 
+/// Purpose: Hand `local.toml` to the editor named by `$VISUAL` or `$EDITOR`, and say so when there is none.
+/// Serves: `loongagent local edit`.
+/// Design: `docs/design/config-routing.md` §3.
+/// Up: `local`; no other caller.
+/// Down: `std::process::Command` and the editor environment variables.
+/// Verify: `cargo test -p loongagent`.
 /// `loongagent local edit` — hand the file to the editor named by `$VISUAL`/`$EDITOR`.
 ///
 /// The file is meant to be read and edited by a person: it is commented, and the comments
@@ -786,6 +903,12 @@ fn local_edit(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Purpose: Ask for a provider and key, validate it, and write the secret and the models where a local install keeps them.
+/// Serves: `local add` and `tui --local`'s first run.
+/// Design: `docs/design/surfaces.md` §2; `docs/design/config-routing.md` §3.
+/// Up: `local`'s `add` arm and `tui.rs`'s `full_screen`; no other caller.
+/// Down: `exported_keys`, `probe_provider`, `provider_key_for_probe`, `offerable_models`, `loong_tui_app::local_wizard` and `adopt_local_model`.
+/// Verify: `cargo test -p loongagent --test local_mode`.
 /// Ask for one API key, validate it, and write it where a local install keeps things.
 ///
 /// `always` decides whether an already-configured install is asked again. A first run
@@ -916,6 +1039,12 @@ pub(crate) fn configure_local(
     Ok(())
 }
 
+/// Purpose: Check every distinct provider on a thread and report health, never removing a model on one bad answer.
+/// Serves: `tui.rs`'s `full_screen`, so the interface opens before the network answers.
+/// Design: `docs/design/config-routing.md` §8.
+/// Up: `tui.rs`'s `full_screen`; no other caller.
+/// Down: `loong_config::catalog`, `provider_key`, `probe_provider`, `provider_key_for_probe` and `std::thread::spawn`.
+/// Verify: `cargo test -p loongagent`.
 /// Check every model this session offers, **without holding up the session**.
 ///
 /// One probe per distinct provider, on a thread, because the alternative is worse in
@@ -985,6 +1114,8 @@ pub(crate) fn spawn_model_health(
     Some(receiver)
 }
 
+/// Purpose: A provider's key from the environment, with the variable it came from.
+/// Contract: `local.rs` catalog probing; `local_check`, `spawn_model_health` and `exported_keys` call it.
 /// The key for a provider, from wherever it lives, with the variable it came from.
 fn provider_key(provider: &loong_config::catalog::Provider) -> Option<(String, String)> {
     let names = std::iter::once(provider.key_env).chain(provider.aliases.iter().copied());
@@ -997,6 +1128,12 @@ fn provider_key(provider: &loong_config::catalog::Provider) -> Option<(String, S
     })
 }
 
+/// Purpose: Every provider this machine already has a key for, so the wizard can offer rather than adopt.
+/// Serves: `configure_local`.
+/// Design: `docs/design/config-routing.md` §3.
+/// Up: `configure_local`; no other caller.
+/// Down: `provider_key` and `loong_config::catalog::PROVIDERS`.
+/// Verify: `cargo test -p loongagent`.
 /// Every provider this machine already has a key for, so the wizard can *offer* them.
 ///
 /// The variable *name* is the whole signal, which is why this needs no heuristics:
@@ -1017,6 +1154,12 @@ fn exported_keys() -> Vec<loong_tui_app::OfferedKey> {
         .collect()
 }
 
+/// Purpose: Which models to put in front of somebody, and whether the vendor's documented list filled in.
+/// Serves: `configure_local`'s validation result.
+/// Design: `docs/design/config-routing.md` §8.
+/// Up: `configure_local`; the `local.rs` tests.
+/// Down: `loong_providers::probe::model_ids` and the catalog's curated models.
+/// Verify: `cargo test -p loongagent`.
 /// Which models to put in front of somebody for this provider, and whether they came from
 /// the catalog rather than from the endpoint.
 ///
@@ -1059,6 +1202,8 @@ fn offerable_models(
     (models, false)
 }
 
+/// Purpose: What to send as the bearer token, which is nothing for a loopback server.
+/// Contract: `local.rs` probing; `configure_local` and `spawn_model_health` call it.
 /// What to send as the bearer token when checking this provider.
 ///
 /// `None` for a loopback server. Sending `Some("")` would put `Authorization: Bearer `
@@ -1074,6 +1219,12 @@ fn provider_key_for_probe<'a>(
     typed.filter(|key| !key.trim().is_empty())
 }
 
+/// Purpose: Check one provider's key by the cheapest route its catalog entry names.
+/// Serves: `configure_local` and `spawn_model_health`.
+/// Design: `docs/design/config-routing.md` §8.
+/// Up: `configure_local` and `spawn_model_health`; no other caller.
+/// Down: `Catalog::models_url` and `loong_providers::probe::{probe_models_url, probe_with_completion}`.
+/// Verify: `cargo test -p loongagent`.
 /// Check one provider's key, using the free route where the vendor publishes one.
 fn probe_provider(
     provider: &loong_config::catalog::Provider,
@@ -1097,6 +1248,12 @@ fn probe_provider(
     }
 }
 
+/// Purpose: Write the key to the env file and the models to `local.toml`, appending rather than replacing.
+/// Serves: `configure_local` once the wizard returns a validated choice.
+/// Design: `docs/design/config-routing.md` §3 and §5.
+/// Up: `configure_local`; no other caller.
+/// Down: `write_env_secret`, `replacement_models`, `upsert_local_models` and `std::env::set_var`.
+/// Verify: `cargo test -p loongagent --test local_mode`.
 /// Write the key where a secret belongs, and the models into the **local** file.
 ///
 /// Appending, not replacing: a second run is how somebody adds their *second* provider,
@@ -1152,6 +1309,12 @@ fn adopt_local_model(
     Ok(())
 }
 
+/// Purpose: What a probe's answer should replace a provider's entries with, and `None` when it named nothing.
+/// Serves: `adopt_local_model`, so an empty answer never deletes configured models.
+/// Design: `docs/design/config-routing.md` §8.
+/// Up: `adopt_local_model`; the `local.rs` tests.
+/// Down: no further call; it maps the probe.
+/// Verify: `cargo test -p loongagent`.
 /// What a probe's answer should replace this provider's entries with.
 ///
 /// `None` for "the provider named nothing, so leave what is already there alone". That
@@ -1182,6 +1345,12 @@ fn replacement_models(
     )
 }
 
+/// Purpose: One model in `local.toml`, as this file understands it.
+/// Serves: `LocalBlock`, `read_local_blocks` and `replacement_models`.
+/// Design: `docs/design/config-routing.md` §3.
+/// Up: `block_model` and `replacement_models` build it; `LocalBlock` carries it.
+/// Down: no further call; it is data.
+/// Verify: `cargo test -p loongagent`.
 /// One model in `local.toml`, as this file understands it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LocalModel {
@@ -1190,6 +1359,12 @@ struct LocalModel {
     context_window: Option<u64>,
 }
 
+/// Purpose: A model and the exact text it is written as, so a person's comments survive a write.
+/// Serves: `read_local_blocks`, `write_local_blocks` and `upsert_local_models`.
+/// Design: `docs/design/config-routing.md` §3.
+/// Up: `read_local_blocks` and `LocalBlock::render` build it; `write_local_blocks` writes it.
+/// Down: `text` and `model`; no further call.
+/// Verify: `cargo test -p loongagent`.
 /// A model **and the text it is written as**.
 ///
 /// The text is kept because this file is meant to be edited by a person: a comment inside
@@ -1202,6 +1377,12 @@ struct LocalBlock {
 }
 
 impl LocalBlock {
+    /// Purpose: Render a fresh `[[models]]` block for a model this program is adding.
+    /// Serves: `upsert_local_models`.
+    /// Design: `docs/design/config-routing.md` §3.
+    /// Up: `upsert_local_models`; the `local.rs` tests.
+    /// Down: `toml_escape`; no further call.
+    /// Verify: `cargo test -p loongagent`.
     /// Render a block for a model this program is adding.
     fn render(model: LocalModel) -> Self {
         let mut text = String::from("[[models]]\n");
@@ -1219,6 +1400,12 @@ impl LocalBlock {
     }
 }
 
+/// Purpose: Add or replace one provider's models in `local.toml` by text surgery, keeping everything else byte for byte.
+/// Serves: `adopt_local_model` and `local_delete`.
+/// Design: `docs/design/config-routing.md` §3.
+/// Up: `adopt_local_model`; the `local.rs` tests.
+/// Down: `read_local_blocks`, `write_local_blocks` and `LocalBlock::render`.
+/// Verify: `cargo test -p loongagent`.
 /// Add or replace one provider's models in `local.toml`, keeping everything else.
 ///
 /// Deliberately **text surgery, not a re-serialize**: the file is meant to be read and
@@ -1250,6 +1437,8 @@ fn upsert_local_models(
     Ok(names)
 }
 
+/// Purpose: Every model the file declares, in declaration order.
+/// Contract: `local.rs` file editing; `local_delete`, `upsert_local_models` and the tests call it.
 /// Every model the local file declares, in the order it declares them.
 ///
 /// Read as data and written back as text, which is the shape this file needs: the
@@ -1267,6 +1456,12 @@ fn read_local_blocks(path: &Path) -> Vec<LocalBlock> {
         .collect()
 }
 
+/// Purpose: Rewrite the model section, keeping the header and everything after it.
+/// Serves: `local_delete` and `upsert_local_models`.
+/// Design: `docs/design/config-routing.md` §3.
+/// Up: `local_delete`, `upsert_local_models` and the `local.rs` tests.
+/// Down: `split_model_blocks`, `local_header`, `route_tail` and `std::fs::write`.
+/// Verify: `cargo test -p loongagent`.
 /// Write the model section, keeping the header and everything after it.
 fn write_local_blocks(path: &Path, blocks: &[LocalBlock]) -> Result<(), String> {
     let existing = std::fs::read_to_string(path).unwrap_or_default();
@@ -1294,6 +1489,12 @@ fn write_local_blocks(path: &Path, blocks: &[LocalBlock]) -> Result<(), String> 
     Ok(())
 }
 
+/// Purpose: What follows the models, with `router.default` pointed at a model that exists.
+/// Serves: `write_local_blocks`, so a delete cannot leave a file that will not load.
+/// Design: `docs/design/config-routing.md` §3.
+/// Up: `write_local_blocks`; no other caller.
+/// Down: `toml_escape`; no further call.
+/// Verify: `cargo test -p loongagent`.
 /// What follows the models, with the router's default pointed at something that exists.
 ///
 /// `router.default` is "the model a turn starts with", and the resolver **refuses** a
@@ -1330,6 +1531,12 @@ fn route_tail(tail: &str, blocks: &[LocalBlock]) -> String {
     out
 }
 
+/// Purpose: One `[[models]]` block read back as data, or `None` when it names no model.
+/// Serves: `read_local_blocks`.
+/// Design: `docs/design/config-routing.md` §3.
+/// Up: `read_local_blocks`; no other caller.
+/// Down: `quoted_value` and `number_value`.
+/// Verify: `cargo test -p loongagent`.
 /// One `[[models]]` block read back as data.
 fn block_model(block: &str) -> Option<LocalModel> {
     let (mut name, mut provider, mut window) = (None, None, None);
@@ -1350,6 +1557,8 @@ fn block_model(block: &str) -> Option<LocalModel> {
     })
 }
 
+/// Purpose: A `key = "value"` line's value, ignoring a trailing comment.
+/// Contract: `local.rs` file parsing; `block_model` and `existing_summarizer_model` call it.
 /// `key = "value"`, ignoring anything after the closing quote (this writer leaves a
 /// trailing comment there).
 fn quoted_value(line: &str, key: &str) -> Option<String> {
@@ -1359,6 +1568,8 @@ fn quoted_value(line: &str, key: &str) -> Option<String> {
     Some(rest.split('"').next()?.to_string())
 }
 
+/// Purpose: A `key = 4096` line's number, ignoring a trailing comment.
+/// Contract: `local.rs` file parsing; `block_model` is the only caller.
 /// `key = 4096`, ignoring a trailing comment.
 fn number_value(line: &str, key: &str) -> Option<u64> {
     let rest = line.strip_prefix(key)?;
@@ -1367,6 +1578,12 @@ fn number_value(line: &str, key: &str) -> Option<u64> {
     digits.parse().ok()
 }
 
+/// Purpose: Split a `local.toml` into the header, the model blocks and whatever follows them.
+/// Serves: `read_local_blocks` and `write_local_blocks`.
+/// Design: `docs/design/config-routing.md` §3.
+/// Up: `read_local_blocks` and `write_local_blocks`; the `local.rs` tests.
+/// Down: `hand_comments_forward`; no further call.
+/// Verify: `cargo test -p loongagent`.
 /// Split a `local.toml` into what comes before the models, the `[[models]]` blocks
 /// themselves, and whatever follows them (`[router]`, and anything hand-written).
 ///
@@ -1425,6 +1642,12 @@ fn split_model_blocks(text: &str) -> (String, Vec<String>, String) {
     (head, blocks, tail)
 }
 
+/// Purpose: Give each block the comments written above it, which a line walk would otherwise leave on the one before.
+/// Serves: `split_model_blocks`, so a note moves with the model it describes.
+/// Design: `docs/design/config-routing.md` §3.
+/// Up: `split_model_blocks`; no other caller.
+/// Down: no further call; it moves lines.
+/// Verify: `cargo test -p loongagent`.
 /// Give each block the comments written **above** it.
 ///
 /// The splitter is a line walk, so a note between two models lands at the end of the one
@@ -1462,6 +1685,8 @@ fn hand_comments_forward(blocks: &mut [String]) {
     }
 }
 
+/// Purpose: The commented header a freshly created `local.toml` gets.
+/// Contract: `local.rs` file writing; `write_local_blocks` is the only caller.
 /// The header a freshly created `local.toml` gets. The comments are the only
 /// documentation these settings have.
 fn local_header() -> &'static str {
@@ -1475,12 +1700,20 @@ fn local_header() -> &'static str {
      # 这个文件只在 `loongagent tui --local` 时被读取。\n\n"
 }
 
+/// Purpose: Escape a value for a TOML basic string.
+/// Contract: `local.rs` file writing; `render`, `route_tail` and `write_semantic_config` call it.
 /// Escape a value for a TOML basic string. Model ids are vendor-supplied and short,
 /// but the file is written by us and read by a parser, so the two must agree.
 fn toml_escape(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+/// Purpose: Put a secret in the `env` file, replacing only the previous definition of the same name.
+/// Serves: `adopt_local_model`.
+/// Design: `docs/design/config-routing.md` §5.
+/// Up: `adopt_local_model`; no other caller.
+/// Down: `std::fs::write` and `restrict_permissions`.
+/// Verify: `cargo test -p loongagent`.
 /// Put a secret in the `env` file, replacing any previous value for the same name.
 ///
 /// `~/.loongagent/env` is read at startup (see [`read_env_files`]) and is the one place
@@ -1509,6 +1742,8 @@ fn write_env_secret(home: &Path, name: &str, value: &str) -> Result<(), String> 
     Ok(())
 }
 
+/// Purpose: Make the secret file readable only by its owner.
+/// Contract: `local.rs`; `write_env_secret` is the only caller.
 /// A secret file that the world can read is not a secret file.
 fn restrict_permissions(path: &Path) {
     #[cfg(unix)]
@@ -1528,6 +1763,8 @@ mod tests {
 
     // ------------------------------------------------ the local model file
 
+    /// Purpose: A fresh `local.toml` path under the test's own directory.
+    /// Contract: `local.rs` tests; every file-editing test calls it.
     fn local_temp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "loongagent-localfile-{}-{name}",
@@ -1538,6 +1775,8 @@ mod tests {
         dir.join("local.toml")
     }
 
+    /// Purpose: A `LocalModel` fixture with a fixed context window.
+    /// Contract: `local.rs` tests; the file-editing tests call it.
     fn model(name: &str, provider: &str) -> LocalModel {
         LocalModel {
             name: name.to_string(),
@@ -1546,6 +1785,8 @@ mod tests {
         }
     }
 
+    /// Purpose: How many real section headers a file has, ignoring the header comment that mentions them.
+    /// Contract: `local.rs` tests; the file-shape tests call it.
     /// How many real sections a file has. Counting occurrences of the text would also
     /// count the header comments that *mention* `[[models]]`.
     fn sections(text: &str, header: &str) -> usize {
@@ -1556,6 +1797,8 @@ mod tests {
 
     // ------------------------------------------------ the semantic switch
 
+    /// Purpose: A semantic-write fixture with fixed window budgets.
+    /// Contract: `local.rs` tests; the semantic-switch tests call it.
     fn semantic(model: &str) -> SemanticWrite {
         SemanticWrite::Semantic {
             base_url: DEFAULT_SUMMARIZER_URL.to_string(),
@@ -1565,6 +1808,8 @@ mod tests {
         }
     }
 
+    /// Purpose: Resolve one file as a user layer, the way a session would read it.
+    /// Contract: `local.rs` tests; the semantic-switch tests call it.
     fn resolved(path: &Path) -> loong_config::Profile {
         loong_config::resolve(
             &[(loong_config::Layer::User, path.to_path_buf())],
@@ -1573,6 +1818,7 @@ mod tests {
         .unwrap()
     }
 
+    /// Purpose: Turning semantic on writes a file a session resolves, and the configured models and comments survive.
     #[test]
     fn semantic_on_writes_a_file_that_resolves_and_keeps_the_models() {
         let path = local_temp("semantic-on");
@@ -1606,6 +1852,7 @@ mod tests {
         assert_eq!(engine.summarizer_window_calls, Some(4));
     }
 
+    /// Purpose: Repeating the switch replaces its tables instead of appending a duplicate, and is byte-idempotent.
     #[test]
     fn switching_semantic_on_twice_does_not_duplicate_its_tables() {
         // A duplicate `[context_engine]` is a file that will not load, so the second
@@ -1630,6 +1877,7 @@ mod tests {
         );
     }
 
+    /// Purpose: Off means the engine is off, not merely empty, and the models remain.
     #[test]
     fn semantic_off_is_a_real_off_and_keeps_the_models() {
         let path = local_temp("semantic-off");
@@ -1647,6 +1895,7 @@ mod tests {
         assert_eq!(profile.models.len(), 1);
     }
 
+    /// Purpose: Record mode needs no model and keeps the deterministic retrieval layer.
     #[test]
     fn record_mode_turns_the_model_off_and_keeps_the_retrieval_layer() {
         let path = local_temp("semantic-record");
@@ -1656,6 +1905,7 @@ mod tests {
         assert_eq!(engine.summarizer, "off", "record needs no model");
     }
 
+    /// Purpose: Only Ollama is accepted as a summariser, and the refusal says why.
     #[test]
     fn a_remote_summariser_provider_is_refused_with_the_reason() {
         // The provider list is short on purpose. Accepting `deepseek/…` here and
@@ -1680,6 +1930,7 @@ mod tests {
         assert_eq!(parse_summarizer_selector(None).unwrap(), ("ollama", None));
     }
 
+    /// Purpose: The model choice keeps the configured one, prefers the measured default, and refuses to guess among several.
     #[test]
     fn choosing_a_model_refuses_to_guess_among_several() {
         let several = vec!["qwen3:0.6b".to_string(), "qwen2.5:3b".to_string()];
@@ -1705,6 +1956,7 @@ mod tests {
         assert!(choose_model(&[], None).unwrap_err().contains("ollama"));
     }
 
+    /// Purpose: A summariser URL typed with `/v1` is corrected to Ollama's native endpoint.
     #[test]
     fn the_summariser_endpoint_drops_the_openai_shim_suffix() {
         assert_eq!(
@@ -1718,6 +1970,7 @@ mod tests {
         );
     }
 
+    /// Purpose: A key or comment the command does not own survives a semantic switch.
     #[test]
     fn a_hand_written_key_survives_a_switch() {
         // The command owns `enabled`/`mode`/the endpoint keys. A key it does not own —
@@ -1736,6 +1989,7 @@ mod tests {
         assert_eq!(sections(&text, "[context_engine]"), 1, "{text}");
     }
 
+    /// Purpose: A local session with no model is refused and names `local add`, while a managed one is left alone.
     #[test]
     fn a_local_session_needs_a_model_before_the_terminal_is_taken_over() {
         // A session with nothing to run cannot answer anything, and its first minutes are
@@ -1790,6 +2044,8 @@ mod tests {
         assert!(session_needs_a_model(&args, false, &empty).is_ok());
     }
 
+    /// Purpose: A `ModelSpec` fixture with a name and a placeholder endpoint.
+    /// Contract: `local.rs` tests; the model-necessity test calls it.
     /// A `ModelSpec` with a name and nothing else.
     fn named(name: &str) -> loong_config::ModelSpec {
         loong_config::ModelSpec {
@@ -1804,6 +2060,7 @@ mod tests {
         }
     }
 
+    /// Purpose: A host that authenticates but lists nothing falls back to the vendor's documented models, with windows.
     #[test]
     fn a_host_that_names_no_models_falls_back_to_the_ones_its_vendor_documents() {
         // A host can authenticate and then name nothing, and the result is a working key
@@ -1868,6 +2125,7 @@ mod tests {
         assert!(models.is_empty() && !curated);
     }
 
+    /// Purpose: Repeated writes and deletes never grow the file's blank space.
     #[test]
     fn a_write_leaves_one_blank_line_between_models_however_often_it_runs() {
         // The bug: each block's text carried the blank space that *followed* it, and the
@@ -1900,6 +2158,7 @@ mod tests {
         );
     }
 
+    /// Purpose: A note written above a model moves with it when the model below or above is deleted.
     #[test]
     fn a_comment_above_a_model_belongs_to_that_model() {
         // The splitter is a line walk, so a note written above a model ends up at the end
@@ -1936,6 +2195,7 @@ mod tests {
         assert!(text.contains("name = \"c\""), "{text}");
     }
 
+    /// Purpose: An empty, rejected or unreachable probe leaves configured models alone.
     #[test]
     fn a_probe_that_named_nothing_does_not_delete_what_is_already_there() {
         // "Nothing came back" and "nothing should remain" are different things, and an
@@ -1976,6 +2236,7 @@ mod tests {
         assert_eq!(written[0].context_window, Some(1_048_576));
     }
 
+    /// Purpose: Deleting the model the router names moves the default to one that still exists.
     #[test]
     fn a_deleted_model_moves_the_router_default_rather_than_leaving_it_dangling() {
         // `router.default` naming a model that is not there does not load, so removing the
@@ -2001,6 +2262,7 @@ mod tests {
         assert!(!text.contains("ds-flash"), "{text}");
     }
 
+    /// Purpose: Deleting the last model removes the router section, so the file still loads.
     #[test]
     fn deleting_the_last_model_takes_the_router_section_with_it() {
         // A `[router]` whose default names nothing is a file that will not load.
@@ -2019,6 +2281,7 @@ mod tests {
         );
     }
 
+    /// Purpose: The delete selector accepts a slot, a model name or a provider, and refuses what matches nothing.
     #[test]
     fn a_selector_names_a_slot_a_model_or_a_whole_provider() {
         let path = local_temp("select");
@@ -2059,6 +2322,7 @@ mod tests {
         assert!(err.contains("nope"), "{err}");
     }
 
+    /// Purpose: Deleting one provider keeps every other block and the hand-written comments.
     #[test]
     fn deleting_a_provider_leaves_the_other_providers_text_alone() {
         let path = local_temp("delete-provider");
@@ -2084,6 +2348,7 @@ mod tests {
         assert!(text.contains("default = \"kimi\""), "{text}");
     }
 
+    /// Purpose: The first provider writes a header, its models and an explicit router default.
     #[test]
     fn a_first_provider_writes_a_header_its_models_and_a_router_default() {
         let path = local_temp("first");
@@ -2108,6 +2373,7 @@ mod tests {
         );
     }
 
+    /// Purpose: The local file never records `mode`, which is what would switch a managed install out of its policy.
     #[test]
     fn the_local_file_never_declares_a_mode() {
         // The bug that poisoned a managed install: writing `mode = "local"` here — or
@@ -2126,6 +2392,7 @@ mod tests {
         );
     }
 
+    /// Purpose: Adding a second provider keeps the first provider's models and the original default.
     #[test]
     fn adding_a_second_provider_keeps_the_first_one_s_models() {
         // A second run is how somebody adds their second provider. Losing the first
@@ -2159,6 +2426,7 @@ mod tests {
         );
     }
 
+    /// Purpose: Re-adding a provider updates its own models without duplicating or disturbing the others.
     #[test]
     fn re_adding_a_provider_replaces_only_that_provider_s_models() {
         // Pasting a new key for a provider you already configured should update it, not
@@ -2181,6 +2449,7 @@ mod tests {
         assert_eq!(sections(&text, "[[models]]"), 2, "{text}");
     }
 
+    /// Purpose: Hand-written comments and the existing router survive adding a provider.
     #[test]
     fn what_a_person_wrote_around_the_models_survives_a_new_provider() {
         // The file is meant to be read and edited by a person, and its comments are the
@@ -2218,6 +2487,7 @@ mod tests {
         );
     }
 
+    /// Purpose: A provider that offered no models writes no file at all.
     #[test]
     fn a_provider_that_offered_no_models_leaves_the_file_alone() {
         // Somebody whose `/models` came back empty should get told, not given a header
@@ -2228,6 +2498,7 @@ mod tests {
         assert!(!path.exists(), "no file is created for no models");
     }
 
+    /// Purpose: The splitter recovers the header, the model blocks and the router from the writer's own output.
     #[test]
     fn splitting_a_written_file_finds_its_header_blocks_and_router() {
         // The exact shape the writer produces, fed back in. The router is what a second
@@ -2255,6 +2526,7 @@ mod tests {
         );
     }
 
+    /// Purpose: The control file round-trips, and a key that is not 32 bytes of hex is refused before any request.
     #[test]
     fn the_control_file_round_trips_and_its_key_is_checked() {
         let file = ControlFile {
@@ -2295,6 +2567,7 @@ mod tests {
         );
     }
 
+    /// Purpose: Merging the two control files lets the user supply a token but never a different address or key.
     #[test]
     fn a_user_file_may_supply_a_token_but_not_a_different_pin() {
         let machine = ControlFile {
@@ -2325,6 +2598,7 @@ mod tests {
         assert!(merge_control(None, None).is_none());
     }
 
+    /// Purpose: Env files are read with the user's file winning over the workspace, and missing files are not errors.
     #[test]
     fn environment_files_are_read_with_the_user_winning_and_the_shell_above_both() {
         let dir = std::env::temp_dir().join(format!("loong-env-{}", std::process::id()));
@@ -2369,6 +2643,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Purpose: A literal control-plane token is refused while the two reference shapes are accepted.
     #[test]
     fn a_literal_control_plane_token_is_refused() {
         let literal = ControlFile {
@@ -2395,6 +2670,7 @@ mod tests {
         }
     }
 
+    /// Purpose: A plain-HTTP address for another machine is refused before a token can be sent.
     #[test]
     fn a_control_plane_address_that_would_leak_a_token_is_refused() {
         let file = ControlFile {
@@ -2406,6 +2682,7 @@ mod tests {
         assert!(error.contains("TLS"), "{error}");
     }
 
+    /// Purpose: A `file:` reference reads either a bare token file or a named key in a table.
     #[test]
     fn a_file_reference_reads_either_a_table_or_a_bare_secret() {
         let dir = std::env::temp_dir().join(format!("loong-secret-{}", std::process::id()));
@@ -2443,6 +2720,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Purpose: The credential reader accepts the shapes operators write and never treats an empty value as a secret.
     #[test]
     fn a_secret_file_is_read_in_the_shapes_operators_actually_write() {
         let dir = std::env::temp_dir().join(format!("loong-creds-{}", std::process::id()));

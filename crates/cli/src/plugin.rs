@@ -1,5 +1,20 @@
+//! Purpose: The skill catalogue and the four plugin commands: what a session would load, and what installing content adds.
+//!
+//! # Contract
+//! - **Serves:** `skills list` and `plugin add|list|update|remove`; `server.rs` loads the same catalogue through this file.
+//! - **Design:** `docs/design/surfaces.md` §2; `docs/design/extension-model.md` §2, §4 and §7.
+//! - **Upstream:** `main.rs`'s `skills` and `plugin` arms; `server.rs`'s `serve` and `build_kernel` call `installed_plugins` and `load_catalogue`.
+//! - **Downstream:** `loong_plugin::{discover, install, update, remove, Roots}` and `loong_skills::SkillSet`.
+//! - **Verify:** `cargo test -p loongagent --test plugins` · `./scripts/check.sh`
+
 use super::*;
 
+/// Purpose: Print the catalogue a session would actually load, including installed plugins and disabled names.
+/// Serves: `loongagent skills list`.
+/// Design: `docs/design/extension-model.md` §2 (content, not code).
+/// Up: `main.rs`'s `skills` → `list` arm; no other caller.
+/// Down: `Args::settings_with_pack`, `installed_plugins`, `load_catalogue` and `SkillSet::catalogue`.
+/// Verify: `cargo test -p loongagent --test plugins`.
 /// Show what a `/name` in this workspace resolves to.
 pub(crate) fn skills_list(args: Args) -> Result<(), String> {
     // Honour the layered configuration: what this prints must be what a session
@@ -47,6 +62,12 @@ pub(crate) fn skills_list(args: Args) -> Result<(), String> {
 
 // -------------------------------------------------------------------- plugins
 
+/// Purpose: Discover the installed plugins, failing loudly with the broken manifest named.
+/// Serves: `skills_list`, `plugin_add` and `plugin_list`, and `server.rs` on the way to every session.
+/// Design: `docs/design/extension-model.md` §4.
+/// Up: `skills_list`, `plugin_add`, `plugin_list`, `plugin_update` and `server.rs`'s `serve`/`build_kernel`.
+/// Down: `loong_plugin::discover` over `Roots::for_workspace`.
+/// Verify: `cargo test -p loongagent --test plugins`.
 /// What the installed plugins contribute, or a loud error naming the manifest.
 ///
 /// This runs on the way to every session (`build_kernel`), so a plugin manifest that
@@ -56,6 +77,12 @@ pub(crate) fn installed_plugins(cwd: &Path) -> Result<loong_plugin::Installed, S
     loong_plugin::discover(&loong_plugin::Roots::for_workspace(cwd)).map_err(|e| e.to_string())
 }
 
+/// Purpose: Load the workspace's skills, the configured extra roots and the plugins' roots as one catalogue.
+/// Serves: every command that must agree with what a session gets.
+/// Design: `docs/design/extension-model.md` §2 and §4.
+/// Up: `skills_list`, `plugin_add`, `plugin_list`, `plugin_update` and `server.rs`.
+/// Down: `loong_skills::SkillSet::load_in`.
+/// Verify: `cargo test -p loongagent --test plugins`.
 /// Load the catalogue exactly as a session will: the workspace's own skills, the
 /// configuration's extra roots, and the installed plugins' (ADR-0018).
 pub(crate) fn load_catalogue(
@@ -68,6 +95,12 @@ pub(crate) fn load_catalogue(
     loong_skills::SkillSet::load_in(cwd, &dirs, &settings.disable_skills).map_err(|e| e.to_string())
 }
 
+/// Purpose: The skills one plugin contributes, in catalogue order.
+/// Serves: `describe_plugin` and `plugin_list`.
+/// Design: `docs/design/extension-model.md` §4.
+/// Up: `describe_plugin` and `plugin_list`; no other caller.
+/// Down: `Plugin::skills_dir` and the `SkillSet` entries' origin and source label.
+/// Verify: `cargo test -p loongagent --test plugins`.
 /// The skills one plugin contributes, in catalogue order.
 fn plugin_skills<'a>(
     set: &'a loong_skills::SkillSet,
@@ -83,6 +116,12 @@ fn plugin_skills<'a>(
         .collect()
 }
 
+/// Purpose: Fetch a plugin, prove the catalogue still loads, and roll the install back when it would not.
+/// Serves: `loongagent plugin add <spec>`, the one command that installs content.
+/// Design: `docs/design/extension-model.md` §4 and §7.
+/// Up: `main.rs`'s `plugin` → `add` arm; no other caller.
+/// Down: `installed_plugins`, `load_catalogue`, `loong_plugin::{install, remove}`, `plugin_scope` and `describe_plugin`.
+/// Verify: `cargo test -p loongagent --test plugins`.
 /// `plugin add <spec>`: fetch it, prove the catalogue still loads, and say what
 /// entered every session's context.
 pub(crate) fn plugin_add(args: Args) -> Result<(), String> {
@@ -131,6 +170,12 @@ pub(crate) fn plugin_add(args: Args) -> Result<(), String> {
     Ok(())
 }
 
+/// Purpose: The summary an install owes: what was added, its cost in every session, and how to undo it.
+/// Serves: `plugin_add` and `plugin_update`.
+/// Design: `docs/design/extension-model.md` §4 and §7.
+/// Up: `plugin_add` and `plugin_update`; no other caller.
+/// Down: `plugin_skills`, `SkillSet::catalogue` and `loong_skills::estimate_tokens`.
+/// Verify: `cargo test -p loongagent --test plugins`.
 /// The summary `plugin add` and `plugin list` both owe a person: what was added, how
 /// it was fetched, what it costs in every session, and how to undo it.
 fn describe_plugin(
@@ -199,6 +244,12 @@ fn describe_plugin(
     );
 }
 
+/// Purpose: Show what is installed, from where, in which scope, and what it adds to context.
+/// Serves: `loongagent plugin list`.
+/// Design: `docs/design/extension-model.md` §4.
+/// Up: `main.rs`'s `plugin` → `list` arm; no other caller.
+/// Down: `installed_plugins`, `load_catalogue`, `plugin_skills` and `Plugin::{scope, source_label}`.
+/// Verify: `cargo test -p loongagent --test plugins`.
 /// `plugin list`: what is installed, from where, and what it puts in context.
 pub(crate) fn plugin_list(args: Args) -> Result<(), String> {
     let roots = loong_plugin::Roots::for_workspace(&args.cwd);
@@ -258,6 +309,12 @@ pub(crate) fn plugin_list(args: Args) -> Result<(), String> {
     Ok(())
 }
 
+/// Purpose: Fetch the latest commit for an installed plugin and re-check the whole catalogue.
+/// Serves: `loongagent plugin update <name>`.
+/// Design: `docs/design/extension-model.md` §4 and §7.
+/// Up: `main.rs`'s `plugin` → `update` arm; no other caller.
+/// Down: `plugin_name`, `loong_plugin::update`, `installed_plugins`, `load_catalogue` and `describe_plugin`.
+/// Verify: `cargo test -p loongagent --test plugins`.
 /// `plugin update <name>`: fetch the latest commit for what is already installed.
 pub(crate) fn plugin_update(args: Args) -> Result<(), String> {
     let name = plugin_name(&args, "update")?;
@@ -275,6 +332,12 @@ pub(crate) fn plugin_update(args: Args) -> Result<(), String> {
     Ok(())
 }
 
+/// Purpose: Delete a plugin's checkout, and with it its skills.
+/// Serves: `loongagent plugin remove <name>`.
+/// Design: `docs/design/extension-model.md` §4.
+/// Up: `main.rs`'s `plugin` → `remove` arm; no other caller.
+/// Down: `plugin_name`, `loong_plugin::remove` and `plugin_scope`.
+/// Verify: `cargo test -p loongagent --test plugins`.
 /// `plugin remove <name>`: delete the checkout, and with it the skills.
 pub(crate) fn plugin_remove(args: Args) -> Result<(), String> {
     let name = plugin_name(&args, "remove")?;
@@ -286,6 +349,8 @@ pub(crate) fn plugin_remove(args: Args) -> Result<(), String> {
     Ok(())
 }
 
+/// Purpose: Which copy of a plugin is meant, refusing when the two flags are opposites.
+/// Contract: `plugin.rs` command flags; `plugin_add`, `plugin_update` and `plugin_remove` call it.
 /// Which copy of a plugin is meant, when both scopes hold the same name.
 ///
 /// `None` is "the name alone": the one scope that has it when only one does, and a
@@ -302,6 +367,8 @@ fn plugin_scope(args: &Args) -> Result<Option<loong_plugin::Scope>, String> {
     }
 }
 
+/// Purpose: The positional plugin name, with the command's own usage message when it is missing.
+/// Contract: `plugin.rs` commands; `plugin_update` and `plugin_remove` call it.
 fn plugin_name(args: &Args, verb: &str) -> Result<String, String> {
     args.positional
         .first()

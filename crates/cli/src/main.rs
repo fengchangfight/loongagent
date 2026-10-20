@@ -1,3 +1,12 @@
+//! Purpose: The `loongagent` binary: parse the command line, resolve the one session and the one configuration, and dispatch.
+//!
+//! # Contract
+//! - **Serves:** every command the binary offers; this file is the composition root that turns flags into one configured server (ADR-0009 §2).
+//! - **Design:** `docs/design/surfaces.md` §2; `docs/design/sessions-lineage.md` §5; `docs/design/control-plane.md` §1.
+//! - **Upstream:** `std::env::args`; the command modules are its callees and its submodules.
+//! - **Downstream:** every command module (`local`, `tui`, `server`, `session`, `control`, `config_cmd`, `context`, `plugin`, `hooks`, `mcp`, `sandbox`, `repl`, `web`, `headless`) and `loong_config` for the layer choice.
+//! - **Verify:** `cargo test -p loongagent` · `./scripts/check.sh`
+//!
 //! loongagent — one binary, many faces (ADR-0009).
 //!
 //! ```text
@@ -120,6 +129,8 @@ MODELS (provider doubles, for a first run without keys):
   loongagent mcp trust         [--cwd DIR]   trust the current mcp.toml (per repository)
 ";
 
+/// Purpose: Run the command and turn one error into an exit code and one stderr line.
+/// Contract: `main.rs` entry point; nothing calls it.
 fn main() {
     if let Err(err) = run() {
         eprintln!("loongagent: {err}");
@@ -127,6 +138,12 @@ fn main() {
     }
 }
 
+/// Purpose: Everything the command line said, before any command resolves it.
+/// Serves: every command module, which receives one.
+/// Design: `docs/design/surfaces.md` §2.
+/// Up: `Args::parse` builds it; `run` hands it to the command modules.
+/// Down: no further call; it is data.
+/// Verify: `cargo test -p loongagent`.
 #[derive(Debug, Clone)]
 struct Args {
     /// Where the session lives, once it has been worked out. `None` means "the newest
@@ -202,6 +219,12 @@ struct Args {
 }
 
 impl Args {
+    /// Purpose: Parse the flags and positionals, load the env files first, and settle the session once the whole line is known.
+    /// Serves: every command; `run` parses before dispatch.
+    /// Design: `docs/design/surfaces.md` §2; `docs/design/config-routing.md` §5.
+    /// Up: `run` and every command module that takes an `Args`; `resume` re-enters through it.
+    /// Down: `load_env_files`, `config_dir` and `finish_session`.
+    /// Verify: `cargo test -p loongagent`.
     fn parse(rest: &[String]) -> Result<Self, String> {
         let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
         let mut args = Args {
@@ -371,6 +394,12 @@ impl Args {
         Ok(args)
     }
 
+    /// Purpose: Work out which session this run is about, once, so every command and the interface agree.
+    /// Serves: `Args::parse`, and so every command.
+    /// Design: `docs/design/sessions-lineage.md` §5.
+    /// Up: `Args::parse`; no other caller.
+    /// Down: `new_session_id`, `session_path_for`, `resolve_session` and `newest_session`.
+    /// Verify: `cargo test -p loongagent`.
     /// Work out which session this run is about — once, here, so every command and the
     /// interface agree. Three ways to say it: a path (`./x.jsonl`), an id (the file's
     /// own name, or an unambiguous prefix of it), or `latest`. Nothing said means the
@@ -402,6 +431,12 @@ impl Args {
         Ok(())
     }
 
+    /// Purpose: The one place local and managed runs diverge: which layer list this run reads.
+    /// Serves: `is_local` and `settings_with_pack`.
+    /// Design: `docs/design/config-routing.md` §1 and §3.
+    /// Up: `is_local` and `settings_with_pack`; no other caller.
+    /// Down: `loong_config::{local_layer_paths, layer_paths}`.
+    /// Verify: `cargo test -p loongagent --test local_mode`.
     /// The layered configuration for this run (ADR-0008): built-in defaults, then
     /// whatever the org / project / user files say, then `--profile` as the session
     /// layer. Flags are applied on top of the resolved values, and only ever
@@ -423,6 +458,12 @@ impl Args {
         }
     }
 
+    /// Purpose: Whether this run is local, answered from the flag or from `local.toml` and nothing else.
+    /// Serves: `settings_with_pack` and `tui.rs`'s `full_screen`, both before any control-plane work.
+    /// Design: `docs/design/config-routing.md` §3.
+    /// Up: `settings_with_pack` and `tui.rs`'s `full_screen`; no other caller.
+    /// Down: `layers` and `loong_config::resolve`; no network, no pack.
+    /// Verify: `cargo test -p loongagent --test local_mode`.
     /// Whether this run is local: the flag, or `local.toml`'s own answer.
     ///
     /// Reads the layer files and nothing else — no pack, no network — so it is safe
@@ -440,6 +481,12 @@ impl Args {
         Ok(resolved.is_local())
     }
 
+    /// Purpose: Resolve the layered configuration with the verified pack in place, or with no control plane at all in local mode.
+    /// Serves: every command that reads settings, and `serve`/`full_screen`.
+    /// Design: `docs/design/config-routing.md` §1–§4; `docs/design/control-plane.md` §4.
+    /// Up: `serve`, `full_screen`, `web`, `local`, `config_show`, `config_explain`, `skills_list`, `plugin_*` and `session_needs_a_model` callers.
+    /// Down: `is_local`, `layers`, `loong_config::resolve`, `resolve_with`, `sync_pack` and `PackState`.
+    /// Verify: `cargo test -p loongagent --test local_mode`.
     fn settings_with_pack(&self) -> Result<(loong_config::Profile, Option<PackState>), String> {
         // Settled **before** anything control-plane-shaped can happen. This function is
         // the whole severance: `full_screen` and `serve` both get their configuration
@@ -490,6 +537,8 @@ impl Args {
         Ok((resolved, pack))
     }
 
+    /// Purpose: The session file this run will use.
+    /// Contract: `main.rs` accessor; every command module reads it through `Args`.
     /// The session file: explicit if asked, otherwise the per-project default.
     fn session_path(&self) -> PathBuf {
         self.session
@@ -497,6 +546,8 @@ impl Args {
             .unwrap_or_else(|| default_session_path(&self.cwd))
     }
 
+    /// Purpose: Where a relative credential path is looked up: beside the profile in use.
+    /// Contract: `main.rs` accessor; `server.rs`'s `build_model` and `build_models` are the callers.
     /// Where a relative credential path is looked up: beside the profile in use.
     fn profile_base(&self) -> PathBuf {
         self.profile
@@ -505,10 +556,14 @@ impl Args {
             .unwrap_or_else(config_dir)
     }
 
+    /// Purpose: The id of the session file this run will use.
+    /// Contract: `main.rs` accessor; `tui.rs`, `repl.rs`, `headless.rs` and `server.rs` are the callers.
     fn session_id(&self) -> String {
         session_id_of(&self.session_path())
     }
 
+    /// Purpose: Create the session directory before anything writes the log into it.
+    /// Contract: `main.rs` accessor; `serve`, `full_screen`, `repl`, `headless` and `web` call it.
     fn ensure_parent(&self) -> Result<(), String> {
         if let Some(dir) = self.session_path().parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -517,6 +572,12 @@ impl Args {
     }
 }
 
+/// Purpose: The machine's control-plane configuration: address, pinned key and a token reference.
+/// Serves: `control.rs`, which merges and validates it, and `tui.rs`'s first-run form.
+/// Design: `docs/design/control-plane.md` §1 and §5.
+/// Up: `control.rs` reads and writes it; `tui.rs`'s `full_screen` builds one from the form.
+/// Down: no further call; it is data.
+/// Verify: `cargo test -p loongagent`.
 /// The client's side of the control plane: where it is, and the key this install
 /// pinned. Deliberately *not* the layered profile config — this is machine
 /// configuration, delivered with the binary (ADR-0016 §3).
@@ -531,6 +592,12 @@ struct ControlFile {
     token: Option<String>,
 }
 
+/// Purpose: What a session needs to know about the verified pack it is about to run on, and where it came from.
+/// Serves: `control.rs`'s `sync_pack`/`cached_pack_state` and every command that reports the pack.
+/// Design: `docs/design/control-plane.md` §3 and §4.
+/// Up: `control.rs` builds it; `serve`, `full_screen`, `web` and the config commands read it.
+/// Down: `summary` and the `loong_config` types it carries.
+/// Verify: `cargo test -p loongagent`.
 /// What a session needs to know about the pack it is about to run on.
 struct PackState {
     provenance: loong_config::ControlProvenance,
@@ -541,6 +608,8 @@ struct PackState {
 }
 
 impl PackState {
+    /// Purpose: The one-line pack summary the terminal and the TUI intro both print.
+    /// Contract: `main.rs` `PackState`; `control.rs`, `tui.rs` and `web.rs` call it.
     fn summary(&self) -> String {
         format!(
             "{} — {}{}",
@@ -555,12 +624,20 @@ impl PackState {
     }
 }
 
+/// Purpose: The client's one root, `$LOONGAGENT_HOME` or `~/.loongagent`.
+/// Contract: `main.rs` path root; `Args::parse`, `profile_base`, `control.rs` and `session.rs` call it.
 /// The client's one root: `$LOONGAGENT_HOME`, else `~/.loongagent` (defined in the
 /// config crate, because the user-layer path comes from the same rule).
 fn config_dir() -> PathBuf {
     loong_config::loongagent_home()
 }
 
+/// Purpose: Dispatch the first word to its command module, or print the usage and the version.
+/// Serves: `main`, and every command the binary offers.
+/// Design: `docs/design/surfaces.md` §2 (the command table).
+/// Up: `main`; no other caller.
+/// Down: every command module's entry function, `Args::parse` and `USAGE`.
+/// Verify: `cargo test -p loongagent --test local_mode`.
 fn run() -> Result<(), String> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let (command, rest) = argv

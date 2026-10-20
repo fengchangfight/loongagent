@@ -1,5 +1,20 @@
+//! Purpose: `loongagent sandbox self-test` and `probe`: prove the OS boundary instead of assuming it.
+//!
+//! # Contract
+//! - **Serves:** the sandbox command group and the startup check in `server.rs`, which refuse or warn from the same probe.
+//! - **Design:** `docs/design/surfaces.md` §2; `docs/design/tools-permissions.md` §4–§6.
+//! - **Upstream:** `main.rs`'s `sandbox` arms call this or `loong_sandbox::sandbox::probe_main` directly.
+//! - **Downstream:** `loong_sandbox::sandbox::self_test`, which runs the confined child; the exit codes are this file's verdict.
+//! - **Verify:** `cargo test -p loongagent --test sandbox_self_test` · `./scripts/check.sh`
+
 use super::*;
 
+/// Purpose: Print the strongest available mechanism and the demonstrated result, failing loudly when nothing denies.
+/// Serves: `loongagent sandbox self-test`, the first-run proof ADR-0007 asks for.
+/// Design: `docs/design/tools-permissions.md` §4 and §6.
+/// Up: `main.rs`'s `sandbox` → `self-test` arm; no other caller.
+/// Down: `loong_sandbox::sandbox::self_test` and `std::process::exit`.
+/// Verify: `cargo test -p loongagent --test sandbox_self_test`.
 /// ADR-0007: prove the boundary before the first tool call. "Available" is not
 /// good enough — the probe must demonstrate that a forbidden write is denied.
 pub(crate) fn sandbox_self_test(args: Args) -> Result<(), String> {

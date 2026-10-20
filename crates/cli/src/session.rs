@@ -1,5 +1,20 @@
+//! Purpose: Sessions as files: the id, the path, the listing, the resolution, the fork and the branch delete.
+//!
+//! # Contract
+//! - **Serves:** `tui`, `resume`, `sessions`, `fork` and `delete`, and `Args::finish_session`, which picks the session before any command runs.
+//! - **Design:** `docs/design/surfaces.md` §2; `docs/design/sessions-lineage.md` §1, §3–§5.
+//! - **Upstream:** `main.rs`'s session arms and `Args::finish_session` call in.
+//! - **Downstream:** `loong_eventlog` (`replay_lenient`, `SessionLog`), `loong_schema`'s `SessionForked` and the filesystem under the client's one root.
+//! - **Verify:** `cargo test -p loongagent` · `./scripts/check.sh`
+
 use super::*;
 
+/// Purpose: Which of the three ways this run got its session, so the interface can say so.
+/// Serves: `session_intro` and `Args::finish_session`.
+/// Design: `docs/design/sessions-lineage.md` §5.
+/// Up: `Args::finish_session` sets it; `session_intro` reads it.
+/// Down: no further call; it is a plain enum.
+/// Verify: `cargo test -p loongagent`.
 /// `~/.loongagent/projects/<project>/session.jsonl` (or under `$LOONGAGENT_HOME`).
 ///
 /// Sessions are state, not configuration, so they live under the state dir and are
@@ -18,6 +33,12 @@ pub(crate) enum SessionSource {
     Continued,
 }
 
+/// Purpose: The first line of the interface: which session this is and, when continuing, how to start a fresh one.
+/// Serves: `tui.rs`'s intro line.
+/// Design: `docs/design/sessions-lineage.md` §5.
+/// Up: `tui.rs`'s `full_screen`; the session tests.
+/// Down: `format!`; no further call.
+/// Verify: `cargo test -p loongagent`.
 /// The first line of the interface, and the whole of what someone needs to know about
 /// which session they are in.
 pub(crate) fn session_intro(source: SessionSource, id: &str, events: u64) -> String {
@@ -30,12 +51,20 @@ pub(crate) fn session_intro(source: SessionSource, id: &str, events: u64) -> Str
     }
 }
 
+/// Purpose: Where one project's sessions live, under the client's root.
+/// Serves: `server.rs`'s factory and `session_path_for`.
+/// Design: `docs/design/sessions-lineage.md` §1.
+/// Up: `server.rs`'s `serve` (the factory closure) and `session_path_in`.
+/// Down: `session_dir_in` and `project_slug`.
+/// Verify: `cargo test -p loongagent`.
 /// Where one project's sessions live. A project is a directory; its slug names the
 /// folder, so two checkouts of the same tree do not share a conversation by accident.
 pub(crate) fn session_dir(cwd: &Path) -> PathBuf {
     session_dir_in(&config_dir(), cwd)
 }
 
+/// Purpose: The same directory under an injected root, for tests and for `new_session_id_in`.
+/// Contract: `session.rs` path layout; `session_dir`, `new_session_id_in`, `newest_session_in` and `resolve_session_in` call it.
 /// The directory a project's sessions live in, under a given root. The root is a
 /// parameter so the tests can use one of their own instead of mutating the environment
 /// of every other test in the binary.
@@ -43,6 +72,12 @@ fn session_dir_in(root: &Path, cwd: &Path) -> PathBuf {
     root.join("projects").join(project_slug(cwd))
 }
 
+/// Purpose: The file's own name as the id, with the legacy `session.jsonl` answering to `default`.
+/// Serves: `Args::session_id`, `resume`, `delete` and the listing.
+/// Design: `docs/design/sessions-lineage.md` §1.
+/// Up: `Args::session_id`, `fork`, `delete`, `session_summaries_in` and `resolve_session_in`.
+/// Down: `Path::file_stem`; no further call.
+/// Verify: `cargo test -p loongagent`.
 /// A session **is** its file, and the file's name is its id: no index to keep in step,
 /// and `ls` is a valid way to look. The first session ever written kept the name
 /// `session.jsonl`; it answers to `default` rather than looking like an accident.
@@ -56,10 +91,18 @@ pub(crate) fn session_id_of(path: &Path) -> String {
     }
 }
 
+/// Purpose: The file a given id names in this project.
+/// Serves: `Args::finish_session` for `--new` and the default case, and `resume`.
+/// Design: `docs/design/sessions-lineage.md` §1.
+/// Up: `Args::finish_session` and `resume`; the session tests.
+/// Down: `session_path_in`, `session_dir_in` and `config_dir`.
+/// Verify: `cargo test -p loongagent`.
 pub(crate) fn session_path_for(id: &str, cwd: &Path) -> PathBuf {
     session_path_in(&config_dir(), id, cwd)
 }
 
+/// Purpose: The same mapping under an injected root, with `default` keeping its legacy file name.
+/// Contract: `session.rs` path layout; `session_path_for` and the session tests call it.
 fn session_path_in(root: &Path, id: &str, cwd: &Path) -> PathBuf {
     if id == "default" {
         session_dir_in(root, cwd).join("session.jsonl")
@@ -68,6 +111,12 @@ fn session_path_in(root: &Path, id: &str, cwd: &Path) -> PathBuf {
     }
 }
 
+/// Purpose: A fresh eight-character id that says itself out loud and does not collide.
+/// Serves: `Args::finish_session` and `server.rs`'s factory.
+/// Design: `docs/design/sessions-lineage.md` §1.
+/// Up: `Args::finish_session` and `server.rs`'s factory closure.
+/// Down: `new_session_id_in` and `new_session_id_in_dir`.
+/// Verify: `cargo test -p loongagent`.
 /// A new id: eight characters, from a clock and this process, in an alphabet with the
 /// pairs people misread removed (`0`/`O`, `1`/`l`/`I`). Short enough to type back,
 /// random enough that a prefix is not a guess.
@@ -75,10 +124,18 @@ pub(crate) fn new_session_id(cwd: &Path) -> String {
     new_session_id_in(&config_dir(), cwd)
 }
 
+/// Purpose: The same generator under an injected root, for tests.
+/// Contract: `session.rs` id generation; `new_session_id` and the session tests call it.
 fn new_session_id_in(root: &Path, cwd: &Path) -> String {
     new_session_id_in_dir(&session_dir_in(root, cwd))
 }
 
+/// Purpose: Generate an id in a named directory, which is how `fork` puts a child beside its parent.
+/// Serves: `fork` and `new_session_id`.
+/// Design: `docs/design/sessions-lineage.md` §1 and §4.
+/// Up: `new_session_id_in` and `fork`; no other caller.
+/// Down: the clock, the process id and the collision check on the directory.
+/// Verify: `cargo test -p loongagent`.
 /// The same, for a directory named directly: `fork` puts the child beside its parent,
 /// which may be a project other than the one this command was run in.
 fn new_session_id_in_dir(dir: &Path) -> String {
@@ -108,6 +165,12 @@ fn new_session_id_in_dir(dir: &Path) -> String {
     format!("p{}", std::process::id())
 }
 
+/// Purpose: What a session looks like from outside, read from its own log rather than an index.
+/// Serves: the listing, the resolution and the branch delete.
+/// Design: `docs/design/sessions-lineage.md` §1 and §3.
+/// Up: `session_summaries_in` builds them; `list_sessions`, `match_session`, `branch_of` and `delete` read them.
+/// Down: no further call; it is data.
+/// Verify: `cargo test -p loongagent`.
 /// What a session looks like from outside, read from the log itself — the log is the
 /// record, so a list must not need an index that could disagree with it.
 #[derive(Debug, Clone)]
@@ -123,6 +186,12 @@ struct SessionSummary {
     parent: Option<(String, u64)>,
 }
 
+/// Purpose: Read every session log in a directory into summaries, counting the child's own events only.
+/// Serves: `session_summaries`, `all_session_summaries_in`, `newest_session_in` and `delete`.
+/// Design: `docs/design/sessions-lineage.md` §1 and §3.
+/// Up: `session_summaries`, `all_session_summaries_in`, `newest_session_in` and `delete`.
+/// Down: `std::fs::read_dir`, the JSONL line parser, `session_id_of` and `SessionSummary`.
+/// Verify: `cargo test -p loongagent`.
 fn session_summaries_in(dir: &Path, project: &str) -> Vec<SessionSummary> {
     let mut sessions = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -201,17 +270,27 @@ fn session_summaries_in(dir: &Path, project: &str) -> Vec<SessionSummary> {
     sessions
 }
 
+/// Purpose: This project's sessions, newest first.
+/// Contract: `session.rs` listing; `list_sessions` is the only caller.
 /// This project's sessions, newest first.
 fn session_summaries(cwd: &Path) -> Vec<SessionSummary> {
     session_summaries_in(&session_dir(cwd), &project_slug(cwd))
 }
 
+/// Purpose: Every project's sessions, newest first.
+/// Contract: `session.rs` listing; `list_sessions --all` and `resume` reach it through resolution.
 /// Every project's sessions, newest first. `--all` for the list, and how `resume` finds
 /// a session that is not in the current directory.
 fn all_session_summaries() -> Vec<SessionSummary> {
     all_session_summaries_in(&config_dir())
 }
 
+/// Purpose: The same walk under an injected root, one directory per project.
+/// Serves: `all_session_summaries` and `resolve_session_in`'s cross-project search.
+/// Design: `docs/design/sessions-lineage.md` §3.
+/// Up: `all_session_summaries` and `resolve_session_in`; no other caller.
+/// Down: `session_summaries_in` and `std::fs::read_dir`.
+/// Verify: `cargo test -p loongagent`.
 fn all_session_summaries_in(root: &Path) -> Vec<SessionSummary> {
     let mut sessions = Vec::new();
     let root = root.join("projects");
@@ -229,16 +308,30 @@ fn all_session_summaries_in(root: &Path) -> Vec<SessionSummary> {
     sessions
 }
 
+/// Purpose: The session a bare surface would continue, or `None` when this project has none.
+/// Serves: `Args::finish_session`, `resolve_session` for `latest`, and `fork` and `list_sessions`.
+/// Design: `docs/design/sessions-lineage.md` §5.
+/// Up: `Args::finish_session`, `resolve_session_in`, `fork` and `list_sessions`.
+/// Down: `newest_session_in`.
+/// Verify: `cargo test -p loongagent`.
 pub(crate) fn newest_session(cwd: &Path) -> Option<PathBuf> {
     newest_session_in(&config_dir(), cwd)
 }
 
+/// Purpose: The newest session in one directory, under an injected root.
+/// Contract: `session.rs` resolution; `newest_session` and `resolve_session_in` call it.
 fn newest_session_in(root: &Path, cwd: &Path) -> Option<PathBuf> {
     session_summaries_in(&session_dir_in(root, cwd), &project_slug(cwd))
         .first()
         .map(|s| s.path.clone())
 }
 
+/// Purpose: Turn a path, an id or a prefix into a session file, naming the candidates when the answer is several.
+/// Serves: `Args::finish_session`, `fork` and `delete`.
+/// Design: `docs/design/sessions-lineage.md` §5.
+/// Up: `Args::finish_session`, `fork` and `delete`; the session tests.
+/// Down: `resolve_session_in`.
+/// Verify: `cargo test -p loongagent`.
 /// Turn what someone typed into a session file. A path stays a path; anything else is an
 /// id — exact, an unambiguous prefix of one, or `latest`. The error names the candidates
 /// rather than saying "not found" when the answer is "several".
@@ -246,6 +339,12 @@ pub(crate) fn resolve_session(spec: &str, cwd: &Path) -> Result<PathBuf, String>
     resolve_session_in(&config_dir(), spec, cwd)
 }
 
+/// Purpose: The same resolution under an injected root, including the cross-project fallback.
+/// Serves: `resolve_session` and the session tests.
+/// Design: `docs/design/sessions-lineage.md` §3 and §5.
+/// Up: `resolve_session` and the session tests; no other caller.
+/// Down: `session_dir_in`, `newest_session_in`, `session_summaries_in`, `match_session`, `all_session_summaries_in` and `match_session_across_projects`.
+/// Verify: `cargo test -p loongagent`.
 fn resolve_session_in(root: &Path, spec: &str, cwd: &Path) -> Result<PathBuf, String> {
     if spec.contains('/') || spec.ends_with(".jsonl") {
         return Ok(PathBuf::from(spec));
@@ -287,6 +386,12 @@ fn resolve_session_in(root: &Path, spec: &str, cwd: &Path) -> Result<PathBuf, St
     }
 }
 
+/// Purpose: Resolve a session in another project, refusing to guess when the same legacy id exists twice.
+/// Serves: `resolve_session_in`'s fallback.
+/// Design: `docs/design/sessions-lineage.md` §3.
+/// Up: `resolve_session_in`; no other caller.
+/// Down: no further call; it compares summaries.
+/// Verify: `cargo test -p loongagent`.
 /// The same, but for sessions in *other* projects: here an exact id is not enough to
 /// disambiguate, because every legacy session in every project is called `default`.
 /// Choosing one silently would be worse than saying which ones exist.
@@ -321,6 +426,12 @@ fn match_session_across_projects(
     }
 }
 
+/// Purpose: Exact id first, then an unambiguous prefix, and an error naming the candidates otherwise.
+/// Serves: `resolve_session_in`.
+/// Design: `docs/design/sessions-lineage.md` §5.
+/// Up: `resolve_session_in`; no other caller.
+/// Down: no further call; it compares summaries.
+/// Verify: `cargo test -p loongagent`.
 /// Exact id, then an unambiguous prefix. `Ok(None)` means "not here"; the error is only
 /// for the case where the answer is "several".
 fn match_session(sessions: &[SessionSummary], wanted: &str) -> Result<Option<PathBuf>, String> {
@@ -345,6 +456,8 @@ fn match_session(sessions: &[SessionSummary], wanted: &str) -> Result<Option<Pat
     }
 }
 
+/// Purpose: How long ago, in the only units a person reads in a list.
+/// Contract: `session.rs` listing; `list_sessions` and `delete` print it.
 /// How long ago, in the only units a person reads in a list.
 fn age_text(then: SystemTime) -> String {
     let secs = SystemTime::now()
@@ -359,6 +472,8 @@ fn age_text(then: SystemTime) -> String {
     }
 }
 
+/// Purpose: Shorten a string to a column budget without breaking a character.
+/// Contract: `session.rs` listing; `list_sessions` is the only caller.
 fn clip(text: &str, width: usize) -> String {
     if text.chars().count() <= width {
         return text.to_string();
@@ -367,6 +482,12 @@ fn clip(text: &str, width: usize) -> String {
     format!("{head}…")
 }
 
+/// Purpose: Print this project's sessions or every project's, newest first, with the one a bare surface would pick.
+/// Serves: `loongagent sessions [--all] [--limit N]`.
+/// Design: `docs/design/sessions-lineage.md` §3 and §5.
+/// Up: `main.rs`'s `sessions` arm; no other caller.
+/// Down: `session_summaries`, `all_session_summaries`, `newest_session`, `age_text` and `clip`.
+/// Verify: `cargo test -p loongagent`.
 /// `loongagent sessions [--all] [--limit N] [--cwd DIR]`
 pub(crate) fn list_sessions(rest: &[String]) -> Result<(), String> {
     let mut cwd = std::env::current_dir().map_err(|e| format!("current directory: {e}"))?;
@@ -480,6 +601,12 @@ pub(crate) fn list_sessions(rest: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Purpose: Create a child session that references its parent's prefix instead of copying it.
+/// Serves: `loongagent fork [ID] [--at SEQ]`.
+/// Design: `docs/design/sessions-lineage.md` §4.
+/// Up: `main.rs`'s `fork` arm; no other caller.
+/// Down: `resolve_session`, `newest_session`, `session_id_of`, `replay_lenient`, `new_session_id_in_dir` and `SessionLog::append`.
+/// Verify: `cargo test -p loongagent`.
 /// `loongagent fork [ID] [--at SEQ] [--cwd DIR]`
 ///
 /// A child session (ADR-0015, level 2): a new log that **references** its parent's
@@ -566,6 +693,12 @@ pub(crate) fn fork(rest: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Purpose: A named session plus every descendant, as indices into the listing.
+/// Serves: `delete`, and the test that pins the cascade.
+/// Design: `docs/design/sessions-lineage.md` §4.
+/// Up: `delete` and the session tests; no other caller.
+/// Down: no further call; it walks the summaries' parent edges.
+/// Verify: `cargo test -p loongagent`.
 /// ADR-0015's *branch*: the session someone named, plus every session that descends
 /// from it. Pure arithmetic over what the logs say, so the cascade can be reasoned about
 /// (and tested) without touching a file.
@@ -598,6 +731,12 @@ fn branch_of(sessions: &[SessionSummary], target: &str) -> Vec<usize> {
     include
 }
 
+/// Purpose: Processes that hold a session open, found by their `--session` argument.
+/// Serves: `delete`, so a delete cannot silently orphan a live writer.
+/// Design: `docs/design/sessions-lineage.md` §1.
+/// Up: `delete`; no other caller.
+/// Down: `/proc/<pid>/cmdline`; no further call.
+/// Verify: `cargo test -p loongagent`.
 /// Processes that hold this session open, by looking for `--session <path>` in their
 /// command line. Deleting a file another process is appending to does not stop that
 /// process: it keeps writing to a name nobody can see any more, and the conversation is
@@ -639,6 +778,12 @@ fn writers_of(path: &Path) -> Vec<u32> {
     writers
 }
 
+/// Purpose: Delete a session and its whole branch, after saying what goes and refusing while it is open.
+/// Serves: `loongagent delete ID [--force]`.
+/// Design: `docs/design/sessions-lineage.md` §4.
+/// Up: `main.rs`'s `delete` arm; no other caller.
+/// Down: `resolve_session`, `session_summaries_in`, `session_id_of`, `branch_of`, `writers_of` and `std::fs::remove_file`.
+/// Verify: `cargo test -p loongagent`.
 /// `loongagent delete ID [--force] [--cwd DIR]`
 ///
 /// The unit is ADR-0015's **branch**: a session and its descendants go together, because
@@ -759,6 +904,12 @@ pub(crate) fn delete(rest: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Purpose: The friendly spelling of `tui --session …`, defaulting to the newest session.
+/// Serves: `loongagent resume [ID]`.
+/// Design: `docs/design/sessions-lineage.md` §5.
+/// Up: `main.rs`'s `resume` arm; no other caller.
+/// Down: `Args::parse` and `tui.rs`'s `full_screen`.
+/// Verify: `cargo test -p loongagent`.
 /// `loongagent resume [ID]` — the friendly spelling of `tui --session …`.
 pub(crate) fn resume(rest: &[String]) -> Result<(), String> {
     let mut args = rest.to_vec();
@@ -779,6 +930,12 @@ pub(crate) fn resume(rest: &[String]) -> Result<(), String> {
     full_screen(Args::parse(&args)?)
 }
 
+/// Purpose: The file a project's bare surface would open when nothing was named.
+/// Serves: `Args::session_path`.
+/// Design: `docs/design/sessions-lineage.md` §1.
+/// Up: `Args::session_path`; no other caller.
+/// Down: `config_dir` and `project_slug`.
+/// Verify: `cargo test -p loongagent`.
 pub(crate) fn default_session_path(cwd: &Path) -> PathBuf {
     config_dir()
         .join("projects")
@@ -786,6 +943,12 @@ pub(crate) fn default_session_path(cwd: &Path) -> PathBuf {
         .join("session.jsonl")
 }
 
+/// Purpose: A readable directory name for a project path, with a hash so two paths cannot share a conversation.
+/// Serves: every path in this file.
+/// Design: `docs/design/sessions-lineage.md` §1.
+/// Up: `session_dir_in`, `session_summaries`, `newest_session_in`, `resolve_session_in` and `delete`.
+/// Down: `std::fs::canonicalize` and the slug hash; no further call.
+/// Verify: `cargo test -p loongagent`.
 /// A readable directory name for a project path: `/home/me/work/api` becomes
 /// `home-me-work-api-3f9a1c22`. The hash is there because two different paths can
 /// produce the same slug (`/a-b/c` and `/a/b-c`), and quietly sharing a session
@@ -813,6 +976,8 @@ fn project_slug(cwd: &Path) -> String {
 mod session_tests {
     use super::*;
 
+    /// Purpose: A root of the test's own, so `config_dir` never reads the developer's environment.
+    /// Contract: `session.rs` tests; the session tests call it.
     /// A root of our own: `config_dir()` would read the developer's environment.
     fn temp_root(name: &str) -> PathBuf {
         let dir =
@@ -822,6 +987,12 @@ mod session_tests {
         dir
     }
 
+    /// Purpose: Write a session log with the given user prompts, enough for the listing and resolution to read.
+    /// Serves: the session tests that need a real log.
+    /// Design: `docs/design/sessions-lineage.md` §1.
+    /// Up: the session tests; no caller in production code.
+    /// Down: `std::fs::write` and `serde_json::to_string`.
+    /// Verify: `cargo test -p loongagent`.
     /// A session log with `turns` user turns, enough for the listing to read.
     fn write_session(path: &Path, prompts: &[&str]) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -843,6 +1014,7 @@ mod session_tests {
         std::fs::write(path, text).unwrap();
     }
 
+    /// Purpose: The intro names the session, and says `--new` when this run continued one.
     #[test]
     fn the_first_line_says_which_session_this_is_and_how_to_start_another() {
         // The confusion this exists for: `tui` continues the newest session, which is
@@ -864,6 +1036,7 @@ mod session_tests {
         assert!(named.starts_with("reopened session 36bxg8rd"), "{named}");
     }
 
+    /// Purpose: Ids are eight readable characters and never repeat or collide with a taken name.
     #[test]
     fn a_new_id_is_short_and_says_itself_out_loud() {
         let root = temp_root("id");
@@ -888,6 +1061,7 @@ mod session_tests {
         }
     }
 
+    /// Purpose: The legacy `session.jsonl` is still `default`, and every other id keeps its own file name.
     #[test]
     fn the_first_session_ever_kept_its_name_and_answers_to_default() {
         assert_eq!(session_id_of(Path::new("/x/session.jsonl")), "default");
@@ -906,6 +1080,7 @@ mod session_tests {
         );
     }
 
+    /// Purpose: A listing reads turns, events and the first prompt from the log, ignoring non-logs.
     #[test]
     fn a_session_is_summarised_from_its_own_log() {
         let root = temp_root("summary");
@@ -925,6 +1100,7 @@ mod session_tests {
         assert_eq!(one.first_prompt.as_deref(), Some("first question"));
     }
 
+    /// Purpose: An exact id, an unambiguous prefix, `latest` and a bare path each resolve to the right file.
     #[test]
     fn resolve_takes_an_exact_id_a_prefix_and_latest() {
         let root = temp_root("resolve");
@@ -972,6 +1148,7 @@ mod session_tests {
         );
     }
 
+    /// Purpose: An ambiguous prefix names both candidates instead of choosing one.
     #[test]
     fn a_prefix_that_fits_two_sessions_says_which() {
         let root = temp_root("ambiguous");
@@ -987,6 +1164,7 @@ mod session_tests {
         );
     }
 
+    /// Purpose: An unknown id points at `loongagent sessions`, whether the project has sessions or none.
     #[test]
     fn an_unknown_id_names_the_way_to_find_one() {
         let root = temp_root("unknown");
@@ -1004,6 +1182,7 @@ mod session_tests {
         assert!(error.contains("loongagent sessions"), "{error}");
     }
 
+    /// Purpose: A session listed by `sessions --all` can be resumed from another project.
     #[test]
     fn a_session_from_another_project_can_still_be_reopened() {
         let root = temp_root("elsewhere");
@@ -1028,6 +1207,7 @@ mod session_tests {
         assert_eq!(all_session_summaries_in(&root).len(), 1);
     }
 
+    /// Purpose: A legacy `default` present in two other projects is refused, and one present once resolves.
     #[test]
     fn an_id_that_exists_in_two_other_projects_is_not_guessed() {
         // Every legacy session is called `default`, so this is the common case, not a
@@ -1059,6 +1239,8 @@ mod session_tests {
         );
     }
 
+    /// Purpose: A summary fixture with a fixed path and an optional parent edge.
+    /// Contract: `session.rs` tests; the branch and cycle tests call it.
     fn summary(id: &str, parent: Option<(&str, u64)>) -> SessionSummary {
         SessionSummary {
             id: id.to_string(),
@@ -1072,6 +1254,7 @@ mod session_tests {
         }
     }
 
+    /// Purpose: Deleting a parent takes every descendant, a child takes its own subtree, and unrelated roots stay.
     #[test]
     fn deleting_a_session_takes_its_whole_branch() {
         let sessions = vec![
@@ -1097,6 +1280,7 @@ mod session_tests {
         assert_eq!(ids("d"), vec!["d"], "an unrelated root is not touched");
     }
 
+    /// Purpose: A hand-edited cycle in the lineage still terminates the branch walk.
     #[test]
     fn a_cycle_in_the_lineage_does_not_spin_forever() {
         // Not reachable through `fork`, but the cascade must not be the thing that hangs
@@ -1105,6 +1289,7 @@ mod session_tests {
         assert_eq!(branch_of(&sessions, "x").len(), 2);
     }
 
+    /// Purpose: A forked child's only event is the lineage record, and the listing reads it without counting the parent's events.
     #[test]
     fn a_child_session_says_where_it_came_from() {
         let root = temp_root("forked-listing");
@@ -1136,6 +1321,7 @@ mod session_tests {
         assert_eq!(parent.parent, None, "a root session came from nowhere");
     }
 
+    /// Purpose: Clipping a long or multi-byte prompt keeps it within the column budget.
     #[test]
     fn a_long_prompt_is_clipped_without_breaking_a_character() {
         assert_eq!(clip("short", 10), "short");
@@ -1145,6 +1331,7 @@ mod session_tests {
         assert!(clipped.ends_with('…'));
     }
 
+    /// Purpose: Ages print as just now, minutes, hours or days.
     #[test]
     fn ages_are_said_the_way_a_person_says_them() {
         let now = SystemTime::now();

@@ -311,7 +311,7 @@ fn all_session_summaries_in(root: &Path) -> Vec<SessionSummary> {
 /// Purpose: The session a bare surface would continue, or `None` when this project has none.
 /// Serves: `Args::finish_session`, the session listing and `fork`.
 /// Design: `docs/design/sessions-lineage.md` §5.
-/// Up: `Args::finish_session` (main.rs:421), `list_sessions` (session.rs:533) and `fork` (session.rs:645).
+/// Up: `Args::finish_session`, `list_sessions` and `fork`.
 /// Down: `newest_session_in`.
 /// Verify: `cargo test -p loongagent`.
 pub(crate) fn newest_session(cwd: &Path) -> Option<PathBuf> {

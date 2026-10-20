@@ -195,9 +195,9 @@ pub(crate) fn control_config(
 }
 
 /// Purpose: The first non-empty line of a description, for a one-line pack summary.
-/// Serves: `PackState::summary`, the one-line pack summary every reporting command prints.
+/// Serves: `PackState::summary`, the one-line pack summary at the top of a pack report.
 /// Design: `docs/design/control-plane.md` §3.
-/// Up: `main.rs`'s `PackState::summary` (main.rs:617); no other caller.
+/// Up: `main.rs`'s `PackState::summary`; no other caller.
 /// Down: `str::lines`; no further call.
 /// Verify: `cargo test -p loongagent`.
 pub(crate) fn first_line(text: &str) -> String {
@@ -465,9 +465,9 @@ pub(crate) fn connect(
 }
 
 /// Purpose: List the pack's profiles with their models and mark the selected one.
-/// Serves: `setup` and `control`'s `status` and `sync` output.
+/// Serves: `setup`, `control status|sync` and `loongagent profiles`.
 /// Design: `docs/design/control-plane.md` §3.
-/// Up: `setup` and `control`; no other caller.
+/// Up: `setup`, `control` and `profiles`; no other caller.
 /// Down: `std::println` over the `ProfilePack` fields; no further call.
 /// Verify: `cargo test -p loongagent`.
 fn print_profiles(pack: &loong_config::ProfilePack, selected: Option<&str>) {

@@ -1,3 +1,12 @@
+//! Purpose: Skills and commands: markdown content loaded by description and expanded only on invoke.
+//!
+//! # Contract
+//! - **Serves:** the kernel's system prompt and `skill` tool, the CLI's `/help` and plugin validation.
+//! - **Design:** `docs/design/extension-model.md` §2 and `docs/design/security-trust.md` §2.
+//! - **Upstream:** `crates/kernel/src/turn/build.rs`, `crates/cli/src/plugin.rs`, `loong-plugin`.
+//! - **Downstream:** `loong_tools` for the `skill` tool and `loong_schema::ActionClass`.
+//! - **Verify:** `cargo test -p loong-skills` · `./scripts/check.sh`
+//!
 //! Skills and commands — **one concept** (T-18, T-16 merged in 2026-10-05).
 //!
 //! A skill is a markdown file with frontmatter. Its *description* is what enters
@@ -36,12 +45,20 @@ pub const COMMANDS_DIR: &str = "commands";
 pub const SKILL_FILE: &str = "SKILL.md";
 
 #[derive(Debug)]
+/// Purpose: Why a skill or a root could not be read or accepted.
+/// Serves: `SkillSet::load_in` and `SkillTool::execute`.
+/// Design: `docs/design/extension-model.md` §2.
+/// Up: `SkillSet::load_in`, `scan_root` and `read_skill` construct it.
+/// Down: its `Display` impl and the kernel's error.
+/// Verify: `cargo test -p loong-skills`.
 pub enum SkillError {
     Io(String),
     Invalid(String),
 }
 
 impl std::fmt::Display for SkillError {
+    /// Purpose: Prefix a skill validation error with `skill:`.
+    /// Contract: `crates/skills/src/lib.rs`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SkillError::Io(m) => write!(f, "{m}"),
@@ -55,6 +72,12 @@ impl std::error::Error for SkillError {}
 /// Where a skill's body lives. MCP prompts are the third case: the description is
 /// in hand, the body is fetched on invoke — progressive disclosure, over a wire.
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Purpose: Where a skill's body lives: a file, a builtin, or an MCP prompt.
+/// Serves: `Skill`, the kernel's MCP prompt conversion and `SkillTool`.
+/// Design: `docs/design/extension-model.md` §2.
+/// Up: `read_skill`, `help_skill` and the kernel's build step.
+/// Down: `body`, `source_label`, `tokens` and `catalogue_line`.
+/// Verify: `cargo test -p loong-skills`.
 pub enum Origin {
     /// A markdown file in the workspace.
     File { source: PathBuf, body: String },
@@ -69,6 +92,12 @@ pub enum Origin {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Purpose: One catalogue entry: its description, body origin and recorded allowlist.
+/// Serves: `SkillSet` and `SkillTool`.
+/// Design: `docs/design/extension-model.md` §2.
+/// Up: `read_skill` and the kernel's MCP prompt conversion.
+/// Down: `SkillSet` and `SkillTool`.
+/// Verify: `cargo test -p loong-skills`.
 pub struct Skill {
     pub name: String,
     pub description: String,
@@ -80,6 +109,12 @@ pub struct Skill {
 
 impl Skill {
     /// The body, when it is already in hand.
+    /// Purpose: The body when it is in hand; `None` for an MCP prompt.
+    /// Serves: `SkillSet::invoke`.
+    /// Design: `docs/design/extension-model.md` §2.
+    /// Up: `SkillSet::invoke`.
+    /// Down: the `Origin` variants.
+    /// Verify: `cargo test -p loong-skills`.
     pub fn body(&self) -> Option<&str> {
         match &self.origin {
             Origin::File { body, .. } | Origin::Builtin { body } => Some(body),
@@ -88,6 +123,12 @@ impl Skill {
     }
 
     /// What to show a human (and the log) as this skill's provenance.
+    /// Purpose: The provenance shown to a human and recorded in the log.
+    /// Serves: `SkillSet::finalize` and `invoke`, plus the CLI and the kernel.
+    /// Design: `docs/design/extension-model.md` §2.
+    /// Up: `finalize`, `invoke`, `crates/cli` and `crates/kernel`.
+    /// Down: the `Origin` variants.
+    /// Verify: `cargo test -p loong-skills`.
     pub fn source_label(&self) -> String {
         match &self.origin {
             Origin::File { source, .. } => source.display().to_string(),
@@ -98,6 +139,12 @@ impl Skill {
 
     /// Rough size of what an invocation will add. An un-fetched MCP prompt has no
     /// known size, and pretending otherwise would be a made-up number.
+    /// Purpose: Rough size an invocation adds; zero for an unfetched MCP prompt.
+    /// Serves: `SkillSet::invoke`.
+    /// Design: `docs/design/extension-model.md` §2.
+    /// Up: `SkillSet::invoke`.
+    /// Down: `estimate_tokens`.
+    /// Verify: `cargo test -p loong-skills`.
     pub fn tokens(&self) -> u64 {
         match &self.origin {
             Origin::File { body, .. } | Origin::Builtin { body } => estimate_tokens(body),
@@ -107,6 +154,12 @@ impl Skill {
 
     /// What the model is shown: a name, a description and the invocation syntax.
     /// Never the body.
+    /// Purpose: The description-only line the model sees, never the body.
+    /// Serves: `SkillSet::catalogue` and `SkillSet::help_skill`.
+    /// Design: `docs/design/extension-model.md` §2.
+    /// Up: `catalogue` and `help_skill`.
+    /// Down: the skill's name, hint, description and origin.
+    /// Verify: `cargo test -p loong-skills`.
     pub fn catalogue_line(&self) -> String {
         let hint = match &self.argument_hint {
             Some(hint) => format!(" {hint}"),
@@ -124,6 +177,12 @@ impl Skill {
 /// What an invocation resolved to. `prompt` is `None` for an MCP prompt: the
 /// caller fetches it (it owns the server connection).
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Purpose: What an invocation resolved to: args, source, optional prompt and size.
+/// Serves: the kernel's user-prompt invocation path.
+/// Design: `docs/design/extension-model.md` §2.
+/// Up: `SkillSet::invoke`.
+/// Down: `crates/kernel/src/turn/loop.rs`.
+/// Verify: `cargo test -p loong-skills`.
 pub struct Invocation {
     pub name: String,
     pub args: String,
@@ -133,6 +192,12 @@ pub struct Invocation {
 }
 
 #[derive(Debug, Clone, Default)]
+/// Purpose: The loaded catalogue: workspace skills, external prompts and disabled names.
+/// Serves: the kernel's system prompt and `SkillTool`.
+/// Design: `docs/design/extension-model.md` §2.
+/// Up: `SkillSet::load_in`.
+/// Down: `catalogue`, `invoke`, `get` and `SkillTool`.
+/// Verify: `cargo test -p loong-skills`.
 pub struct SkillSet {
     pub workspace: PathBuf,
     pub skills: Vec<Skill>,
@@ -144,6 +209,12 @@ pub struct SkillSet {
 impl SkillSet {
     /// Discover every skill in the workspace. A malformed skill is an error, not a
     /// silently skipped file: a workflow that stopped working should say so.
+    /// Purpose: Discover the workspace's skills without extra roots or disabled names.
+    /// Serves: tests and callers that need only the workspace roots.
+    /// Design: `docs/design/extension-model.md` §2.
+    /// Up: this crate's tests.
+    /// Down: `SkillSet::load_in`.
+    /// Verify: `cargo test -p loong-skills`.
     pub fn load(workspace: impl AsRef<Path>) -> Result<Self, SkillError> {
         Self::load_in(workspace, &[], &[])
     }
@@ -151,6 +222,12 @@ impl SkillSet {
     /// Discover skills from the workspace **and** any extra roots a profile
     /// contributed (ADR-0008 add-only: layers union), minus entries a
     /// lower-authority layer disabled by identity.
+    /// Purpose: Discover every skill root, minus names a lower layer disabled.
+    /// Serves: `crates/kernel/src/turn/build.rs`, `crates/cli/src/plugin.rs` and `loong-plugin`.
+    /// Design: `docs/design/extension-model.md` §2.
+    /// Up: those three callers.
+    /// Down: `scan_root` and `finalize`.
+    /// Verify: `cargo test -p loong-skills`.
     pub fn load_in(
         workspace: impl AsRef<Path>,
         extra_dirs: &[PathBuf],
@@ -199,11 +276,23 @@ impl SkillSet {
 
     /// Add skills that come from somewhere else (MCP prompts), then rebuild the
     /// catalogue: `/help` must list them too.
+    /// Purpose: Add skills that came from elsewhere (MCP prompts), then rebuild `/help`.
+    /// Serves: the kernel's build step after starting MCP servers.
+    /// Design: `docs/design/extension-model.md` §2.
+    /// Up: `crates/kernel/src/turn/build.rs`.
+    /// Down: `finalize`.
+    /// Verify: `cargo test -p loong-skills`.
     pub fn with_external(mut self, mut extra: Vec<Skill>) -> Result<Self, SkillError> {
         self.skills.append(&mut extra);
         self.finalize()
     }
 
+    /// Purpose: Rebuild `/help`, reject duplicate names and sort the catalogue.
+    /// Serves: `load_in` and `with_external`.
+    /// Design: `docs/design/extension-model.md` §2.
+    /// Up: `load_in` and `with_external`.
+    /// Down: `help_skill`.
+    /// Verify: `cargo test -p loong-skills`.
     fn finalize(mut self) -> Result<Self, SkillError> {
         // `/help` is regenerated from the final set — including skills that arrived
         // after the first pass — so a stale help entry must not survive.
@@ -228,21 +317,45 @@ impl SkillSet {
         Ok(self)
     }
 
+    /// Purpose: Whether the set holds only built-ins.
+    /// Serves: the crate's tests; no in-tree production caller.
+    /// Design: `docs/design/extension-model.md` §2.
+    /// Up: tests only.
+    /// Down: the `Origin` of each skill.
+    /// Verify: `cargo test -p loong-skills`.
     pub fn is_empty(&self) -> bool {
         self.skills
             .iter()
             .all(|s| matches!(s.origin, Origin::Builtin { .. }))
     }
 
+    /// Purpose: The skill with this exact name.
+    /// Serves: the kernel's bootstrap lookup and `SkillSet::invoke`.
+    /// Design: `docs/design/extension-model.md` §2.
+    /// Up: `crates/kernel/src/turn/build.rs` and `invoke`.
+    /// Down: the `skills` vector.
+    /// Verify: `cargo test -p loong-skills`.
     pub fn get(&self, name: &str) -> Option<&Skill> {
         self.skills.iter().find(|s| s.name == name)
     }
 
+    /// Purpose: Every skill name, for a listing or a refusal message.
+    /// Serves: the kernel's system prompt and the CLI's server.
+    /// Design: `docs/design/extension-model.md` §2.
+    /// Up: `crates/kernel/src/turn/build.rs`, `crates/cli/src/server.rs` and `SkillTool::execute`.
+    /// Down: the `skills` vector.
+    /// Verify: `cargo test -p loong-skills`.
     pub fn names(&self) -> Vec<&str> {
         self.skills.iter().map(|s| s.name.as_str()).collect()
     }
 
     /// The description-only view that goes into context.
+    /// Purpose: The description-only view that goes into context.
+    /// Serves: the kernel's system prompt and the CLI's plugin listing.
+    /// Design: `docs/design/extension-model.md` §2.
+    /// Up: `crates/kernel/src/turn/build.rs` and `crates/cli/src/plugin.rs`.
+    /// Down: `Skill::catalogue_line`.
+    /// Verify: `cargo test -p loong-skills`.
     pub fn catalogue(&self) -> String {
         self.skills
             .iter()
@@ -253,6 +366,12 @@ impl SkillSet {
 
     /// `/name args` → what to send, or `None` when no such skill exists. An MCP
     /// prompt comes back without its body: the caller owns the connection.
+    /// Purpose: `/name args` to a resolved invocation, or `None` when unknown.
+    /// Serves: the kernel's user-prompt path.
+    /// Design: `docs/design/extension-model.md` §2.
+    /// Up: `crates/kernel/src/turn/loop.rs`.
+    /// Down: `get`, `body` and `substitute`.
+    /// Verify: `cargo test -p loong-skills`.
     pub fn invoke(&self, name: &str, args: &str) -> Option<Invocation> {
         let skill = self.get(name)?;
         Some(Invocation {
@@ -264,6 +383,12 @@ impl SkillSet {
         })
     }
 
+    /// Purpose: Build the builtin `/help` skill from the final catalogue.
+    /// Serves: `SkillSet::finalize`.
+    /// Design: `docs/design/extension-model.md` §2.
+    /// Up: `finalize`.
+    /// Down: `Skill::catalogue_line`.
+    /// Verify: `cargo test -p loong-skills`.
     fn help_skill(&self) -> Skill {
         let mut body = String::from("The skills and commands available in this workspace are:\n\n");
         for skill in self.skills.iter() {
@@ -290,6 +415,12 @@ impl SkillSet {
 /// Deliberately strict about what counts as an invocation: `/etc/hosts is wrong`
 /// is a sentence about a path, not a command, and treating it as one would make a
 /// chat message fail for looking like a filename.
+/// Purpose: Parse `/name args` strictly enough that `/etc/hosts` is not a command.
+/// Serves: the kernel's user-prompt path.
+/// Design: `docs/design/extension-model.md` §2.
+/// Up: `crates/kernel/src/turn/loop.rs`.
+/// Down: the returned `(name, args)` pair.
+/// Verify: `cargo test -p loong-skills`.
 pub fn parse_invocation(text: &str) -> Option<(String, String)> {
     let rest = text.trim().strip_prefix('/')?;
     let (name, args) = match rest.split_once(char::is_whitespace) {
@@ -303,6 +434,12 @@ pub fn parse_invocation(text: &str) -> Option<(String, String)> {
     looks_like_a_command.then(|| (name.to_string(), args.to_string()))
 }
 
+/// Purpose: Expand `$ARGUMENTS` and `$1`…`$9`, appending unused arguments.
+/// Serves: `SkillSet::invoke`.
+/// Design: `docs/design/extension-model.md` §2.
+/// Up: `SkillSet::invoke`.
+/// Down: the body's argument placeholders.
+/// Verify: `cargo test -p loong-skills`.
 fn substitute(body: &str, args: &str) -> String {
     let parts: Vec<&str> = args.split_whitespace().collect();
     let mut used_placeholder = false;
@@ -351,6 +488,12 @@ fn substitute(body: &str, args: &str) -> String {
 }
 
 /// Every skill file under one root, in both accepted spellings.
+/// Purpose: Every skill file under one root, in both accepted spellings.
+/// Serves: `SkillSet::load_in`.
+/// Design: `docs/design/extension-model.md` §2.
+/// Up: `load_in`.
+/// Down: `read_skill` and the `skills/`/`commands/` layout.
+/// Verify: `cargo test -p loong-skills`.
 fn scan_root(root: &Path) -> Result<Vec<Skill>, SkillError> {
     let mut skills = Vec::new();
     // Both readings are natural, so both work: a root that holds a `skills/`
@@ -412,6 +555,12 @@ fn scan_root(root: &Path) -> Result<Vec<Skill>, SkillError> {
     Ok(skills)
 }
 
+/// Purpose: Read one markdown file into a `Skill`, validating its frontmatter and name.
+/// Serves: `scan_root`.
+/// Design: `docs/design/extension-model.md` §2.
+/// Up: `scan_root`.
+/// Down: `split_frontmatter` and `parse_frontmatter`.
+/// Verify: `cargo test -p loong-skills`.
 fn read_skill(path: &Path, fallback_name: Option<&str>) -> Result<Skill, SkillError> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| SkillError::Io(format!("{}: {e}", path.display())))?;
@@ -458,6 +607,8 @@ fn read_skill(path: &Path, fallback_name: Option<&str>) -> Result<Skill, SkillEr
     })
 }
 
+/// Purpose: Split a markdown file into its frontmatter and body.
+/// Contract: `crates/skills/src/lib.rs`.
 fn split_frontmatter(text: &str) -> Option<(&str, &str)> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let rest = text.trim_start_matches(['\n', '\r']);
@@ -470,6 +621,12 @@ fn split_frontmatter(text: &str) -> Option<(&str, &str)> {
     Some((front, body))
 }
 
+/// Purpose: Parse `key: value` frontmatter lines into a lowercase-keyed map.
+/// Serves: `read_skill`.
+/// Design: `docs/design/extension-model.md` §2.
+/// Up: `read_skill`.
+/// Down: the `Skill` fields.
+/// Verify: `cargo test -p loong-skills`.
 fn parse_frontmatter(front: &str) -> Result<BTreeMap<String, String>, String> {
     let mut fields = BTreeMap::new();
     for (index, line) in front.lines().enumerate() {
@@ -487,13 +644,26 @@ fn parse_frontmatter(front: &str) -> Result<BTreeMap<String, String>, String> {
     Ok(fields)
 }
 
+/// Purpose: The rough token estimate used for budgets and catalogue cost.
+/// Serves: `Skill::tokens`, the kernel's prompt budget and the CLI's plugin listing.
+/// Design: `docs/design/extension-model.md` §2.
+/// Up: `Skill::tokens`, `crates/kernel/src/turn/build.rs` and `crates/cli/src/plugin.rs`.
+/// Down: none; it is a pure character count.
+/// Verify: `cargo test -p loong-skills`.
 pub fn estimate_tokens(text: &str) -> u64 {
     (text.chars().count() as u64 + 3) / 4
 }
 
 /// Fetching a prompt body from the server that owns it. The skill registry stays
 /// ignorant of MCP; whoever owns the connections supplies this.
+/// Purpose: Fetch an MCP prompt body without the skill crate knowing MCP.
+/// Serves: `SkillTool::execute`.
+/// Design: `docs/design/extension-model.md` §2.
+/// Up: the kernel implements it on `KernelMcp`.
+/// Down: `SkillTool::execute` calls `fetch`.
+/// Verify: `cargo test -p loong-skills`.
 pub trait PromptFetcher: Send + Sync {
+    /// Purpose: Fetch one prompt body with the argument names it declared.
     fn fetch(
         &self,
         server: &str,
@@ -504,12 +674,24 @@ pub trait PromptFetcher: Send + Sync {
 }
 
 /// The model-invoked path: it sees the catalogue, and asks for a body by name.
+/// Purpose: The model-invoked `skill` tool: it loads a body by name.
+/// Serves: the kernel's registry.
+/// Design: `docs/design/extension-model.md` §2.
+/// Up: register in the kernel's build step.
+/// Down: `Tool` and `PromptFetcher`.
+/// Verify: `cargo test -p loong-skills`.
 pub struct SkillTool {
     skills: std::sync::Arc<SkillSet>,
     fetcher: Option<std::sync::Arc<dyn PromptFetcher>>,
 }
 
 impl SkillTool {
+    /// Purpose: Build the tool with no MCP fetcher.
+    /// Serves: the kernel's build step when no server is reachable.
+    /// Design: `docs/design/extension-model.md` §2.
+    /// Up: `crates/kernel/src/turn/build.rs`.
+    /// Down: the `skills` field.
+    /// Verify: `cargo test -p loong-skills`.
     pub fn new(skills: std::sync::Arc<SkillSet>) -> Self {
         Self {
             skills,
@@ -517,6 +699,12 @@ impl SkillTool {
         }
     }
 
+    /// Purpose: Build the tool with an MCP fetcher for remote prompt bodies.
+    /// Serves: the kernel's build step.
+    /// Design: `docs/design/extension-model.md` §2.
+    /// Up: `crates/kernel/src/turn/build.rs`.
+    /// Down: the `fetcher` field.
+    /// Verify: `cargo test -p loong-skills`.
     pub fn with_fetcher(
         skills: std::sync::Arc<SkillSet>,
         fetcher: std::sync::Arc<dyn PromptFetcher>,
@@ -529,13 +717,19 @@ impl SkillTool {
 }
 
 impl Tool for SkillTool {
+    /// Purpose: The tool name the model calls (`skill`).
+    /// Contract: `crates/skills/src/lib.rs`.
     fn name(&self) -> &str {
         "skill"
     }
+    /// Purpose: The text that tells the model what this tool returns.
+    /// Contract: `crates/skills/src/lib.rs`.
     fn description(&self) -> &str {
         "Load the full instructions of a skill or command from this workspace by name. The \
          catalogue of available names is in the system prompt; this returns the body."
     }
+    /// Purpose: The one-string `name` argument schema.
+    /// Contract: `crates/skills/src/lib.rs`.
     fn parameters(&self) -> Json {
         json!({
             "type": "object",
@@ -546,9 +740,17 @@ impl Tool for SkillTool {
         })
     }
     /// Reading a local file: no side effects, nothing outside the workspace.
+    /// Purpose: `Investigate`, because reading a skill has no side effects.
+    /// Contract: `crates/skills/src/lib.rs`.
     fn action_class(&self, _args: &Json, _cwd: &Path) -> ActionClass {
         ActionClass::Investigate
     }
+    /// Purpose: Resolve a name to its body, fetching an MCP prompt when needed.
+    /// Serves: the kernel's dispatch after the PDP.
+    /// Design: `docs/design/extension-model.md` §2.
+    /// Up: the kernel's tool dispatch.
+    /// Down: `SkillSet::get` and `PromptFetcher::fetch`.
+    /// Verify: `cargo test -p loong-skills`.
     fn execute(&self, args: &Json, _ctx: &ExecContext<'_>) -> Result<String, ToolError> {
         let name = args
             .get("name")
@@ -593,6 +795,8 @@ mod tests {
 
     static N: AtomicU64 = AtomicU64::new(0);
 
+    /// Purpose: A fresh temporary workspace with both skill roots.
+    /// Contract: `crates/skills/src/lib.rs`.
     fn workspace() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "loong-skills-{}-{}",
@@ -604,6 +808,8 @@ mod tests {
         dir
     }
 
+    /// Purpose: Write a `skills/<name>/SKILL.md` file and return its path.
+    /// Contract: `crates/skills/src/lib.rs`.
     fn skill_file(ws: &Path, name: &str, body: &str) -> PathBuf {
         let dir = ws.join(".loongagent/skills").join(name);
         std::fs::create_dir_all(&dir).unwrap();
@@ -612,6 +818,8 @@ mod tests {
         path
     }
 
+    /// Purpose: Write a `commands/<name>.md` file and return its path.
+    /// Contract: `crates/skills/src/lib.rs`.
     fn command_file(ws: &Path, name: &str, body: &str) -> PathBuf {
         let path = ws.join(".loongagent/commands").join(format!("{name}.md"));
         std::fs::write(&path, body).unwrap();
@@ -619,6 +827,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that a `SKILL.md` yields its name, description, hint and body.
     fn a_skill_is_discovered_with_its_description_and_body() {
         let ws = workspace();
         skill_file(
@@ -635,6 +844,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that `<name>.md` is the same concept and takes its name from the file stem.
     fn the_older_commands_shape_is_the_same_concept() {
         let ws = workspace();
         command_file(
@@ -651,6 +861,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that the catalogue shows the description and source but never the body.
     fn the_catalogue_carries_descriptions_and_never_bodies() {
         let ws = workspace();
         skill_file(
@@ -673,6 +884,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that `/help` is builtin, lists the catalogue and includes itself.
     fn help_is_always_available_and_lists_what_exists() {
         let ws = workspace();
         skill_file(
@@ -689,6 +901,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin `$ARGUMENTS`, positional substitution, the append fallback and a lone `$`.
     fn arguments_substitute_all_forms_and_are_never_dropped() {
         let ws = workspace();
         skill_file(&ws, "all", "---\ndescription: d\n---\nARGS=[$ARGUMENTS]\n");
@@ -726,6 +939,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that an unknown invocation is `None`, not a guess.
     fn an_unknown_name_is_none_not_a_guess() {
         let ws = workspace();
         let set = SkillSet::load(&ws).unwrap();
@@ -733,6 +947,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin the command grammar and that path-like sentences are not commands.
     fn invocation_syntax_is_parsed_strictly() {
         assert_eq!(
             parse_invocation("/review HEAD~1"),
@@ -754,6 +969,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin the errors for missing frontmatter, missing description, a bad name and a duplicate.
     fn broken_skills_are_loud_and_specific() {
         let ws = workspace();
         skill_file(&ws, "no-front", "just a body\n");
@@ -790,6 +1006,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that quotes and colons in frontmatter values survive parsing.
     fn a_quoted_or_spaced_value_survives_the_frontmatter() {
         let ws = workspace();
         skill_file(
@@ -803,6 +1020,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin the `skill` tool's body, source naming and refusals.
     fn the_model_can_load_a_body_by_name_and_gets_refused_for_a_bad_one() {
         let ws = workspace();
         skill_file(
@@ -840,6 +1058,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that an MCP prompt enters the catalogue without a body and invokes to coordinates.
     fn an_mcp_prompt_is_a_skill_whose_body_is_fetched_on_invoke() {
         let ws = workspace();
         skill_file(
@@ -899,9 +1118,17 @@ mod tests {
         assert!(set.names().contains(&"mcp__policy__review"));
     }
 
+    /// Purpose: A test fetcher that says what it was asked for.
+    /// Serves: the MCP-fetching tests.
+    /// Design: `docs/design/extension-model.md` §2.
+    /// Up: `the_tool_fetches_an_mcp_body_and_says_so_without_a_server`.
+    /// Down: `PromptFetcher::fetch`.
+    /// Verify: `cargo test -p loong-skills`.
     struct FakeFetcher;
 
     impl PromptFetcher for FakeFetcher {
+        /// Purpose: Return a description of the fetch instead of a real body.
+        /// Contract: `crates/skills/src/lib.rs`.
         fn fetch(
             &self,
             server: &str,
@@ -916,6 +1143,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin the fetch path and the refusal when no server is reachable.
     fn the_tool_fetches_an_mcp_body_and_says_so_without_a_server() {
         let ws = workspace();
         let set = std::sync::Arc::new(
@@ -956,6 +1184,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that a duplicate name across origins is rejected.
     fn an_external_skill_cannot_shadow_a_local_one() {
         let ws = workspace();
         skill_file(&ws, "review", "---\ndescription: local\n---\nbody\n");
@@ -978,6 +1207,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that extra roots are unioned and disabled names leave the catalogue.
     fn extra_roots_are_unioned_and_disabled_names_are_reported() {
         let ws = workspace();
         skill_file(&ws, "local", "---\ndescription: Local\n---\nbody\n");
@@ -1011,6 +1241,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin the two root shapes and that a plugin README is not read as a command.
     fn a_root_that_carries_the_workspace_shape_is_read_in_that_shape() {
         // What a plugin checkout looks like: `skills/` beside a repository's own
         // markdown. Reading `README.md` as a command would fail the whole load, and
@@ -1058,6 +1289,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that a missing profile root is an error.
     fn a_profile_root_that_does_not_exist_is_loud() {
         let ws = workspace();
         let err = SkillSet::load_in(&ws, &[ws.join("nope")], &[])
@@ -1067,6 +1299,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that an empty workspace still offers `/help`.
     fn an_empty_workspace_still_offers_help() {
         let ws = workspace();
         let set = SkillSet::load(&ws).unwrap();

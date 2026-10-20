@@ -1,3 +1,12 @@
+//! Purpose: Parse `hooks.toml` and keep its hooks inert until a human trusts the exact bytes.
+//!
+//! # Contract
+//! - **Serves:** the kernel's build step and the `loongagent hooks` command.
+//! - **Design:** `docs/design/extension-model.md` §1 and `docs/design/security-trust.md` §1.
+//! - **Upstream:** `crates/kernel/src/turn/build.rs` and `crates/cli/src/hooks.rs`.
+//! - **Downstream:** `loong_manifest` for the hash and trust check; `run` consumes the specs.
+//! - **Verify:** `cargo test -p loong-hooks` · `./scripts/check.sh`
+//!
 //! Hook configuration and the trust gate.
 //!
 //! Hooks that ship inside a repository are **content from that repository**, so
@@ -23,6 +32,12 @@ const MAX_TIMEOUT_MS: u64 = 60_000;
 /// The moments a hook can answer for (ADR-0007 §7's event set, restricted to the
 /// ones this kernel actually has).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// Purpose: The six lifecycle moments a hook can answer for.
+/// Serves: `HookSet::load`, `HookRunner::fire` and the kernel's hook calls.
+/// Design: `docs/design/extension-model.md` §1.
+/// Up: `HookEvent::parse` from the manifest.
+/// Down: `wire` and the kernel's `fire` calls.
+/// Verify: `cargo test -p loong-hooks`.
 pub enum HookEvent {
     SessionStart,
     UserPromptSubmit,
@@ -42,6 +57,12 @@ impl HookEvent {
         HookEvent::PermissionDecided,
     ];
 
+    /// Purpose: The event's snake_case name on the wire and in the payload.
+    /// Serves: `HookEvent::parse` and `payload`.
+    /// Design: `docs/design/extension-model.md` §1.
+    /// Up: `parse`, `summary` and the CLI's `hooks list`.
+    /// Down: the manifest spelling and the payload's `event` field.
+    /// Verify: `cargo test -p loong-hooks`.
     pub fn wire(self) -> &'static str {
         match self {
             HookEvent::SessionStart => "session_start",
@@ -53,6 +74,12 @@ impl HookEvent {
         }
     }
 
+    /// Purpose: Parse a manifest event name, rejecting an unknown one.
+    /// Serves: `HookSet::load`.
+    /// Design: `docs/design/extension-model.md` §1.
+    /// Up: `HookSet::load`.
+    /// Down: `HookEvent::ALL` and `wire`.
+    /// Verify: `cargo test -p loong-hooks`.
     pub fn parse(text: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|e| e.wire() == text)
     }
@@ -61,12 +88,24 @@ impl HookEvent {
 /// What a hook that could not answer means. **Fail closed by default**: a guard
 /// that silently evaporates is worse than one that stops work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Purpose: What a hook that could not answer means; fail closed by default.
+/// Serves: `HookSet::load`, which parses it, and `run`'s fallback.
+/// Design: `docs/design/extension-model.md` §1.
+/// Up: `HookSet::load`.
+/// Down: `HookRunner::fallback`.
+/// Verify: `cargo test -p loong-hooks`.
 pub enum OnError {
     Deny,
     Allow,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Purpose: How a hook answers: a script, an HTTP endpoint, or an MCP tool.
+/// Serves: `HookSet::load` and `HookRunner::run_one`.
+/// Design: `docs/design/extension-model.md` §1.
+/// Up: `HookSet::load` constructs it.
+/// Down: `label`, `target` and `HookRunner::run_one`.
+/// Verify: `cargo test -p loong-hooks`.
 pub enum HookKind {
     /// A script file (fingerprinted, executed with `sh`).
     Shell { script: PathBuf },
@@ -78,6 +117,12 @@ pub enum HookKind {
 }
 
 impl HookKind {
+    /// Purpose: The kind's short name for default ids and `HookOutcome`.
+    /// Serves: `HookSet::load` and `run::outcome`.
+    /// Design: `docs/design/extension-model.md` §1.
+    /// Up: `HookSet::load`'s default id and `outcome`.
+    /// Down: the strings `"shell"`, `"http"` and `"mcp"`.
+    /// Verify: `cargo test -p loong-hooks`.
     pub fn label(&self) -> &'static str {
         match self {
             HookKind::Shell { .. } => "shell",
@@ -87,6 +132,12 @@ impl HookKind {
     }
 
     /// What to show a human in `hooks list`.
+    /// Purpose: What to show a human in `hooks list`.
+    /// Serves: `crates/cli/src/hooks.rs`.
+    /// Design: `docs/design/extension-model.md` §1.
+    /// Up: the CLI's `hooks list`.
+    /// Down: the script path, URL or `server/tool` pair.
+    /// Verify: `cargo test -p loong-hooks`.
     pub fn target(&self) -> String {
         match self {
             HookKind::Shell { script } => script.display().to_string(),
@@ -97,6 +148,12 @@ impl HookKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Purpose: One parsed hook: id, event, kind, failure policy and deadline.
+/// Serves: `HookSet` and `HookRunner`.
+/// Design: `docs/design/extension-model.md` §1.
+/// Up: `HookSet::load`.
+/// Down: `HookRunner`.
+/// Verify: `cargo test -p loong-hooks`.
 pub struct HookSpec {
     pub id: String,
     pub event: HookEvent,
@@ -106,6 +163,12 @@ pub struct HookSpec {
 }
 
 #[derive(Debug)]
+/// Purpose: Why `hooks.toml` could not be read, parsed or accepted.
+/// Serves: `HookSet::load` and the CLI's error output.
+/// Design: `docs/design/extension-model.md` §1.
+/// Up: `HookSet::load`.
+/// Down: its `Display` impl and the kernel's error.
+/// Verify: `cargo test -p loong-hooks`.
 pub enum ConfigError {
     Io(String),
     Parse(String),
@@ -113,6 +176,8 @@ pub enum ConfigError {
 }
 
 impl std::fmt::Display for ConfigError {
+    /// Purpose: Prefix parse and validation errors with `hooks.toml`.
+    /// Contract: `crates/hooks/src/config.rs`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ConfigError::Io(m) => write!(f, "{m}"),
@@ -125,6 +190,12 @@ impl std::fmt::Display for ConfigError {
 impl std::error::Error for ConfigError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Purpose: The trust verdict for the manifest and every script it names.
+/// Serves: `HookSet::active` and `summary`.
+/// Design: `docs/design/extension-model.md` §1 and `docs/design/security-trust.md` §1.
+/// Up: `HookSet::read_trust`.
+/// Down: `active` and `summary`.
+/// Verify: `cargo test -p loong-hooks`.
 pub enum TrustStatus {
     /// No manifest: the session simply has no hooks.
     NoHooks,
@@ -136,6 +207,12 @@ pub enum TrustStatus {
 }
 
 #[derive(Debug, Clone)]
+/// Purpose: The parsed manifest plus its trust verdict.
+/// Serves: the kernel's build step and the CLI.
+/// Design: `docs/design/extension-model.md` §1 and `docs/design/security-trust.md` §1.
+/// Up: `HookSet::load`.
+/// Down: `active`, `fingerprints` and `summary`.
+/// Verify: `cargo test -p loong-hooks`.
 pub struct HookSet {
     pub workspace: PathBuf,
     pub hooks_dir: PathBuf,
@@ -147,6 +224,12 @@ impl HookSet {
     /// Load `<workspace>/.loongagent/hooks.toml`. An absent manifest is not an
     /// error; a malformed one is (silently ignoring a broken guard is the worst
     /// outcome).
+    /// Purpose: Parse the manifest and check its trust record, with no manifest meaning no hooks.
+    /// Serves: `crates/kernel/src/turn/build.rs` and `crates/cli/src/hooks.rs`.
+    /// Design: `docs/design/extension-model.md` §1 and `docs/design/security-trust.md` §1.
+    /// Up: those two callers.
+    /// Down: `read_trust` and `sources_of`.
+    /// Verify: `cargo test -p loong-hooks`.
     pub fn load(workspace: impl AsRef<Path>) -> Result<Self, ConfigError> {
         let workspace = workspace.as_ref().to_path_buf();
         let hooks_dir = workspace.join(HOOKS_DIR);
@@ -260,6 +343,12 @@ impl HookSet {
     }
 
     /// Every file whose bytes must be trusted, with a change-detection hash.
+    /// Purpose: Every file whose bytes must be trusted, with its change-detection hash.
+    /// Serves: `loongagent hooks trust`, which prints them.
+    /// Design: `docs/design/extension-model.md` §1 and `docs/design/security-trust.md` §1.
+    /// Up: `crates/cli/src/hooks.rs`.
+    /// Down: `sources_of` and `loong_manifest::hash_file`.
+    /// Verify: `cargo test -p loong-hooks`.
     pub fn fingerprints(&self) -> Result<Vec<(String, String)>, ConfigError> {
         let sources = sources_of(
             &self.hooks_dir,
@@ -276,6 +365,12 @@ impl HookSet {
             .collect()
     }
 
+    /// Purpose: Turn the trust record into `TrustStatus`, counting an absent record as changed.
+    /// Serves: `HookSet::load`.
+    /// Design: `docs/design/extension-model.md` §1 and `docs/design/security-trust.md` §1.
+    /// Up: `HookSet::load`.
+    /// Down: `loong_manifest::check`.
+    /// Verify: `cargo test -p loong-hooks`.
     fn read_trust(
         hooks_dir: &Path,
         specs: &[HookSpec],
@@ -300,6 +395,12 @@ impl HookSet {
     }
 
     /// Record the current bytes as trusted — the explicit, per-repository opt-in.
+    /// Purpose: Record the current bytes as trusted, the explicit per-repository opt-in.
+    /// Serves: `loongagent hooks trust`.
+    /// Design: `docs/design/extension-model.md` §1 and `docs/design/security-trust.md` §1.
+    /// Up: `crates/cli/src/hooks.rs`, the server's startup path and tests.
+    /// Down: `loong_manifest::record`.
+    /// Verify: `cargo test -p loong-hooks`.
     pub fn trust_now(&self) -> Result<PathBuf, ConfigError> {
         let sources = sources_of(
             &self.hooks_dir,
@@ -312,6 +413,12 @@ impl HookSet {
     }
 
     /// The hooks that may actually run: none until the bytes are trusted.
+    /// Purpose: The hooks that may run: none until the bytes are trusted.
+    /// Serves: the kernel's build step when it builds the runner.
+    /// Design: `docs/design/extension-model.md` §1.
+    /// Up: `crates/kernel/src/turn/build.rs`.
+    /// Down: the `specs` field, gated by `trust`.
+    /// Verify: `cargo test -p loong-hooks`.
     pub fn active(&self) -> &[HookSpec] {
         match self.trust {
             TrustStatus::Trusted => &self.specs,
@@ -320,6 +427,12 @@ impl HookSet {
     }
 
     /// A one-line summary for startup logs and `hooks list`.
+    /// Purpose: A one-line trust summary for startup logs and `hooks list`.
+    /// Serves: `crates/cli/src/hooks.rs` and the server's startup note.
+    /// Design: `docs/design/extension-model.md` §1.
+    /// Up: the CLI and the server.
+    /// Down: `trust` and the spec count.
+    /// Verify: `cargo test -p loong-hooks`.
     pub fn summary(&self) -> String {
         match &self.trust {
             TrustStatus::NoHooks => "no hooks".to_string(),
@@ -335,6 +448,12 @@ impl HookSet {
 
 /// The files a hook set's behaviour depends on: the manifest, then every script
 /// it names (deduplicated: one script used by two hooks is trusted once).
+/// Purpose: The files whose bytes a hook set depends on: the manifest and every shell script.
+/// Serves: `fingerprints`, `read_trust` and `trust_now`.
+/// Design: `docs/design/extension-model.md` §1.
+/// Up: those three methods.
+/// Down: `HookKind::Shell` and `loong_manifest::Sources`.
+/// Verify: `cargo test -p loong-hooks`.
 fn sources_of(
     hooks_dir: &Path,
     specs: &[HookSpec],
@@ -361,6 +480,12 @@ fn sources_of(
 pub use loong_manifest::fingerprint;
 
 #[derive(Deserialize)]
+/// Purpose: The TOML shape: the HTTP opt-in flag and the hook entries.
+/// Serves: `HookSet::load`.
+/// Design: `docs/design/extension-model.md` §1.
+/// Up: `toml::from_str` in `load`.
+/// Down: `RawHook`.
+/// Verify: `cargo test -p loong-hooks`.
 struct RawFile {
     #[serde(default)]
     allow_http_hooks: bool,
@@ -369,6 +494,12 @@ struct RawFile {
 }
 
 #[derive(Deserialize)]
+/// Purpose: One `[[hook]]` table before validation.
+/// Serves: `RawFile` and `HookSet::load`.
+/// Design: `docs/design/extension-model.md` §1.
+/// Up: `RawFile`.
+/// Down: `HookSet::load`'s validation.
+/// Verify: `cargo test -p loong-hooks`.
 struct RawHook {
     id: Option<String>,
     event: String,
@@ -388,6 +519,12 @@ mod tests {
 
     static N: AtomicU64 = AtomicU64::new(0);
 
+    /// Purpose: A fresh temporary workspace carrying a `.loongagent` directory.
+    /// Serves: every test in this module.
+    /// Design: `docs/design/extension-model.md` §1.
+    /// Up: the hooks config tests only.
+    /// Down: `std::env::temp_dir` and `HOOKS_DIR`.
+    /// Verify: `cargo test -p loong-hooks`.
     pub fn workspace() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "loong-hooks-{}-{}",
@@ -398,10 +535,14 @@ mod tests {
         dir
     }
 
+    /// Purpose: Write a `hooks.toml` body into a test workspace.
+    /// Contract: `crates/hooks/src/config.rs`.
     fn write_manifest(ws: &Path, body: &str) {
         std::fs::write(ws.join(HOOKS_DIR).join(HOOKS_FILE), body).unwrap();
     }
 
+    /// Purpose: Write a hook script into a test workspace and return its path.
+    /// Contract: `crates/hooks/src/config.rs`.
     fn write_script(ws: &Path, name: &str, body: &str) -> PathBuf {
         let path = ws.join(HOOKS_DIR).join(name);
         if let Some(parent) = path.parent() {
@@ -412,6 +553,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that no manifest means no hooks and the "no hooks" summary.
     fn no_manifest_means_no_hooks() {
         let ws = workspace();
         let set = HookSet::load(&ws).unwrap();
@@ -421,6 +563,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin shell parsing, the fail-closed default, and inertness until trusted.
     fn a_shell_hook_parses_and_is_inert_until_trusted() {
         let ws = workspace();
         write_script(&ws, "check.sh", "exit 0\n");
@@ -449,6 +592,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that trust is bound to content, so a changed script or manifest re-arms it.
     fn trusting_is_bound_to_content_not_to_a_path() {
         let ws = workspace();
         let script = write_script(&ws, "check.sh", "exit 0\n");
@@ -480,6 +624,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that HTTP hooks are refused unless the manifest opts in.
     fn http_hooks_are_off_unless_the_manifest_opts_in() {
         let ws = workspace();
         write_manifest(
@@ -499,6 +644,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin the loud, specific errors for a broken manifest.
     fn broken_manifests_are_loud() {
         let ws = workspace();
         write_script(&ws, "ok.sh", "exit 0\n");
@@ -558,6 +704,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that fingerprints cover the manifest and every named script.
     fn fingerprints_cover_the_manifest_and_every_script() {
         let ws = workspace();
         write_script(&ws, "a.sh", "exit 0\n");
@@ -578,6 +725,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that one script used by two hooks is fingerprinted once and still trusts.
     fn one_script_used_by_two_hooks_is_fingerprinted_once() {
         let ws = workspace();
         write_script(&ws, "shared.sh", "exit 0\n");
@@ -604,6 +752,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that the fingerprint is stable and order sensitive.
     fn the_hash_is_stable_and_order_sensitive() {
         assert_eq!(fingerprint(b"abc"), fingerprint(b"abc"));
         assert_ne!(fingerprint(b"abc"), fingerprint(b"acb"));

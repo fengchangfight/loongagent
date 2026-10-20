@@ -46,9 +46,6 @@ crates/context/tests/worker.rs
 crates/control/src/bin/loongagent-control.rs
 crates/control/src/lib.rs
 crates/control/tests/key_material_never_lands_in_git.rs
-crates/hooks/src/config.rs
-crates/hooks/src/lib.rs
-crates/hooks/src/run.rs
 crates/kernel/src/context_engine.rs
 crates/kernel/src/ledger.rs
 crates/kernel/src/lib.rs
@@ -65,7 +62,6 @@ crates/kernel/src/turn/session.rs
 crates/kernel/src/turn/tests.rs
 crates/plugin/src/lib.rs
 crates/server/src/lib.rs
-crates/skills/src/lib.rs
 crates/tui-app/src/lib.rs
 crates/tui-app/src/mention.rs
 crates/tui-app/src/setup.rs

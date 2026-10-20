@@ -1,3 +1,12 @@
+//! Purpose: Fire hooks and aggregate their verdicts monotonically, so hooks can only tighten a turn.
+//!
+//! # Contract
+//! - **Serves:** the kernel's turn through `Kernel::fire_hooks` and the tool-decision path.
+//! - **Design:** `docs/design/extension-model.md` §1 and `docs/design/security-trust.md` §1–§3.
+//! - **Upstream:** `crates/kernel/src/turn.rs` and `turn/hooks.rs`; `KernelMcp` implements `McpCaller`.
+//! - **Downstream:** `loong_proc` for shell hooks, `loong_http` for HTTP hooks, `loong_schema::Verdict`.
+//! - **Verify:** `cargo test -p loong-hooks` · `./scripts/check.sh`
+//!
 //! Firing hooks and aggregating what they say.
 //!
 //! Three properties are load-bearing:
@@ -22,11 +31,24 @@ use std::time::Instant;
 
 /// Calling a tool on an MCP server, without the hook engine knowing anything about
 /// MCP: the kernel owns the servers and supplies this.
+/// Purpose: Calling an MCP tool without the hook engine knowing anything about MCP.
+/// Serves: `HookRunner::run_mcp`.
+/// Design: `docs/design/extension-model.md` §1.
+/// Up: the kernel's build step supplies a `KernelMcp`.
+/// Down: `run_mcp` calls `call`.
+/// Verify: `cargo test -p loong-hooks`.
 pub trait McpCaller: Send + Sync {
+    /// Purpose: Call a named tool on a named server and return its raw body.
     fn call(&self, server: &str, tool: &str, args: &Value) -> Result<String, String>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Purpose: What one hook answered, and whether it answered at all.
+/// Serves: `HookReport` and the kernel's `hook.fired` event.
+/// Design: `docs/design/extension-model.md` §1.
+/// Up: `HookRunner` constructs it.
+/// Down: the kernel's `hook.fired` recording.
+/// Verify: `cargo test -p loong-hooks`.
 pub struct HookOutcome {
     pub id: String,
     pub event: HookEvent,
@@ -39,12 +61,24 @@ pub struct HookOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Purpose: The aggregated verdict plus every hook's outcome.
+/// Serves: the kernel's `turn/hooks.rs` and the event log.
+/// Design: `docs/design/extension-model.md` §1.
+/// Up: `HookRunner::fire`.
+/// Down: `crates/kernel/src/turn/hooks.rs`.
+/// Verify: `cargo test -p loong-hooks`.
 pub struct HookReport {
     pub verdict: Verdict,
     pub outcomes: Vec<HookOutcome>,
 }
 
 impl HookReport {
+    /// Purpose: The empty report: allow, with no hooks run.
+    /// Serves: the kernel's fast path when no hook is registered for an event.
+    /// Design: `docs/design/extension-model.md` §1.
+    /// Up: `crates/kernel/src/turn.rs`.
+    /// Down: the `HookReport` fields.
+    /// Verify: `cargo test -p loong-hooks`.
     pub fn allow() -> Self {
         Self {
             verdict: Verdict::Allow,
@@ -53,11 +87,23 @@ impl HookReport {
     }
 
     /// Did any hook hold the action up (ask or deny)?
+    /// Purpose: Whether any hook held the action up.
+    /// Serves: `crates/kernel/src/turn/hooks.rs`'s `tighten`.
+    /// Design: `docs/design/extension-model.md` §1.
+    /// Up: `crates/kernel/src/turn/hooks.rs`.
+    /// Down: the aggregated `verdict`.
+    /// Verify: `cargo test -p loong-hooks`.
     pub fn tightening(&self) -> bool {
         !matches!(self.verdict, Verdict::Allow)
     }
 
     /// The reasons of the hooks that tightened, for the human and the log.
+    /// Purpose: The reasons of the hooks that tightened, for the human and the log.
+    /// Serves: the kernel's `hook.fired` reason and the denial text.
+    /// Design: `docs/design/extension-model.md` §1.
+    /// Up: `crates/kernel/src/turn/hooks.rs`.
+    /// Down: the non-allow outcomes.
+    /// Verify: `cargo test -p loong-hooks`.
     pub fn reason(&self) -> String {
         self.outcomes
             .iter()
@@ -75,11 +121,23 @@ impl HookReport {
     }
 
     /// Hooks that could not answer — visible, never silent.
+    /// Purpose: The hooks that could not answer.
+    /// Serves: the kernel's `hook.fired` recording and this module's tests.
+    /// Design: `docs/design/extension-model.md` §1.
+    /// Up: this module's tests; no in-tree production caller.
+    /// Down: the `failed` field.
+    /// Verify: `cargo test -p loong-hooks`.
     pub fn failures(&self) -> Vec<&HookOutcome> {
         self.outcomes.iter().filter(|o| o.failed).collect()
     }
 }
 
+/// Purpose: The active hooks and the ability to fire them.
+/// Serves: the kernel's turn.
+/// Design: `docs/design/extension-model.md` §1.
+/// Up: `crates/kernel/src/turn/build.rs`.
+/// Down: `fire`, `run_one` and the three transports.
+/// Verify: `cargo test -p loong-hooks`.
 pub struct HookRunner {
     workspace: PathBuf,
     specs: Vec<HookSpec>,
@@ -89,6 +147,12 @@ pub struct HookRunner {
 }
 
 impl HookRunner {
+    /// Purpose: Build a runner from the workspace and its trusted specs.
+    /// Serves: `crates/kernel/src/turn/build.rs`.
+    /// Design: `docs/design/extension-model.md` §1.
+    /// Up: the kernel's build step.
+    /// Down: the `workspace` and `specs` fields.
+    /// Verify: `cargo test -p loong-hooks`.
     pub fn new(workspace: impl Into<PathBuf>, specs: Vec<HookSpec>) -> Self {
         Self {
             workspace: workspace.into(),
@@ -97,19 +161,43 @@ impl HookRunner {
         }
     }
 
+    /// Purpose: Supply the MCP caller an `mcp` hook needs, when a session has servers.
+    /// Serves: `crates/kernel/src/turn/build.rs`.
+    /// Design: `docs/design/extension-model.md` §1.
+    /// Up: the kernel's build step.
+    /// Down: the `mcp` field.
+    /// Verify: `cargo test -p loong-hooks`.
     pub fn with_mcp(mut self, caller: Option<Arc<dyn McpCaller>>) -> Self {
         self.mcp = caller;
         self
     }
 
+    /// Purpose: Whether this runner has no hooks at all.
+    /// Serves: no in-tree caller; the kernel uses `registered_for` to skip an event instead.
+    /// Design: `docs/design/extension-model.md` §1.
+    /// Up: none in the tree.
+    /// Down: the `specs` field.
+    /// Verify: `cargo test -p loong-hooks`.
     pub fn is_empty(&self) -> bool {
         self.specs.is_empty()
     }
 
+    /// Purpose: The specs this runner holds.
+    /// Serves: no in-tree caller at all.
+    /// Design: `docs/design/extension-model.md` §1.
+    /// Up: none in the tree.
+    /// Down: the `specs` field.
+    /// Verify: `cargo test -p loong-hooks`.
     pub fn specs(&self) -> &[HookSpec] {
         &self.specs
     }
 
+    /// Purpose: How many hooks are registered for one event.
+    /// Serves: the kernel's fast path that skips an event with no hooks.
+    /// Design: `docs/design/extension-model.md` §1.
+    /// Up: `crates/kernel/src/turn.rs`.
+    /// Down: the `specs` field.
+    /// Verify: `cargo test -p loong-hooks`.
     pub fn registered_for(&self, event: HookEvent) -> usize {
         self.specs.iter().filter(|s| s.event == event).count()
     }
@@ -117,6 +205,12 @@ impl HookRunner {
     /// Run every hook registered for `event` and aggregate. All of them run (no
     /// short circuit) so the recorded outcome is the whole picture, not the first
     /// one that objected.
+    /// Purpose: Run every hook for an event and aggregate without short-circuiting.
+    /// Serves: the kernel's hook calls.
+    /// Design: `docs/design/extension-model.md` §1.
+    /// Up: `crates/kernel/src/turn.rs`.
+    /// Down: `run_one` and `strictest`.
+    /// Verify: `cargo test -p loong-hooks`.
     pub fn fire(&self, event: HookEvent, payload: &Value) -> HookReport {
         let mut outcomes = Vec::new();
         let mut verdict = Verdict::Allow;
@@ -128,6 +222,8 @@ impl HookRunner {
         HookReport { verdict, outcomes }
     }
 
+    /// Purpose: Dispatch one spec to its transport.
+    /// Contract: `crates/hooks/src/run.rs`.
     fn run_one(&self, spec: &HookSpec, payload: &Value) -> HookOutcome {
         match &spec.kind {
             HookKind::Shell { script } => self.run_shell(spec, script, payload),
@@ -136,6 +232,12 @@ impl HookRunner {
         }
     }
 
+    /// Purpose: Run a shell hook with the payload on stdin and a hard deadline.
+    /// Serves: `run_one`.
+    /// Design: `docs/design/extension-model.md` §1.
+    /// Up: `run_one`.
+    /// Down: `loong_proc::Shell::detect`, `RunSpec` and `parse_shell_answer`.
+    /// Verify: `cargo test -p loong-hooks`.
     fn run_shell(&self, spec: &HookSpec, script: &Path, payload: &Value) -> HookOutcome {
         let started = Instant::now();
         let body = payload.to_string();
@@ -167,6 +269,12 @@ impl HookRunner {
         }
     }
 
+    /// Purpose: Post the payload to an HTTP hook and read the same verdict JSON.
+    /// Serves: `run_one`.
+    /// Design: `docs/design/extension-model.md` §1 and `docs/design/security-trust.md` §3.
+    /// Up: `run_one`.
+    /// Down: `loong_http::post_json` and `parse_verdict_body`.
+    /// Verify: `cargo test -p loong-hooks`.
     fn run_http(&self, spec: &HookSpec, url: &str, payload: &Value) -> HookOutcome {
         let started = Instant::now();
         let body = payload.to_string();
@@ -191,6 +299,12 @@ impl HookRunner {
     /// An `mcp` hook: call the tool, and expect the same verdict JSON an HTTP hook
     /// returns. One contract across all three kinds, so a policy service can move
     /// from a script to an endpoint to an MCP tool without a rewrite.
+    /// Purpose: Call an MCP tool and expect the same verdict JSON an HTTP hook returns.
+    /// Serves: `run_one`.
+    /// Design: `docs/design/extension-model.md` §1.
+    /// Up: `run_one`.
+    /// Down: the supplied `McpCaller` and `parse_verdict_body`.
+    /// Verify: `cargo test -p loong-hooks`.
     fn run_mcp(&self, spec: &HookSpec, server: &str, tool: &str, payload: &Value) -> HookOutcome {
         let started = Instant::now();
         let Some(caller) = &self.mcp else {
@@ -214,6 +328,8 @@ impl HookRunner {
     }
 
     /// What a hook that could not answer means, according to its own config.
+    /// Purpose: What a hook that could not answer means, according to its own config.
+    /// Contract: `crates/hooks/src/run.rs`.
     fn fallback(&self, spec: &HookSpec, why: String) -> Answer {
         Answer {
             verdict: match spec.on_error {
@@ -226,12 +342,20 @@ impl HookRunner {
     }
 }
 
+/// Purpose: The internal result of one hook: verdict, reason and whether it answered.
+/// Serves: the parsers and `outcome`.
+/// Design: `docs/design/extension-model.md` §1.
+/// Up: `parse_shell_answer`, `parse_verdict_body` and `fallback`.
+/// Down: `outcome`.
+/// Verify: `cargo test -p loong-hooks`.
 struct Answer {
     verdict: Verdict,
     reason: String,
     answered: bool,
 }
 
+/// Purpose: Turn an internal answer into the recorded outcome.
+/// Contract: `crates/hooks/src/run.rs`.
 fn outcome(spec: &HookSpec, answer: Answer, started: Instant) -> HookOutcome {
     HookOutcome {
         id: spec.id.clone(),
@@ -246,6 +370,12 @@ fn outcome(spec: &HookSpec, answer: Answer, started: Instant) -> HookOutcome {
 
 /// The shell hook contract: a JSON verdict on stdout, else the exit code
 /// (0 = allow, 2 = deny with stderr as the reason), else `on_error`.
+/// Purpose: The shell contract: JSON on stdout, else the exit code, else `on_error`.
+/// Serves: `run_shell`.
+/// Design: `docs/design/extension-model.md` §1.
+/// Up: `run_shell`.
+/// Down: `json_verdict` and `fallback_verdict`.
+/// Verify: `cargo test -p loong-hooks`.
 fn parse_shell_answer(stdout: &str, stderr: &str, code: Option<i32>, on_error: OnError) -> Answer {
     if let Some(answer) = json_verdict(stdout) {
         return answer;
@@ -286,6 +416,8 @@ fn parse_shell_answer(stdout: &str, stderr: &str, code: Option<i32>, on_error: O
 
 /// The contract for hook kinds that answer over a wire (HTTP, MCP): the body must
 /// carry a verdict.
+/// Purpose: The wire contract for HTTP and MCP hooks; a body without a verdict falls back.
+/// Contract: `crates/hooks/src/run.rs`.
 fn parse_verdict_body(body: &str, on_error: OnError) -> Answer {
     json_verdict(body).unwrap_or_else(|| Answer {
         verdict: fallback_verdict(on_error),
@@ -298,6 +430,12 @@ fn parse_verdict_body(body: &str, on_error: OnError) -> Answer {
     })
 }
 
+/// Purpose: Parse a JSON verdict object, or `None` when it carries no usable verdict.
+/// Serves: `parse_shell_answer` and `parse_verdict_body`.
+/// Design: `docs/design/extension-model.md` §1.
+/// Up: both parsers.
+/// Down: `loong_schema::Verdict`.
+/// Verify: `cargo test -p loong-hooks`.
 fn json_verdict(stdout: &str) -> Option<Answer> {
     let value: Value = serde_json::from_str(stdout.trim()).ok()?;
     let text = value.get("verdict")?.as_str()?;
@@ -314,6 +452,8 @@ fn json_verdict(stdout: &str) -> Option<Answer> {
     })
 }
 
+/// Purpose: The verdict a hook's `on_error` policy names.
+/// Contract: `crates/hooks/src/run.rs`.
 fn fallback_verdict(on_error: OnError) -> Verdict {
     match on_error {
         OnError::Deny => Verdict::Deny,
@@ -321,6 +461,8 @@ fn fallback_verdict(on_error: OnError) -> Verdict {
     }
 }
 
+/// Purpose: The label `on_error` uses in a failure reason.
+/// Contract: `crates/hooks/src/run.rs`.
 fn on_error_label(on_error: OnError) -> &'static str {
     match on_error {
         OnError::Deny => "deny",
@@ -328,6 +470,8 @@ fn on_error_label(on_error: OnError) -> &'static str {
     }
 }
 
+/// Purpose: The first line of a body, bounded for a reason string.
+/// Contract: `crates/hooks/src/run.rs`.
 fn first_line(text: &str) -> String {
     let line = text.trim().lines().next().unwrap_or("").trim();
     if line.chars().count() > 200 {
@@ -339,7 +483,15 @@ fn first_line(text: &str) -> String {
 
 /// deny > ask > allow: the only way to combine verdicts that keeps hooks
 /// tighten-only.
+/// Purpose: deny > ask > allow: the only combination that keeps hooks tighten-only.
+/// Serves: `HookRunner::fire`.
+/// Design: `docs/design/extension-model.md` §1 and `docs/design/security-trust.md` §2.
+/// Up: `HookRunner::fire`.
+/// Down: the `Verdict` ranking.
+/// Verify: `cargo test -p loong-hooks`.
 pub fn strictest(a: &Verdict, b: &Verdict) -> Verdict {
+    /// Purpose: The numeric rank behind `strictest`.
+    /// Contract: `crates/hooks/src/run.rs`.
     fn rank(v: &Verdict) -> u8 {
         match v {
             Verdict::Allow => 0,
@@ -366,6 +518,12 @@ pub fn strictest(a: &Verdict, b: &Verdict) -> Verdict {
 
 /// The payload every hook receives on stdin: the event name, a timestamp, and
 /// whatever fields the moment carries.
+/// Purpose: The payload every hook receives: the event, a timestamp and the moment's fields.
+/// Serves: the kernel's hook calls.
+/// Design: `docs/design/extension-model.md` §1.
+/// Up: `crates/kernel/src/turn.rs` and `turn/loop.rs`.
+/// Down: `HookEvent::wire` and `now_ms`; the hook's stdin or request body.
+/// Verify: `cargo test -p loong-hooks`.
 pub fn payload(event: HookEvent, fields: Value) -> Value {
     let mut map = match fields {
         Value::Object(map) => map,
@@ -380,6 +538,12 @@ pub fn payload(event: HookEvent, fields: Value) -> Value {
     Value::Object(map)
 }
 
+/// Purpose: The current time in milliseconds for the payload.
+/// Serves: `payload`; no other in-tree caller.
+/// Design: `docs/design/extension-model.md` §1.
+/// Up: `payload`.
+/// Down: `SystemTime::now`.
+/// Verify: `cargo test -p loong-hooks`.
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -396,6 +560,8 @@ mod tests {
 
     static N: AtomicU64 = AtomicU64::new(0);
 
+    /// Purpose: A fresh temporary directory for a test.
+    /// Contract: `crates/hooks/src/run.rs`.
     fn workspace() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "loong-runner-{}-{}",
@@ -406,12 +572,20 @@ mod tests {
         dir
     }
 
+    /// Purpose: Write a hook script into a test directory and return its path.
+    /// Contract: `crates/hooks/src/run.rs`.
     fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
         let path = dir.join(name);
         std::fs::write(&path, body).unwrap();
         path
     }
 
+    /// Purpose: A shell hook spec for the runner tests.
+    /// Serves: every test in this module.
+    /// Design: `docs/design/extension-model.md` §1.
+    /// Up: the runner tests.
+    /// Down: `HookSpec` and `HookKind::Shell`.
+    /// Verify: `cargo test -p loong-hooks`.
     fn spec(
         id: &str,
         event: HookEvent,
@@ -431,6 +605,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin the exit-code contract: `0` allows, `2` denies with stderr as the reason, every hook runs.
     fn exit_zero_allows_and_exit_two_denies_with_stderr_as_the_reason() {
         let ws = workspace();
         let allow = spec(
@@ -470,6 +645,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that a JSON verdict on stdout reaches `ask` and carries its reason.
     fn a_json_verdict_on_stdout_reaches_the_full_range() {
         let ws = workspace();
         let ask = spec(
@@ -490,6 +666,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that a broken hook fails closed by default and records the failure.
     fn a_broken_hook_fails_closed_by_default_and_says_so() {
         let ws = workspace();
         let broken = spec(
@@ -511,6 +688,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that `on_error = allow` is possible but still recorded as a failure.
     fn on_error_allow_is_possible_but_explicit() {
         let ws = workspace();
         let flaky = spec(
@@ -531,6 +709,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that a slow hook is cut off at its deadline and fails closed.
     fn a_slow_hook_is_cut_off() {
         let ws = workspace();
         let slow = spec(
@@ -549,6 +728,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that the hook receives the payload and runs in the workspace.
     fn the_hook_receives_the_event_and_runs_in_the_workspace() {
         let ws = workspace();
         std::fs::write(ws.join("marker"), "here").unwrap();
@@ -583,6 +763,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that a hook only fires for its own event.
     fn hooks_only_fire_for_their_own_event() {
         let ws = workspace();
         let pre = spec(
@@ -607,6 +788,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that aggregation is monotonic and independent of hook order.
     fn aggregation_is_monotonic_and_order_independent() {
         let ws = workspace();
         let allow = spec(
@@ -648,6 +830,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that an HTTP hook's verdict and payload reach the report and the request.
     fn http_hooks_answer_with_a_verdict() {
         let (base, server) = loong_http::testing::fake_server(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n\
@@ -684,6 +867,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that a misbehaving HTTP hook falls back to its own `on_error`.
     fn an_http_hook_that_misbehaves_falls_back_to_on_error() {
         let (base, server) = loong_http::testing::fake_server(
             "HTTP/1.1 500 Oops\r\nContent-Type: text/plain\r\n\r\nbroken",
@@ -723,17 +907,26 @@ mod tests {
         server.join().unwrap();
     }
 
+    /// Purpose: A test `McpCaller` that returns a fixed answer.
+    /// Serves: the MCP hook tests.
+    /// Design: `docs/design/extension-model.md` §1.
+    /// Up: `an_mcp_hook_uses_the_same_verdict_contract` and its neighbours.
+    /// Down: `McpCaller::call`.
+    /// Verify: `cargo test -p loong-hooks`.
     struct FakeMcp {
         answer: Result<String, String>,
     }
 
     impl McpCaller for FakeMcp {
+        /// Purpose: Return the fixed answer whatever was asked.
+        /// Contract: `crates/hooks/src/run.rs`.
         fn call(&self, _server: &str, _tool: &str, _args: &Value) -> Result<String, String> {
             self.answer.clone()
         }
     }
 
     #[test]
+    /// Purpose: Pin that an MCP hook uses the same verdict contract as a shell or HTTP hook.
     fn an_mcp_hook_uses_the_same_verdict_contract() {
         let ws = workspace();
         let hook = HookSpec {
@@ -772,6 +965,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that an MCP hook fails closed when no server is available or the answer is not a verdict.
     fn an_mcp_hook_fails_closed_when_the_server_is_missing_or_broken() {
         let ws = workspace();
         let hook = HookSpec {
@@ -813,6 +1007,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that the strictest verdict wins for every pair.
     fn the_strictest_verdict_wins() {
         assert_eq!(strictest(&Verdict::Allow, &Verdict::Ask), Verdict::Ask);
         assert_eq!(strictest(&Verdict::Ask, &Verdict::Allow), Verdict::Ask);
@@ -822,6 +1017,7 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that a trusted hook set builds a runner that fires.
     fn a_trusted_hook_set_produces_a_runner() {
         let ws = workspace();
         let dir = ws.join(crate::config::HOOKS_DIR);

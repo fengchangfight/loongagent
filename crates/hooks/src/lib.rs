@@ -1,3 +1,12 @@
+//! Purpose: Lifecycle hooks: the deterministic veto channel around the loop, allow / ask / deny only (ADR-0007 §7).
+//!
+//! # Contract
+//! - **Serves:** the kernel's turn, at the six implemented lifecycle events.
+//! - **Design:** `docs/design/extension-model.md` §1 and `docs/design/security-trust.md` §1–§3.
+//! - **Upstream:** `crates/kernel/src/turn/build.rs` and `crates/cli/src/hooks.rs`.
+//! - **Downstream:** `config` (manifest and trust gate) and `run` (verdict contract and aggregation).
+//! - **Verify:** `cargo test -p loong-hooks` · `./scripts/check.sh`
+//!
 //! Lifecycle hooks: the deterministic enforcement layer (ADR-0007 §7).
 //!
 //! A hook answers one question at a declared moment — allow, ask, or deny — and

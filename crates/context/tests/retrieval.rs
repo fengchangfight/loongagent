@@ -1,9 +1,12 @@
-//! End-to-end tests for the P1 retrieval layer.
+//! Purpose: End-to-end tests for L1 retrieval: pure materialisation, rebuildable state, citations and Chinese search.
 //!
-//! These are the tests the design note promises: the same log always produces
-//! the same derived state, a deleted store rebuilds identically, every citation
-//! resolves, and Chinese two-character keywords actually match — the case where
-//! an FTS5-only implementation silently returns nothing.
+//! Serves: the retrieval layer's promises: the same log always derives the same state, a deleted store rebuilds, and two-character Chinese terms match.
+//!
+//! # Contract
+//! - **Design:** `docs/context/data-model.md` §5.2–§5.4; `docs/context/recall.md` §7.2; `docs/design/context-ledger.md` §5.
+//! - **Upstream:** `loong_context::{build, materialize, Store, SearchQuery}` and the session fixture below.
+//! - **Downstream:** `Store::rebuild`, `Store::search`, `Store::verify` and `Store::atom`.
+//! - **Verify:** `cargo test -p loong-context --test retrieval`.
 
 use loong_context::{build, materialize, EntityKind, SearchQuery, Store, StoreError};
 use loong_eventlog::SessionLog;
@@ -14,10 +17,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static N: AtomicU64 = AtomicU64::new(0);
 
+/// Purpose: A throwaway log path; the JSONL file is the source of truth, so tests keep it.
+/// Serves: each retrieval test owning a clean session log and cleaning it up.
+/// Design: `docs/context/data-model.md` §5.2.
+/// Up: The retrieval tests.
+/// Down: `TempLog::new`, `TempLog::path` and `TempLog::drop`.
+/// Verify: `cargo test -p loong-context --test retrieval`.
 /// A throwaway log path. The file is the source of truth, so tests keep it.
 struct TempLog(PathBuf);
 
 impl TempLog {
+    /// Purpose: Create a fresh temp log path and remove any stale file.
+    /// Contract: `retrieval.rs` fixtures.
     fn new() -> Self {
         let p = std::env::temp_dir().join(format!(
             "loong-context-{}-{}.jsonl",
@@ -27,18 +38,28 @@ impl TempLog {
         let _ = std::fs::remove_file(&p);
         TempLog(p)
     }
+    /// Purpose: The session log's path.
+    /// Contract: `retrieval.rs` fixtures.
     fn path(&self) -> &PathBuf {
         &self.0
     }
 }
 
 impl Drop for TempLog {
+    /// Purpose: Remove the log and its sidecar database.
+    /// Contract: `retrieval.rs` fixtures.
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
         let _ = std::fs::remove_file(self.0.with_extension("jsonl.context.db"));
     }
 }
 
+/// Purpose: A session shaped like the design note's example: report, reads, a failed attempt, a fix, green tests.
+/// Serves: exercising every entity kind, both test outcomes and a skipped event in one realistic log.
+/// Design: `docs/context/data-model.md` §5.3–§5.4.
+/// Up: The retrieval tests.
+/// Down: `loong_eventlog::SessionLog`; no other callee.
+/// Verify: `cargo test -p loong-context --test retrieval`.
 /// A session shaped like the one in the design note §6.5: a bug is reported,
 /// files are read, a wrong fix is tried, a right fix lands, tests pass, commit.
 fn config_layering_session(path: &PathBuf) -> Vec<EventEnvelope> {
@@ -108,6 +129,7 @@ fn config_layering_session(path: &PathBuf) -> Vec<EventEnvelope> {
     events
 }
 
+/// Purpose: Pin that materialisation is pure and skips kinds that carry no searchable content.
 #[test]
 fn the_same_event_always_materialises_the_same_way() {
     let tmp = TempLog::new();
@@ -122,6 +144,7 @@ fn the_same_event_always_materialises_the_same_way() {
     );
 }
 
+/// Purpose: Pin that a long tool extract is capped and announces the cut.
 #[test]
 fn a_long_tool_output_is_capped_and_says_so() {
     let tmp = TempLog::new();
@@ -135,6 +158,7 @@ fn a_long_tool_output_is_capped_and_says_so() {
     assert!(atom.text.chars().count() < 600);
 }
 
+/// Purpose: Pin that paths, modules, commands, tests, tools and error codes are extracted deterministically.
 #[test]
 fn entities_are_extracted_from_paths_commands_tests_and_errors() {
     let tmp = TempLog::new();
@@ -159,6 +183,7 @@ fn entities_are_extracted_from_paths_commands_tests_and_errors() {
     assert!(has(EntityKind::Error, "E0308"), "{all:?}");
 }
 
+/// Purpose: Pin that two-character Chinese terms match, the case an FTS5-trigram-only search silently fails.
 #[test]
 fn a_two_character_chinese_word_is_findable() {
     // The case an FTS5-trigram-only implementation gets silently wrong: `修复`
@@ -175,6 +200,7 @@ fn a_two_character_chinese_word_is_findable() {
     assert!(!hits.is_empty(), "two-character Chinese must match");
 }
 
+/// Purpose: Pin implicit AND: every term must match, and an absent term excludes rather than zeroing the others.
 #[test]
 fn several_terms_narrow_rather_than_zero_out() {
     let tmp = TempLog::new();
@@ -191,6 +217,7 @@ fn several_terms_narrow_rather_than_zero_out() {
     assert!(impossible.is_empty(), "a term that is absent must exclude");
 }
 
+/// Purpose: Pin newest-first ordering and that a hit carries its entities.
 #[test]
 fn results_are_newest_first_and_entities_come_back_with_them() {
     let tmp = TempLog::new();
@@ -216,6 +243,7 @@ fn results_are_newest_first_and_entities_come_back_with_them() {
         .any(|(k, n)| k == "test" && n == "layer_merge"));
 }
 
+/// Purpose: Pin that entity filters answer which commands and modules the session used.
 #[test]
 fn entity_filters_answer_which_commands_and_tests_this_session_used() {
     let tmp = TempLog::new();
@@ -241,6 +269,7 @@ fn entity_filters_answer_which_commands_and_tests_this_session_used() {
     );
 }
 
+/// Purpose: Pin that re-ingest adds nothing and an appended event is picked up without re-reading state.
 #[test]
 fn ingest_is_idempotent_and_incremental() {
     let tmp = TempLog::new();
@@ -270,6 +299,7 @@ fn ingest_is_idempotent_and_incremental() {
     assert_eq!(store.atom_count().unwrap(), after_first + 1);
 }
 
+/// Purpose: Pin that a rebuild from the log reproduces the same rows as the first build.
 #[test]
 fn a_deleted_store_rebuilds_to_the_same_rows() {
     let tmp = TempLog::new();
@@ -291,6 +321,7 @@ fn a_deleted_store_rebuilds_to_the_same_rows() {
     assert_eq!(before, fresh_hits);
 }
 
+/// Purpose: Pin that a healthy store verifies clean, skipped events are auditable, and an empty store is healthy.
 #[test]
 fn verify_reports_a_healthy_store_and_survives_an_empty_one() {
     let tmp = TempLog::new();
@@ -315,6 +346,7 @@ fn verify_reports_a_healthy_store_and_survives_an_empty_one() {
     assert_eq!(report.watermark, 0);
 }
 
+/// Purpose: Pin that a missing atom behind the store's back is reported rather than hidden.
 #[test]
 fn a_store_missing_a_row_is_not_reported_as_healthy() {
     // Delete a row behind the store's back: `verify` must notice, because a
@@ -341,6 +373,7 @@ fn a_store_missing_a_row_is_not_reported_as_healthy() {
     assert!(!report.is_healthy());
 }
 
+/// Purpose: Pin that one atom is returned in full with its citation and that a missing seq is None.
 #[test]
 fn one_atom_can_be_expanded_in_full() {
     let tmp = TempLog::new();
@@ -362,6 +395,7 @@ fn one_atom_can_be_expanded_in_full() {
     );
 }
 
+/// Purpose: Pin that an unknown schema version refuses to open instead of being half-read.
 #[test]
 fn a_store_written_by_another_schema_is_refused_not_half_read() {
     let tmp = TempLog::new();

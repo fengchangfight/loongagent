@@ -1,21 +1,12 @@
-//! Two writers on one sidecar (ADR-0017 §4.6, §9).
+//! Purpose: Two writers on one sidecar: the foreground and the enrichment worker must queue, not fail.
 //!
-//! The foreground derives the deterministic layers through one `Store`; the
-//! enrichment worker owns a **second** `Store` on the same file, on purpose — sharing
-//! one connection behind a mutex would make the foreground wait on whichever model
-//! call the worker was inside. What makes two writers safe is SQLite's own short
-//! write transactions: WAL for readers, and a busy timeout so the writer that loses
-//! the race waits rather than failing with `SQLITE_BUSY`.
+//! Serves: the design's two-connection arrangement, with a control showing that the waiting property is the crate's guarantee rather than a driver default.
 //!
-//! Two facts are pinned here, and the first is the control for the second:
-//!
-//! * a connection with **no** busy timeout fails immediately when another writer
-//!   holds the lock — so the property below is not a property of SQLite's defaults;
-//! * a [`Store`] waits for the lock and then succeeds.
-//!
-//! `rusqlite` currently installs its own 5 s default timeout, which is why the
-//! control has to ask for zero explicitly. `Store::init` sets the pragma anyway:
-//! the guarantee is the design's, not the driver's.
+//! # Contract
+//! - **Design:** `docs/context/status.md` §11.1; `docs/context/pipeline.md` §6.6.
+//! - **Upstream:** `loong_context::Store` and a raw `rusqlite::Connection` in the control test.
+//! - **Downstream:** `Store::put_summary`, the busy-timeout pragma and SQLite's short write transactions.
+//! - **Verify:** `cargo test -p loong-context --test two_writers`.
 
 use loong_context::{Store, Summary, SUMMARY_SCHEMA_VERSION};
 use rusqlite::Connection;
@@ -26,6 +17,8 @@ use std::time::{Duration, Instant};
 
 static N: AtomicU64 = AtomicU64::new(0);
 
+/// Purpose: A unique temporary database path.
+/// Contract: `two_writers.rs` fixtures.
 fn temp_db() -> PathBuf {
     std::env::temp_dir().join(format!(
         "loong-context-two-writers-{}-{}.db",
@@ -34,12 +27,20 @@ fn temp_db() -> PathBuf {
     ))
 }
 
+/// Purpose: Remove the database and its WAL sidecars.
+/// Contract: `two_writers.rs` fixtures.
 fn cleanup(path: &Path) {
     for suffix in ["", "-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
     }
 }
 
+/// Purpose: One summary row to write from a named side.
+/// Serves: the interleaved writers touching the same id without conflicting shapes.
+/// Design: `docs/context/data-model.md` §5.2.
+/// Up: The two-writer tests.
+/// Down: `Summary` fields only; no other callee.
+/// Verify: `cargo test -p loong-context --test two_writers`.
 fn row(side: &str, index: usize) -> Summary {
     Summary {
         id: "ep-1".to_string(),
@@ -62,6 +63,12 @@ fn row(side: &str, index: usize) -> Summary {
     }
 }
 
+/// Purpose: Hold the write lock for a duration, run an attempt while it is held, and return how long the attempt took.
+/// Serves: measuring that a `Store` waits rather than failing with `SQLITE_BUSY`.
+/// Design: `docs/context/status.md` §11.1.
+/// Up: `a_store_writer_waits_instead_of_failing`.
+/// Down: A holder thread, `rusqlite::Connection` and the attempt closure.
+/// Verify: `cargo test -p loong-context --test two_writers a_store_writer_waits_instead_of_failing`.
 /// Hold the write lock for `held_for` and run `attempt` while it is held, returning
 /// how long `attempt` took.
 fn under_a_held_write_lock(
@@ -100,6 +107,7 @@ fn under_a_held_write_lock(
     waited
 }
 
+/// Purpose: Pin the control: with no busy timeout the same write fails at once, so the waiting property is not a driver default.
 /// The control: with no timeout, the same write fails at once. Without this, the
 /// test below could be passing because of a SQLite default rather than because of
 /// anything this crate does.
@@ -149,6 +157,7 @@ fn a_writer_with_no_timeout_fails_immediately() {
     cleanup(&path);
 }
 
+/// Purpose: Pin that a `Store` writer waits out a held lock and then succeeds.
 /// The property the engine relies on: a `Store` write waits out the other writer.
 #[test]
 fn a_store_writer_waits_instead_of_failing() {
@@ -171,6 +180,7 @@ fn a_store_writer_waits_instead_of_failing() {
     cleanup(&path);
 }
 
+/// Purpose: Pin that interleaved writes from two connections neither error nor duplicate the row.
 /// Interleaved writes from two connections: neither may error, and the row must be
 /// there exactly once however the races fell.
 #[test]

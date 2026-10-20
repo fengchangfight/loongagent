@@ -1,22 +1,12 @@
-//! A measurement kept in the repository on purpose: what one **idle window** of
-//! semantic enrichment costs (ADR-0017 §4.6, §11.1).
+//! Purpose: A re-measurable window cost: how many episodes one idle window enriches, and at what price.
 //!
-//! The design says the model call belongs in bounded idle windows rather than on the
-//! turn's critical path. That claim has a quantity attached to it — how many episodes
-//! one window enriches, and how long it takes — and a quantity should be
-//! re-measurable rather than remembered. It also answers the configuration question
-//! the design leaves open (`window_calls`, `window_tokens`): whether four calls is
-//! worth one sleep interval or whether a window should be smaller.
+//! Serves: the quantity attached to "the model call belongs off the critical path", so the configuration choice rests on a measurement.
 //!
-//! Run with:
-//!
-//! ```text
-//! cargo test -p loong-context --test window_cost -- --ignored --nocapture
-//! ```
-//!
-//! Environment: `LOONG_OLLAMA_URL` (default `http://127.0.0.1:11434`),
-//! `LOONG_SUMMARIZER_MODEL` (default `qwen2.5:7b-instruct`),
-//! `LOONG_WINDOW_CALLS` (default 4), `LOONG_WINDOW_TASKS` (default 24).
+//! # Contract
+//! - **Design:** `docs/context/status.md` §11.1; `docs/context/config.md` §11.
+//! - **Upstream:** `loong_context::{OllamaSummarizer, Store, WindowBudget}` and the console-session fixture below.
+//! - **Downstream:** `Store::rebuild`, `Store::digest` and `Store::synthesize_window`.
+//! - **Verify:** `cargo test -p loong-context --test window_cost -- --ignored --nocapture`.
 
 use loong_context::worker::IdleForeground;
 use loong_context::{OllamaSummarizer, Store, WindowBudget};
@@ -27,6 +17,12 @@ use std::time::Instant;
 
 static N: AtomicU64 = AtomicU64::new(0);
 
+/// Purpose: A session of many small finished tasks, the shape the enrichment queue actually has.
+/// Serves: a realistic window measurement: one episode per task, each with an edit and a failing-then-passing test.
+/// Design: `docs/context/pipeline.md` §6.3.
+/// Up: `one_idle_window_cost`.
+/// Down: `loong_eventlog::SessionLog`; no other callee.
+/// Verify: `cargo test -p loong-context --test window_cost`.
 /// A session of many small finished tasks, the shape the enrichment queue actually
 /// has: one episode per task, each with an edit and a failing-then-passing test.
 fn console_session(path: &PathBuf, tasks: usize) {
@@ -69,6 +65,8 @@ fn console_session(path: &PathBuf, tasks: usize) {
     }
 }
 
+/// Purpose: An environment variable parsed as a `usize`, or the default.
+/// Contract: `window_cost.rs` measurement configuration.
 fn env_usize(key: &str, default: usize) -> usize {
     std::env::var(key)
         .ok()
@@ -76,6 +74,7 @@ fn env_usize(key: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+/// Purpose: Measure one idle window's calls, enrichment, tokens and wall clock against the deterministic foreground cost.
 #[test]
 #[ignore = "needs a local Ollama; a measurement, not a gate"]
 fn one_idle_window_cost() {

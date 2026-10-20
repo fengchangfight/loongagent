@@ -1,13 +1,12 @@
-//! Tests for P4's synthesis layer: the L3 domain map and the L4 global map.
+//! Purpose: Tests for P4: the deterministic L3 domain map and the bounded L4 global map.
 //!
-//! What these hold to (`docs/06-context-engineering.md` §4.2, §4.2.1, §6.4):
+//! Serves: maps that exist with no model, roll up by a deterministic rule, record their children as lineage and never grow past their ceiling.
 //!
-//! * a domain is assigned by a **deterministic rule**, not by a model;
-//! * the maps exist with **no model at all** — that is the whole point of R mode;
-//! * L4 is **bounded** and says so when it truncates, because it is the one block
-//!   that is always in the foreground;
-//! * and an L3 records its children as its lineage, never a previous version of
-//!   itself — the rule that stops error compounding per level.
+//! # Contract
+//! - **Design:** `docs/context/pipeline.md` §6.4; `docs/context/recall.md` §7.1; `docs/design/context-ledger.md` §2.
+//! - **Upstream:** `loong_context::{domain_of, Store, SyncOutcome}` and the task fixture below.
+//! - **Downstream:** `crate::synthesis::{domain_of, domains_of, global_map}`, `Store::digest_domains` and `Store::global_map`.
+//! - **Verify:** `cargo test -p loong-context --test synthesis`.
 
 use loong_context::{domain_of, Store, SyncOutcome};
 use loong_eventlog::SessionLog;
@@ -16,9 +15,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static N: AtomicU64 = AtomicU64::new(0);
 
+/// Purpose: A temporary session log removed when the test ends.
+/// Serves: every test starting from a clean log and leaving nothing behind.
+/// Design: `docs/context/pipeline.md` §6.4.
+/// Up: The synthesis tests.
+/// Down: `TempLog::new`, `TempLog::path` and `TempLog::drop`.
+/// Verify: `cargo test -p loong-context --test synthesis`.
 struct TempLog(PathBuf);
 
 impl TempLog {
+    /// Purpose: Create a fresh temp log path and remove any stale file.
+    /// Contract: `synthesis.rs` fixtures.
     fn new() -> Self {
         let p = std::env::temp_dir().join(format!(
             "loong-context-synth-{}-{}.jsonl",
@@ -28,17 +35,27 @@ impl TempLog {
         let _ = std::fs::remove_file(&p);
         TempLog(p)
     }
+    /// Purpose: The session log's path.
+    /// Contract: `synthesis.rs` fixtures.
     fn path(&self) -> &PathBuf {
         &self.0
     }
 }
 
 impl Drop for TempLog {
+    /// Purpose: Remove the session log.
+    /// Contract: `synthesis.rs` fixtures.
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
     }
 }
 
+/// Purpose: Append one task that edits a file and verifies itself with a failing-then-passing test.
+/// Serves: a closed episode whose domain membership is computable.
+/// Design: `docs/context/pipeline.md` §6.3.
+/// Up: `session`.
+/// Down: `loong_eventlog::SessionLog`; no other callee.
+/// Verify: `cargo test -p loong-context --test synthesis`.
 /// Append a task that edits `file` and verifies itself with a test.
 fn append_task(path: &PathBuf, index: usize, file: &str) {
     let mut log = SessionLog::open(path).unwrap();
@@ -86,6 +103,8 @@ fn append_task(path: &PathBuf, index: usize, file: &str) {
     .unwrap();
 }
 
+/// Purpose: Create the log and append one task per file.
+/// Contract: `synthesis.rs` fixtures.
 fn session(path: &PathBuf, files: &[&str]) {
     if !path.exists() {
         std::fs::File::create(path).unwrap();
@@ -95,6 +114,7 @@ fn session(path: &PathBuf, files: &[&str]) {
     }
 }
 
+/// Purpose: Pin the deterministic two-segment domain rule, including `./` and `inbox`.
 #[test]
 fn a_domain_is_the_first_two_path_segments() {
     assert_eq!(domain_of("src/kernel/turn.rs"), "src/kernel");
@@ -105,6 +125,7 @@ fn a_domain_is_the_first_two_path_segments() {
     assert_eq!(domain_of(""), "inbox");
 }
 
+/// Purpose: Pin that three episodes of one domain produce one L3 map naming all of them.
 #[test]
 fn episodes_roll_up_into_a_domain_map() {
     let tmp = TempLog::new();
@@ -149,6 +170,7 @@ fn episodes_roll_up_into_a_domain_map() {
     }
 }
 
+/// Purpose: Pin that a domain with fewer than three episodes does not get an invented map.
 #[test]
 fn a_domain_below_the_threshold_does_not_get_a_map() {
     // Two episodes is not a subsystem; inventing a map for it would be noise
@@ -162,6 +184,7 @@ fn a_domain_below_the_threshold_does_not_get_a_map() {
     assert_eq!(store.summary_count(3).unwrap(), 0);
 }
 
+/// Purpose: Pin that an L3's lineage is its L2 children, not a raw range and not itself.
 #[test]
 fn a_domain_map_records_its_children_not_a_previous_version_of_itself() {
     let tmp = TempLog::new();
@@ -200,6 +223,7 @@ fn a_domain_map_records_its_children_not_a_previous_version_of_itself() {
     );
 }
 
+/// Purpose: Pin that two modules roll up into two separate L3 scopes.
 #[test]
 fn two_domains_stay_separate() {
     let tmp = TempLog::new();
@@ -235,6 +259,7 @@ fn two_domains_stay_separate() {
     );
 }
 
+/// Purpose: Pin that L4 names the busiest domains and stays under its hard token ceiling.
 #[test]
 fn the_global_map_is_small_and_always_available() {
     let tmp = TempLog::new();
@@ -267,6 +292,7 @@ fn the_global_map_is_small_and_always_available() {
     assert_eq!(map.episodes, 12);
 }
 
+/// Purpose: Pin that a young session still gets an L4 map before any L3 exists.
 #[test]
 fn the_global_map_exists_before_any_domain_does() {
     // A young session still deserves a map: otherwise the foreground has nothing
@@ -284,6 +310,7 @@ fn the_global_map_exists_before_any_domain_does() {
     assert!(map.tokens <= loong_context::L4_MAX_TOKENS);
 }
 
+/// Purpose: Pin the steady state: an unchanged session is not re-derived at L2 or L3.
 #[test]
 fn an_idle_synthesis_pass_writes_nothing() {
     // The steady-state rule, one level up: a worker looking at an unchanged
@@ -301,6 +328,7 @@ fn an_idle_synthesis_pass_writes_nothing() {
     assert_eq!(store.digest_pending(4).unwrap(), 0, "already current");
 }
 
+/// Purpose: Pin that incremental sync and digest keep L2/L3/L4 current as tasks are appended.
 #[test]
 fn the_worker_keeps_the_maps_current_as_the_session_grows() {
     let tmp = TempLog::new();

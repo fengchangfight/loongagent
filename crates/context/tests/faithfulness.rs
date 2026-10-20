@@ -1,37 +1,12 @@
-//! The acceptance gate for S mode: does a local model invent decisions, or drop
-//! state?
+//! Purpose: The acceptance gate for semantic mode: does a local model explain the approach that was adopted, or invent one?
 //!
-//! `docs/06-context-engineering.md` §14 item 2 calls this the thing that decides
-//! whether semantic summarisation ships at all, and ADR-0017's verification list
-//! makes it a deliverable rather than an exercise. It exists because no leaderboard
-//! answers the only question that matters here: *will this model tell me a decision
-//! was verified when it wasn't?*
+//! Serves: the property that decides whether semantic summarisation is safe to ship, measured without depending on a developer's machine.
 //!
-//! Two tests, deliberately separate:
-//!
-//! * [`the_scorer_can_tell_faithful_from_fabricated`] is a **gate** — it runs
-//!   everywhere, needs no model, and checks that the measuring instrument works by
-//!   scoring a known-faithful and a known-fabricating answer.
-//! * [`faithfulness_of_a_local_model`] is a **measurement** — `#[ignore]`d, points
-//!   at a local Ollama, prints a table, and asserts only a floor. Run it with:
-//!
-//!   `cargo test -p loong-context --test faithfulness -- --ignored --nocapture`
-//!
-//! ## What the model is responsible for now
-//!
-//! The design change this gate measures: `rejected` is **computed** by the harness
-//! from the attempt sequence and is never asked of the model. Asking a 7B model to
-//! copy failed attempts out of a list it can already read was measured to fail both
-//! ways — right answers on some cases and an *invented* failing test on another. So
-//! the model answers only `why`, `open_questions`, and `conclusion`. The gate's job
-//! is therefore narrower and sharper: did the model explain the approach that was
-//! actually adopted, or did it name the abandoned one as the cause?
-//!
-//! That splits the assertions in two. The abandoned list is checked against what
-//! [`computed_abandoned`] derives from `case.input.edits` — a regression test on the
-//! extractor, since no model supplies it. `why` is checked against the case's
-//! `why_should_mention` — the model's own responsibility, and the failure that makes
-//! a memory dangerous rather than merely thin.
+//! # Contract
+//! - **Design:** `docs/context/pipeline.md` §6.2; `docs/context/config.md` §11; `docs/design/context-ledger.md` §5.
+//! - **Upstream:** `loong_context::summarizer` and the dataset and scorer below.
+//! - **Downstream:** The shipped `DigestInput`/`Synthesis` contract and the `OllamaSummarizer` request shape.
+//! - **Verify:** `cargo test -p loong-context --test faithfulness`.
 
 use loong_context::digest::Edit;
 use loong_context::summarizer::{
@@ -39,6 +14,12 @@ use loong_context::summarizer::{
 };
 use loong_context::TestRecord;
 
+/// Purpose: One labelled case: the brief and what a faithful answer contains.
+/// Serves: the gate distinguishing a faithful explanation from a fabricated one case by case.
+/// Design: `docs/context/pipeline.md` §6.2.
+/// Up: `dataset` builds cases; `score` reads them.
+/// Down: The fields `score` and the dataset tests assert on.
+/// Verify: `cargo test -p loong-context --test faithfulness the_dataset_covers_both_directions`.
 /// One labelled case: the brief, and what a faithful answer contains.
 struct Case {
     name: &'static str,
@@ -64,6 +45,12 @@ struct Case {
     no_abandoned_expected: bool,
 }
 
+/// Purpose: A realistic two-attempt sequence: one verified failure, then one pass.
+/// Serves: the input shape the digest produces and the extractor derives the abandoned list from.
+/// Design: `docs/context/pipeline.md` §6.2.
+/// Up: `case`.
+/// Down: Returns `Edit` values; no other callee.
+/// Verify: `cargo test -p loong-context --test faithfulness wording_is_not_faithfulness`.
 /// A realistic attempt sequence for a case that *had* an abandoned approach: a
 /// first attempt verified as failing, then a second that passed. This is the input
 /// shape the digest now produces, and the shape the harness derives the abandoned
@@ -87,6 +74,12 @@ fn two_attempts(file: &str, abandoned: &str, adopted: &str) -> Vec<Edit> {
     ]
 }
 
+/// Purpose: Build one labelled case from its prose and attempt sequence.
+/// Serves: ten cases with a consistent shape, so the scorer measures the model rather than the fixtures.
+/// Design: `docs/context/pipeline.md` §6.2.
+/// Up: `dataset`.
+/// Down: `two_attempts` and `DigestInput`; no other callee.
+/// Verify: `cargo test -p loong-context --test faithfulness the_dataset_covers_both_directions`.
 #[allow(clippy::too_many_arguments)]
 fn case(
     name: &'static str,
@@ -144,6 +137,12 @@ fn case(
     }
 }
 
+/// Purpose: The ten zh-en episodes the gate scores.
+/// Serves: re-running the gate against another model without rebuilding the fixture.
+/// Design: `docs/context/pipeline.md` §6.2.
+/// Up: `the_scorer_can_tell_faithful_from_fabricated`, `the_dataset_covers_both_directions` and the measurement.
+/// Down: `case`; no other callee.
+/// Verify: `cargo test -p loong-context --test faithfulness the_dataset_covers_both_directions`.
 /// Ten realistic zh-en episodes. Kept in the repository so the gate can be re-run
 /// against a different model without rebuilding the test.
 fn dataset() -> Vec<Case> {
@@ -273,6 +272,12 @@ fn dataset() -> Vec<Case> {
     ]
 }
 
+/// Purpose: What one run scored.
+/// Serves: the gate's verdict being a count of specific failures rather than an opinion.
+/// Design: `docs/context/pipeline.md` §6.2.
+/// Up: `score`, `run` and `sum`.
+/// Down: `Score::faithful` and the assertions.
+/// Verify: `cargo test -p loong-context --test faithfulness the_scorer_can_tell_faithful_from_fabricated`.
 /// What one run scored.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Score {
@@ -301,15 +306,25 @@ struct Score {
 }
 
 impl Score {
+    /// Purpose: Whether the run had no fabrication, wrong explanation or missing reason.
+    /// Contract: `faithfulness.rs` scoring.
     fn faithful(&self) -> bool {
         self.fabricated_abandoned == 0 && self.why_wrong == 0 && self.missing_why == 0
     }
 }
 
+/// Purpose: Join `why` items for phrase matching.
+/// Contract: `faithfulness.rs` scoring.
 fn text_of(items: &[String]) -> String {
     items.join(" | ")
 }
 
+/// Purpose: The abandoned list exactly as `digest::render` computes it.
+/// Serves: checking the harness's derivation without calling the renderer, whose output is prose plus the list.
+/// Design: `docs/context/pipeline.md` §6.2.
+/// Up: `the_scorer_can_tell_faithful_from_fabricated`, `wording_is_not_faithfulness` and the measurement.
+/// Down: Reads `Case.input.edits`; no other callee.
+/// Verify: `cargo test -p loong-context --test faithfulness wording_is_not_faithfulness`.
 /// The abandoned list exactly as `loong_context::digest::render` computes it: an
 /// edit whose outcome was a failing verification is an abandoned attempt. Written
 /// out here rather than called, because the library's `render` emits the whole
@@ -329,6 +344,12 @@ fn computed_abandoned(case: &Case) -> Vec<String> {
         .collect()
 }
 
+/// Purpose: Score one model answer against its case.
+/// Serves: separating a regression in the harness from a failure of the model.
+/// Design: `docs/context/pipeline.md` §6.2.
+/// Up: `run` and `wording_is_not_faithfulness`.
+/// Down: `computed_abandoned` and `text_of`.
+/// Verify: `cargo test -p loong-context --test faithfulness the_scorer_can_tell_faithful_from_fabricated`.
 /// Score one answer against its case. Pure, so the instrument itself is testable.
 fn score(case: &Case, synthesis: &Synthesis) -> Score {
     let mut score = Score {
@@ -381,6 +402,8 @@ fn score(case: &Case, synthesis: &Synthesis) -> Score {
     score
 }
 
+/// Purpose: Score every case in a run, treating a model error as an empty answer.
+/// Contract: `faithfulness.rs` scoring.
 /// Score a whole run: one score per case, summed. A summariser error is scored as
 /// an empty answer, because that is what it is.
 fn run(cases: &[Case], summarizer: &mut dyn Summarizer) -> Score {
@@ -394,6 +417,12 @@ fn run(cases: &[Case], summarizer: &mut dyn Summarizer) -> Score {
     sum(&scores)
 }
 
+/// Purpose: Sum per-case scores into one run total.
+/// Serves: the printed table and the assertion reading the same numbers.
+/// Design: `docs/context/pipeline.md` §6.2.
+/// Up: `run` and the measurement.
+/// Down: Reads `Score`'s fields; no other callee.
+/// Verify: `cargo test -p loong-context --test faithfulness`.
 fn sum(scores: &[Score]) -> Score {
     let mut total = Score::default();
     for score in scores {
@@ -412,6 +441,12 @@ fn sum(scores: &[Score]) -> Score {
     total
 }
 
+/// Purpose: A summariser that answers from a fixed script.
+/// Serves: testing the measuring instrument itself, with no model involved.
+/// Design: `docs/context/pipeline.md` §6.2.
+/// Up: `the_scorer_can_tell_faithful_from_fabricated`.
+/// Down: The `Summarizer` impl below.
+/// Verify: `cargo test -p loong-context --test faithfulness the_scorer_can_tell_faithful_from_fabricated`.
 /// A summariser that answers from a fixed script: the measuring instrument's own
 /// test double.
 struct ScriptedSummarizer {
@@ -419,15 +454,20 @@ struct ScriptedSummarizer {
 }
 
 impl Summarizer for ScriptedSummarizer {
+    /// Purpose: The provenance name `scripted:test`.
+    /// Contract: `faithfulness.rs` test double.
     fn name(&self) -> String {
         "scripted:test".to_string()
     }
 
+    /// Purpose: Call the scripted answer function.
+    /// Contract: `faithfulness.rs` test double.
     fn summarize(&mut self, input: &DigestInput) -> Result<Synthesis, SummarizerError> {
         Ok((self.answer)(input))
     }
 }
 
+/// Purpose: Pin that the instrument accepts an answer naming the adopted approach and rejects one naming the abandoned approach.
 #[test]
 fn the_scorer_can_tell_faithful_from_fabricated() {
     // A faithful answer: explains the approach that was adopted, and leaves
@@ -549,6 +589,7 @@ fn the_scorer_can_tell_faithful_from_fabricated() {
     );
 }
 
+/// Purpose: Pin that reworded correct explanations pass while naming the abandoned approach as the cause fails.
 #[test]
 fn wording_is_not_faithfulness_but_naming_the_wrong_thing_is() {
     let cases = dataset();
@@ -608,6 +649,7 @@ fn wording_is_not_faithfulness_but_naming_the_wrong_thing_is() {
     assert_eq!(readme_score.missing_why, 0, "{readme_score:?}");
 }
 
+/// Purpose: Pin that with no model the computed abandoned list still works and the missing reason is reported, not hidden.
 #[test]
 fn an_absent_summarizer_is_not_an_error_it_is_r_mode() {
     // The rollback guarantee at the summariser level: no model means no semantic
@@ -633,6 +675,7 @@ fn an_absent_summarizer_is_not_an_error_it_is_r_mode() {
     );
 }
 
+/// Purpose: Pin that the dataset contains both cases that punish silence and cases that punish invention.
 #[test]
 fn the_dataset_covers_both_directions() {
     // A gate made of easy cases is not a gate. The dataset must contain cases that
@@ -675,6 +718,7 @@ fn the_dataset_covers_both_directions() {
     );
 }
 
+/// Purpose: Measure whether a local model explains the adopted approach, asserting only that the extractor never calls an adopted attempt abandoned.
 /// The measurement. Ignored by default: it needs a local Ollama with the model
 /// pulled, and a gate that depends on a developer's machine is not a gate.
 #[test]

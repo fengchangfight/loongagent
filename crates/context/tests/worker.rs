@@ -1,13 +1,12 @@
-//! Tests for P3: incremental ingest, the tail, and the background worker.
+//! Purpose: Tests for P3: the tail, incremental sync and the bounded background worker.
 //!
-//! The promises under test (`docs/06-context-engineering.md` §4.3, §4.5, §4.6):
+//! Serves: content read once by byte offset, the worker yielding to the foreground, and incremental derivation equalling a full rebuild.
 //!
-//! * new content is read **once**, by byte offset, not by re-reading the log;
-//! * the worker does not run while the foreground is busy;
-//! * an activation is bounded, and idles rather than spins;
-//! * and — the one that keeps the whole design honest — **incremental derivation
-//!   produces exactly what a full rebuild produces**, so "the worker happened to
-//!   be running" can never change what the agent remembers.
+//! # Contract
+//! - **Design:** `docs/context/pipeline.md` §6.6; `docs/context/status.md` §11.1.
+//! - **Upstream:** `loong_context::worker` and the task fixture below.
+//! - **Downstream:** `crate::tail`, `Store::sync`, `Store::digest_pending` and `Store::digest_domains`.
+//! - **Verify:** `cargo test -p loong-context --test worker`.
 
 use loong_context::worker::{self, Budget, Foreground, Step, WorkerConfig, WorkerStats};
 use loong_context::{Store, SyncOutcome};
@@ -17,9 +16,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static N: AtomicU64 = AtomicU64::new(0);
 
+/// Purpose: A temporary session log removed when the test ends.
+/// Serves: every test starting from a clean log and leaving nothing behind.
+/// Design: `docs/context/pipeline.md` §6.6.
+/// Up: The worker tests.
+/// Down: `TempLog::new`, `TempLog::path` and `TempLog::drop`.
+/// Verify: `cargo test -p loong-context --test worker`.
 struct TempLog(PathBuf);
 
 impl TempLog {
+    /// Purpose: Create a fresh temp log path and remove any stale file.
+    /// Contract: `worker.rs` fixtures.
     fn new() -> Self {
         let p = std::env::temp_dir().join(format!(
             "loong-context-worker-{}-{}.jsonl",
@@ -29,17 +36,27 @@ impl TempLog {
         let _ = std::fs::remove_file(&p);
         TempLog(p)
     }
+    /// Purpose: The session log's path.
+    /// Contract: `worker.rs` fixtures.
     fn path(&self) -> &PathBuf {
         &self.0
     }
 }
 
 impl Drop for TempLog {
+    /// Purpose: Remove the session log.
+    /// Contract: `worker.rs` fixtures.
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
     }
 }
 
+/// Purpose: Append one task's worth of events: a request, an edit, a failing test and a passing test.
+/// Serves: enough material for the segmenter to close a task and enough events to test bounds.
+/// Design: `docs/context/pipeline.md` §6.3.
+/// Up: The worker tests.
+/// Down: `loong_eventlog::SessionLog`; no other callee.
+/// Verify: `cargo test -p loong-context --test worker`.
 /// Append one task's worth of events: a request, an edit, a failing test, a
 /// passing test. Enough material that the segmenter will close it.
 fn append_task(path: &PathBuf, index: usize) {
@@ -91,6 +108,7 @@ fn append_task(path: &PathBuf, index: usize) {
     .unwrap();
 }
 
+/// Purpose: Pin that a tail read returns only appended events, and an idle look costs a stat.
 #[test]
 fn a_tail_read_returns_only_what_was_appended() {
     let tmp = TempLog::new();
@@ -135,6 +153,7 @@ fn a_tail_read_returns_only_what_was_appended() {
     );
 }
 
+/// Purpose: Pin that a partial line is left for next time and read whole once the writer finishes it.
 #[test]
 fn a_half_written_line_is_not_read_as_an_event() {
     // Appends are one write per event, but a reader can still catch a partial
@@ -179,6 +198,7 @@ fn a_half_written_line_is_not_read_as_an_event() {
     assert_eq!(batch.events[0].seq, 2);
 }
 
+/// Purpose: Pin that a truncated log is reported as `Shrank`, not silently re-read.
 #[test]
 fn a_shorter_log_is_reported_rather_than_guessed_at() {
     let tmp = TempLog::new();
@@ -211,6 +231,7 @@ fn a_shorter_log_is_reported_rather_than_guessed_at() {
     }
 }
 
+/// Purpose: Pin that sync reads appended events once and then idles without re-reading.
 #[test]
 fn sync_reads_once_and_then_idles() {
     let tmp = TempLog::new();
@@ -246,6 +267,7 @@ fn sync_reads_once_and_then_idles() {
     assert_eq!(store.atom_count().unwrap(), 2 + 7);
 }
 
+/// Purpose: Pin that a replaced or truncated log asks for a rebuild instead of being trusted.
 #[test]
 fn a_replaced_log_asks_to_be_rebuilt() {
     let tmp = TempLog::new();
@@ -269,6 +291,7 @@ fn a_replaced_log_asks_to_be_rebuilt() {
     }
 }
 
+/// Purpose: Pin that a busy foreground defers before reading anything, and the same step works once idle.
 #[test]
 fn the_worker_does_not_start_while_the_foreground_is_busy() {
     let tmp = TempLog::new();
@@ -308,13 +331,22 @@ fn the_worker_does_not_start_while_the_foreground_is_busy() {
     assert_eq!(stats.events, 7);
 }
 
+/// Purpose: A foreground whose busy state is fixed for the test.
+/// Serves: driving `worker::step` down both the deferred and active paths deterministically.
+/// Design: `docs/context/pipeline.md` §6.6.
+/// Up: The worker tests.
+/// Down: Its `Foreground` impl.
+/// Verify: `cargo test -p loong-context --test worker the_worker_does_not_start_while_the_foreground_is_busy`.
 struct Busy(bool);
 impl Foreground for Busy {
+    /// Purpose: Report the fixed busy state.
+    /// Contract: `worker.rs` test double.
     fn is_busy(&self) -> bool {
         self.0
     }
 }
 
+/// Purpose: Pin that one activation is bounded, a second finishes the backlog and a third idles.
 #[test]
 fn an_activation_is_bounded_and_then_idles() {
     let tmp = TempLog::new();
@@ -356,6 +388,7 @@ fn an_activation_is_bounded_and_then_idles() {
     assert_eq!(last, Step::Idle, "steady state is idle, not a busy loop");
 }
 
+/// Purpose: Pin that incremental derivation equals a full rebuild, so whether the worker ran cannot change what is remembered.
 #[test]
 fn what_the_worker_derives_equals_what_a_full_rebuild_derives() {
     // The promise that makes a background worker acceptable at all: whether it ran
@@ -391,6 +424,7 @@ fn what_the_worker_derives_equals_what_a_full_rebuild_derives() {
     assert_eq!(incremental.verify().unwrap(), rebuilt.verify().unwrap());
 }
 
+/// Purpose: Pin that a steady-state activation reads no events and does not rebuild.
 #[test]
 fn the_idle_path_costs_a_stat_not_a_scan() {
     // A bound rather than a benchmark: a worker in steady state must not touch the

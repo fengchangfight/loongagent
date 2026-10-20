@@ -1,11 +1,12 @@
-//! Tests for the semantic layer: the one place a model may write, and the limits
-//! on what it may write.
+//! Purpose: The semantic layer's limits: what a model may add, and everything it may not touch.
 //!
-//! The rule under test is the field-ownership table in ADR-0017 §4, as code: a
-//! model may *add* `rejected`, `why`, `open_questions` and a `conclusion`, and may
-//! not touch a computed field, a citation, or the episode's boundaries. If a model
-//! could rewrite `status`, a memory could report a failing task as verified — which
-//! is the failure the whole acceptance gate exists to prevent.
+//! Serves: the field-ownership rule in ADR-0017 §4 as a regression net: a model cannot rewrite a computed status, a citation, an episode boundary or the call budget.
+//!
+//! # Contract
+//! - **Design:** `docs/context/pipeline.md` §6.2 and §6.6; `docs/context/status.md` §11.1; `docs/design/context-ledger.md` §4.
+//! - **Upstream:** `loong_context::{Store, WindowBudget}` and the scripted `Summarizer` implementations below.
+//! - **Downstream:** `crate::summary`'s conditional enrichment write, the window budget and the foreground yield.
+//! - **Verify:** `cargo test -p loong-context --test semantic`.
 
 use loong_context::summarizer::{Summarizer, SummarizerError, Synthesis};
 use loong_context::worker::IdleForeground;
@@ -17,9 +18,17 @@ use std::sync::{Arc, Mutex};
 
 static N: AtomicU64 = AtomicU64::new(0);
 
+/// Purpose: A temporary session log removed when the test ends.
+/// Serves: every test starting from a clean log and leaving nothing behind.
+/// Design: `docs/context/pipeline.md` §6.6.
+/// Up: The semantic tests.
+/// Down: `TempLog::new`, `TempLog::path` and `TempLog::drop`.
+/// Verify: `cargo test -p loong-context --test semantic`.
 struct TempLog(PathBuf);
 
 impl TempLog {
+    /// Purpose: Create a fresh temp log path and remove any stale file.
+    /// Contract: `semantic.rs` fixtures.
     fn new() -> Self {
         let p = std::env::temp_dir().join(format!(
             "loong-context-sem-{}-{}.jsonl",
@@ -29,17 +38,27 @@ impl TempLog {
         let _ = std::fs::remove_file(&p);
         TempLog(p)
     }
+    /// Purpose: The session log's path.
+    /// Contract: `semantic.rs` fixtures.
     fn path(&self) -> &PathBuf {
         &self.0
     }
 }
 
 impl Drop for TempLog {
+    /// Purpose: Remove the session log.
+    /// Contract: `semantic.rs` fixtures.
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
     }
 }
 
+/// Purpose: Append one task: a request, an edit, a failing test and a passing re-run.
+/// Serves: a realistic episode the segmenter closes and the model can be asked about.
+/// Design: `docs/context/pipeline.md` §6.3.
+/// Up: The semantic tests.
+/// Down: `loong_eventlog::SessionLog`; no other callee.
+/// Verify: `cargo test -p loong-context --test semantic`.
 fn append_task(path: &PathBuf, index: usize, file: &str) {
     if !path.exists() {
         std::fs::File::create(path).unwrap();
@@ -87,6 +106,12 @@ fn append_task(path: &PathBuf, index: usize, file: &str) {
     .unwrap();
 }
 
+/// Purpose: A summariser that answers from a script and counts its calls.
+/// Serves: the model's spend being checkable rather than asserted.
+/// Design: `docs/context/pipeline.md` §6.6.
+/// Up: The semantic tests.
+/// Down: The `Summarizer` impl below.
+/// Verify: `cargo test -p loong-context --test semantic the_call_budget_is_respected`.
 /// A summariser that answers from a script and counts its calls, so "how much did
 /// the background cost?" is checkable rather than asserted.
 struct Scripted {
@@ -96,6 +121,8 @@ struct Scripted {
 }
 
 impl Scripted {
+    /// Purpose: Build a summariser that always says the same thing, plus its call counter.
+    /// Contract: `semantic.rs` fixtures.
     fn saying(synthesis: Synthesis) -> (Self, Arc<Mutex<u32>>) {
         let calls = Arc::new(Mutex::new(0));
         (
@@ -108,6 +135,12 @@ impl Scripted {
         )
     }
 
+    /// Purpose: Build a summariser that answers usefully once and then fails.
+    /// Serves: the partial-failure case: one degraded episode must not stop the pass.
+    /// Design: `docs/context/pipeline.md` §6.6.
+    /// Up: `a_model_that_breaks_mid_pass_degrades_one_episode_and_keeps_going`.
+    /// Down: The `Summarizer` impl below.
+    /// Verify: `cargo test -p loong-context --test semantic a_model_that_breaks_mid_pass`.
     fn failing_after(n: u32) -> (Self, Arc<Mutex<u32>>) {
         let calls = Arc::new(Mutex::new(0));
         (
@@ -127,10 +160,18 @@ impl Scripted {
 }
 
 impl Summarizer for Scripted {
+    /// Purpose: The provenance name `scripted`.
+    /// Contract: `semantic.rs` test double.
     fn name(&self) -> String {
         "scripted".to_string()
     }
 
+    /// Purpose: Count the call and answer, or fail after the configured number.
+    /// Serves: exercising both the success and the "model went away" path deterministically.
+    /// Design: `docs/context/pipeline.md` §6.6.
+    /// Up: `Store::synthesize_window` through `Summarizer`.
+    /// Down: Returns the configured `Synthesis` or `Unavailable`; no other callee.
+    /// Verify: `cargo test -p loong-context --test semantic`.
     fn summarize(
         &mut self,
         _input: &loong_context::DigestInput,
@@ -146,6 +187,8 @@ impl Summarizer for Scripted {
     }
 }
 
+/// Purpose: Build and digest a store over the temp log.
+/// Contract: `semantic.rs` fixtures.
 fn digested(path: &PathBuf) -> Store {
     let mut store = Store::in_memory().unwrap();
     assert!(matches!(
@@ -157,6 +200,7 @@ fn digested(path: &PathBuf) -> Store {
     store
 }
 
+/// Purpose: Pin that a model may add `rejected`/`why`/`open_questions`/`conclusion` while status, span, citations, domain and lineage stay computed.
 #[test]
 fn a_models_answer_is_added_and_computed_fields_are_left_alone() {
     let tmp = TempLog::new();
@@ -209,6 +253,7 @@ fn a_models_answer_is_added_and_computed_fields_are_left_alone() {
     }
 }
 
+/// Purpose: Pin that a model's claim that a verified task is open cannot change the computed status, and the disagreement stays visible.
 #[test]
 fn a_model_that_claims_a_verified_task_is_open_changes_nothing() {
     // The measured failure mode: a 3B model called a committed, passing task
@@ -238,6 +283,7 @@ fn a_model_that_claims_a_verified_task_is_open_changes_nothing() {
     assert!(after.content.contains("模型结论：这个任务还没有完成"));
 }
 
+/// Purpose: Pin that an empty answer is recorded as asked, with the computed abandoned list intact, and is never asked again.
 #[test]
 fn an_empty_answer_is_recorded_as_asked_and_not_asked_again() {
     let tmp = TempLog::new();
@@ -268,6 +314,7 @@ fn an_empty_answer_is_recorded_as_asked_and_not_asked_again() {
     assert_eq!(*calls.lock().unwrap(), 1);
 }
 
+/// Purpose: Pin that one failed call degrades only its own episode, leaves every digest in place and does not stop the pass.
 #[test]
 fn a_model_that_breaks_mid_pass_degrades_one_episode_and_keeps_going() {
     let tmp = TempLog::new();
@@ -307,6 +354,7 @@ fn a_model_that_breaks_mid_pass_degrades_one_episode_and_keeps_going() {
     }
 }
 
+/// Purpose: Pin that one call is made per enriched episode, and a second pass asks nothing already answered.
 #[test]
 fn the_model_is_never_asked_twice_for_the_same_episode() {
     let tmp = TempLog::new();
@@ -328,6 +376,7 @@ fn the_model_is_never_asked_twice_for_the_same_episode() {
     assert_eq!(*calls.lock().unwrap(), after_first, "no second call");
 }
 
+/// Purpose: Pin that the call budget is a ceiling: two episodes enriched means exactly two calls.
 #[test]
 fn the_call_budget_is_respected() {
     let tmp = TempLog::new();
@@ -348,6 +397,7 @@ fn the_call_budget_is_respected() {
     );
 }
 
+/// Purpose: Pin that a recorded failure is terminal for that model, so a down endpoint is not re-asked each window; a new model name is asked.
 #[test]
 fn a_failed_episode_is_not_asked_again_in_the_same_session() {
     // The worker runs in a loop for the session's whole life. If a recorded
@@ -360,11 +410,21 @@ fn a_failed_episode_is_not_asked_again_in_the_same_session() {
     let mut store = digested(tmp.path());
     // A summariser that always errors is what this test needs; `Scripted::saying`
     // answers an empty synthesis, which is a success, not a failure.
+    /// Purpose: A summariser that always errors.
+    /// Serves: proving that a permanent failure is recorded rather than retried forever.
+    /// Design: `docs/context/pipeline.md` §6.6.
+    /// Up: `a_failed_episode_is_not_asked_again_in_the_same_session`.
+    /// Down: The `Summarizer` impl below.
+    /// Verify: `cargo test -p loong-context --test semantic a_failed_episode_is_not_asked_again`.
     struct Broken;
     impl Summarizer for Broken {
+        /// Purpose: The provenance name `broken`.
+        /// Contract: `semantic.rs` test double.
         fn name(&self) -> String {
             "broken".to_string()
         }
+        /// Purpose: Always return `Unavailable`.
+        /// Contract: `semantic.rs` test double.
         fn summarize(
             &mut self,
             _input: &loong_context::DigestInput,
@@ -409,6 +469,7 @@ fn a_failed_episode_is_not_asked_again_in_the_same_session() {
     assert_eq!(*calls.lock().unwrap(), third.calls as u32);
 }
 
+/// Purpose: Pin that a window stops before a second call that would exceed its token budget, while always making the first.
 #[test]
 fn a_window_stops_at_its_token_budget() {
     // The second half of §4.6's budget: "N calls / M tokens". A window with room
@@ -436,6 +497,7 @@ fn a_window_stops_at_its_token_budget() {
     );
 }
 
+/// Purpose: Pin that one window spends at most its call budget and leaves the rest for the next window.
 #[test]
 fn one_window_enriches_at_most_its_call_budget() {
     let tmp = TempLog::new();
@@ -459,6 +521,7 @@ fn one_window_enriches_at_most_its_call_budget() {
     );
 }
 
+/// Purpose: Pin that a turn starting mid-window stops it at the next call boundary, not after the whole budget.
 #[test]
 fn a_window_yields_at_the_next_call_when_the_foreground_starts() {
     // §4.6's "yield at a batch boundary" with the boundary drawn per call: a turn
@@ -488,6 +551,12 @@ fn a_window_yields_at_the_next_call_when_the_foreground_starts() {
     );
 }
 
+/// Purpose: A model that takes long enough for the foreground to re-derive the episode it is answering about.
+/// Serves: pinning the real race: the worker yields between windows, not inside one.
+/// Design: `docs/context/pipeline.md` §6.6.
+/// Up: `a_summary_replaced_while_the_model_answers_is_not_overwritten`.
+/// Down: The `Summarizer` impl below; `Store::put_summary` on a second connection.
+/// Verify: `cargo test -p loong-context --test semantic a_summary_replaced_while_the_model_answers_is_not_overwritten`.
 /// A model that takes long enough for the foreground to re-derive the episode it is
 /// answering about. This is the real race: the worker yields *between* windows, not
 /// inside one, so a new turn can start while a request is in flight.
@@ -497,10 +566,18 @@ struct ForegroundRewrites {
 }
 
 impl Summarizer for ForegroundRewrites {
+    /// Purpose: The provenance name `racing`.
+    /// Contract: `semantic.rs` test double.
     fn name(&self) -> String {
         "racing".to_string()
     }
 
+    /// Purpose: Re-derive the open episode on another connection before answering.
+    /// Serves: simulating the foreground replacing the row the model was asked about.
+    /// Design: `docs/context/pipeline.md` §6.6.
+    /// Up: `Store::synthesize_window` through `Summarizer`.
+    /// Down: `Store::open` and `Store::put_summary`; returns an answer about the old digest.
+    /// Verify: `cargo test -p loong-context --test semantic a_summary_replaced_while_the_model_answers_is_not_overwritten`.
     fn summarize(
         &mut self,
         _input: &loong_context::DigestInput,
@@ -517,6 +594,7 @@ impl Summarizer for ForegroundRewrites {
     }
 }
 
+/// Purpose: Pin that a model's answer is dropped when the foreground re-derived the episode while it was in flight, never restoring the stale digest.
 #[test]
 fn a_summary_replaced_while_the_model_answers_is_not_overwritten() {
     // The conditional write. `put_summary` is a replace, so a naive enrichment would

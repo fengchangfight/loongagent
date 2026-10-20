@@ -25,15 +25,6 @@ crates/cli/tests/sandbox_self_test.rs
 crates/cli/tests/tui_surface.rs
 crates/cli/tests/vertical_slice.rs
 crates/cli/tests/web_surface.rs
-crates/context/tests/faithfulness.rs
-crates/context/tests/retrieval.rs
-crates/context/tests/search_cost.rs
-crates/context/tests/semantic.rs
-crates/context/tests/summaries.rs
-crates/context/tests/synthesis.rs
-crates/context/tests/two_writers.rs
-crates/context/tests/window_cost.rs
-crates/context/tests/worker.rs
 crates/tui-app/src/lib.rs
 crates/tui-app/src/mention.rs
 crates/tui-app/src/setup.rs

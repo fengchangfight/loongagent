@@ -1,14 +1,12 @@
-//! A measurement kept in the repository on purpose.
+//! Purpose: Measurements kept in the repository: why retrieval uses `LIKE`, and why staying current does not grow with the log.
 //!
-//! The design note claims `LIKE` is fast enough to be the retrieval path for raw
-//! events, and that claim is the reason we do *not* build a trigram index over
-//! them (which would cost ~2× the source text in index bytes alone). A claim like
-//! that should be re-measurable, not remembered. This is also where the fallback
-//! from the design note gets checked: if this stops being fast enough on a real
-//! session, the answer is a char-unigram derived column, and this file is the
-//! evidence that justifies it.
+//! Serves: the numbers behind the no-FTS and byte-tail decisions, re-runnable rather than remembered.
 //!
-//! Run with `cargo test -p loong-context --test search_cost -- --ignored --nocapture`.
+//! # Contract
+//! - **Design:** `docs/context/data-model.md` §5.3; `docs/context/pipeline.md` §6.6.
+//! - **Upstream:** `loong_context::{SearchQuery, Store}` and the session fixtures below.
+//! - **Downstream:** `Store::rebuild`, `Store::search`, `Store::recall`, `Store::sync` and `Store::digest_pending`.
+//! - **Verify:** `cargo test -p loong-context --test search_cost -- --ignored --nocapture`.
 
 use loong_context::{SearchQuery, Store};
 use loong_eventlog::SessionLog;
@@ -20,6 +18,12 @@ static N: AtomicU64 = AtomicU64::new(0);
 
 const EVENTS: usize = 20_000;
 
+/// Purpose: A plausible long session: tool calls with paths, tool results with output, and Chinese user messages.
+/// Serves: measuring search on the shape of a real coding conversation rather than a synthetic table.
+/// Design: `docs/context/data-model.md` §5.3.
+/// Up: `like_search_cost_on_a_long_session`.
+/// Down: `loong_eventlog::SessionLog`; no other callee.
+/// Verify: `cargo test -p loong-context --test search_cost -- --ignored --nocapture`.
 /// A plausible long session: tool calls with paths, tool results with output,
 /// and Chinese user messages — the shape of a real coding conversation.
 fn big_log(path: &PathBuf, events: usize) -> usize {
@@ -65,6 +69,7 @@ fn big_log(path: &PathBuf, events: usize) -> usize {
     atoms
 }
 
+/// Purpose: Measure `LIKE` search cost on a long session, including the worst case that answers "nothing here".
 #[test]
 #[ignore = "a measurement, not a gate; run it explicitly"]
 fn like_search_cost_on_a_long_session() {
@@ -148,6 +153,7 @@ fn like_search_cost_on_a_long_session() {
     let _ = std::fs::remove_file(&db);
 }
 
+/// Purpose: Measure summary recall over 4,000 summaries, the evidence behind having no full-text table.
 /// The measurement behind *not* having a full-text table over summaries.
 ///
 /// An FTS5 trigram index over summaries is faster per query (0.12 ms vs 1-2 ms at
@@ -200,6 +206,12 @@ fn summary_recall_cost() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// Purpose: A long session of many small tasks, so the digest has thousands of episodes.
+/// Serves: measuring recall and tail cost at a realistic session length.
+/// Design: `docs/context/data-model.md` §5.3.
+/// Up: `summary_recall_cost` and `staying_current_does_not_grow_with_the_log`.
+/// Down: `loong_eventlog::SessionLog`; no other callee.
+/// Verify: `cargo test -p loong-context --test search_cost -- --ignored --nocapture`.
 /// A long session of many small tasks, so the digest has thousands of episodes to
 /// work with rather than one enormous one.
 fn console_session(path: &PathBuf, tasks: usize) {
@@ -242,6 +254,7 @@ fn console_session(path: &PathBuf, tasks: usize) {
     }
 }
 
+/// Purpose: Measure that staying current costs what was appended, not the length of the log.
 /// The claim the resident worker rests on: staying current costs a function of
 /// what was *appended*, not of how long the session has been running. If this
 /// regresses, a worker on a long session becomes a worker that re-reads it, which
@@ -300,6 +313,12 @@ fn staying_current_does_not_grow_with_the_log() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// Purpose: Append one task's events to an existing log.
+/// Serves: measuring the incremental cost of one appended task on an already-long session.
+/// Design: `docs/context/pipeline.md` §6.6.
+/// Up: `staying_current_does_not_grow_with_the_log`.
+/// Down: `loong_eventlog::SessionLog`; no other callee.
+/// Verify: `cargo test -p loong-context --test search_cost -- --ignored --nocapture`.
 /// Append a single task's events to an existing log, for the incremental test.
 fn append_one_task(path: &PathBuf, index: usize) {
     let mut log = SessionLog::open(path).unwrap();

@@ -1,9 +1,12 @@
-//! Tests for the L2 comprehension layer (P2).
+//! Purpose: Tests for L2: digests are derived, computed fields stay computed, and every claim cites the record.
 //!
-//! The contract these hold to (`docs/06-context-engineering.md` §6.2, §7.2):
-//! a digest is derived, not generated; the fields that *can* be computed are
-//! computed; a summary always cites evidence; expanding a summary hands back the
-//! raw events it rests on; and a rebuild reproduces all of it.
+//! Serves: the comprehension layer's promises: a deterministic digest, citations that resolve, evidence on expand, and recall over summaries.
+//!
+//! # Contract
+//! - **Design:** `docs/context/pipeline.md` §6.2–§6.3; `docs/context/recall.md` §7.2; `docs/design/context-ledger.md` §5.
+//! - **Upstream:** `loong_context::{SearchQuery, Store}` and the two-episode fixture below.
+//! - **Downstream:** `crate::digest`, `crate::summaries` and `crate::synthesis::domain_of`.
+//! - **Verify:** `cargo test -p loong-context --test summaries`.
 
 use loong_context::{SearchQuery, Store};
 use loong_eventlog::SessionLog;
@@ -14,9 +17,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static N: AtomicU64 = AtomicU64::new(0);
 
+/// Purpose: A temporary session log removed when the test ends.
+/// Serves: every test starting from a clean log and leaving nothing behind.
+/// Design: `docs/context/pipeline.md` §6.2.
+/// Up: The summaries tests.
+/// Down: `TempLog::new`, `TempLog::path` and `TempLog::drop`.
+/// Verify: `cargo test -p loong-context --test summaries`.
 struct TempLog(PathBuf);
 
 impl TempLog {
+    /// Purpose: Create a fresh temp log path and remove any stale file.
+    /// Contract: `summaries.rs` fixtures.
     fn new() -> Self {
         let p = std::env::temp_dir().join(format!(
             "loong-context-sum-{}-{}.jsonl",
@@ -26,17 +37,27 @@ impl TempLog {
         let _ = std::fs::remove_file(&p);
         TempLog(p)
     }
+    /// Purpose: The session log's path.
+    /// Contract: `summaries.rs` fixtures.
     fn path(&self) -> &PathBuf {
         &self.0
     }
 }
 
 impl Drop for TempLog {
+    /// Purpose: Remove the session log.
+    /// Contract: `summaries.rs` fixtures.
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
     }
 }
 
+/// Purpose: Two episodes: a bug fixed and verified, then a small follow-up request.
+/// Serves: a log that closes one episode on a new request and leaves another in the tail.
+/// Design: `docs/context/pipeline.md` §6.3.
+/// Up: The summaries tests.
+/// Down: `loong_eventlog::SessionLog`; no other callee.
+/// Verify: `cargo test -p loong-context --test summaries episodes_split`.
 /// Two episodes: a bug fixed and verified, then a small follow-up request.
 fn two_episodes(path: &PathBuf) -> Vec<EventEnvelope> {
     let mut log = SessionLog::create(path).unwrap();
@@ -120,6 +141,8 @@ fn two_episodes(path: &PathBuf) -> Vec<EventEnvelope> {
     events
 }
 
+/// Purpose: Build and digest a store over the temp log.
+/// Contract: `summaries.rs` fixtures.
 fn digested(path: &PathBuf) -> Store {
     let mut store = Store::in_memory().unwrap();
     store.rebuild(path).unwrap();
@@ -127,6 +150,7 @@ fn digested(path: &PathBuf) -> Store {
     store
 }
 
+/// Purpose: Pin that a new request closes an episode only once it has material, not on every message.
 #[test]
 fn episodes_split_on_a_new_request_but_not_on_every_message() {
     let tmp = TempLog::new();
@@ -147,6 +171,7 @@ fn episodes_split_on_a_new_request_but_not_on_every_message() {
     );
 }
 
+/// Purpose: Pin that a digest is reproducible verbatim from the atoms, by the same store and by an independent one.
 #[test]
 fn a_digest_is_deterministic_and_rebuilding_reproduces_it() {
     let tmp = TempLog::new();
@@ -168,6 +193,7 @@ fn a_digest_is_deterministic_and_rebuilding_reproduces_it() {
     assert_eq!(first, fresh_episodes);
 }
 
+/// Purpose: Pin that touched files and commands come from a write, not a read.
 #[test]
 fn touched_files_come_from_writes_not_reads() {
     let tmp = TempLog::new();
@@ -191,6 +217,7 @@ fn touched_files_come_from_writes_not_reads() {
     );
 }
 
+/// Purpose: Pin that the failed→ok transition survives instead of collapsing to ok.
 #[test]
 fn a_test_that_failed_then_passed_keeps_the_transition() {
     let tmp = TempLog::new();
@@ -216,6 +243,7 @@ fn a_test_that_failed_then_passed_keeps_the_transition() {
     );
 }
 
+/// Purpose: Pin that status is computed from evidence and the producer stays deterministic.
 #[test]
 fn status_is_computed_from_evidence_not_guessed() {
     let tmp = TempLog::new();
@@ -233,6 +261,7 @@ fn status_is_computed_from_evidence_not_guessed() {
     assert_eq!(fix.producer, "deterministic");
 }
 
+/// Purpose: Pin that every citation names real atoms and stays inside its episode.
 #[test]
 fn every_citation_resolves_to_a_real_atom() {
     let tmp = TempLog::new();
@@ -264,6 +293,7 @@ fn every_citation_resolves_to_a_real_atom() {
     }
 }
 
+/// Purpose: Pin that expanding a summary hands back the raw evidence, including the failing run and the fixing write.
 #[test]
 fn expand_returns_the_summary_and_the_raw_evidence_it_rests_on() {
     let tmp = TempLog::new();
@@ -297,6 +327,7 @@ fn expand_returns_the_summary_and_the_raw_evidence_it_rests_on() {
     );
 }
 
+/// Purpose: Pin that a two-character Chinese term finds a summary, and an absent word finds nothing.
 #[test]
 fn a_two_character_chinese_word_is_findable_in_summaries() {
     // The FTS5 path: `层叠` is shorter than the trigram width, so a naive MATCH
@@ -320,6 +351,7 @@ fn a_two_character_chinese_word_is_findable_in_summaries() {
         .is_empty());
 }
 
+/// Purpose: Pin that recall can be restricted to a level and an empty level returns nothing.
 #[test]
 fn recall_can_be_restricted_to_a_level() {
     let tmp = TempLog::new();
@@ -338,6 +370,7 @@ fn recall_can_be_restricted_to_a_level() {
     assert!(level3.is_empty(), "nothing is at L3 yet");
 }
 
+/// Purpose: Pin that an L2 records one raw-event input span, never another summary.
 #[test]
 fn a_summary_records_its_lineage_as_a_raw_event_range() {
     let tmp = TempLog::new();
@@ -355,6 +388,7 @@ fn a_summary_records_its_lineage_as_a_raw_event_range() {
     }
 }
 
+/// Purpose: Pin that a superseded summary is marked and remains readable alongside its replacement.
 #[test]
 fn superseding_a_conclusion_keeps_the_old_one() {
     // "We used to think X" is itself a fact. A superseded summary is marked, not
@@ -383,6 +417,7 @@ fn superseding_a_conclusion_keeps_the_old_one() {
     );
 }
 
+/// Purpose: Pin that a summary's entity links answer a module lookup, the input to L3.
 #[test]
 fn a_summary_can_be_looked_up_by_a_module_it_mentions() {
     let tmp = TempLog::new();

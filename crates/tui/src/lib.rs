@@ -568,9 +568,9 @@ impl<T: Transport> Client<T> {
     }
 
     /// Purpose: The session this client currently names in its requests.
-    /// Serves: no in-tree caller; the tests assert on it.
+    /// Serves: no caller anywhere in the tree.
     /// Design: `docs/design/surfaces.md` §3.
-    /// Up: no in-tree caller; it exposes the field every request names.
+    /// Up: no caller anywhere in the tree; it exposes the field every request names.
     /// Down: no call.
     /// Verify: `cargo test -p loong-tui`.
     pub fn session_id(&self) -> &str {

@@ -55,8 +55,8 @@ none exists, write or split one first, then the module plan, then the code.
 
 Every `.rs` file opens with a `//!` module contract: `Purpose:` and the five
 labels `Serves`, `Design`, `Upstream`, `Downstream`, `Verify`. `Design` names
-the owning document by a backticked `docs/...` path; `Verify` names the command
-that proves the file.
+the owning document by a backticked `docs/...` path, or by an `ADR-NNNN` that
+exists; `Verify` names the command that proves the file.
 
 Every `fn`, `struct`, `enum`, `trait`, `union` and `type` carries a doc block.
 `pub` items and non-trivial private items carry `Purpose:` plus `Serves`,
@@ -64,9 +64,10 @@ Every `fn`, `struct`, `enum`, `trait`, `union` and `type` carries a doc block.
 `Upstream`/`Downstream`. A private function whose body is at most 12 lines may
 use `Purpose:` and `Contract:` in place of the five. Types always carry the full
 block, private or not. A test function carries one `Purpose` line; the file's
-module contract names the test target. A declaration-only trait method may carry
-one `Purpose` line; the trait's contract carries the rest. `mod` declarations
-need nothing: the file contract covers them.
+module contract names the test target. A declaration-only function — a trait
+method, or a body-less signature outside a trait — may carry one `Purpose` line;
+the trait's or file's contract carries the rest. `mod` declarations need
+nothing: the file contract covers them.
 
 A file that cannot carry a contract is listed, with a reason, in
 `scripts/contract-exemptions.txt`: the generated schema files
@@ -74,7 +75,9 @@ A file that cannot carry a contract is listed, with a reason, in
 `crates/schema/tests/generated_roundtrip.rs`, and the crate-root build scripts
 `crates/cli/build.rs` and `crates/control/build.rs`.
 `crates/kernel/src/turn/build.rs` is a module, not a build script. A single item
-may use `// Contract-exempt: <reason>`; a stale exemption fails the gate.
+may use `// Contract-exempt: <reason>`, or be listed as `path#item | reason` in
+the same file; a reason shorter than 10 characters exempts nothing, and a stale
+exemption fails the gate.
 
 ### Every document has a path up
 
@@ -82,9 +85,11 @@ Every maintained document starts with four header fields: `Up` (its parent
 edge), `Authority` (the ADR or higher document that decides the topic), `Code`
 (the files it describes) and `Verify` (the command that proves them).
 `research/`, `archive/`, `superpowers/` and `human-written/` are records and
-need no header; ADRs gain only `Up`; the index is the root and has no `Up`.
-Every document stays within its class budget, stated with the other exceptions
-in [`docs/README.md`](docs/README.md); an over-run fails the gate.
+need no header; the generated `docs/crate-map.md` is a product and needs none
+either; ADRs gain only `Up`; `README.md` and the index (`docs/README.md`) are
+roots and need no `Up`. Every document stays within its class budget, stated
+with the other exceptions in [`docs/README.md`](docs/README.md); an over-run
+fails the gate.
 
 One document is the authority for a topic. Other documents link to it instead of
 restating it. Detail links down: a parent summarises and points.
@@ -92,14 +97,15 @@ restating it. Detail links down: a parent summarises and points.
 ### The gates are the enforcement
 
 - `scripts/check-modules.py` checks the code contracts.
-- `scripts/check-docs.py` checks links, the index, headers, budgets, code paths
-  and the `Up` chains.
+- `scripts/check-docs.py` checks links, the index, the crate map, citations,
+  test counts, headers, budgets, code paths and the `Up` chains.
 - `scripts/check.sh` runs everything CI runs and must be green before a commit.
 
 Every check is shown failing on a seeded defect before it is trusted; a check
-that has never failed has not been shown to work. During migration,
-`scripts/code-contract-baseline.txt` lists files that do not comply yet; the gate
-skips those entries and fails on a stale one, so a task removes its own entries
-and never leaves one behind. `scripts/doc-contract-baseline.txt` was deleted after
-the document-tree audit, so `scripts/check-docs.py` now checks the whole
-maintained tree; a future migration that needs one would recreate it explicitly.
+that has never failed has not been shown to work. Both migration baselines are
+gone: `scripts/doc-contract-baseline.txt` was deleted after the document-tree
+audit, and `scripts/code-contract-baseline.txt` after the code audit, so
+`scripts/check-docs.py` and `scripts/check-modules.py` now check the whole
+maintained tree. A future migration that needs a baseline must recreate the
+file explicitly; while one exists it is a ratchet that only shrinks and fails on
+a stale entry, so a task removes its own entries and never leaves one behind.

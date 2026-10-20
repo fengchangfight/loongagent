@@ -74,6 +74,9 @@ Exceptions, each for a stated reason:
   human input. They are indexed; `research/`, `archive/` and `superpowers/` are
   link-checked, while `human-written/` is skipped by the docs checks. None needs
   a header or a length cap.
+- The generated `docs/crate-map.md` is a product, not a document maintained by
+  hand: the `crate-map` check compares it byte for byte, so the four navigation
+  checks skip it and a hand edit is overwritten.
 
 Length budgets, by class:
 
@@ -89,6 +92,9 @@ Length budgets, by class:
 | `docs/extending/**` | 150 |
 | `docs/runbooks/**` | 300 |
 | `docs/decisions/**` | 300 |
+
+A maintained document that matches no row above gets the 250-line default, so a
+new root file cannot slip in uncapped.
 
 One document is the authority for a topic: a subsystem document owns its
 mechanism, an ADR owns its decision, `docs/04` owns the current architecture and

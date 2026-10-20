@@ -16,7 +16,8 @@ Usage:
                         baseline is ignored, which is how a seeded defect or a
                         scratch file is inspected
     --baseline FILE     files allowed to fail for now (default:
-                        scripts/code-contract-baseline.txt)
+                        scripts/code-contract-baseline.txt, which is deleted; a
+                        missing file means nothing is baselined)
     --emit-baseline FILE
                         write the currently failing paths there, one per line,
                         and exit 0; refuses to write when nothing fails
@@ -25,9 +26,11 @@ Usage:
 
 The baseline is a ratchet, not an ignore list. If one of its entries names a
 missing file or a file that now passes, the gate fails: the list may only
-shrink, so a migration removes its own entries and never leaves one behind. A
-missing baseline file means "nothing is baselined" (the first run, before the
-file exists), never a silent pass.
+shrink, so a migration removes its own entries and never leaves one behind. No
+baseline exists now — `scripts/code-contract-baseline.txt` was deleted after the
+code audit — so the gate checks the whole tracked tree. A missing baseline file
+means "nothing is baselined", never a silent pass; a future migration that needs
+one recreates it explicitly.
 
 Exemptions are different from the baseline. A file that cannot carry a contract
 is listed in scripts/contract-exemptions.txt as `path | reason`; a single item
@@ -821,7 +824,8 @@ def main() -> int:
         "--baseline",
         default=None,
         metavar="FILE",
-        help=f"baselined failures (default: {DEFAULT_BASELINE})",
+        help=f"baselined failures (default: {DEFAULT_BASELINE}, deleted; a "
+        "missing file means nothing is baselined)",
     )
     parser.add_argument(
         "--emit-baseline",

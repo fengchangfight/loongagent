@@ -1,3 +1,12 @@
+//! Purpose: `loongagent-control`: the control-plane binary — keygen, sign, check, serve, publish, show and health.
+//!
+//! # Contract
+//! - **Serves:** a profile administrator's publish path and the deployed pack-distribution service.
+//! - **Design:** `docs/design/control-plane.md` §2, §4 and §6; `docs/design/security-trust.md` §1.
+//! - **Upstream:** an operator runs it; `crates/control/tests/key_material_never_lands_in_git.rs` runs it as a child process.
+//! - **Downstream:** `loong_control` for the serving side, `loong_pack` for keys and envelopes, and `loong_config` for draft validation.
+//! - **Verify:** `cargo test -p loong-control` · `./scripts/check.sh`
+//!
 //! `loongagent-control` — the control plane, and the tools a **profile
 //! administrator** uses to publish to it.
 //!
@@ -23,6 +32,8 @@ use loong_pack::{
 };
 use std::path::{Path, PathBuf};
 
+/// Purpose: Walk up from a path to the git work tree that contains it.
+/// Contract: called by `guard_private_material` and `guard_pack_repository`.
 /// Walk up from `path` looking for a git work tree (a `.git` file or directory).
 ///
 /// The signing key is the one file in this system that must never be committed: a
@@ -40,6 +51,8 @@ fn git_work_tree(path: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Purpose: Run a read-only git query in a directory, treating any failure as "cannot tell".
+/// Contract: called by `is_tracked` and `is_ignored`.
 /// `Some(stdout)` when the git command succeeded. A missing git or a repository that
 /// is not one is not an error: it means "cannot tell", and we say less rather than
 /// cry wolf.
@@ -56,14 +69,20 @@ fn git(dir: &Path, args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+/// Purpose: Whether a path is tracked by the repository.
+/// Contract: called by `guard_pack_repository`.
 fn is_tracked(repo: &Path, name: &str) -> bool {
     git(repo, &["ls-files", "--error-unmatch", name]).is_some()
 }
 
+/// Purpose: Whether a path is covered by the repository's `.gitignore`.
+/// Contract: called by `guard_private_material` and `guard_pack_repository`.
 fn is_ignored(repo: &Path, name: &str) -> bool {
     git(repo, &["check-ignore", "-q", name]).is_some()
 }
 
+/// Purpose: Whether a file name is one this system treats as holding a secret.
+/// Contract: called by `guard_pack_repository`; `.example` and `.template` names are documentation.
 /// Names that hold a secret. Deliberately about *this* system's files: an
 /// `.env.example` is documentation, not a secret.
 fn looks_like_a_secret(name: &str) -> bool {
@@ -79,6 +98,12 @@ fn looks_like_a_secret(name: &str) -> bool {
         || name.starts_with(".env.")
 }
 
+/// Purpose: Refuse to create private material inside a git work tree unless `--force` was given.
+/// Serves: `keygen`.
+/// Design: `docs/design/control-plane.md` §6; `docs/design/security-trust.md` §1.
+/// Up: `keygen`.
+/// Down: `git_work_tree` and `is_ignored`.
+/// Verify: `cargo test -p loong-control`.
 /// Refuse to *create* private material inside a work tree unless told twice.
 ///
 /// `names` is what this command is about to write, so the forced path can name the
@@ -114,6 +139,12 @@ fn guard_private_material(
     Ok(())
 }
 
+/// Purpose: Refuse to publish while the draft's repository tracks a secret, and warn about unignored ones.
+/// Serves: `publish`.
+/// Design: `docs/design/control-plane.md` §6; `docs/design/security-trust.md` §1.
+/// Up: `publish`.
+/// Down: `git_work_tree`, `looks_like_a_secret`, `is_tracked` and `is_ignored`.
+/// Verify: `cargo test -p loong-control`.
 /// Publishing is where a leak in the *repository holding the draft* becomes visible:
 /// the draft itself can only carry references, but the repository may also hold the
 /// machine's `.env` next to it.
@@ -163,6 +194,8 @@ fn guard_pack_repository(pack: &Path, force: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// Purpose: Print the binary's error and exit non-zero.
+/// Contract: the process entry point; calls `run`.
 fn main() {
     if let Err(message) = run() {
         eprintln!("loongagent-control: {message}");
@@ -170,6 +203,12 @@ fn main() {
     }
 }
 
+/// Purpose: The full help text: every command, the token rule and the pack format.
+/// Serves: `run`'s help arm and every unknown-command error.
+/// Design: `docs/design/control-plane.md` §2.
+/// Up: `run`.
+/// Down: no call; it returns a string.
+/// Verify: `cargo test -p loong-control`.
 fn usage() -> String {
     "\
 loongagent-control — distribute signed profile packs (ADR-0008 §6, ADR-0016)
@@ -242,6 +281,12 @@ session ends at the provider's limit.
     .to_string()
 }
 
+/// Purpose: Read the first argument and dispatch to the command arm.
+/// Serves: `main`.
+/// Design: `docs/design/control-plane.md` §2.
+/// Up: `main`.
+/// Down: `keygen`, `sign`, `show`, `public_key`, `check`, `serve`, `publish` and `health`.
+/// Verify: `cargo test -p loong-control`.
 fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = args.first().map(String::as_str).unwrap_or("");
@@ -272,6 +317,8 @@ fn run() -> Result<(), String> {
     }
 }
 
+/// Purpose: The value after a required flag, or an error naming it.
+/// Contract: called by the command arms that need a value.
 fn flag(args: &[String], name: &str) -> Result<String, String> {
     args.iter()
         .position(|a| a == name)
@@ -279,12 +326,20 @@ fn flag(args: &[String], name: &str) -> Result<String, String> {
         .ok_or_else(|| format!("{name} is required"))
 }
 
+/// Purpose: The value after an optional flag, when present.
+/// Contract: called by the command arms and `read_token`.
 fn optional(args: &[String], name: &str) -> Option<String> {
     args.iter()
         .position(|a| a == name)
         .and_then(|i| args.get(i + 1).cloned())
 }
 
+/// Purpose: Read a token from an environment variable or a file, never from the command line.
+/// Serves: `show`, `serve` and `publish`.
+/// Design: `docs/design/control-plane.md` §2; `docs/design/security-trust.md` §1.
+/// Up: `show`, `serve` and `publish`.
+/// Down: `std::env::var` and the filesystem.
+/// Verify: `cargo test -p loong-control`.
 fn read_token(args: &[String], env_flag: &str, file_flag: &str) -> Result<String, String> {
     if let Some(name) = optional(args, env_flag) {
         return std::env::var(&name)
@@ -301,6 +356,12 @@ fn read_token(args: &[String], env_flag: &str, file_flag: &str) -> Result<String
     ))
 }
 
+/// Purpose: Create a signing keypair, refusing to write the private key into a work tree.
+/// Serves: profile administrators.
+/// Design: `docs/design/control-plane.md` §2 and §6; `docs/design/security-trust.md` §1.
+/// Up: `run`.
+/// Down: `guard_private_material`, `loong_pack::generate_keypair` and the filesystem.
+/// Verify: `cargo test -p loong-control`.
 fn keygen(args: &[String]) -> Result<(), String> {
     let dir = optional(args, "--out").unwrap_or_else(|| ".".to_string());
     let dir = PathBuf::from(dir);
@@ -349,6 +410,12 @@ fn keygen(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Purpose: Validate a draft, sign it offline and prove the signature verifies before writing it.
+/// Serves: an air-gapped administrator.
+/// Design: `docs/design/control-plane.md` §4.
+/// Up: `run`.
+/// Down: `flag`, `optional`, `loong_config::profiles_from_payload`, `Envelope::sign`, `public_of` and `Envelope::verify`.
+/// Verify: `cargo test -p loong-control`.
 fn sign(args: &[String]) -> Result<(), String> {
     let pack_path = flag(args, "--pack")?;
     let key_path = flag(args, "--key")?;
@@ -416,6 +483,12 @@ fn sign(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Purpose: Validate a draft offline with the same resolver the control plane uses.
+/// Serves: a pre-commit hook and profile administrators.
+/// Design: `docs/design/control-plane.md` §3.
+/// Up: `run`.
+/// Down: `flag`, `loong_config::profiles_from_payload` and `first_line`.
+/// Verify: `cargo test -p loong-control`.
 /// Validate a draft the way the control plane would, without a network or a key. This
 /// is the check to put in a pre-commit hook: a secret pasted into a committed draft is
 /// already in the history by the time `publish` refuses it.
@@ -451,6 +524,8 @@ fn check(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Purpose: Print the pinned value and key id for an existing signing key.
+/// Contract: called by `run`'s `public-key` arm.
 /// The pinning value for an existing signing key. Not a secret, and the one thing an
 /// administrator needs after the keygen output has scrolled away.
 fn public_key(args: &[String]) -> Result<(), String> {
@@ -462,6 +537,12 @@ fn public_key(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Purpose: Decode an envelope from a file or a plane, and verify it when a key is given.
+/// Serves: profile administrators.
+/// Design: `docs/design/control-plane.md` §4.
+/// Up: `run`.
+/// Down: `read_token`, `loong_http::get_json`, `Envelope::from_json`, `Envelope::verify` and `profiles_from_payload`.
+/// Verify: `cargo test -p loong-control`.
 fn show(args: &[String]) -> Result<(), String> {
     let text = match (optional(args, "--file"), optional(args, "--url")) {
         (Some(path), _) => {
@@ -529,6 +610,12 @@ fn show(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Purpose: Start the control plane with its signing key, tokens and listener.
+/// Serves: the deployed service.
+/// Design: `docs/design/control-plane.md` §2 and §6.
+/// Up: `run`.
+/// Down: `flag`, `optional`, `public_of`, `read_token`, `ControlPlane::new`, `with_signing_key`, `bind` and `ControlPlane::serve`.
+/// Verify: `cargo test -p loong-control`.
 fn serve(args: &[String]) -> Result<(), String> {
     let dir = flag(args, "--dir")?;
     let issuer = flag(args, "--issuer")?;
@@ -590,6 +677,12 @@ fn serve(args: &[String]) -> Result<(), String> {
     plane.serve(listener).map_err(|e| format!("serving: {e}"))
 }
 
+/// Purpose: Send a draft or a signed envelope to a control plane and report what it published.
+/// Serves: profile administrators.
+/// Design: `docs/design/control-plane.md` §2 and §4.
+/// Up: `run`.
+/// Down: `read_token`, `guard_pack_repository`, `loong_config::profiles_from_payload` and `loong_http::post_json`.
+/// Verify: `cargo test -p loong-control`.
 fn publish(args: &[String]) -> Result<(), String> {
     let url = flag(args, "--url")?;
     let token = read_token(args, "--token-env", "--token-file")?;
@@ -665,6 +758,12 @@ fn publish(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Purpose: Read a plane's health document and refuse to call it ready without a pack.
+/// Serves: operators.
+/// Design: `docs/design/control-plane.md` §2.
+/// Up: `run`.
+/// Down: `flag` and `loong_http::get_json`.
+/// Verify: `cargo test -p loong-control`.
 fn health(args: &[String]) -> Result<(), String> {
     let url = flag(args, "--url")?;
     let response = loong_http::get_json(
@@ -695,6 +794,8 @@ fn health(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Purpose: The first non-empty line of a description, for one-line summaries.
+/// Contract: called by `check` and `show`.
 fn first_line(text: &str) -> String {
     text.lines()
         .find(|line| !line.trim().is_empty())

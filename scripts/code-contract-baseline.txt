@@ -43,9 +43,6 @@ crates/context/tests/synthesis.rs
 crates/context/tests/two_writers.rs
 crates/context/tests/window_cost.rs
 crates/context/tests/worker.rs
-crates/control/src/bin/loongagent-control.rs
-crates/control/src/lib.rs
-crates/control/tests/key_material_never_lands_in_git.rs
 crates/kernel/src/context_engine.rs
 crates/kernel/src/ledger.rs
 crates/kernel/src/lib.rs
@@ -60,7 +57,6 @@ crates/kernel/src/turn/nudge.rs
 crates/kernel/src/turn/recall.rs
 crates/kernel/src/turn/session.rs
 crates/kernel/src/turn/tests.rs
-crates/plugin/src/lib.rs
 crates/server/src/lib.rs
 crates/tui-app/src/lib.rs
 crates/tui-app/src/mention.rs

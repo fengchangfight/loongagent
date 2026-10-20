@@ -1,3 +1,13 @@
+//! Purpose: Prove that the control-plane binary never writes key material into a git repository and never publishes beside a tracked secret.
+//!
+//! # Contract
+//! - **Serves:** the keygen and publish pre-flight checks a profile administrator relies on.
+//! - **Design:** `docs/design/control-plane.md` §6; `docs/design/security-trust.md` §1.
+//! - **Upstream:** no production caller; `cargo test -p loong-control` runs the file.
+//! - **Downstream:** the `loongagent-control` binary as a child process, and `git` in the fixtures.
+//! - **Verify:** `cargo test -p loong-control` · `./scripts/check.sh`
+//!
+//!
 //! The signing key is the one file in this system that must never be committed: a key
 //! in a repository is an off-site ability to mint packs that every install accepts.
 //! An administrator runs `keygen` wherever they happen to be, so these are the checks
@@ -6,10 +16,14 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Purpose: The compiled `loongagent-control` binary under test.
+/// Contract: fixture for every test in this file.
 fn binary() -> &'static str {
     env!("CARGO_BIN_EXE_loongagent-control")
 }
 
+/// Purpose: A unique temporary directory for one test.
+/// Contract: test fixture; no test touches a real checkout.
 fn temp(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "loong-git-guard-{}-{}-{name}",
@@ -23,6 +37,8 @@ fn temp(name: &str) -> PathBuf {
     dir
 }
 
+/// Purpose: Run git in a fixture and report whether it succeeded.
+/// Contract: fixture for the repository-backed tests; an unavailable git skips them.
 fn git(dir: &Path, args: &[&str]) -> bool {
     Command::new("git")
         .arg("-C")
@@ -33,6 +49,8 @@ fn git(dir: &Path, args: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
+/// Purpose: Run the binary and capture success plus its combined output.
+/// Contract: fixture for every test in this file.
 fn run(args: &[&str]) -> (bool, String) {
     let output = Command::new(binary()).args(args).output().unwrap();
     (
@@ -45,6 +63,7 @@ fn run(args: &[&str]) -> (bool, String) {
     )
 }
 
+/// Purpose: Pin the keygen refusal inside a work tree, its `--out`/`--force` advice, and the forced write.
 #[test]
 fn keygen_refuses_to_write_a_signing_key_inside_a_repository() {
     let repo = temp("keygen-in-repo");
@@ -78,6 +97,7 @@ fn keygen_refuses_to_write_a_signing_key_inside_a_repository() {
     std::fs::remove_dir_all(&repo).ok();
 }
 
+/// Purpose: Pin that outside a work tree keygen writes the key and says nothing about git.
 #[test]
 fn keygen_outside_a_repository_is_undisturbed() {
     let dir = temp("keygen-plain");
@@ -91,6 +111,7 @@ fn keygen_outside_a_repository_is_undisturbed() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// Purpose: Pin the publish refusal while a secret is tracked beside the draft.
 #[test]
 fn publishing_refuses_while_a_secret_is_tracked_beside_the_draft() {
     let repo = temp("publish-leak");
@@ -128,6 +149,7 @@ fn publishing_refuses_while_a_secret_is_tracked_beside_the_draft() {
     std::fs::remove_dir_all(&repo).ok();
 }
 
+/// Purpose: Pin that an unignored secret warns without blocking the publish attempt.
 #[test]
 fn an_unignored_secret_is_a_warning_not_a_wall() {
     let repo = temp("publish-warn");
@@ -164,6 +186,7 @@ fn an_unignored_secret_is_a_warning_not_a_wall() {
     std::fs::remove_dir_all(&repo).ok();
 }
 
+/// Purpose: Pin that a reference-only draft beside an ignored secret publishes without a word about git.
 #[test]
 fn a_draft_with_only_references_publishes_without_a_word_about_secrets() {
     let repo = temp("publish-clean");

@@ -1,3 +1,12 @@
+//! Purpose: Plugins: install a reviewed checkout's skills by name, and never its hooks, servers or code.
+//!
+//! # Contract
+//! - **Serves:** the session's skill catalogue (ADR-0018) and the CLI's `plugin add/list/update/remove` and `skills list`.
+//! - **Design:** `docs/design/extension-model.md` §4 and §7; `docs/design/security-trust.md` §2.
+//! - **Upstream:** `crates/cli/src/plugin.rs` (every `plugin` command) and `crates/cli/src/server.rs`, whose kernel build reaches `Installed::skill_dirs` through `installed_plugins`.
+//! - **Downstream:** `loong_skills::SkillSet::load_in` for validation and the catalogue, `loong_config` for the two plugin roots, and `git` as a child process.
+//! - **Verify:** `cargo test -p loong-plugin` · `./scripts/check.sh`
+//!
 //! Plugins: a bundle of skills you install **by name**, instead of hand-copying
 //! markdown into every workspace.
 //!
@@ -48,6 +57,12 @@ pub const PLUGINS_DIR: &str = "plugins";
 /// The Claude Code convention: a repository's skills live under `skills/`.
 pub const SKILLS_DIR: &str = "skills";
 
+/// Purpose: Why a plugin could not be read, validated or fetched.
+/// Serves: `install`, `update`, `read_manifest`, `resolve_spec` and the CLI's `plugin` command.
+/// Design: `docs/design/extension-model.md` §4.
+/// Up: `read_manifest`, `install`, `update` and `put_back` construct it; the source resolvers raise `Invalid`.
+/// Down: its `Display` impl and `crates/cli/src/plugin.rs`, which turns it into a `String`.
+/// Verify: `cargo test -p loong-plugin`.
 #[derive(Debug)]
 pub enum PluginError {
     Io(String),
@@ -57,6 +72,8 @@ pub enum PluginError {
 }
 
 impl std::fmt::Display for PluginError {
+    /// Purpose: Render a plugin failure, marking validation errors with a `plugin:` prefix.
+    /// Contract: the `Display` half of `PluginError`; proven by `cargo test -p loong-plugin`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PluginError::Io(m) => write!(f, "{m}"),
@@ -68,8 +85,20 @@ impl std::fmt::Display for PluginError {
 
 impl std::error::Error for PluginError {}
 
+/// Purpose: This crate's short result type: a `PluginError` on every failure path.
+/// Serves: every fallible function in the file.
+/// Design: `docs/design/extension-model.md` §4.
+/// Up: no code constructs it by name; it appears as the written return type below.
+/// Down: `std::result::Result`.
+/// Verify: `cargo test -p loong-plugin`.
 type Result<T> = std::result::Result<T, PluginError>;
 
+/// Purpose: The two install layers: user-wide and project-local.
+/// Serves: `Roots`, `InstallOptions`, `find_dir` and the CLI's `--user`/`--project` flags.
+/// Design: `docs/design/extension-model.md` §4.
+/// Up: `InstallOptions::new`, `find_dir` and `crates/cli/src/plugin.rs` build it.
+/// Down: `Roots::root` and `as_str`.
+/// Verify: `cargo test -p loong-plugin`.
 /// Where a plugin is installed: the two layers, most local last.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
@@ -80,6 +109,12 @@ pub enum Scope {
 }
 
 impl Scope {
+    /// Purpose: The lower-case word the CLI prints for a scope.
+    /// Serves: `find_dir`'s ambiguity message and `crates/cli/src/plugin.rs`.
+    /// Design: `docs/design/extension-model.md` §4.
+    /// Up: `Plugin::scope` and `find_dir`.
+    /// Down: no call; it returns a static label.
+    /// Verify: `cargo test -p loong-plugin`.
     pub fn as_str(self) -> &'static str {
         match self {
             Scope::User => "user",
@@ -87,12 +122,24 @@ impl Scope {
         }
     }
 
+    /// Purpose: Both scopes, least local first, so a project install replaces a user one.
+    /// Serves: `discover` and `find_dir`.
+    /// Design: `docs/design/extension-model.md` §4.
+    /// Up: `discover` and `find_dir`.
+    /// Down: the returned array, whose entries reach `Roots::root`.
+    /// Verify: `cargo test -p loong-plugin`.
     /// Least local first, so a later scope replaces an earlier one of the same name.
     pub fn all() -> [Scope; 2] {
         [Scope::User, Scope::Project]
     }
 }
 
+/// Purpose: The user and project plugin roots, injected rather than read at each use.
+/// Serves: `discover`, `install`, `remove`, `update` and the CLI's plugin commands.
+/// Design: `docs/design/extension-model.md` §4.
+/// Up: `Roots::for_workspace` in `crates/cli/src/plugin.rs`, and the test helper `roots`.
+/// Down: `root` and every filesystem scan in this file.
+/// Verify: `cargo test -p loong-plugin`.
 /// The two directories plugins are installed under.
 ///
 /// Explicit rather than read from the environment at each use: a test (or a
@@ -105,6 +152,12 @@ pub struct Roots {
 }
 
 impl Roots {
+    /// Purpose: The real roots for a workspace: the user plugin directory and `<cwd>/.loongagent/plugins`.
+    /// Serves: `crates/cli/src/plugin.rs` and `InstallOptions::new`.
+    /// Design: `docs/design/extension-model.md` §4.
+    /// Up: `crates/cli/src/plugin.rs` and `InstallOptions::new`.
+    /// Down: `loong_config::loongagent_home`.
+    /// Verify: `cargo test -p loong-plugin`.
     pub fn for_workspace(cwd: &Path) -> Self {
         Self {
             user: loong_config::loongagent_home().join(PLUGINS_DIR),
@@ -112,6 +165,12 @@ impl Roots {
         }
     }
 
+    /// Purpose: The directory a given scope installs under.
+    /// Serves: `discover`, `install`, `find_dir` and `look_in`.
+    /// Design: `docs/design/extension-model.md` §4.
+    /// Up: `discover`, `install`, `find_dir` and `look_in`.
+    /// Down: the `user`/`project` fields; no further call.
+    /// Verify: `cargo test -p loong-plugin`.
     pub fn root(&self, scope: Scope) -> &Path {
         match scope {
             Scope::User => &self.user,
@@ -120,6 +179,12 @@ impl Roots {
     }
 }
 
+/// Purpose: One catalogue entry: the name, its source, its skills directory and its bootstrap list.
+/// Serves: `catalog`, `resolve_spec` and `install`.
+/// Design: `docs/design/extension-model.md` §4.
+/// Up: `catalog` builds the static entries; `crates/cli/src/plugin.rs` prints them for `plugin list`.
+/// Down: `resolve_spec` and `install` read the fields.
+/// Verify: `cargo test -p loong-plugin`.
 /// A plugin the binary already knows by name, so `plugin add superpowers` needs
 /// no URL. This is a *catalogue*, not a marketplace: one entry per plugin that
 /// has been looked at, and nothing is fetched until a person asks for it.
@@ -139,6 +204,12 @@ pub struct Known {
     pub notes: &'static str,
 }
 
+/// Purpose: The reviewed names `plugin add <name>` accepts without a URL.
+/// Serves: `resolve_spec`, `install`, `crates/cli/src/plugin.rs` and the tests.
+/// Design: `docs/design/extension-model.md` §4.
+/// Up: `resolve_spec`, `install`, `crates/cli/src/plugin.rs` and the tests.
+/// Down: the returned `Known` entries.
+/// Verify: `cargo test -p loong-plugin`.
 /// The plugins `plugin add <name>` knows without a URL.
 pub fn catalog() -> &'static [Known] {
     &[Known {
@@ -159,6 +230,12 @@ pub fn catalog() -> &'static [Known] {
     }]
 }
 
+/// Purpose: One installed plugin: its manifest and the checkout directory it lives in.
+/// Serves: `discover`, `install`, `update`, `read_manifest` and `crates/cli/src/plugin.rs`.
+/// Design: `docs/design/extension-model.md` §4.
+/// Up: `read_manifest` and `install` construct it; `discover` collects it.
+/// Down: `name`, `manifest_path`, `skills_dir`, `scope` and `source_label`.
+/// Verify: `cargo test -p loong-plugin`.
 /// One installed plugin: the manifest this crate wrote, plus where it lives.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Plugin {
@@ -168,14 +245,32 @@ pub struct Plugin {
 }
 
 impl Plugin {
+    /// Purpose: The installed name, which is also its directory and its skill namespace.
+    /// Serves: `discover`, `find_dir`, `look_in` and `crates/cli/src/plugin.rs`.
+    /// Design: `docs/design/extension-model.md` §4.
+    /// Up: `discover`, `find_dir`, `look_in`, `put_back` and `crates/cli/src/plugin.rs`.
+    /// Down: `Manifest::name`; no further call.
+    /// Verify: `cargo test -p loong-plugin`.
     pub fn name(&self) -> &str {
         &self.manifest.name
     }
 
+    /// Purpose: The manifest file inside the checkout.
+    /// Serves: `read_manifest`, `write_manifest` and `install`.
+    /// Design: `docs/design/extension-model.md` §4.
+    /// Up: `read_manifest`, `write_manifest` and `install`.
+    /// Down: `MANIFEST_FILE` joined to the root; no further call.
+    /// Verify: `cargo test -p loong-plugin`.
     pub fn manifest_path(&self) -> PathBuf {
         self.root.join(MANIFEST_FILE)
     }
 
+    /// Purpose: The directory inside the checkout that the skills loader is pointed at.
+    /// Serves: `Installed::skill_dirs`, `update`, `crates/cli/src/plugin.rs` and the kernel build.
+    /// Design: `docs/design/extension-model.md` §4.
+    /// Up: `Installed::skill_dirs`, `update` and `crates/cli/src/plugin.rs`.
+    /// Down: a join only; `read_manifest` already proved the path stays inside the checkout.
+    /// Verify: `cargo test -p loong-plugin`.
     /// The directory the skills loader is pointed at.
     ///
     /// Already checked to be inside the checkout by [`read_manifest`], which is the
@@ -184,6 +279,12 @@ impl Plugin {
         self.root.join(&self.manifest.skills)
     }
 
+    /// Purpose: Which root this plugin was found under, as `plugin list` prints it.
+    /// Serves: `crates/cli/src/plugin.rs` and the shadow test.
+    /// Design: `docs/design/extension-model.md` §4.
+    /// Up: `crates/cli/src/plugin.rs` and `discovery_reads_installs_and_reports_shadowing`.
+    /// Down: `Scope::as_str`.
+    /// Verify: `cargo test -p loong-plugin`.
     pub fn scope(&self, roots: &Roots) -> &'static str {
         if self.root.starts_with(&roots.project) {
             Scope::Project.as_str()
@@ -192,6 +293,12 @@ impl Plugin {
         }
     }
 
+    /// Purpose: The provenance line `plugin list` shows: source, requested ref and short commit.
+    /// Serves: `crates/cli/src/plugin.rs`.
+    /// Design: `docs/design/extension-model.md` §4.
+    /// Up: `crates/cli/src/plugin.rs` only.
+    /// Down: the `Manifest` fields.
+    /// Verify: `cargo test -p loong-plugin`.
     /// What `plugin list` shows as where this came from.
     pub fn source_label(&self) -> String {
         let mut label = self.manifest.source.clone();
@@ -207,6 +314,12 @@ impl Plugin {
     }
 }
 
+/// Purpose: The manifest written into a checkout: name, source, commit, skills directory, bootstrap and notes.
+/// Serves: `read_manifest`, `write_manifest`, `install` and every `Plugin` consumer.
+/// Design: `docs/design/extension-model.md` §4.
+/// Up: `read_manifest` parses it; `install` and `update` write it.
+/// Down: `Plugin`, `install`, `update` and `crates/cli/src/plugin.rs` read its fields.
+/// Verify: `cargo test -p loong-plugin`.
 /// The manifest on disk. Every field is written by an install; a person may edit
 /// it — that is why it is TOML inside the plugin directory — and `plugin update`
 /// rewrites only what it owns.
@@ -244,11 +357,15 @@ pub struct Manifest {
     pub installed_from: Option<String>,
 }
 
+/// Purpose: Serde's default for `skills`: `.`, a flat checkout.
+/// Contract: read by `#[serde(default = "default_skills")]` on `Manifest::skills`.
 fn default_skills() -> String {
     ".".to_string()
 }
 
 impl Manifest {
+    /// Purpose: Render the manifest as TOML with the header a person editing it needs.
+    /// Contract: used by `install` and `write_manifest`; a render failure becomes `PluginError::Invalid`.
     fn to_toml(&self) -> Result<String> {
         let body = toml::to_string(self)
             .map_err(|e| PluginError::Invalid(format!("cannot render the manifest: {e}")))?;
@@ -260,6 +377,12 @@ impl Manifest {
     }
 }
 
+/// Purpose: Every plugin installed for one workspace and user, plus the names a project install shadowed.
+/// Serves: `discover`, `crates/cli/src/plugin.rs` and the kernel build through `skill_dirs`.
+/// Design: `docs/design/extension-model.md` §4.
+/// Up: `discover` returns it; `crates/cli/src/plugin.rs` holds it while building a session.
+/// Down: `skill_dirs`, `bootstrap_skills`, `bootstrap_notes`, `get` and `is_empty`.
+/// Verify: `cargo test -p loong-plugin`.
 /// Every plugin installed for this workspace and this user.
 #[derive(Debug, Clone, Default)]
 pub struct Installed {
@@ -271,11 +394,23 @@ pub struct Installed {
 }
 
 impl Installed {
+    /// Purpose: The skill roots to hand the loader, one per installed plugin.
+    /// Serves: `crates/cli/src/server.rs` and `crates/cli/src/plugin.rs`.
+    /// Design: `docs/design/extension-model.md` §4.
+    /// Up: `crates/cli/src/server.rs`, `crates/cli/src/plugin.rs` and `discovery_reads_installs_and_reports_shadowing`.
+    /// Down: `Plugin::skills_dir`.
+    /// Verify: `cargo test -p loong-plugin`.
     /// The skill roots to hand the loader, in name order.
     pub fn skill_dirs(&self) -> Vec<PathBuf> {
         self.plugins.iter().map(Plugin::skills_dir).collect()
     }
 
+    /// Purpose: The always-on skill names, de-duplicated in plugin order.
+    /// Serves: `crates/cli/src/server.rs`'s kernel build.
+    /// Design: `docs/design/extension-model.md` §4.
+    /// Up: `crates/cli/src/server.rs` and `discovery_reads_installs_and_reports_shadowing`.
+    /// Down: the `Manifest::bootstrap` lists.
+    /// Verify: `cargo test -p loong-plugin`.
     /// The skills whose bodies belong in the system prompt, plugin order.
     pub fn bootstrap_skills(&self) -> Vec<String> {
         let mut names = Vec::new();
@@ -289,6 +424,12 @@ impl Installed {
         names
     }
 
+    /// Purpose: The harness-adaptation lines that travel with the bootstrap bodies.
+    /// Serves: `crates/cli/src/server.rs`'s kernel build.
+    /// Design: `docs/design/extension-model.md` §4.
+    /// Up: `crates/cli/src/server.rs` and `discovery_reads_installs_and_reports_shadowing`.
+    /// Down: the `Manifest::notes` lists.
+    /// Verify: `cargo test -p loong-plugin`.
     /// The adaptation lines that travel with those bodies.
     pub fn bootstrap_notes(&self) -> Vec<String> {
         let mut notes = Vec::new();
@@ -305,15 +446,34 @@ impl Installed {
         notes
     }
 
+    /// Purpose: One installed plugin by name, when present.
+    /// Serves: no production caller; tests look one plugin up by name.
+    /// Design: `docs/design/extension-model.md` §4.
+    /// Up: no production caller; the tests call it.
+    /// Down: the `plugins` vector; no further call.
+    /// Verify: `cargo test -p loong-plugin`.
     pub fn get(&self, name: &str) -> Option<&Plugin> {
         self.plugins.iter().find(|p| p.name() == name)
     }
 
+    /// Purpose: Whether anything is installed, for messages and fast paths.
+    /// Serves: `crates/cli/src/plugin.rs` and `not_installed`.
+    /// Design: `docs/design/extension-model.md` §4.
+    /// Up: `crates/cli/src/plugin.rs` and `crates/cli/src/server.rs` both ask it;
+    /// `not_installed` does too.
+    /// Down: the `plugins` vector; no further call.
+    /// Verify: `cargo test -p loong-plugin`.
     pub fn is_empty(&self) -> bool {
         self.plugins.is_empty()
     }
 }
 
+/// Purpose: Read every installed plugin under both roots and report a project shadow.
+/// Serves: `crates/cli/src/plugin.rs` and the kernel build.
+/// Design: `docs/design/extension-model.md` §4.
+/// Up: `crates/cli/src/plugin.rs` and the tests.
+/// Down: `installed_dirs` and `read_manifest`; `not_installed` calls back into it.
+/// Verify: `cargo test -p loong-plugin`.
 /// Read every installed plugin under both roots. A manifest that cannot be read is
 /// an error, not a silent skip: skills that are not there while the person believes
 /// they are is the failure mode worth being loud about.
@@ -335,6 +495,12 @@ pub fn discover(roots: &Roots) -> Result<Installed> {
     })
 }
 
+/// Purpose: The directories under a root that carry a manifest, in name order.
+/// Serves: `discover` and `look_in`.
+/// Design: `docs/design/extension-model.md` §4.
+/// Up: `discover` and `look_in`.
+/// Down: `MANIFEST_FILE` for the filter; no further call.
+/// Verify: `cargo test -p loong-plugin`.
 /// The directories under a plugin root that carry a manifest, in name order.
 fn installed_dirs(root: &Path) -> Result<Vec<PathBuf>> {
     if !root.is_dir() {
@@ -350,6 +516,12 @@ fn installed_dirs(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(dirs)
 }
 
+/// Purpose: Read one manifest and refuse a skills directory that leaves the checkout.
+/// Serves: `discover`, `install`, `update`, `look_in` and `crates/cli/src/plugin.rs`.
+/// Design: `docs/design/extension-model.md` §4.
+/// Up: `discover`, `install`, `update`, `look_in` and the tests.
+/// Down: `resolve_inside`, the TOML parse and the filesystem read.
+/// Verify: `cargo test -p loong-plugin`.
 /// Read one installed plugin's manifest.
 pub fn read_manifest(dir: &Path) -> Result<Plugin> {
     let path = dir.join(MANIFEST_FILE);
@@ -375,6 +547,8 @@ pub fn read_manifest(dir: &Path) -> Result<Plugin> {
     Ok(plugin)
 }
 
+/// Purpose: Join a manifest's skills path and refuse anything that escapes the checkout.
+/// Contract: `read_manifest` and `install` are the two callers; proven by `cargo test -p loong-plugin`.
 /// The directory a manifest names, refused unless it lands inside the checkout.
 ///
 /// `Path::join` hands back an absolute path unchanged and `..` walks up, so a manifest
@@ -395,6 +569,12 @@ fn resolve_inside(root: &Path, relative: &str) -> Result<PathBuf> {
     Ok(root.join(relative))
 }
 
+/// Purpose: What a spec string turned out to be: a repository or a plain directory.
+/// Serves: `resolve_spec`, `install` and the tests.
+/// Design: `docs/design/extension-model.md` §4.
+/// Up: `resolve_spec` returns it; `install` matches on it.
+/// Down: `name` and `git_ref`.
+/// Verify: `cargo test -p loong-plugin`.
 /// What a spec string turned out to be.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
@@ -409,12 +589,24 @@ pub enum Source {
 }
 
 impl Source {
+    /// Purpose: The directory name the source installs under.
+    /// Serves: `install` and the tests.
+    /// Design: `docs/design/extension-model.md` §4.
+    /// Up: `install` and `every_spec_shape_resolves_the_way_a_person_would_expect`.
+    /// Down: the variant's `name` field; no further call.
+    /// Verify: `cargo test -p loong-plugin`.
     pub fn name(&self) -> &str {
         match self {
             Source::Git { name, .. } | Source::Dir { name, .. } => name,
         }
     }
 
+    /// Purpose: The branch or tag asked for, when the source is a repository.
+    /// Serves: `install`.
+    /// Design: `docs/design/extension-model.md` §4.
+    /// Up: `install`.
+    /// Down: the `Git` variant; no further call.
+    /// Verify: `cargo test -p loong-plugin`.
     pub fn git_ref(&self) -> Option<&str> {
         match self {
             Source::Git { git_ref, .. } => git_ref.as_deref(),
@@ -423,6 +615,12 @@ impl Source {
     }
 }
 
+/// Purpose: Turn a `plugin add` argument into a git source or a directory.
+/// Serves: `install` and `crates/cli/src/plugin.rs`.
+/// Design: `docs/design/extension-model.md` §4.
+/// Up: `install` and the tests.
+/// Down: `catalog`, `split_ref`, `existing_dir` and `git_url`.
+/// Verify: `cargo test -p loong-plugin`.
 /// What `plugin add <spec>` accepts, and the one place that grammar lives.
 ///
 /// * `superpowers` — a name from [`catalog`], so the common case needs no URL;
@@ -484,6 +682,8 @@ pub fn resolve_spec(spec: &str, cwd: &Path) -> Result<Source> {
     )))
 }
 
+/// Purpose: Expand `owner/repo`, a host-qualified path or a scheme into a URL git accepts.
+/// Contract: called by `resolve_spec`; an unchanged answer means "not a repository".
 /// The URL `git` should be given for what a person typed.
 ///
 /// `obra/superpowers` is GitHub shorthand; `gitlab.example.com/team/skills` names its
@@ -501,6 +701,12 @@ fn git_url(spec: &str) -> String {
     }
 }
 
+/// Purpose: The canonical directory a spec names, when one exists.
+/// Serves: `resolve_spec`.
+/// Design: `docs/design/extension-model.md` §4.
+/// Up: `resolve_spec`.
+/// Down: `expand_home` and `Path::canonicalize`.
+/// Verify: `cargo test -p loong-plugin`.
 /// The directory a spec names, when it names one that exists.
 fn existing_dir(spec: &str, cwd: &Path) -> Option<PathBuf> {
     if spec.is_empty() || spec.contains("://") {
@@ -516,6 +722,12 @@ fn existing_dir(spec: &str, cwd: &Path) -> Option<PathBuf> {
     resolved.is_dir().then_some(resolved)
 }
 
+/// Purpose: Split a trailing `@ref` off a spec without mangling `git@host:path`.
+/// Serves: `resolve_spec`.
+/// Design: `docs/design/extension-model.md` §4.
+/// Up: `resolve_spec`.
+/// Down: no call; it returns the pair.
+/// Verify: `cargo test -p loong-plugin`.
 /// `owner/repo@v1.2` → (`owner/repo`, Some("v1.2")). The `@` in `git@host:path` and
 /// in `https://user@host/…` is not a ref separator: after the first, the rest of the
 /// URL still contains a `/`, and a scp-like `user@host:path` never has one at all.
@@ -540,6 +752,8 @@ fn split_ref(spec: &str) -> (&str, Option<String>) {
     }
 }
 
+/// Purpose: The last path segment minus `.git`: the directory a clone is called.
+/// Contract: called by `resolve_spec` when it builds a `Source::Git`.
 /// The last path segment, minus `.git`: what a clone of this URL is called.
 fn repo_name(url: &str) -> String {
     let trimmed = url.trim_end_matches('/').trim_end_matches(".git");
@@ -551,6 +765,8 @@ fn repo_name(url: &str) -> String {
         .to_string()
 }
 
+/// Purpose: Expand a leading `~/` using the configured home directory.
+/// Contract: called by `existing_dir`.
 fn expand_home(path: &str) -> PathBuf {
     if let Some(rest) = path.strip_prefix("~/") {
         if let Some(home) = loong_config::home_dir() {
@@ -560,6 +776,12 @@ fn expand_home(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
+/// Purpose: How one `plugin add` should behave: roots, scope, name, ref, skills, bootstrap and force.
+/// Serves: `install` and `crates/cli/src/plugin.rs`.
+/// Design: `docs/design/extension-model.md` §4.
+/// Up: `InstallOptions::new` and `crates/cli/src/plugin.rs`.
+/// Down: `install` reads every field.
+/// Verify: `cargo test -p loong-plugin`.
 /// How an install should behave.
 #[derive(Debug, Clone)]
 pub struct InstallOptions {
@@ -582,6 +804,12 @@ pub struct InstallOptions {
 }
 
 impl InstallOptions {
+    /// Purpose: The defaults for one install: real roots, user scope, no overrides and no force.
+    /// Serves: `crates/cli/src/plugin.rs` and the test helper `options`.
+    /// Design: `docs/design/extension-model.md` §4.
+    /// Up: `crates/cli/src/plugin.rs` and the tests.
+    /// Down: `Roots::for_workspace`.
+    /// Verify: `cargo test -p loong-plugin`.
     pub fn new(cwd: impl AsRef<Path>) -> Self {
         Self {
             cwd: cwd.as_ref().to_path_buf(),
@@ -596,6 +824,12 @@ impl InstallOptions {
     }
 }
 
+/// Purpose: Fetch, validate, manifest and atomically place one plugin.
+/// Serves: `crates/cli/src/plugin.rs`.
+/// Design: `docs/design/extension-model.md` §4.
+/// Up: `crates/cli/src/plugin.rs` and the tests.
+/// Down: `resolve_spec`, `catalog`, `read_manifest`, `skill_names`, `clone_into`, `copy_tree` and `read_tool_manifest`.
+/// Verify: `cargo test -p loong-plugin`.
 /// Fetch a plugin and write its manifest. Returns the installed plugin, whose
 /// skills have already been parsed once: an install that would break every session
 /// fails here, not in the next session.
@@ -740,6 +974,12 @@ pub fn install(spec: &str, opts: &InstallOptions) -> Result<Plugin> {
     read_manifest(&dest)
 }
 
+/// Purpose: Parse a skills root the way a session will and return the names it yields.
+/// Serves: `install`, `update` and the tests.
+/// Design: `docs/design/extension-model.md` §4.
+/// Up: `install`, `update` and the tests.
+/// Down: `loong_skills::SkillSet::load_in`.
+/// Verify: `cargo test -p loong-plugin`.
 /// Which skills a directory holds, parsed the way a session will parse them. The
 /// names are returned so an install can say what it added.
 ///
@@ -757,6 +997,12 @@ pub fn skill_names(skills_root: &Path) -> Result<Vec<String>> {
         .collect())
 }
 
+/// Purpose: Find the skills directory in a fresh checkout, or refuse with a way forward.
+/// Serves: `install`.
+/// Design: `docs/design/extension-model.md` §4.
+/// Up: `install`.
+/// Down: `holds_skills`.
+/// Verify: `cargo test -p loong-plugin`.
 /// The skills directory inside a fresh checkout, or a refusal that says what to do
 /// about it. The Claude Code layout (`skills/<name>/SKILL.md`) is the convention; a
 /// directory of skill directories at the root is the fallback.
@@ -774,6 +1020,12 @@ fn detect_skills(checkout: &Path) -> Result<String> {
     )))
 }
 
+/// Purpose: A cheap structural probe for "does this look like a skills root?".
+/// Serves: `detect_skills` and `install`.
+/// Design: `docs/design/extension-model.md` §4.
+/// Up: `detect_skills` and `install`.
+/// Down: the filesystem only; whether the skills parse is `skill_names`' job.
+/// Verify: `cargo test -p loong-plugin`.
 /// A cheap structural probe: does this look like a skills root at all? Used only to
 /// *find* the root; whether the skills parse is decided by [`skill_names`].
 fn holds_skills(dir: &Path) -> bool {
@@ -798,6 +1050,12 @@ fn holds_skills(dir: &Path) -> bool {
     false
 }
 
+/// Purpose: The `version` and `description` a Claude Code style plugin.json offers, for display only.
+/// Serves: `read_tool_manifest` and `install`.
+/// Design: `docs/design/extension-model.md` §4.
+/// Up: `read_tool_manifest` builds it; `install` copies the fields into `Manifest`.
+/// Down: no further call in this crate.
+/// Verify: `cargo test -p loong-plugin`.
 /// The plugin's own `version`/`description`, when it ships the manifest shape the
 /// Claude Code ecosystem uses. Read for display only: the installed name is the one
 /// the person typed, so a repository cannot rename itself into somebody's directory.
@@ -806,6 +1064,12 @@ struct ToolManifest {
     description: Option<String>,
 }
 
+/// Purpose: Read the first plugin.json a checkout ships, for its version and description.
+/// Serves: `install`.
+/// Design: `docs/design/extension-model.md` §4.
+/// Up: `install`.
+/// Down: `serde_json` only.
+/// Verify: `cargo test -p loong-plugin`.
 fn read_tool_manifest(checkout: &Path) -> Option<ToolManifest> {
     for candidate in [
         ".claude-plugin/plugin.json",
@@ -833,6 +1097,12 @@ fn read_tool_manifest(checkout: &Path) -> Option<ToolManifest> {
     None
 }
 
+/// Purpose: Locate one install by name and scope, refusing an ambiguous name.
+/// Serves: `remove` and `update`.
+/// Design: `docs/design/extension-model.md` §4.
+/// Up: `remove` and `update`.
+/// Down: `look_in` and `not_installed`.
+/// Verify: `cargo test -p loong-plugin`.
 /// Find an install by name. The directory name is searched first, so a plugin whose
 /// manifest has been broken can still be found — and removed, which is the only way
 /// out of that state.
@@ -869,6 +1139,12 @@ fn find_dir(roots: &Roots, name: &str, scope: Option<Scope>) -> Result<PathBuf> 
     }
 }
 
+/// Purpose: One root's answer for a name: the directory, or a manifest that names it.
+/// Serves: `find_dir`.
+/// Design: `docs/design/extension-model.md` §4.
+/// Up: `find_dir`.
+/// Down: `installed_dirs` and `read_manifest`.
+/// Verify: `cargo test -p loong-plugin`.
 /// One root's answer for a name: the directory called `name`, or failing that a
 /// directory whose manifest says `name` (an install may have been renamed).
 fn look_in(root: &Path, name: &str) -> Result<Option<PathBuf>> {
@@ -886,6 +1162,12 @@ fn look_in(root: &Path, name: &str) -> Result<Option<PathBuf>> {
     Ok(None)
 }
 
+/// Purpose: The "no plugin named X" error, listing what is installed.
+/// Serves: `find_dir`.
+/// Design: `docs/design/extension-model.md` §4.
+/// Up: `find_dir`.
+/// Down: `discover`.
+/// Verify: `cargo test -p loong-plugin`.
 fn not_installed(roots: &Roots, name: &str) -> PluginError {
     // A root that cannot be read is its own answer, and a better one than "no plugin
     // named X" — the same thing the scan this replaced would have said.
@@ -911,6 +1193,12 @@ fn not_installed(roots: &Roots, name: &str) -> PluginError {
     ))
 }
 
+/// Purpose: Delete an installed plugin's checkout.
+/// Serves: `crates/cli/src/plugin.rs`.
+/// Design: `docs/design/extension-model.md` §4.
+/// Up: `crates/cli/src/plugin.rs` and the tests.
+/// Down: `find_dir` and `std::fs::remove_dir_all`.
+/// Verify: `cargo test -p loong-plugin`.
 /// Remove an installed plugin. Returns the directory that was deleted.
 pub fn remove(roots: &Roots, name: &str, scope: Option<Scope>) -> Result<PathBuf> {
     let dir = find_dir(roots, name, scope)?;
@@ -919,6 +1207,12 @@ pub fn remove(roots: &Roots, name: &str, scope: Option<Scope>) -> Result<PathBuf
     Ok(dir)
 }
 
+/// Purpose: Fetch the latest commit in place, rolling back when the checkout no longer loads.
+/// Serves: `crates/cli/src/plugin.rs`.
+/// Design: `docs/design/extension-model.md` §4.
+/// Up: `crates/cli/src/plugin.rs` and the tests.
+/// Down: `find_dir`, `git_in`, `skill_names`, `put_back` and `write_manifest`.
+/// Verify: `cargo test -p loong-plugin`.
 /// Fetch the latest commit for an installed plugin, in place.
 pub fn update(roots: &Roots, name: &str, scope: Option<Scope>) -> Result<Plugin> {
     let dir = find_dir(roots, name, scope)?;
@@ -973,6 +1267,12 @@ pub fn update(roots: &Roots, name: &str, scope: Option<Scope>) -> Result<Plugin>
     read_manifest(&updated.root)
 }
 
+/// Purpose: Restore the last loading commit and manifest after a bad update, and explain the result.
+/// Serves: `update`.
+/// Design: `docs/design/extension-model.md` §4.
+/// Up: `update`.
+/// Down: `git_in` and `write_manifest`.
+/// Verify: `cargo test -p loong-plugin`.
 /// Put a checkout back the way it was, after a fetch brought a commit that does not
 /// load, and return the error that says so.
 ///
@@ -1007,6 +1307,8 @@ fn put_back(previous: &Plugin, cause: PluginError) -> PluginError {
     }
 }
 
+/// Purpose: Write a plugin's manifest beside its checkout.
+/// Contract: called by `update` and `put_back`; a write failure becomes `PluginError::Io`.
 /// Write an installed plugin's manifest beside its checkout.
 fn write_manifest(plugin: &Plugin) -> Result<()> {
     let path = plugin.manifest_path();
@@ -1014,6 +1316,12 @@ fn write_manifest(plugin: &Plugin) -> Result<()> {
         .map_err(|e| PluginError::Io(format!("{}: {e}", path.display())))
 }
 
+/// Purpose: Clone a repository shallowly into a staging directory, with one retry.
+/// Serves: `install`.
+/// Design: `docs/design/extension-model.md` §4.
+/// Up: `install`.
+/// Down: `run_git`.
+/// Verify: `cargo test -p loong-plugin`.
 /// `git clone --depth 1`.
 ///
 /// `http.version=HTTP/1.1` is not decoration: git negotiates HTTP/2 by default and
@@ -1057,6 +1365,8 @@ fn clone_into(url: &str, git_ref: Option<&str>, dest: &Path) -> Result<()> {
     )))
 }
 
+/// Purpose: Run `git -C <dir>` with argument-only commands, never a shell string.
+/// Contract: called by `update` and `put_back`; `install` reaches it through `clone_into`.
 /// `git` in a checkout. The operations this system needs — clone, fetch, reset,
 /// rev-parse — take arguments rather than a shell string, so none of them needs a
 /// shell (and nothing a plugin contains can smuggle a command in).
@@ -1067,6 +1377,12 @@ fn git_in(dir: &Path, args: &[&str]) -> Result<String> {
     run_git(&refs)
 }
 
+/// Purpose: Run `git` and turn a failure into an actionable `PluginError::Fetch`.
+/// Serves: `git_in` and `clone_into`.
+/// Design: `docs/design/extension-model.md` §4.
+/// Up: `git_in` and `clone_into`.
+/// Down: `std::process::Command`; no further call.
+/// Verify: `cargo test -p loong-plugin`.
 fn run_git(args: &[&str]) -> Result<String> {
     let output = std::process::Command::new("git")
         .args(args)
@@ -1088,6 +1404,12 @@ fn run_git(args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Purpose: Copy a plain directory into staging, skipping a nested `.git`.
+/// Serves: `install`.
+/// Design: `docs/design/extension-model.md` §4.
+/// Up: `install`.
+/// Down: itself, recursively, and the filesystem.
+/// Verify: `cargo test -p loong-plugin`.
 /// Copy a plain directory, so a plugin that is just files on a disk installs the
 /// same way one from a repository does. A nested `.git` is skipped: the copy is not
 /// a checkout, and `update` should say so rather than fetch half a history.
@@ -1113,6 +1435,8 @@ fn copy_tree(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Purpose: Whether a name is safe as a directory, an argument and a `/name`.
+/// Contract: called by `install` before anything is fetched.
 /// A name that can be a directory, an argument, and a `/name`.
 fn is_usable_name(name: &str) -> bool {
     !name.is_empty()
@@ -1121,6 +1445,8 @@ fn is_usable_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
+/// Purpose: The wall clock in milliseconds since the Unix epoch, for `installed_at_ms`.
+/// Contract: called by `install` and `update`.
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1128,6 +1454,12 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Purpose: Format a millisecond timestamp as a UTC `YYYY-MM-DD` date.
+/// Serves: `crates/cli/src/plugin.rs` and the tests.
+/// Design: `docs/design/extension-model.md` §4.
+/// Up: `crates/cli/src/plugin.rs` and `the_dates_are_the_dates`.
+/// Down: no call; pure arithmetic.
+/// Verify: `cargo test -p loong-plugin`.
 /// `YYYY-MM-DD` in UTC. Ten lines instead of a date library: the only thing this is
 /// for is saying how old an install is.
 pub fn utc_date(ms: u64) -> String {
@@ -1153,6 +1485,8 @@ mod tests {
 
     static N: AtomicU64 = AtomicU64::new(0);
 
+    /// Purpose: A unique temporary directory for one test, cleared first.
+    /// Contract: test helper for every test in this module.
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "loong-plugin-{tag}-{}-{}",
@@ -1164,6 +1498,8 @@ mod tests {
         dir
     }
 
+    /// Purpose: Both plugin roots under temporary directories.
+    /// Contract: test helper, so no test touches a real `~/.loongagent`.
     /// Both roots under temporary directories, so no test can touch a real install.
     fn roots(tag: &str) -> Roots {
         Roots {
@@ -1172,6 +1508,8 @@ mod tests {
         }
     }
 
+    /// Purpose: Install options pointed at a test's temporary roots.
+    /// Contract: test helper for the install and update tests.
     /// Options pointed at those roots. Specifications in tests are absolute paths
     /// or catalogue names, so `cwd` only has to be somewhere real.
     fn options(roots: &Roots) -> InstallOptions {
@@ -1181,6 +1519,8 @@ mod tests {
         }
     }
 
+    /// Purpose: Lay out a Claude-Code-style `skills/<name>/SKILL.md` checkout.
+    /// Contract: test fixture for the install and discovery tests.
     /// A checkout laid out the way a Claude Code plugin is: `skills/<name>/SKILL.md`.
     fn checkout(dir: &Path, names: &[&str]) {
         for name in names {
@@ -1194,6 +1534,8 @@ mod tests {
         }
     }
 
+    /// Purpose: Write one skill directory into an existing checkout.
+    /// Contract: test fixture used by the update tests.
     fn skill(dir: &Path, name: &str) {
         let skill = dir.join("skills").join(name);
         std::fs::create_dir_all(&skill).unwrap();
@@ -1204,6 +1546,12 @@ mod tests {
         .unwrap();
     }
 
+    /// Purpose: Run `git` in a test fixture and fail loudly on a non-zero exit.
+    /// Serves: the two git-backed install and update tests.
+    /// Design: `docs/design/extension-model.md` §4.
+    /// Up: `a_git_install_records_the_commit_and_updates_in_place` and `an_update_that_would_break_the_plugin_goes_back_to_the_commit_that_worked`.
+    /// Down: `std::process::Command`.
+    /// Verify: `cargo test -p loong-plugin`.
     fn git(args: &[&str], cwd: &Path) {
         let out = std::process::Command::new("git")
             .args(args)
@@ -1221,6 +1569,8 @@ mod tests {
         );
     }
 
+    /// Purpose: Pin that `superpowers` resolves to the catalogue's source, skills directory and bootstrap.
+    /// Verify: `cargo test -p loong-plugin`.
     #[test]
     fn a_catalog_name_is_a_one_word_install() {
         let known = catalog().iter().find(|k| k.name == "superpowers").unwrap();
@@ -1238,6 +1588,8 @@ mod tests {
         }
     }
 
+    /// Purpose: Pin every accepted spec shape: name, shorthand, URL, scp, directory and trailing `@ref`.
+    /// Verify: `cargo test -p loong-plugin`.
     #[test]
     fn every_spec_shape_resolves_the_way_a_person_would_expect() {
         let cwd = temp_dir("specs");
@@ -1314,6 +1666,7 @@ mod tests {
         ));
     }
 
+    /// Purpose: Pin that an unknown spec names the catalogue and `owner/repo` as the ways forward.
     #[test]
     fn an_unrecognisable_spec_says_what_would_be_recognised() {
         let cwd = temp_dir("bad-spec");
@@ -1323,6 +1676,8 @@ mod tests {
         assert!(resolve_spec("", &cwd).is_err());
     }
 
+    /// Purpose: Pin that an install writes a readable manifest and parses the skills it installed.
+    /// Verify: `cargo test -p loong-plugin`.
     #[test]
     fn install_writes_a_manifest_and_parses_the_skills_it_installed() {
         let roots = roots("install");
@@ -1356,6 +1711,8 @@ mod tests {
         assert!(text.contains("name = \"mine\""), "{text}");
     }
 
+    /// Purpose: Pin `skills/` detection and the flat-checkout fallback.
+    /// Verify: `cargo test -p loong-plugin`.
     #[test]
     fn the_skills_root_is_detected_in_both_shapes() {
         let roots = roots("detect");
@@ -1378,6 +1735,8 @@ mod tests {
         assert_eq!(plugin.manifest.skills, ".");
     }
 
+    /// Purpose: Pin that a skills-less directory is refused and leaves nothing half-installed.
+    /// Verify: `cargo test -p loong-plugin`.
     #[test]
     fn a_directory_without_skills_is_refused_with_a_way_forward() {
         let roots = roots("noskills");
@@ -1393,6 +1752,8 @@ mod tests {
         assert_eq!(std::fs::read_dir(&roots.user).unwrap().count(), 0);
     }
 
+    /// Purpose: Pin that one unparseable skill refuses the whole install before it is committed.
+    /// Verify: `cargo test -p loong-plugin`.
     #[test]
     fn a_broken_skill_refuses_the_whole_install() {
         let roots = roots("broken");
@@ -1413,6 +1774,8 @@ mod tests {
         );
     }
 
+    /// Purpose: Pin that a bootstrap skill the checkout does not have refuses the install.
+    /// Verify: `cargo test -p loong-plugin`.
     #[test]
     fn a_declared_bootstrap_skill_the_plugin_does_not_have_is_refused() {
         let roots = roots("bootstrap-missing");
@@ -1435,6 +1798,8 @@ mod tests {
         );
     }
 
+    /// Purpose: Pin the already-installed refusal and the `--force` override.
+    /// Verify: `cargo test -p loong-plugin`.
     #[test]
     fn installing_twice_is_refused_until_forced() {
         let roots = roots("twice");
@@ -1453,6 +1818,8 @@ mod tests {
         assert!(install(source.to_str().unwrap(), &opts).is_ok());
     }
 
+    /// Purpose: Pin discovery order, the catalogue bootstrap and the project shadow report.
+    /// Verify: `cargo test -p loong-plugin`.
     #[test]
     fn discovery_reads_installs_and_reports_shadowing() {
         let roots = roots("discover");
@@ -1495,6 +1862,8 @@ mod tests {
         assert_eq!(installed.plugins[0].scope(&roots), "project");
     }
 
+    /// Purpose: Pin the ambiguous-name refusal and that each scope stays reachable.
+    /// Verify: `cargo test -p loong-plugin`.
     #[test]
     fn a_name_installed_in_both_scopes_has_to_say_which_one() {
         let roots = roots("scopes");
@@ -1543,6 +1912,7 @@ mod tests {
         assert!(remove(&roots, "solo", None).is_ok());
     }
 
+    /// Purpose: Pin that a plain checkout without a manifest is not a plugin.
     #[test]
     fn a_directory_without_a_manifest_is_not_a_plugin() {
         let roots = roots("nomanifest");
@@ -1550,6 +1920,8 @@ mod tests {
         assert!(discover(&roots).unwrap().is_empty());
     }
 
+    /// Purpose: Pin that a missing skills directory and a bad manifest both fail loudly and stay removable.
+    /// Verify: `cargo test -p loong-plugin`.
     #[test]
     fn a_manifest_pointing_at_nothing_is_loud() {
         let roots = roots("missing");
@@ -1574,6 +1946,8 @@ mod tests {
         assert!(discover(&roots).unwrap().is_empty());
     }
 
+    /// Purpose: Pin that absolute and `..` skills paths are refused while the shapes an install writes still read.
+    /// Verify: `cargo test -p loong-plugin`.
     #[test]
     fn a_manifest_pointing_outside_the_checkout_is_refused() {
         let roots = roots("outside");
@@ -1614,6 +1988,8 @@ mod tests {
         }
     }
 
+    /// Purpose: Pin that `--skills` cannot point outside the checkout at install time.
+    /// Verify: `cargo test -p loong-plugin`.
     #[test]
     fn skills_outside_the_checkout_are_refused_at_install() {
         let roots = roots("skills-outside");
@@ -1636,6 +2012,8 @@ mod tests {
         );
     }
 
+    /// Purpose: Pin remove's deletion and update's refusal on a copied directory.
+    /// Verify: `cargo test -p loong-plugin`.
     #[test]
     fn remove_deletes_the_checkout_and_update_says_why_it_cannot() {
         let roots = roots("remove");
@@ -1656,6 +2034,8 @@ mod tests {
         assert!(err.contains("no plugin named"), "{err}");
     }
 
+    /// Purpose: Pin the recorded commit and an in-place update that gains a skill.
+    /// Verify: `cargo test -p loong-plugin`.
     #[test]
     fn a_git_install_records_the_commit_and_updates_in_place() {
         let roots = roots("git");
@@ -1688,6 +2068,8 @@ mod tests {
         assert_eq!(names, vec!["alpha".to_string(), "beta".to_string()]);
     }
 
+    /// Purpose: Pin the rollback to the last loading commit and manifest.
+    /// Verify: `cargo test -p loong-plugin`.
     #[test]
     fn an_update_that_would_break_the_plugin_goes_back_to_the_commit_that_worked() {
         let roots = roots("update-back");
@@ -1746,6 +2128,7 @@ mod tests {
         );
     }
 
+    /// Purpose: Pin the UTC date arithmetic across the epoch and recent dates.
     #[test]
     fn the_dates_are_the_dates() {
         assert_eq!(utc_date(0), "1970-01-01");

@@ -1,3 +1,12 @@
+//! Purpose: The control-plane client and server: fetch and verify a profile pack, cache it, and serve it.
+//!
+//! # Contract
+//! - **Serves:** `crates/cli/src/control.rs` (the client sync) and `loongagent-control` (the serving side).
+//! - **Design:** `docs/design/control-plane.md` §2 and §4; `docs/design/security-trust.md` §1.
+//! - **Upstream:** `crates/cli/src/control.rs`, which calls `sync`; `crates/control/src/bin/loongagent-control.rs`, which calls `bind` and `ControlPlane`.
+//! - **Downstream:** `loong_pack` for the envelope sign/verify path, `loong_http` for the transport and `loong_config` for profile resolution.
+//! - **Verify:** `cargo test -p loong-control` · `./scripts/check.sh`
+//!
 //! Talking to the control plane: fetching the signed profile pack, verifying it,
 //! caching it, and — for the control plane itself — serving it.
 //!
@@ -26,6 +35,12 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
 /// (nothing listening) returns immediately; this only bounds a black-holed endpoint.
 pub const CLIENT_SYNC_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Purpose: Why a control-plane conversation failed, and whether a cached pack may stand in.
+/// Serves: `sync`, `fetch`, `Cache`, `ControlPlane` and `crates/cli/src/control.rs`.
+/// Design: `docs/design/control-plane.md` §2 and §4.
+/// Up: `check_transport`, `fetch`, `Cache::store`, `ControlPlane`'s methods and `sync` construct it.
+/// Down: its `Display` impl, and `crates/cli/src/control.rs` matches `Unreachable`.
+/// Verify: `cargo test -p loong-control`.
 #[derive(Debug)]
 pub enum ControlError {
     /// No control plane is configured yet: the first-run state, not a failure.
@@ -43,6 +58,12 @@ pub enum ControlError {
 }
 
 impl std::fmt::Display for ControlError {
+    /// Purpose: Render a control-plane failure, including the setup hint for `NotConfigured`.
+    /// Serves: `crates/cli/src/control.rs` and the binary's error output.
+    /// Design: `docs/design/control-plane.md` §2.
+    /// Up: `crates/cli/src/control.rs` and `crates/control/src/bin/loongagent-control.rs` display it.
+    /// Down: no call; it writes to the formatter only.
+    /// Verify: `cargo test -p loong-control`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ControlError::NotConfigured => write!(
@@ -61,6 +82,12 @@ impl std::fmt::Display for ControlError {
 
 impl std::error::Error for ControlError {}
 
+/// Purpose: What the client needs to fetch a pack: address, pinned key, token reference and profile.
+/// Serves: `sync`, `Cache::new` and `crates/cli/src/control.rs`.
+/// Design: `docs/design/control-plane.md` §4; `docs/design/security-trust.md` §1.
+/// Up: `crates/cli/src/control.rs` builds it from resolved configuration.
+/// Down: `check_transport`, `origin`, `pack_url` and `sync`.
+/// Verify: `cargo test -p loong-control`.
 /// What the client needs to know to fetch a pack, from the machine configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControlConfig {
@@ -76,6 +103,12 @@ pub struct ControlConfig {
 }
 
 impl ControlConfig {
+    /// Purpose: The cache key: the base address without its scheme or trailing slash.
+    /// Serves: `Cache::new` and `crates/cli/src/control.rs`.
+    /// Design: `docs/design/control-plane.md` §4.
+    /// Up: `Cache::new` and `crates/cli/src/control.rs`.
+    /// Down: no call.
+    /// Verify: `cargo test -p loong-control`.
     /// The origin, used to name the cache file: two control planes on one machine
     /// must not overwrite each other's packs.
     pub fn origin(&self) -> String {
@@ -86,6 +119,12 @@ impl ControlConfig {
         trimmed.trim_end_matches('/').to_string()
     }
 
+    /// Purpose: Refuse plain HTTP to another machine, and require `https://` elsewhere.
+    /// Serves: `sync` and `crates/cli/src/control.rs`.
+    /// Design: `docs/design/control-plane.md` §4 and §6; `docs/design/security-trust.md` §1.
+    /// Up: `sync` and the tests.
+    /// Down: `ControlError::BadUrl`.
+    /// Verify: `cargo test -p loong-control`.
     /// Refuse to send a token in the clear to another machine. HTTPS is required
     /// everywhere except loopback, where the traffic cannot leave the machine
     /// (ADR-0016 §4).
@@ -115,12 +154,24 @@ impl ControlConfig {
         )))
     }
 
+    /// Purpose: The profiles endpoint under this install's base address.
+    /// Serves: `fetch`.
+    /// Design: `docs/design/control-plane.md` §2.
+    /// Up: `fetch`.
+    /// Down: no call.
+    /// Verify: `cargo test -p loong-control`.
     /// The pack for this install, plus whose it is.
     pub fn pack_url(&self) -> String {
         format!("{}/v1/pack/profiles", self.base_url.trim_end_matches('/'))
     }
 }
 
+/// Purpose: A verified pack, whether it came from the cache, and why a live fetch failed.
+/// Serves: `crates/cli/src/control.rs`.
+/// Design: `docs/design/control-plane.md` §4.
+/// Up: `sync` returns it; `crates/cli/src/control.rs` reads `from_cache` and `note`.
+/// Down: the `Envelope` it carries.
+/// Verify: `cargo test -p loong-control`.
 /// A pack that verified. The `from_cache` flag is part of the record: a session
 /// should be able to say whether it ran on a live or last-known pack.
 #[derive(Debug, Clone)]
@@ -130,6 +181,12 @@ pub struct Synced {
     pub note: Option<String>,
 }
 
+/// Purpose: The last verified pack for one control plane, under the state directory.
+/// Serves: `sync` and `crates/cli/src/control.rs`.
+/// Design: `docs/design/control-plane.md` §4.
+/// Up: `Cache::new` in `crates/cli/src/control.rs`, and the tests.
+/// Down: `load` and `store`.
+/// Verify: `cargo test -p loong-control`.
 /// The last verified pack, per control plane, under the state directory.
 #[derive(Debug, Clone)]
 pub struct Cache {
@@ -137,6 +194,12 @@ pub struct Cache {
 }
 
 impl Cache {
+    /// Purpose: The cache file for one control-plane origin under the state directory.
+    /// Serves: `crates/cli/src/control.rs` and the tests.
+    /// Design: `docs/design/control-plane.md` §4.
+    /// Up: `crates/cli/src/control.rs` and `with_plane`.
+    /// Down: the origin sanitiser and the state directory.
+    /// Verify: `cargo test -p loong-control`.
     pub fn new(state_dir: impl AsRef<Path>, origin: &str) -> Self {
         let safe: String = origin
             .chars()
@@ -157,15 +220,33 @@ impl Cache {
         }
     }
 
+    /// Purpose: The cache file this handle reads and writes.
+    /// Serves: `crates/cli/src/control.rs` and the tests.
+    /// Design: `docs/design/control-plane.md` §4.
+    /// Up: `crates/cli/src/control.rs` and the cache tests.
+    /// Down: no call; the tests assert on the path.
+    /// Verify: `cargo test -p loong-control`.
     pub fn path(&self) -> &Path {
         &self.path
     }
 
+    /// Purpose: The cached pack, or `None` when there is none or it does not parse.
+    /// Serves: `sync`.
+    /// Design: `docs/design/control-plane.md` §4.
+    /// Up: `sync` and the tests.
+    /// Down: `Envelope::from_json`.
+    /// Verify: `cargo test -p loong-control`.
     pub fn load(&self) -> Option<Envelope> {
         let text = std::fs::read_to_string(&self.path).ok()?;
         Envelope::from_json(&text).ok()
     }
 
+    /// Purpose: Cache a verified pack atomically, and leave an identical one untouched.
+    /// Serves: `sync`.
+    /// Design: `docs/design/control-plane.md` §4.
+    /// Up: `sync` and the tests.
+    /// Down: `Envelope::to_json`, the filesystem and the rename.
+    /// Verify: `cargo test -p loong-control`.
     /// Written to a temporary file and renamed, so a crash mid-write cannot leave a
     /// half pack where the next run would read it.
     ///
@@ -205,6 +286,12 @@ impl Cache {
     }
 }
 
+/// Purpose: Fetch, verify and cache a pack; fall back to the last verified cache only on transport failure.
+/// Serves: `crates/cli/src/control.rs`.
+/// Design: `docs/design/control-plane.md` §4.
+/// Up: `crates/cli/src/control.rs` and the tests.
+/// Down: `check_transport`, `fetch`, `Cache::load`, `Cache::store` and `Envelope::verify`.
+/// Verify: `cargo test -p loong-control`.
 /// Fetch the pack, verify it, cache it; fall back to the cache when the control
 /// plane cannot be reached.
 ///
@@ -246,6 +333,12 @@ pub fn sync(
     }
 }
 
+/// Purpose: GET the profiles endpoint and turn HTTP and JSON failures into typed errors.
+/// Serves: `sync`.
+/// Design: `docs/design/control-plane.md` §2.
+/// Up: `sync`.
+/// Down: `loong_http::get_json` and `Envelope::from_json`.
+/// Verify: `cargo test -p loong-control`.
 fn fetch(
     config: &ControlConfig,
     token: Option<&str>,
@@ -267,6 +360,12 @@ fn fetch(
 
 // ------------------------------------------------------------------ the server
 
+/// Purpose: The serving side: one published pack, a client token, an admin token and the pinned public key.
+/// Serves: `crates/control/src/bin/loongagent-control.rs` and the tests.
+/// Design: `docs/design/control-plane.md` §2 and §6; `docs/design/security-trust.md` §1.
+/// Up: `crates/control/src/bin/loongagent-control.rs` and `with_plane`.
+/// Down: `publish_draft`, `publish`, `store`, `health`, `handle`, `serve` and `can_sign`.
+/// Verify: `cargo test -p loong-control`.
 /// The control plane's side: a directory holding the published pack, a token every
 /// install may use to read, and a separate token for publishing.
 pub struct ControlPlane {
@@ -285,6 +384,12 @@ pub struct ControlPlane {
 }
 
 impl ControlPlane {
+    /// Purpose: A distributing plane with no signing key.
+    /// Serves: `crates/control/src/bin/loongagent-control.rs` and the tests.
+    /// Design: `docs/design/control-plane.md` §2.
+    /// Up: `crates/control/src/bin/loongagent-control.rs` and the tests.
+    /// Down: no call; the methods read the fields it sets.
+    /// Verify: `cargo test -p loong-control`.
     pub fn new(
         dir: impl Into<PathBuf>,
         client_token: impl Into<String>,
@@ -302,6 +407,12 @@ impl ControlPlane {
         }
     }
 
+    /// Purpose: Add the signing key, refusing one that does not derive the served public key.
+    /// Serves: `crates/control/src/bin/loongagent-control.rs` and the tests.
+    /// Design: `docs/design/control-plane.md` §2 and §4; `docs/design/security-trust.md` §1.
+    /// Up: `crates/control/src/bin/loongagent-control.rs` and the tests.
+    /// Down: `loong_pack::public_of` and `PackError::WrongKey`.
+    /// Verify: `cargo test -p loong-control`.
     /// The same plane, holding a signing key: administrators publish drafts and the
     /// control plane signs them (owner decision, 2026-10-09).
     pub fn with_signing_key(mut self, key_pkcs8: Vec<u8>) -> Result<Self, ControlError> {
@@ -318,14 +429,32 @@ impl ControlPlane {
         Ok(self)
     }
 
+    /// Purpose: Whether this plane holds a signing key.
+    /// Serves: `health` and `crates/control/src/bin/loongagent-control.rs`.
+    /// Design: `docs/design/control-plane.md` §2.
+    /// Up: `health` and the binary's serve output.
+    /// Down: no call.
+    /// Verify: `cargo test -p loong-control`.
     pub fn can_sign(&self) -> bool {
         self.signing_key.is_some()
     }
 
+    /// Purpose: The file the served pack is stored in.
+    /// Serves: `store`, `handle`, `health` and the binary.
+    /// Design: `docs/design/control-plane.md` §2.
+    /// Up: `store`, `handle`, `health` and the tests.
+    /// Down: no call.
+    /// Verify: `cargo test -p loong-control`.
     pub fn pack_path(&self) -> PathBuf {
         self.dir.join("profiles.json")
     }
 
+    /// Purpose: Validate, sign and store an administrator's draft with the key this plane holds.
+    /// Serves: the publish route in `handle` and the binary.
+    /// Design: `docs/design/control-plane.md` §2 and §4.
+    /// Up: `handle` and the tests.
+    /// Down: `loong_config::profiles_from_payload`, `Envelope::sign` and `store`.
+    /// Verify: `cargo test -p loong-control`.
     /// Sign and publish a **draft** payload.
     ///
     /// The administrator sends the profile TOML they wrote; validation happens here
@@ -366,6 +495,12 @@ impl ControlPlane {
         Ok(envelope)
     }
 
+    /// Purpose: Accept an already-signed envelope after verifying it under the served key.
+    /// Serves: `handle` and the air-gapped publish path.
+    /// Design: `docs/design/control-plane.md` §4.
+    /// Up: `handle` and the tests.
+    /// Down: `Envelope::from_json`, `Envelope::verify` and `store`.
+    /// Verify: `cargo test -p loong-control`.
     /// Accept an already-signed envelope. Kept for an air-gapped administrator who
     /// signs elsewhere; it must verify under the key this control plane serves.
     pub fn publish(&self, json: &str) -> Result<Envelope, ControlError> {
@@ -383,6 +518,8 @@ impl ControlPlane {
         Ok(envelope)
     }
 
+    /// Purpose: Replace the served pack file atomically.
+    /// Contract: called by `publish_draft` and `publish`; failures become `ControlError::Io` or `Rejected`.
     fn store(&self, envelope: &Envelope) -> Result<(), ControlError> {
         let json = envelope.to_json().map_err(ControlError::Rejected)?;
         std::fs::create_dir_all(&self.dir).map_err(|e| ControlError::Io(e.to_string()))?;
@@ -393,10 +530,22 @@ impl ControlPlane {
         Ok(())
     }
 
+    /// Purpose: Whether a pack has been published.
+    /// Serves: `handle`, `health` and `crates/control/src/bin/loongagent-control.rs`.
+    /// Design: `docs/design/control-plane.md` §2.
+    /// Up: `handle`, `health` and the binary's serve output.
+    /// Down: `pack_path`.
+    /// Verify: `cargo test -p loong-control`.
     pub fn has_pack(&self) -> bool {
         self.pack_path().exists()
     }
 
+    /// Purpose: Accept connections until the listener closes, handling each one in turn.
+    /// Serves: `crates/control/src/bin/loongagent-control.rs` and the tests.
+    /// Design: `docs/design/control-plane.md` §2 and §6.
+    /// Up: `crates/control/src/bin/loongagent-control.rs`, `with_plane` and the endpoint tests.
+    /// Down: `handle`.
+    /// Verify: `cargo test -p loong-control`.
     /// Serve until the listener is dropped: health without a token, the pack with
     /// the client token, publishing with the admin token.
     pub fn serve(&self, listener: TcpListener) -> std::io::Result<()> {
@@ -407,6 +556,12 @@ impl ControlPlane {
         Ok(())
     }
 
+    /// Purpose: One HTTP/1.1 request: parse it, authorise it and route it to health, the pack or publish.
+    /// Serves: `serve`.
+    /// Design: `docs/design/control-plane.md` §2.
+    /// Up: `serve`.
+    /// Down: `health`, `has_pack`, `authorised`, `accept`, `json_error` and `write_response`.
+    /// Verify: `cargo test -p loong-control`.
     fn handle(&self, stream: &mut TcpStream) -> std::io::Result<()> {
         let mut reader = BufReader::new(stream.try_clone()?);
         let mut request_line = String::new();
@@ -494,6 +649,12 @@ impl ControlPlane {
         write_response(stream, status, &payload)
     }
 
+    /// Purpose: Tell a draft from a signed envelope, validate it and store it.
+    /// Serves: `handle`.
+    /// Design: `docs/design/control-plane.md` §2 and §3.
+    /// Up: `handle`.
+    /// Down: `publish_draft`, `publish` and `loong_config::profiles_from_payload`.
+    /// Verify: `cargo test -p loong-control`.
     /// What `/v1/admin/publish` accepts: a draft this plane signs, or an envelope
     /// signed elsewhere. Told apart by shape, and both are validated before storing.
     fn accept(&self, body: &str) -> Result<(Envelope, Vec<String>), ControlError> {
@@ -548,6 +709,12 @@ impl ControlPlane {
         Ok((envelope, names))
     }
 
+    /// Purpose: The unauthenticated health document: issuer, key id, pack state and plaintext-secret count.
+    /// Serves: `handle` and `crates/control/src/bin/loongagent-control.rs`.
+    /// Design: `docs/design/control-plane.md` §2.
+    /// Up: `handle`.
+    /// Down: `has_pack`, `can_sign`, `Envelope::from_json` and `profiles_from_payload`.
+    /// Verify: `cargo test -p loong-control`.
     fn health(&self) -> String {
         let mut health = serde_json::json!({
             "ok": true,
@@ -570,6 +737,8 @@ impl ControlPlane {
         health.to_string()
     }
 
+    /// Purpose: Whether a presented token matches the token this route expects.
+    /// Contract: called by `handle` for the pack and publish routes.
     fn authorised(&self, token: Option<&str>, expected: &str) -> bool {
         match token {
             Some(token) => token == expected,
@@ -578,6 +747,8 @@ impl ControlPlane {
     }
 }
 
+/// Purpose: The wall clock in milliseconds, for a draft's `issued_at_ms`.
+/// Contract: called by `publish_draft`.
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -585,10 +756,18 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Purpose: A one-field JSON error body.
+/// Contract: called by `handle` for every non-200 response.
 fn json_error(message: &str) -> String {
     serde_json::json!({ "error": message }).to_string()
 }
 
+/// Purpose: Write one complete HTTP/1.1 response and close the connection.
+/// Serves: `handle`.
+/// Design: `docs/design/control-plane.md` §2.
+/// Up: `handle`.
+/// Down: the socket writes; no further call.
+/// Verify: `cargo test -p loong-control`.
 fn write_response(stream: &mut TcpStream, status: u16, body: &str) -> std::io::Result<()> {
     let reason = match status {
         200 => "OK",
@@ -608,6 +787,12 @@ fn write_response(stream: &mut TcpStream, status: u16, body: &str) -> std::io::R
     stream.flush()
 }
 
+/// Purpose: Bind a listener, kept here so tests can start a plane on an ephemeral port.
+/// Serves: `crates/control/src/bin/loongagent-control.rs` and the tests.
+/// Design: `docs/design/control-plane.md` §2 and §6.
+/// Up: `crates/control/src/bin/loongagent-control.rs`, `with_plane` and the endpoint tests.
+/// Down: `TcpListener::bind`.
+/// Verify: `cargo test -p loong-control`.
 /// Bind a control plane. Kept here rather than in a binary so tests can start one
 /// on an ephemeral port.
 pub fn bind(addr: &str, port: u16) -> std::io::Result<TcpListener> {
@@ -619,6 +804,12 @@ mod tests {
     use super::*;
     use loong_pack::{generate_keypair, public_of, Envelope};
 
+    /// Purpose: A signed test pack with fixed metadata.
+    /// Serves: the control-plane tests.
+    /// Design: `docs/design/control-plane.md` §4.
+    /// Up: `with_plane` and the publish tests.
+    /// Down: `Envelope::sign`.
+    /// Verify: `cargo test -p loong-control`.
     fn pack(private: &[u8], version: &str, payload: &str) -> Envelope {
         Envelope::sign(
             private,
@@ -633,6 +824,8 @@ mod tests {
         .unwrap()
     }
 
+    /// Purpose: A unique temporary state directory for one test.
+    /// Contract: test helper for the cache and plane tests.
     fn temp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "loong-control-{}-{}-{name}",
@@ -646,6 +839,12 @@ mod tests {
         dir
     }
 
+    /// Purpose: Stand up a control plane on a real socket with a client config and a cache.
+    /// Serves: the client-side tests.
+    /// Design: `docs/design/control-plane.md` §4.
+    /// Up: `a_client_fetches_verifies_and_caches_a_published_pack`, `an_unreachable_control_plane_falls_back_to_the_last_verified_pack` and `a_pack_that_does_not_verify_is_never_used_and_never_cached`.
+    /// Down: `generate_keypair`, `bind`, `ControlPlane`, `Cache::new`, `pack` and `publish`.
+    /// Verify: `cargo test -p loong-control`.
     /// A control plane and a client, in one process, over a real socket.
     fn with_plane<T>(f: impl FnOnce(&ControlConfig, &Cache, &ControlPlane, TcpListener) -> T) -> T {
         let (private, public) = generate_keypair().unwrap();
@@ -674,6 +873,8 @@ mod tests {
     }
 
     impl ControlPlane {
+        /// Purpose: A copy of the plane the serving thread can own.
+        /// Contract: test helper, called by `with_plane` only.
         fn clone_for_test(&self) -> ControlPlane {
             ControlPlane {
                 dir: self.dir.clone(),
@@ -686,6 +887,7 @@ mod tests {
         }
     }
 
+    /// Purpose: Pin the live fetch, its verification, and the cache write.
     #[test]
     fn a_client_fetches_verifies_and_caches_a_published_pack() {
         with_plane(|config, cache, _, _| {
@@ -698,6 +900,8 @@ mod tests {
         });
     }
 
+    /// Purpose: Pin that offline is degraded, not dead, and says why.
+    /// Verify: `cargo test -p loong-control`.
     #[test]
     fn an_unreachable_control_plane_falls_back_to_the_last_verified_pack() {
         with_plane(|config, cache, _, _| {
@@ -713,6 +917,8 @@ mod tests {
         });
     }
 
+    /// Purpose: Pin that a forgery stops the session and is never cached.
+    /// Verify: `cargo test -p loong-control`.
     #[test]
     fn a_pack_that_does_not_verify_is_never_used_and_never_cached() {
         with_plane(|config, cache, plane, _| {
@@ -735,6 +941,8 @@ mod tests {
         });
     }
 
+    /// Purpose: Pin draft signing, and that an unusable draft never replaces the served pack.
+    /// Verify: `cargo test -p loong-control`.
     #[test]
     fn the_control_plane_signs_a_draft_with_the_key_it_holds() {
         let (private, public) = generate_keypair().unwrap();
@@ -769,6 +977,8 @@ mod tests {
         assert_eq!(served.version, "2026.10.09-2");
     }
 
+    /// Purpose: Pin the no-key refusal and the `--key` hint.
+    /// Verify: `cargo test -p loong-control`.
     #[test]
     fn a_control_plane_without_a_signing_key_says_so_instead_of_guessing() {
         let (_, public) = generate_keypair().unwrap();
@@ -786,6 +996,8 @@ mod tests {
         );
     }
 
+    /// Purpose: Pin the key-mismatch refusal before serving.
+    /// Verify: `cargo test -p loong-control`.
     #[test]
     fn a_signing_key_that_does_not_match_the_served_public_key_refuses_to_start() {
         let (_, public) = generate_keypair().unwrap();
@@ -804,6 +1016,8 @@ mod tests {
         }
     }
 
+    /// Purpose: Pin the publish endpoint and the verified read-back.
+    /// Verify: `cargo test -p loong-control`.
     #[test]
     fn the_publish_endpoint_takes_a_draft_and_signs_it() {
         let (private, public) = generate_keypair().unwrap();
@@ -848,6 +1062,8 @@ mod tests {
         envelope.verify(&public, &[PROFILES_SCHEMA]).unwrap();
     }
 
+    /// Purpose: Pin the wrong-key and wrong-artifact refusals that keep the previous pack.
+    /// Verify: `cargo test -p loong-control`.
     #[test]
     fn the_control_plane_refuses_to_serve_what_no_client_could_accept() {
         let (private, public) = generate_keypair().unwrap();
@@ -888,6 +1104,8 @@ mod tests {
         assert!(plane.publish(&wrong_artifact.to_json().unwrap()).is_err());
     }
 
+    /// Purpose: Pin that health is open, the pack needs the client token, and only the admin token publishes.
+    /// Verify: `cargo test -p loong-control`.
     #[test]
     fn tokens_are_required_and_separated() {
         let (private, public) = generate_keypair().unwrap();
@@ -947,6 +1165,8 @@ mod tests {
         assert_eq!(unsigned.status, 400, "{}", unsigned.body);
     }
 
+    /// Purpose: Pin the empty-plane answer as `NothingPublished`, not a network failure.
+    /// Verify: `cargo test -p loong-control`.
     #[test]
     fn a_control_plane_with_nothing_published_says_so() {
         let (_, public) = generate_keypair().unwrap();
@@ -975,6 +1195,8 @@ mod tests {
         );
     }
 
+    /// Purpose: Pin the TLS rule and its two loopback-free exceptions.
+    /// Verify: `cargo test -p loong-control`.
     #[test]
     fn plain_http_is_refused_off_loopback() {
         let config = ControlConfig {
@@ -999,6 +1221,8 @@ mod tests {
         .is_ok());
     }
 
+    /// Purpose: Pin that concurrent cache writes leave one whole, verifiable pack and no scratch files.
+    /// Verify: `cargo test -p loong-control`.
     #[test]
     fn several_writers_do_not_corrupt_the_cache() {
         // A surface and the server it spawns both sync; so do two terminals.
@@ -1031,6 +1255,8 @@ mod tests {
         assert!(leftovers.is_empty(), "left behind: {leftovers:?}");
     }
 
+    /// Purpose: Pin the no-rewrite fast path by comparing modification times.
+    /// Verify: `cargo test -p loong-control`.
     #[test]
     fn an_unchanged_pack_is_not_written_again() {
         let (private, public) = generate_keypair().unwrap();
@@ -1049,6 +1275,7 @@ mod tests {
             .unwrap();
     }
 
+    /// Purpose: Pin that two control planes cannot share a cache path.
     #[test]
     fn the_cache_is_named_after_the_control_plane() {
         let state = temp("cache-naming");

@@ -16,7 +16,7 @@ listed is a violation. The middle column is each crate's own `//!` header.
 |---|---|---|
 | `loong-config` | Configuration and profile layering: one stack, four merge kinds, and a secret path that is a reference (ADR-0008). | `loong-schema` |
 | `loong-context` | Layered, reversible context memory (ADR-0017). | `loong-eventlog`, `loong-http`, `loong-schema` |
-| `loong-control` | Talking to the control plane: fetching the signed profile pack, verifying it, | `loong-config`, `loong-http`, `loong-pack` |
+| `loong-control` | The control-plane client and server: fetch and verify a profile pack, cache it, and serve it. | `loong-config`, `loong-http`, `loong-pack` |
 | `loong-eventlog` | Write and read the append-only JSONL event log that is one session's source of truth. | `loong-schema` |
 | `loong-hooks` | Lifecycle hooks: the deterministic veto channel around the loop, allow / ask / deny only (ADR-0007 §7). | `loong-http`, `loong-manifest`, `loong-proc`, `loong-schema` |
 | `loong-http` | Carry one JSON request over HTTP/1.1, plain or TLS, with bounded timeouts and a streamed reply. | — |
@@ -25,7 +25,7 @@ listed is a violation. The middle column is each crate's own `//!` header.
 | `loong-manifest` | Gate repository manifests behind a human trust decision and a change-detection hash. | — |
 | `loong-mcp` | MCP: external tools behind the same `Tool` interface as the built-ins. | `loong-manifest`, `loong-protocol`, `loong-schema`, `loong-tools` |
 | `loong-pack` | Sign and verify the one envelope every distributed artifact travels in. | — |
-| `loong-plugin` | Plugins: a bundle of skills you install **by name**, instead of hand-copying | `loong-config`, `loong-skills` |
+| `loong-plugin` | Plugins: install a reviewed checkout's skills by name, and never its hooks, servers or code. | `loong-config`, `loong-skills` |
 | `loong-proc` | Run a child process with bounded output, a hard timeout and teardown of its whole tree. | — |
 | `loong-protocol` | Define the JSON-RPC 2.0 envelopes and one-line framing that carry schema messages between surfaces and the server. | `loong-schema` |
 | `loong-providers` | Model providers behind one `Model` interface, so the kernel never learns which vendor answered (ADR-0004). | `loong-http`, `loong-schema` |

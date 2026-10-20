@@ -15,7 +15,7 @@ Language: zh
 |---|---|---|
 | system / tools / rules / skills | 不变 | 不变 |
 | L4 地图 | 不存在 | 新 `Category::CognitiveMap`（`Lifetime::Session`, `pinned`），按 `replace(id, text)` 原地更新 |
-| 历史消息 | 累积到 ceiling → 清理/丢弃 | R 模式同今天；S 模式**只清工具输出**，不丢消息 |
+| 历史消息 | 累积到 ceiling → 清理/丢弃 | 装了引擎（R 或 S）**只清工具输出**，不丢消息；未装引擎才丢最老交换 |
 | recall 结果 | 不存在 | **不另记账本条目**：答案作为普通 `tool.result` 进入历史，由 history 分类计费（原因见 §7.2 要点 8） |
 
 `Category::Retrieval` 这个分类**存在于枚举里但 `recall` 不使用它** —— 早期设计想让检索

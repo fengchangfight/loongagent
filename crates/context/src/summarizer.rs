@@ -42,7 +42,7 @@ impl DigestInput {
     /// Design: `docs/context/pipeline.md` §6.2.
     /// Up: `Store::synthesize_window`.
     /// Down: Reads `Digest`'s fields; no other callee.
-    /// Verify: `cargo test -p loong-context summarizer::tests::the_request_disables_thinking`.
+    /// Verify: `cargo test -p loong-context summarizer::tests::the_request_disables_thinking_and_carries_the_schema`.
     pub fn from_digest(digest: &Digest) -> Self {
         Self {
             request: digest
@@ -331,7 +331,7 @@ impl OllamaSummarizer {
     /// Design: `docs/context/config.md` §11.
     /// Up: The kernel's `ContextEngine` and the faithfulness/window-cost tests.
     /// Down: `with_timeout`, `with_max_tokens` and the `Summarizer` impl.
-    /// Verify: `cargo test -p loong-context summarizer::tests::the_request_disables_thinking`.
+    /// Verify: `cargo test -p loong-context summarizer::tests::the_request_disables_thinking_and_carries_the_schema`.
     pub fn new(base: impl Into<String>, model: impl Into<String>) -> Self {
         Self {
             base: base.into().trim_end_matches('/').to_string(),

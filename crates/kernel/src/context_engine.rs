@@ -876,7 +876,7 @@ mod tests {
     /// Design: `docs/design/context-ledger.md` §6.
     /// Up: the ignored measurement test.
     /// Down: the `Summarizer` trait.
-    /// Verify: `cargo test -p loong-kernel context_engine::tests::measurement -- --ignored`.
+    /// Verify: `cargo test -p loong-kernel context_engine::tests::measurement_the_foreground_path_does_not_wait_for_a_slow_model -- --ignored`.
     /// A summariser that takes a measurable amount of wall-clock time, for the
     /// measurement that the foreground does not wait on it.
     struct Slow {
@@ -1246,7 +1246,7 @@ mod tests {
     /// `refresh()`, which every step boundary runs, and a model that takes real time
     /// must not be inside it. Ignored because it is a measurement, not a gate.
     ///
-    /// `cargo test -p loong-kernel context_engine::tests::measurement -- --ignored --nocapture`
+    /// `cargo test -p loong-kernel context_engine::tests::measurement_the_foreground_path_does_not_wait_for_a_slow_model -- --ignored --nocapture`
     #[test]
     #[ignore = "a measurement, not a gate; run it explicitly"]
     fn measurement_the_foreground_path_does_not_wait_for_a_slow_model() {

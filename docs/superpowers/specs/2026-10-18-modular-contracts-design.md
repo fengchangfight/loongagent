@@ -50,7 +50,7 @@ hops is checked by a gate.
 |---|---|---|
 | 1 | Every code file has a five-field module contract | `check-modules.py` passes on all non-exempt files; the five labels are `Serves`, `Design`, `Upstream`, `Downstream`, `Verify` |
 | 2 | Every function and type has a doc comment | `check-modules.py` reports zero undocumented items; `pub` and non-trivial private items carry `Purpose` plus the five contract fields; trivial private items carry `Purpose` and `Contract:` |
-| 3 | Every maintained document has a four-field navigation header | `Up`, `Authority`, `Code`, `Verify`; `Up` resolves and reaches both `docs/design/README.md` and `docs/04-system-overview.md` |
+| 3 | Every maintained document has its class's navigation header | the documented fields (`Up`, `Authority`, `Code`, `Verify`; ADRs only `Up`, the index only `Code` and `Verify`); `Up` resolves; every `docs/design/**` document's chain reaches both `docs/design/README.md` and `docs/04-system-overview.md`, and every other maintained document reaches at least one root |
 | 4 | No maintained document exceeds its budget | the per-directory limits in §4.2; the gate prints the over-run and fails |
 | 5 | A code contract's `Design` and `Verify` anchors exist | every backticked `docs/...` path resolves; every `ADR-NNNN` names a real ADR; `Verify` names a test module or a command |
 | 6 | A document's `Code` anchors exist | every backticked `crates/...` path resolves |
@@ -118,7 +118,7 @@ docs/
     extension-model.md        hooks, skills, MCP, plugins, packs
     sessions-lineage.md       session/event tree, fork, resume, export
     surfaces.md               CLI, server, TUI, web, ACP
-    control-plane.md          control plane, gateway, org layer
+    control-plane.md          control plane, gateway, control layer
     security-trust.md         trust boundaries, signing, sandbox, approval
     flows/
       turn-lifecycle.md       one turn, end to end
@@ -128,7 +128,7 @@ docs/
       pack-install.md         fetch, verify, seat a profile or plugin pack
   context/                    split of the old 06, Chinese preserved
     README.md  principles.md  data-model.md  pipeline.md
-    recall.md  failure-modes.md  config.md  rollout.md
+    recall.md  failure-modes.md  config.md  rollout.md  status.md
   extending/                  split of the old 07
     README.md  builtin-tool.md  event.md  hook.md  routing.md
   runbooks/
@@ -226,12 +226,19 @@ Rules:
 - Trait method declarations carry one `Purpose` line; the trait itself carries
   the five fields.
 - Exempt files are listed in `scripts/contract-exemptions.txt` with a reason:
-  `crates/schema/src/generated.rs` (generated) and the two real crate-root
-  `build.rs` files. `crates/kernel/src/turn/build.rs` is **not** exempt: it is a
+  the generated schema files `crates/schema/src/generated.rs` and
+  `crates/schema/tests/generated_roundtrip.rs`, and the two real crate-root
+  `build.rs` files (`crates/cli/build.rs`, `crates/control/build.rs`).
+  `crates/kernel/src/turn/build.rs` is **not** exempt: it is a
   module named `build`, not a Cargo build script. The gate fails if an exemption
   names a file or item that no longer exists, so the list cannot grow stale.
 - A single line `// Contract-exempt: <reason>` may exempt one item, but the
   reason must be at least 10 characters and the count is printed by the gate.
+
+Corrected during execution (2026-10-20): the exemption list has four files (the
+generated round-trip test was added), the context tree has nine files
+(`status.md` was restored), and criterion 3 and §5 state the reachability rule
+and output the gate actually has.
 
 ### 4.4 Gates
 
@@ -318,7 +325,7 @@ not been shown to work.
 
 | Old | New | Rule |
 |---|---|---|
-| `docs/06-context-engineering.md` (1,059) | `docs/06` entry (<=60) + `docs/context/*` (8 files including the README) | move sections by topic; preserve Chinese; every Chinese file carries `Language: zh`; update every inbound link |
+| `docs/06-context-engineering.md` (1,059) | `docs/06` entry (<=60) + `docs/context/*` (9 files including the README) | move sections by topic; preserve Chinese; every Chinese file carries `Language: zh`; update every inbound link |
 | `docs/07-extending.md` (220) | `docs/07` entry (<=60) + `docs/extending/*` (5 files including the README) | one procedure per file; the old anchors keep working through the entry |
 | `docs/02-topics.md` (696) | `docs/02` entry + `docs/topics/{README,open,decided}.md` | every T-NN keeps its number and gets one line in the index; status decisions move with the topic |
 | `DEVELOPMENT.md` (1,111) | `DEVELOPMENT.md` (<=300) + `docs/design/*` + `docs/runbooks/*` | keep toolchain, gates, release; move mechanism descriptions to design docs, troubleshooting to runbooks |
@@ -335,8 +342,10 @@ Every phase ends with `./scripts/check.sh` green. The migration additionally
 needs the following evidence, in the task that owns it:
 
 1. **Document tree.** `python3 scripts/check-docs.py` passes all nine checks;
-   `python3 scripts/check-docs.py --check reachable` prints one path per design
-   document to `design/README.md` and `docs/04`.
+   `python3 scripts/check-docs.py --check reachable` passes when every
+   `docs/design/**` document's chain reaches both roots and every other
+   maintained document's chain reaches one (the check reports `OK`, not a path
+   list).
 2. **Code contracts.** `python3 scripts/check-modules.py` reports zero missing
    module contracts and zero undocumented items, with the exemption count and
    each exemption named.

@@ -83,9 +83,9 @@ Four things are **fixed and non-pluggable**, because behavior that can be swappe
    sessions relate by **lineage** (fork, delegation), and "branch" means a child
    session (ADR-0003, ADR-0015). Every tool call, approval, decision and cost is
    an event.
-3. **Context assembly** — the ledger is the only write path to the model;
-   plugins, MCP servers, skills and subagents may *propose* entries, never append
-   (ADR-0006).
+3. **Context assembly** — the ledger is the only write path to the model, and
+   only the kernel appends to it; plugins, MCP servers, skills and subagents have
+   no proposal door yet (ADR-0006).
 4. **The PDP** — decisions happen in the kernel at the single tool chokepoint,
    returning allow / ask / deny plus the rule that fired; enforcement lives at
    the OS (ADR-0007) — Landlock on Linux today, seatbelt and Job Objects decided

@@ -106,7 +106,7 @@ instead of silently running something else.
 The pack travels in the envelope from `crates/pack`: `artifact`, `payload_schema`, `version`,
 `issuer`, `scope`, `issued_at_ms`, `key_id`, `payload`, `signature`. The signature is Ed25519
 (via `ring`) over the canonical JSON of every field except `signature`, so the version, issuer,
-scope and payload are covered. `key_id` is the first eight bytes of the signing key's
+scope and payload are covered. `key_id` is the first eight bytes of the public key's
 SHA-256. Verification (`Envelope::verify`) refuses an empty signature, a payload schema this
 build does not know, a key id that does not match the **pinned** public key, and a signature
 that does not verify. The control plane additionally refuses to publish an envelope whose

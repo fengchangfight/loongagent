@@ -122,7 +122,7 @@ with the last synced version. **Routing follows the keys (ADR-0005, revised
 2026-10-18):** in gateway mode the profile is the intent the gateway routes by,
 and its routing policy is server-side; in local mode the user is the picker and
 no pack exists.
-Unsigned artifacts can never occupy the org layer. Still open: the **policy and
+Unsigned artifacts can never occupy the control layer (above org). Still open: the **policy and
 context** payload schemas — the envelope is built for them, the payload schemas
 are not written (ADR-0016) — while the *profiles* payload schema **is** written
 and used to verify (`PROFILES_SCHEMA`, `crates/pack/src/lib.rs`); pack **update

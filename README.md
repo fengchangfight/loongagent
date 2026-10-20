@@ -230,7 +230,7 @@ loongagent use default       # 选一个
 skills/commands、**插件**、六个内置工具（`read_file` / `write_file` / `edit` / `glob` /
 `grep` / `shell`，记忆打开时再加一个 `recall`）、四个界面（tui / web / repl / run）、流式回答、
 可选的**分层记忆**（R 模式 + S 模式、后台增量、`recall`/`expand`、F2 可见性）和**控制面**
-（签名 pack 由固定公钥验签后才进 org 层，`loongagent-control` 二进制与 runbook 都在；身份/SSO、
+（签名 pack 由固定公钥验签后才进 control 层（高于 org），`loongagent-control` 二进制与 runbook 都在；身份/SSO、
 审计、密钥轮换还没做完）。Linux 与 **Windows** 都能构建运行，命令面一致。
 测试 736 个通过、11 个忽略。
 <!-- test-counts: 736 passed, 11 ignored -->

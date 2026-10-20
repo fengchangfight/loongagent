@@ -135,9 +135,9 @@ advisory and trust-gated (ADR-0007).
 
 **Decision (owner sign-off, 2026-10-04): one layered stack with a per-key merge
 kind, so no lower layer can loosen a higher one.** Layers are built-in < org <
-project < user < session; merge kinds are free-override, narrow-only, add-only and
-reference, with secrets only as references and one signed envelope for every pack
-(ADR-0008).
+control < project < user < session; merge kinds are free-override, narrow-only,
+add-only and reference, with secrets only as references and one signed envelope
+for every pack (ADR-0008, ADR-0016).
 
 **Constrains:** T-07, T-21 (what seniors can open), enterprise managed-config
 story.

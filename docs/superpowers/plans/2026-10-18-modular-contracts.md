@@ -1,6 +1,6 @@
 # Modular Contracts Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use subagent-driven-development (recommended) or executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use subagent-driven-development (recommended) or executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Make every code and document node navigable back to its subsystem and the top-level design, and keep those edges true with gates that have been shown to fail.
 
@@ -64,31 +64,31 @@ Every code file names one primary design document. This table is the source for 
 
 Every Phase C task uses this procedure. The task's Files list is the only input that changes.
 
-- [ ] **Step A: Read the design document named in the task's Design column, and the files to annotate.**
+- [x] **Step A: Read the design document named in the task's Design column, and the files to annotate.**
 
-- [ ] **Step B: Write the module contract at the top of every file in the task.** Five labelled lines exactly as the spec's §4.3 example. `Design` names the task's document as a backticked `docs/...` path. `Verify` names the test target and, where useful, `./scripts/check.sh`.
-- [ ] **Step B2: Regenerate the crate map.** The map's middle column is each crate's first `//!` line, so after writing the module contract run `python3 scripts/layering_rules.py --emit-map . > docs/crate-map.md` and include `docs/crate-map.md` in the task commit.
+- [x] **Step B: Write the module contract at the top of every file in the task.** Five labelled lines exactly as the spec's §4.3 example. `Design` names the task's document as a backticked `docs/...` path. `Verify` names the test target and, where useful, `./scripts/check.sh`.
+- [x] **Step B2: Regenerate the crate map.** The map's middle column is each crate's first `//!` line, so after writing the module contract run `python3 scripts/layering_rules.py --emit-map . > docs/crate-map.md` and include `docs/crate-map.md` in the task commit.
 
-- [ ] **Step C: Write the item docs.** For each item: `Purpose` first. `pub` items, non-trivial private functions and every type get `Serves`, `Design`, `Up`, `Down`, `Verify`. Trivial private functions get `Purpose` plus `Contract: <file>`. Test functions get one `Purpose` line naming the behaviour they pin. Never restate the signature.
+- [x] **Step C: Write the item docs.** For each item: `Purpose` first. `pub` items, non-trivial private functions and every type get `Serves`, `Design`, `Up`, `Down`, `Verify`. Trivial private functions get `Purpose` plus `Contract: <file>`. Test functions get one `Purpose` line naming the behaviour they pin. Never restate the signature.
 
-- [ ] **Step D: Run the code gate on the task's files.**
+- [x] **Step D: Run the code gate on the task's files.**
 
 Run: `python3 scripts/check-modules.py --paths <comma-separated files>`
 Expected: exit 0, `documented N/N`, no missing label.
 
-- [ ] **Step E: Prove the source did not change.**
+- [x] **Step E: Prove the source did not change.**
 
 Run: `python3 scripts/check-comment-only.py --base HEAD`
 Expected: exit 0, `comment-only: OK (<n> files)`.
 
-- [ ] **Step F: Remove the task's files from `scripts/code-contract-baseline.txt`.**
+- [x] **Step F: Remove the task's files from `scripts/code-contract-baseline.txt`.**
 
-- [ ] **Step G: Run the crate tests and the full gate.**
+- [x] **Step G: Run the crate tests and the full gate.**
 
 Run: `cargo fmt --all -- --check && cargo test -p <crates> && ./scripts/check.sh`
 Expected: `all gates passed`.
 
-- [ ] **Step H: Commit.**
+- [x] **Step H: Commit.**
 
 ```bash
 git add <the annotated files> scripts/code-contract-baseline.txt
@@ -108,7 +108,7 @@ git commit -m "docs(<scope>): add contracts to <crate>, without changing code"
 **Interfaces:**
 - Produces: the modularity section of `AGENTS.md` and the header/budget conventions in `docs/README.md`. Later tasks quote these rules in their reports.
 
-- [ ] **Step 1: Add the modularity section to `AGENTS.md`**
+- [x] **Step 1: Add the modularity section to `AGENTS.md`**
 
 Four short subsections, in the file's plain-English voice:
 
@@ -119,11 +119,11 @@ Four short subsections, in the file's plain-English voice:
 
 Keep the section under 60 lines. It states rules, not a tutorial; the spec carries the reasoning.
 
-- [ ] **Step 2: Update `docs/README.md` conventions**
+- [x] **Step 2: Update `docs/README.md` conventions**
 
 Add the header schema, the length budgets, the record-class exemptions, and one sentence that `docs/design/` is the subsystem layer and `docs/README.md` remains the only index. Add rows for `design/`, `context/`, `topics/` and `extending/` in the tasks that create those entries, so the index never links a file that does not exist yet.
 
-- [ ] **Step 3: Verify and commit**
+- [x] **Step 3: Verify and commit**
 
 Run: `python3 scripts/check-docs.py` (should still be green; no new document yet).
 Read the new `AGENTS.md` section once. Then commit.
@@ -146,7 +146,7 @@ git commit -m "docs(agents): state the contract and navigation rules before chan
 - Produces: `check-modules.py [--root DIR] [--paths P1,P2] [--baseline FILE] [--emit-baseline FILE] [--list]`; exit 0 when every in-scope file passes, 1 with one line per failure.
 - Produces: the exemption format `path | reason` and `path#item | reason`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `scripts/tests/test_check_modules.py`, using `unittest` and temp directories. Fixtures are inline Rust strings. Tests:
 
@@ -167,18 +167,18 @@ git commit -m "docs(agents): state the contract and navigation rules before chan
 Run: `python3 -m unittest scripts.tests.test_check_modules -v`
 Expected: FAIL, module not found.
 
-- [ ] **Step 2: Implement the scanner and the checks**
+- [x] **Step 2: Implement the scanner and the checks**
 
 Implementation order: mask comments/strings/raw strings while preserving newlines; find items with a line regex including indentation and visibility; find the doc block upward through attributes; measure the body span by brace matching on the masked text; apply the field rules; resolve backticked `docs/...` paths and `ADR-NNNN`; read exemptions and baseline; print the summary.
 
 Key decisions fixed here: item kinds are `fn|struct|enum|trait|union|type`; `mod` is skipped; a private `fn` is trivial when the span from its signature line to its closing brace is ≤12 lines; the five module labels are `Serves`, `Design`, `Upstream`, `Downstream`, `Verify`; the item labels are `Purpose`, `Serves`, `Design`, `Up`, `Down`, `Verify`.
 
-- [ ] **Step 3: Run the tests to green**
+- [x] **Step 3: Run the tests to green**
 
 Run: `python3 -m unittest scripts.tests.test_check_modules -v`
 Expected: PASS.
 
-- [ ] **Step 4: Create the exemption file and the initial baseline**
+- [x] **Step 4: Create the exemption file and the initial baseline**
 
 `scripts/contract-exemptions.txt`:
 
@@ -196,16 +196,16 @@ python3 scripts/check-modules.py --emit-baseline scripts/code-contract-baseline.
 
 Expected: the file lists every non-exempt `.rs` that does not yet pass, one path per line.
 
-- [ ] **Step 5: Prove the gate fails on a seeded defect**
+- [x] **Step 5: Prove the gate fails on a seeded defect**
 
 Temporarily remove the `Serves:` line from `crates/kernel/src/turn/loop.rs`'s `//!` block (it has no block yet, so add a minimal one first, run, then remove one label), or use a fixture copy outside the baseline. Run `check-modules.py --paths crates/kernel/src/turn/loop.rs`.
 Expected: exit 1 naming the missing label. Restore.
 
-- [ ] **Step 6: Wire it into `scripts/check.sh`**
+- [x] **Step 6: Wire it into `scripts/check.sh`**
 
 Add a `bold "code contracts"` step running `python3 scripts/check-modules.py` after the layering step and before the documents step. Add one line to the header comment naming what it catches.
 
-- [ ] **Step 7: Run the full gate and commit**
+- [x] **Step 7: Run the full gate and commit**
 
 Run: `./scripts/check.sh`
 Expected: `all gates passed` (the baseline keeps the old tree green).
@@ -227,24 +227,24 @@ git commit -m "gate(code): a contract check with a baseline ratchet, so the old 
 - Produces: four new `--check` names: `headers`, `lengths`, `code-paths`, `reachable`; the existing `links`, `crate-map`, `orphans`, `citations`, `counts` keep their names.
 - Produces: `--emit-baseline FILE` writing the maintained documents that do not yet pass headers or lengths.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Inline temp git repositories. Tests: a doc with all four fields passes; a missing `Up:` fails; a 260-line design doc fails `lengths`; a `Code:` path that does not exist fails `code-paths`; a design doc whose `Up:` reaches `design/README.md` and `04` passes `reachable`; a broken `Up:` fails; an ADR needs only `Up:`; `research/` is exempt.
 
 Run: `python3 -m unittest scripts.tests.test_check_docs -v`
 Expected: FAIL.
 
-- [ ] **Step 2: Implement the four checks**
+- [x] **Step 2: Implement the four checks**
 
 Add them to `CHECKS` and the dispatch. Reuse `tracked_markdown`, `code_free`, `find_links` and `judged_documents`. Parse a header field as the first matching `^\- \*\*Field:\*\*` line within the first 20 lines. Resolve relative links against the document's directory. The `reachable` check is a BFS over `Up:` edges with a visited set and a root set of `docs/design/README.md` and `docs/04-system-overview.md`.
 
 The `citations` check scans `docs/02-topics.md` **and** `docs/topics/*.md` for `^## T-NN` during the migration, so it works before and after Task 14.
 
-- [ ] **Step 3: Add the baseline and prove each check fails**
+- [x] **Step 3: Add the baseline and prove each check fails**
 
 Generate `scripts/doc-contract-baseline.txt` from the current tree. Seed each defect in a scratch document outside the baseline: remove `Up:`, add 20 lines over a budget, break a `Code:` path, cut an `Up:` link. Record the four red runs, then remove the scratch document.
 
-- [ ] **Step 4: Wire into `check.sh`, run the full gate and commit**
+- [x] **Step 4: Wire into `check.sh`, run the full gate and commit**
 
 The documents step already runs `check-docs.py`; the new checks join the default set. Run `./scripts/check.sh`, expected green.
 
@@ -262,19 +262,19 @@ git commit -m "gate(docs): check headers, budgets, code anchors and the path bac
 **Interfaces:**
 - Produces: `check-comment-only.py [--root DIR] [--base REV]`; exit 0 when every changed `.rs` has an identical comment-stripped token stream, 1 with a per-file diff otherwise. Not wired into `check.sh`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Temp git repo with a committed file, then a worktree edit that only adds `///` lines (passes), then an edit that changes a literal (fails), then a new file with only comments (passes), then a deleted file (reported, not a crash).
 
-- [ ] **Step 2: Implement the token comparison**
+- [x] **Step 2: Implement the token comparison**
 
 Reuse the masking approach from Task 2. Strip comments, then remove all whitespace outside strings. Compare the resulting strings. On mismatch print the first difference with line numbers.
 
-- [ ] **Step 3: Prove it red on a seeded change, then green on a no-op**
+- [x] **Step 3: Prove it red on a seeded change, then green on a no-op**
 
 Edit a function body, run, expect exit 1; restore; run, expect `comment-only: OK`.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add scripts/check-comment-only.py scripts/tests/test_check_comment_only.py
@@ -295,27 +295,27 @@ git commit -m "gate(source): prove a migration changed comments and nothing else
 - Consumes: all three gate scripts.
 - Produces: the concrete templates every later task copies.
 
-- [ ] **Step 1: Write `docs/design/README.md` (≤150 lines)**
+- [x] **Step 1: Write `docs/design/README.md` (≤150 lines)**
 
 Header: Up `../04-system-overview.md`; Authority `../decisions/0004-microkernel-extension-model.md`; Code `crates/kernel/src/lib.rs`; Verify `./scripts/check.sh`. Body: the Mermaid layer diagram (schema at the bottom, surfaces at the top), a table of the eleven subsystem documents, and three reading paths (newcomer, maintainer, debugger). Index only the documents that exist; add rows as later tasks create them.
 
-- [ ] **Step 2: Write `docs/design/kernel-loop.md` (≤250 lines)**
+- [x] **Step 2: Write `docs/design/kernel-loop.md` (≤250 lines)**
 
 Required sections: the turn's inputs and outputs; the step loop; where the model call, tool call, ledger append and event append happen; the step budget and nudge; interruption and resume; the failure modes that end a turn. Include one Mermaid `sequenceDiagram` of a turn. Every claim names a code path; link ADR-0004, ADR-0006 and `../design/flows/turn-lifecycle.md` (created in Task 10). `Code:` names `crates/kernel/src/turn.rs`, `turn/loop.rs`, `turn/model.rs`.
 
-- [ ] **Step 3: Annotate `crates/kernel/src/turn/loop.rs`**
+- [x] **Step 3: Annotate `crates/kernel/src/turn/loop.rs`**
 
 Follow the Per-Crate Annotation Procedure with this one file. Its primary `Design:` is `docs/design/kernel-loop.md`. Expect ~14 items.
 
-- [ ] **Step 4: Add the header to `docs/04-system-overview.md`**
+- [x] **Step 4: Add the header to `docs/04-system-overview.md`**
 
 Up: `00-vision.md`; Authority: `decisions/`, naming ADR-0004 as the architecture anchor; Code: `crates/kernel/src/lib.rs`; Verify: `./scripts/check.sh`. Do not rewrite the body in this task.
 
-- [ ] **Step 5: Add the `design/` index row and remove the pilot from both baselines**
+- [x] **Step 5: Add the `design/` index row and remove the pilot from both baselines**
 
 `docs/README.md` gains `| [design/](design/README.md) | Subsystem layer: ... |` and the `design/` first-segment row is enough for the orphan check. Remove `crates/kernel/src/turn/loop.rs` from the code baseline. New documents are not in the doc baseline. **Keep `docs/04` in the doc baseline**: it is 207 lines and its 180-line budget is met in Task 17, so removing it now would fail `lengths`.
 
-- [ ] **Step 6: Prove the whole chain**
+- [x] **Step 6: Prove the whole chain**
 
 Run:
 ```
@@ -327,7 +327,7 @@ cargo test -p loong-kernel
 ```
 Expected: all exit 0. `check-docs.py --check reachable` prints a path from `design/kernel-loop.md` through `design/README.md` to `04`.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/kernel/src/turn/loop.rs docs/design/README.md docs/design/kernel-loop.md docs/04-system-overview.md docs/README.md scripts/code-contract-baseline.txt scripts/doc-contract-baseline.txt
@@ -348,9 +348,9 @@ Every Phase B task ends with `python3 scripts/check-docs.py && ./scripts/check.s
 - Modify: `docs/design/README.md` (two rows)
 - Modify: `docs/04-system-overview.md` (links where it describes these)
 
-- [ ] **Step 1: Write `context-ledger.md` (≤250)** — the ledger as the only write path; entry kinds and lifetimes; budget and eviction; compaction; recall; what the model sees. Mermaid flowchart of proposal → ledger → model. Authority ADR-0006 and ADR-0017. Code: `crates/kernel/src/ledger.rs`, `context_engine.rs`, `turn/compaction.rs`, `turn/recall.rs`. Up: `README.md` and `../04-system-overview.md`. Detail links to `../context/README.md`.
-- [ ] **Step 2: Write `tools-permissions.md` (≤250)** — the uniform tool interface; action classes; PDP allow/ask/deny; where enforcement happens; confinement and the `ExecContext`; the built-in tools. Mermaid flowchart of proposal → PDP → execution. Authority ADR-0004 and ADR-0007. Code: `crates/tools/src/lib.rs`, `crates/sandbox/src/`, `crates/kernel/src/turn/confinement.rs`, `crates/proc/src/lib.rs`.
-- [ ] **Step 3: Add the two rows to `design/README.md`, link from `04` where it already describes the mechanisms, and run the gate.**
+- [x] **Step 1: Write `context-ledger.md` (≤250)** — the ledger as the only write path; entry kinds and lifetimes; budget and eviction; compaction; recall; what the model sees. Mermaid flowchart of proposal → ledger → model. Authority ADR-0006 and ADR-0017. Code: `crates/kernel/src/ledger.rs`, `context_engine.rs`, `turn/compaction.rs`, `turn/recall.rs`. Up: `README.md` and `../04-system-overview.md`. Detail links to `../context/README.md`.
+- [x] **Step 2: Write `tools-permissions.md` (≤250)** — the uniform tool interface; action classes; PDP allow/ask/deny; where enforcement happens; confinement and the `ExecContext`; the built-in tools. Mermaid flowchart of proposal → PDP → execution. Authority ADR-0004 and ADR-0007. Code: `crates/tools/src/lib.rs`, `crates/sandbox/src/`, `crates/kernel/src/turn/confinement.rs`, `crates/proc/src/lib.rs`.
+- [x] **Step 3: Add the two rows to `design/README.md`, link from `04` where it already describes the mechanisms, and run the gate.**
 
 ```bash
 git add docs/design/context-ledger.md docs/design/tools-permissions.md docs/design/README.md docs/04-system-overview.md scripts/doc-contract-baseline.txt
@@ -364,9 +364,9 @@ git commit -m "docs(design): the ledger and the permission chokepoint get one ho
 - Create: `docs/design/config-routing.md`
 - Modify: `docs/design/README.md`, `docs/04-system-overview.md`
 
-- [ ] **Step 1: Write `events-storage.md` (≤250)** — the schema as the source of truth; JSONL as truth; SQLite as a derived index; session versus event tree; the wire protocol on top. Mermaid flowchart of event → JSONL → index and the two tree levels. Authority ADR-0002, ADR-0003, ADR-0015. Code: `crates/schema/protocol.toml`, `crates/protocol/src/lib.rs`, `crates/eventlog/src/lib.rs`, `crates/index/src/lib.rs`.
-- [ ] **Step 2: Write `config-routing.md` (≤250)** — the layer order; profile packs and their signatures; manifest trust; how the router picks a model; the provider interface. Mermaid flowchart of layers and routing. Authority ADR-0005, ADR-0008, ADR-0016. Code: `crates/config/src/`, `crates/manifest/src/lib.rs`, `crates/providers/src/`.
-- [ ] **Step 3: Update the design index, link from `04`, gate, commit** with message `docs(design): storage and routing each get one authority`.
+- [x] **Step 1: Write `events-storage.md` (≤250)** — the schema as the source of truth; JSONL as truth; SQLite as a derived index; session versus event tree; the wire protocol on top. Mermaid flowchart of event → JSONL → index and the two tree levels. Authority ADR-0002, ADR-0003, ADR-0015. Code: `crates/schema/protocol.toml`, `crates/protocol/src/lib.rs`, `crates/eventlog/src/lib.rs`, `crates/index/src/lib.rs`.
+- [x] **Step 2: Write `config-routing.md` (≤250)** — the layer order; profile packs and their signatures; manifest trust; how the router picks a model; the provider interface. Mermaid flowchart of layers and routing. Authority ADR-0005, ADR-0008, ADR-0016. Code: `crates/config/src/`, `crates/manifest/src/lib.rs`, `crates/providers/src/`.
+- [x] **Step 3: Update the design index, link from `04`, gate, commit** with message `docs(design): storage and routing each get one authority`.
 
 ### Task 8: extension model and sessions/lineage design
 
@@ -375,9 +375,9 @@ git commit -m "docs(design): the ledger and the permission chokepoint get one ho
 - Create: `docs/design/sessions-lineage.md`
 - Modify: `docs/design/README.md`, `docs/04-system-overview.md`
 
-- [ ] **Step 1: Write `extension-model.md` (≤250)** — the four extension kinds (hooks, skills/commands, MCP tools, plugins/packs), their trust gates, and the one loader each. Mermaid flowchart of install → trust → load → invoke. Authority ADR-0004, ADR-0007 §7, ADR-0016, ADR-0018. Code: `crates/hooks/src/`, `crates/skills/src/`, `crates/mcp/src/`, `crates/plugin/src/`, `crates/pack/src/lib.rs`. Detail links to `../extending/README.md`.
-- [ ] **Step 2: Write `sessions-lineage.md` (≤250)** — session contains an event tree; fork and delegation are lineage; resume, retry, steer; export/import (decided, not built). Mermaid flowchart of session → event tree → lineage. Authority ADR-0003, ADR-0014, ADR-0015. Code: `crates/server/src/lib.rs`, `crates/kernel/src/turn/session.rs`, `crates/eventlog/src/lib.rs`.
-- [ ] **Step 3: Index, link, gate, commit** with message `docs(design): extensions and session lineage get one authority each`.
+- [x] **Step 1: Write `extension-model.md` (≤250)** — the four extension kinds (hooks, skills/commands, MCP tools, plugins/packs), their trust gates, and the one loader each. Mermaid flowchart of install → trust → load → invoke. Authority ADR-0004, ADR-0007 §7, ADR-0016, ADR-0018. Code: `crates/hooks/src/`, `crates/skills/src/`, `crates/mcp/src/`, `crates/plugin/src/`, `crates/pack/src/lib.rs`. Detail links to `../extending/README.md`.
+- [x] **Step 2: Write `sessions-lineage.md` (≤250)** — session contains an event tree; fork and delegation are lineage; resume, retry, steer; export/import (decided, not built). Mermaid flowchart of session → event tree → lineage. Authority ADR-0003, ADR-0014, ADR-0015. Code: `crates/server/src/lib.rs`, `crates/kernel/src/turn/session.rs`, `crates/eventlog/src/lib.rs`.
+- [x] **Step 3: Index, link, gate, commit** with message `docs(design): extensions and session lineage get one authority each`.
 
 ### Task 9: surfaces, control plane and trust design
 
@@ -387,10 +387,10 @@ git commit -m "docs(design): the ledger and the permission chokepoint get one ho
 - Create: `docs/design/security-trust.md`
 - Modify: `docs/design/README.md`, `docs/04-system-overview.md`
 
-- [ ] **Step 1: Write `surfaces.md` (≤250)** — CLI, local server, TUI, web, ACP; what each may do; the protocol they share. Mermaid flowchart of clients → server. Authority ADR-0001, ADR-0002, ADR-0009. Code: `crates/cli/src/main.rs`, `crates/server/src/lib.rs`, `crates/tui/`, `crates/tui-app/`, `crates/web/`.
-- [ ] **Step 2: Write `control-plane.md` (≤250)** — local versus gateway mode; what the control plane serves; the pack signing and org-layer trust; deployment. Mermaid flowchart of the two modes and where the key lives. Authority ADR-0012, ADR-0016. Code: `crates/control/src/`, `crates/pack/src/lib.rs`, `crates/config/src/lib.rs`.
-- [ ] **Step 3: Write `security-trust.md` (≤250)** — the trust boundaries: generated schema, manifest, packs, hooks, sandbox, secrets, approval. A table of "what is trusted, who signs it, what enforces it". Authority ADR-0007, ADR-0016, ADR-0018. Code: `crates/sandbox/`, `crates/manifest/`, `crates/pack/`, `crates/config/src/secret.rs`.
-- [ ] **Step 4: Index, link, gate, commit** with message `docs(design): the surfaces, the control plane and the trust boundaries`.
+- [x] **Step 1: Write `surfaces.md` (≤250)** — CLI, local server, TUI, web, ACP; what each may do; the protocol they share. Mermaid flowchart of clients → server. Authority ADR-0001, ADR-0002, ADR-0009. Code: `crates/cli/src/main.rs`, `crates/server/src/lib.rs`, `crates/tui/`, `crates/tui-app/`, `crates/web/`.
+- [x] **Step 2: Write `control-plane.md` (≤250)** — local versus gateway mode; what the control plane serves; the pack signing and org-layer trust; deployment. Mermaid flowchart of the two modes and where the key lives. Authority ADR-0012, ADR-0016. Code: `crates/control/src/`, `crates/pack/src/lib.rs`, `crates/config/src/lib.rs`.
+- [x] **Step 3: Write `security-trust.md` (≤250)** — the trust boundaries: generated schema, manifest, packs, hooks, sandbox, secrets, approval. A table of "what is trusted, who signs it, what enforces it". Authority ADR-0007, ADR-0016, ADR-0018. Code: `crates/sandbox/`, `crates/manifest/`, `crates/pack/`, `crates/config/src/secret.rs`.
+- [x] **Step 4: Index, link, gate, commit** with message `docs(design): the surfaces, the control plane and the trust boundaries`.
 
 ### Task 10: flows — turn lifecycle and tool approval
 
@@ -398,9 +398,9 @@ git commit -m "docs(design): the ledger and the permission chokepoint get one ho
 - Create: `docs/design/flows/turn-lifecycle.md`
 - Create: `docs/design/flows/tool-approval.md`
 
-- [ ] **Step 1: Write `turn-lifecycle.md` (≤200)** — Mermaid sequence from user intent through context assembly, model call, tool proposal, approval, execution, event append, next step, turn end. Name the exact event kinds and the functions that emit them.
-- [ ] **Step 2: Write `tool-approval.md` (≤200)** — Mermaid sequence from tool proposal through action-class classification, PDP decision, ask/deny path, confinement, execution, result event. Name the allow/ask/deny outcomes and the event that records the rule that fired.
-- [ ] **Step 3: Link both from `design/README.md` and the owning subsystem docs; gate; commit** with message `docs(flows): one turn and one tool approval, with the events they emit`.
+- [x] **Step 1: Write `turn-lifecycle.md` (≤200)** — Mermaid sequence from user intent through context assembly, model call, tool proposal, approval, execution, event append, next step, turn end. Name the exact event kinds and the functions that emit them.
+- [x] **Step 2: Write `tool-approval.md` (≤200)** — Mermaid sequence from tool proposal through action-class classification, PDP decision, ask/deny path, confinement, execution, result event. Name the allow/ask/deny outcomes and the event that records the rule that fired.
+- [x] **Step 3: Link both from `design/README.md` and the owning subsystem docs; gate; commit** with message `docs(flows): one turn and one tool approval, with the events they emit`.
 
 ### Task 11: flows — resume/fork, compaction, pack install
 
@@ -409,10 +409,10 @@ git commit -m "docs(design): the ledger and the permission chokepoint get one ho
 - Create: `docs/design/flows/context-compaction.md`
 - Create: `docs/design/flows/pack-install.md`
 
-- [ ] **Step 1: Write `resume-fork.md` (≤200)** — session list → open → rebuild context → attach a client; fork as a child session with lineage.
-- [ ] **Step 2: Write `context-compaction.md` (≤200)** — trigger, digest, synthesis, ledger replacement, event record; what is reversible.
-- [ ] **Step 3: Write `pack-install.md` (≤200)** — resolve by name → fetch → verify signature → seat the layer → record; what happens on a bad signature.
-- [ ] **Step 4: Link, gate, commit** with message `docs(flows): resume, compaction and pack install, each with its failure path`.
+- [x] **Step 1: Write `resume-fork.md` (≤200)** — session list → open → rebuild context → attach a client; fork as a child session with lineage.
+- [x] **Step 2: Write `context-compaction.md` (≤200)** — trigger, digest, synthesis, ledger replacement, event record; what is reversible.
+- [x] **Step 3: Write `pack-install.md` (≤200)** — resolve by name → fetch → verify signature → seat the layer → record; what happens on a bad signature.
+- [x] **Step 4: Link, gate, commit** with message `docs(flows): resume, compaction and pack install, each with its failure path`.
 
 ### Task 12: split `docs/06` into `docs/context/`
 
@@ -425,11 +425,11 @@ git commit -m "docs(design): the ledger and the permission chokepoint get one ho
 **Interfaces:**
 - Consumes: `docs/design/context-ledger.md` from Task 6 as the Up target for `context/README.md`.
 
-- [ ] **Step 1: Capture the old heading list and word count** with `grep -n '^#' docs/06-context-engineering.md` and `wc -w`. Keep it for the coverage check.
-- [ ] **Step 2: Move sections by topic** — §0–1 → `README.md`; §4 → `principles.md`; §5 → `data-model.md`; §6 → `pipeline.md`; §7 → `recall.md`; §8 → `failure-modes.md`; §9–11.1 → `config.md`; §12–14 → `rollout.md`. Preserve the Chinese prose; do not translate or summarise away detail. Each file gets `Language: zh` under its title and the four header fields. `Up` is `context/README.md` (except the README, which points at `../design/context-ledger.md`); Authority is ADR-0006 and ADR-0017; Code is the matching `crates/context/` or `crates/kernel/` path; Verify is `cargo test -p loong-context` plus the relevant test module.
-- [ ] **Step 3: Rewrite `docs/06` as a 60-line entry** — `Language: zh`, the four fields, one paragraph, and links to the eight files. Every old anchor that external documents use stays reachable through the entry.
-- [ ] **Step 4: Check coverage and links** — every heading from Step 1 is either in a new file or deliberately folded into the entry; `python3 scripts/check-docs.py` green; `grep -rn '06-context-engineering' docs README.md DEVELOPMENT.md` shows only working links.
-- [ ] **Step 5: Remove `docs/06` from the doc baseline, gate, commit** with message `docs(context): split the 1,059-line context design into eight linked documents`.
+- [x] **Step 1: Capture the old heading list and word count** with `grep -n '^#' docs/06-context-engineering.md` and `wc -w`. Keep it for the coverage check.
+- [x] **Step 2: Move sections by topic** — §0–1 → `README.md`; §4 → `principles.md`; §5 → `data-model.md`; §6 → `pipeline.md`; §7 → `recall.md`; §8 → `failure-modes.md`; §9–11.1 → `config.md`; §12–14 → `rollout.md`. Preserve the Chinese prose; do not translate or summarise away detail. Each file gets `Language: zh` under its title and the four header fields. `Up` is `context/README.md` (except the README, which points at `../design/context-ledger.md`); Authority is ADR-0006 and ADR-0017; Code is the matching `crates/context/` or `crates/kernel/` path; Verify is `cargo test -p loong-context` plus the relevant test module.
+- [x] **Step 3: Rewrite `docs/06` as a 60-line entry** — `Language: zh`, the four fields, one paragraph, and links to the eight files. Every old anchor that external documents use stays reachable through the entry.
+- [x] **Step 4: Check coverage and links** — every heading from Step 1 is either in a new file or deliberately folded into the entry; `python3 scripts/check-docs.py` green; `grep -rn '06-context-engineering' docs README.md DEVELOPMENT.md` shows only working links.
+- [x] **Step 5: Remove `docs/06` from the doc baseline, gate, commit** with message `docs(context): split the 1,059-line context design into eight linked documents`.
 
 ### Task 13: split `docs/07` into `docs/extending/`
 
@@ -438,10 +438,10 @@ git commit -m "docs(design): the ledger and the permission chokepoint get one ho
 - Rewrite: `docs/07-extending.md` (≤60)
 - Modify: inbound links, `docs/README.md`
 
-- [ ] **Step 1: Move one procedure per file.** `builtin-tool.md`: the `Tool` trait, action classes, registration, the permission declaration, the test. `event.md`: `crates/schema/protocol.toml`, `scripts/gen-schema.py`, the generated files, the `ignorable` rule. `hook.md`: `hooks.toml`, the verdict combination in `crates/hooks/src/run.rs`, the per-repository trust gate. `routing.md`: ADR-0005, `Router`/`RouterRule`/`parse_condition`, the provider layer. Each ≤150 lines, four header fields, `Up` to `extending/README.md` (README to `../design/extension-model.md`).
-- [ ] **Step 2: Rewrite `docs/07` as a 60-line entry** with the four fields and links to the five files.
-- [ ] **Step 3: Verify each procedure against the code** — follow the first instruction in each file and confirm the named file does the job. Run the gate.
-- [ ] **Step 4: Remove `docs/07` from the baseline, commit** with message `docs(extending): four procedures, one file each, checked against the code`.
+- [x] **Step 1: Move one procedure per file.** `builtin-tool.md`: the `Tool` trait, action classes, registration, the permission declaration, the test. `event.md`: `crates/schema/protocol.toml`, `scripts/gen-schema.py`, the generated files, the `ignorable` rule. `hook.md`: `hooks.toml`, the verdict combination in `crates/hooks/src/run.rs`, the per-repository trust gate. `routing.md`: ADR-0005, `Router`/`RouterRule`/`parse_condition`, the provider layer. Each ≤150 lines, four header fields, `Up` to `extending/README.md` (README to `../design/extension-model.md`).
+- [x] **Step 2: Rewrite `docs/07` as a 60-line entry** with the four fields and links to the five files.
+- [x] **Step 3: Verify each procedure against the code** — follow the first instruction in each file and confirm the named file does the job. Run the gate.
+- [x] **Step 4: Remove `docs/07` from the baseline, commit** with message `docs(extending): four procedures, one file each, checked against the code`.
 
 ### Task 14: split `docs/02` into `docs/topics/`
 
@@ -450,11 +450,11 @@ git commit -m "docs(design): the ledger and the permission chokepoint get one ho
 - Rewrite: `docs/02-topics.md` (≤150)
 - Modify: inbound links, `docs/README.md`
 
-- [ ] **Step 1: Inventory all T-NN headings** with `grep -n '^## T-' docs/02-topics.md`; expect T-01…T-26, 26 total.
-- [ ] **Step 2: Write `topics/README.md`** — a table of all 26: number, one-line title, status (`Seed` / `Wanted` / `Discussing` / `Promoted → ADR-NNNN` / `Merged → T-NN`), and a link to the detail file. Keep the coverage map's intent in one short paragraph.
-- [ ] **Step 3: Write `open.md` and `decided.md`** — move the full topic text, keeping every `## T-NN` heading verbatim so citations still resolve. `open.md` holds Seed/Wanted/Discussing; `decided.md` holds Promoted/Merged. Each ≤250 lines; if either overflows, split by theme and add a row to the README.
-- [ ] **Step 4: Rewrite `docs/02` as a 150-line entry** — status legend, the table or a pointer to it, and links. Update `check-docs.py`'s topic scan to read `docs/topics/*.md` (already done in Task 3 for both locations).
-- [ ] **Step 5: Verify 26 topics, no duplicates, every status has an ADR that exists; gate; remove from baseline; commit** with message `docs(topics): a 696-line backlog becomes an index and two detail files`.
+- [x] **Step 1: Inventory all T-NN headings** with `grep -n '^## T-' docs/02-topics.md`; expect T-01…T-26, 26 total.
+- [x] **Step 2: Write `topics/README.md`** — a table of all 26: number, one-line title, status (`Seed` / `Wanted` / `Discussing` / `Promoted → ADR-NNNN` / `Merged → T-NN`), and a link to the detail file. Keep the coverage map's intent in one short paragraph.
+- [x] **Step 3: Write `open.md` and `decided.md`** — move the full topic text, keeping every `## T-NN` heading verbatim so citations still resolve. `open.md` holds Seed/Wanted/Discussing; `decided.md` holds Promoted/Merged. Each ≤250 lines; if either overflows, split by theme and add a row to the README.
+- [x] **Step 4: Rewrite `docs/02` as a 150-line entry** — status legend, the table or a pointer to it, and links. Update `check-docs.py`'s topic scan to read `docs/topics/*.md` (already done in Task 3 for both locations).
+- [x] **Step 5: Verify 26 topics, no duplicates, every status has an ADR that exists; gate; remove from baseline; commit** with message `docs(topics): a 696-line backlog becomes an index and two detail files`.
 
 ### Task 15: `DEVELOPMENT.md` becomes the maintainer entry
 
@@ -462,10 +462,10 @@ git commit -m "docs(design): the ledger and the permission chokepoint get one ho
 - Rewrite: `DEVELOPMENT.md` (≤300)
 - Modify: `docs/design/*` and `docs/runbooks/*` only if a moved section has no destination yet
 
-- [ ] **Step 1: Inventory headings and keep a map** of where each goes: toolchain/build/gates/release stay; mechanism descriptions go to the design document named in the Annotation Map; control-plane operation goes to the runbooks; troubleshooting goes to `runbooks/`.
-- [ ] **Step 2: Rewrite to ≤300 lines** — the four header fields, the toolchain, the one-command gate, how to run a focused test, how to change code (the documents-first path), release, and links. No duplicated mechanism prose: link.
-- [ ] **Step 3: Verify every removed section has a destination** — compare the Step 1 map with the new files; `grep` for any command that disappeared and confirm it exists in a runbook.
-- [ ] **Step 4: Gate, remove from baseline, commit** with message `docs(dev): the maintainer guide keeps the commands and links the mechanisms`.
+- [x] **Step 1: Inventory headings and keep a map** of where each goes: toolchain/build/gates/release stay; mechanism descriptions go to the design document named in the Annotation Map; control-plane operation goes to the runbooks; troubleshooting goes to `runbooks/`.
+- [x] **Step 2: Rewrite to ≤300 lines** — the four header fields, the toolchain, the one-command gate, how to run a focused test, how to change code (the documents-first path), release, and links. No duplicated mechanism prose: link.
+- [x] **Step 3: Verify every removed section has a destination** — compare the Step 1 map with the new files; `grep` for any command that disappeared and confirm it exists in a runbook.
+- [x] **Step 4: Gate, remove from baseline, commit** with message `docs(dev): the maintainer guide keeps the commands and links the mechanisms`.
 
 ### Task 16: split the control-plane runbook
 
@@ -474,10 +474,10 @@ git commit -m "docs(design): the ledger and the permission chokepoint get one ho
 - Rewrite: `docs/runbooks/control-plane.md` (≤60, an entry that preserves inbound links)
 - Modify: inbound links
 
-- [ ] **Step 1: Split by when a reader needs it** — bootstrap (stand it up), operate (run it day to day), security (keys, signing, what is trusted). Preserve commands verbatim; no prose rewrite.
-- [ ] **Step 2: Write `runbooks/README.md`** — one line per runbook, including `windows-build.md`.
-- [ ] **Step 3: Keep `control-plane.md` as a 60-line entry** with links, so every existing link and muscle-memory path still works.
-- [ ] **Step 4: Gate, remove from baseline, commit** with message `docs(runbooks): bootstrap, operate and security are three different jobs`.
+- [x] **Step 1: Split by when a reader needs it** — bootstrap (stand it up), operate (run it day to day), security (keys, signing, what is trusted). Preserve commands verbatim; no prose rewrite.
+- [x] **Step 2: Write `runbooks/README.md`** — one line per runbook, including `windows-build.md`.
+- [x] **Step 3: Keep `control-plane.md` as a 60-line entry** with links, so every existing link and muscle-memory path still works.
+- [x] **Step 4: Gate, remove from baseline, commit** with message `docs(runbooks): bootstrap, operate and security are three different jobs`.
 
 ### Task 17: trim `docs/03` and header the remaining design documents
 
@@ -485,10 +485,10 @@ git commit -m "docs(design): the ledger and the permission chokepoint get one ho
 - Rewrite: `docs/03-architecture.md` (≤250)
 - Modify: `docs/00-vision.md`, `docs/02-topics.md`, `docs/04-system-overview.md`, `docs/05-parity-and-synthesis.md`, `docs/06-context-engineering.md`, `docs/07-extending.md` (headers and links)
 
-- [ ] **Step 1: Trim `03`** — keep the AQ-1…AQ-12 map, the dependency order and each decision in 3-5 lines with its ADR link. The options and trade-offs live in the ADRs and the archived discussion; do not restate them. Target ≤250 lines.
-- [ ] **Step 2: Add the four fields to `00`, `02`, `04`, `05`, `06`, `07`** and fix their links to the new design/topics/context/extending entries. `00`'s Up is `../README.md`; `02`'s Up is `04-system-overview.md` and `topics/README.md`'s Up is `../02-topics.md` (that direction keeps the chain acyclic); `05`'s Up is `04`; `06`'s Up is `context/README.md`; `07`'s Up is `extending/README.md`.
-- [ ] **Step 3: Check the numbers in the documents** — ADR range, topic range, test counts, crate count. Correct only what is false; the gate catches impossible citations, not stale prose.
-- [ ] **Step 4: Gate, remove the six documents from the baseline, commit** with message `docs(arch): the decision map keeps the decisions and links the reasoning`.
+- [x] **Step 1: Trim `03`** — keep the AQ-1…AQ-12 map, the dependency order and each decision in 3-5 lines with its ADR link. The options and trade-offs live in the ADRs and the archived discussion; do not restate them. Target ≤250 lines.
+- [x] **Step 2: Add the four fields to `00`, `02`, `04`, `05`, `06`, `07`** and fix their links to the new design/topics/context/extending entries. `00`'s Up is `../README.md`; `02`'s Up is `04-system-overview.md` and `topics/README.md`'s Up is `../02-topics.md` (that direction keeps the chain acyclic); `05`'s Up is `04`; `06`'s Up is `context/README.md`; `07`'s Up is `extending/README.md`.
+- [x] **Step 3: Check the numbers in the documents** — ADR range, topic range, test counts, crate count. Correct only what is false; the gate catches impossible citations, not stale prose.
+- [x] **Step 4: Gate, remove the six documents from the baseline, commit** with message `docs(arch): the decision map keeps the decisions and links the reasoning`.
 
 ### Task 18: ADR navigation and the one index
 
@@ -497,10 +497,10 @@ git commit -m "docs(design): the ledger and the permission chokepoint get one ho
 - Modify: `docs/README.md` (all new rows, conventions, budgets)
 - Modify: `README.md` (header and links; ≤250)
 
-- [ ] **Step 1: Add one `Up:` line to each ADR**, immediately below `Status:`, pointing at `../design/README.md`. Do not touch `Status:` or the body.
-- [ ] **Step 2: Update the index** — rows for `design/`, `design/flows/`, `context/`, `topics/`, `extending/`, the three control-plane runbooks, and the new top-level entries. The index explains the header schema and budgets in two lines.
-- [ ] **Step 3: Update `README.md`** — four header fields (Up may be the root), links to the design entry and the status authority, and the test-counts comment. Keep it ≤250 lines; move installation detail only if it is duplicated in a runbook.
-- [ ] **Step 4: Run `check-docs.py --check reachable`; fix every chain; gate; remove the ADRs and index from the baseline; commit** with message `docs(index): every document now has one way up and one way in`.
+- [x] **Step 1: Add one `Up:` line to each ADR**, immediately below `Status:`, pointing at `../design/README.md`. Do not touch `Status:` or the body.
+- [x] **Step 2: Update the index** — rows for `design/`, `design/flows/`, `context/`, `topics/`, `extending/`, the three control-plane runbooks, and the new top-level entries. The index explains the header schema and budgets in two lines.
+- [x] **Step 3: Update `README.md`** — four header fields (Up may be the root), links to the design entry and the status authority, and the test-counts comment. Keep it ≤250 lines; move installation detail only if it is duplicated in a runbook.
+- [x] **Step 4: Run `check-docs.py --check reachable`; fix every chain; gate; remove the ADRs and index from the baseline; commit** with message `docs(index): every document now has one way up and one way in`.
 
 ### Task 19: documents audit
 
@@ -508,11 +508,11 @@ git commit -m "docs(design): the ledger and the permission chokepoint get one ho
 - Delete: `scripts/doc-contract-baseline.txt` (after it is empty)
 - Modify: anything the audit finds
 
-- [ ] **Step 1:** Ensure the doc baseline is empty, then delete it. The gate now checks every maintained document.
-- [ ] **Step 2:** `python3 scripts/check-docs.py --check headers`, `--check lengths`, `--check code-paths`, `--check reachable` — all green.
-- [ ] **Step 3:** Prove the checks still fail on seeded defects: remove one `Up:`, push a design doc 10 lines over budget, break one `Code:` path, cut one `Up:`. Restore after each.
-- [ ] **Step 4:** Read the design map end to end: every row links a file that exists; every flow's participants are real; no document exceeds its budget.
-- [ ] **Step 5:** `./scripts/check.sh` green; commit `docs(audit): the document tree is complete and the baseline is gone`.
+- [x] **Step 1:** Ensure the doc baseline is empty, then delete it. The gate now checks every maintained document.
+- [x] **Step 2:** `python3 scripts/check-docs.py --check headers`, `--check lengths`, `--check code-paths`, `--check reachable` — all green.
+- [x] **Step 3:** Prove the checks still fail on seeded defects: remove one `Up:`, push a design doc 10 lines over budget, break one `Code:` path, cut one `Up:`. Restore after each.
+- [x] **Step 4:** Read the design map end to end: every row links a file that exists; every flow's participants are real; no document exceeds its budget.
+- [x] **Step 5:** `./scripts/check.sh` green; commit `docs(audit): the document tree is complete and the baseline is gone`.
 
 ---
 
@@ -526,8 +526,8 @@ Every task follows the Per-Crate Annotation Procedure. The Files list is exact; 
 **Design:** `docs/design/events-storage.md`
 **Verify:** `cargo test -p loong-schema -p loong-protocol`
 
-- [ ] **Step 1:** Follow the procedure. `crates/schema/src/generated.rs` stays untouched and exempt. Remove the three schema files and protocol from the code baseline.
-- [ ] **Step 2:** Gate, comment-only, tests, full gate, commit: `docs(schema): contracts for the wire schema and the JSON-RPC envelope`.
+- [x] **Step 1:** Follow the procedure. `crates/schema/src/generated.rs` stays untouched and exempt. Remove the three schema files and protocol from the code baseline.
+- [x] **Step 2:** Gate, comment-only, tests, full gate, commit: `docs(schema): contracts for the wire schema and the JSON-RPC envelope`.
 
 ### Task 21: eventlog and index
 
@@ -535,8 +535,8 @@ Every task follows the Per-Crate Annotation Procedure. The Files list is exact; 
 **Design:** `docs/design/events-storage.md`
 **Verify:** `cargo test -p loong-eventlog -p loong-index`
 
-- [ ] **Step 1:** Procedure; remove both from the baseline.
-- [ ] **Step 2:** Commit: `docs(storage): contracts for the JSONL truth and the derived index`.
+- [x] **Step 1:** Procedure; remove both from the baseline.
+- [x] **Step 2:** Commit: `docs(storage): contracts for the JSONL truth and the derived index`.
 
 ### Task 22: http, proc, manifest, pack, web
 
@@ -544,8 +544,8 @@ Every task follows the Per-Crate Annotation Procedure. The Files list is exact; 
 **Design:** `docs/design/config-routing.md` §8 + `docs/design/control-plane.md` (http), `tools-permissions.md` (proc), `security-trust.md` (manifest, pack), `surfaces.md` (web)
 **Verify:** `cargo test -p loong-http -p loong-proc -p loong-manifest -p loong-pack -p loong-web`
 
-- [ ] **Step 1:** Procedure; remove the five from the baseline.
-- [ ] **Step 2:** Commit: `docs(util): contracts for transport, child processes, trust and the web surface`.
+- [x] **Step 1:** Procedure; remove the five from the baseline.
+- [x] **Step 2:** Commit: `docs(util): contracts for transport, child processes, trust and the web surface`.
 
 ### Task 23: config
 
@@ -553,8 +553,8 @@ Every task follows the Per-Crate Annotation Procedure. The Files list is exact; 
 **Design:** `docs/design/config-routing.md`
 **Verify:** `cargo test -p loong-config`
 
-- [ ] **Step 1:** Procedure; remove the eight files from the baseline.
-- [ ] **Step 2:** Commit: `docs(config): contracts for the layer order, profiles and the secret path`.
+- [x] **Step 1:** Procedure; remove the eight files from the baseline.
+- [x] **Step 2:** Commit: `docs(config): contracts for the layer order, profiles and the secret path`.
 
 ### Task 24: sandbox and tools
 
@@ -562,8 +562,8 @@ Every task follows the Per-Crate Annotation Procedure. The Files list is exact; 
 **Design:** `docs/design/tools-permissions.md`
 **Verify:** `cargo test -p loong-sandbox -p loong-tools`
 
-- [ ] **Step 1:** Procedure; remove the files from the baseline.
-- [ ] **Step 2:** Commit: `docs(tools): contracts for the tool interface and the enforcement point`.
+- [x] **Step 1:** Procedure; remove the files from the baseline.
+- [x] **Step 2:** Commit: `docs(tools): contracts for the tool interface and the enforcement point`.
 
 ### Task 25: providers and mcp
 
@@ -571,8 +571,8 @@ Every task follows the Per-Crate Annotation Procedure. The Files list is exact; 
 **Design:** `docs/design/config-routing.md` (providers), `extension-model.md` (mcp)
 **Verify:** `cargo test -p loong-providers -p loong-mcp`
 
-- [ ] **Step 1:** Procedure; remove from the baseline.
-- [ ] **Step 2:** Commit: `docs(models): contracts for provider adapters and external tools`.
+- [x] **Step 1:** Procedure; remove from the baseline.
+- [x] **Step 2:** Commit: `docs(models): contracts for provider adapters and external tools`.
 
 ### Task 26: hooks and skills
 
@@ -580,8 +580,8 @@ Every task follows the Per-Crate Annotation Procedure. The Files list is exact; 
 **Design:** `docs/design/extension-model.md`
 **Verify:** `cargo test -p loong-hooks -p loong-skills`
 
-- [ ] **Step 1:** Procedure; remove from the baseline.
-- [ ] **Step 2:** Commit: `docs(extensions): contracts for hooks and the one skill loader`.
+- [x] **Step 1:** Procedure; remove from the baseline.
+- [x] **Step 2:** Commit: `docs(extensions): contracts for hooks and the one skill loader`.
 
 ### Task 27: plugin and control
 
@@ -589,8 +589,8 @@ Every task follows the Per-Crate Annotation Procedure. The Files list is exact; 
 **Design:** `docs/design/extension-model.md` (plugin), `control-plane.md` (control)
 **Verify:** `cargo test -p loong-plugin -p loong-control`
 
-- [ ] **Step 1:** Procedure; remove from the baseline. Leave `crates/control/build.rs` exempt.
-- [ ] **Step 2:** Commit: `docs(plugins): contracts for install-by-name and the control-plane client`.
+- [x] **Step 1:** Procedure; remove from the baseline. Leave `crates/control/build.rs` exempt.
+- [x] **Step 2:** Commit: `docs(plugins): contracts for install-by-name and the control-plane client`.
 
 ### Task 28: kernel core
 
@@ -598,8 +598,8 @@ Every task follows the Per-Crate Annotation Procedure. The Files list is exact; 
 **Design:** `docs/design/kernel-loop.md` (primary), `context-ledger.md`, `sessions-lineage.md`
 **Verify:** `cargo test -p loong-kernel`
 
-- [ ] **Step 1:** Procedure. `turn/build.rs` is a module and gets a module contract; it is not the Cargo build script. Remove the files from the baseline.
-- [ ] **Step 2:** Commit: `docs(kernel): contracts for the turn, the ledger and the context engine`.
+- [x] **Step 1:** Procedure. `turn/build.rs` is a module and gets a module contract; it is not the Cargo build script. Remove the files from the baseline.
+- [x] **Step 2:** Commit: `docs(kernel): contracts for the turn, the ledger and the context engine`.
 
 ### Task 29: kernel tests
 
@@ -607,8 +607,8 @@ Every task follows the Per-Crate Annotation Procedure. The Files list is exact; 
 **Design:** `docs/design/kernel-loop.md`
 **Verify:** `cargo test -p loong-kernel`
 
-- [ ] **Step 1:** Procedure with the test rule: one `Purpose` line per test, naming the behaviour and the regression it pins. The file still gets a module contract whose `Verify` is `cargo test -p loong-kernel turn::tests`.
-- [ ] **Step 2:** Commit: `docs(kernel): name what each turn test pins, not just that it exists`.
+- [x] **Step 1:** Procedure with the test rule: one `Purpose` line per test, naming the behaviour and the regression it pins. The file still gets a module contract whose `Verify` is `cargo test -p loong-kernel turn::tests`.
+- [x] **Step 2:** Commit: `docs(kernel): name what each turn test pins, not just that it exists`.
 
 ### Task 30: context core
 
@@ -616,8 +616,8 @@ Every task follows the Per-Crate Annotation Procedure. The Files list is exact; 
 **Design:** `docs/design/context-ledger.md`, detail `docs/context/data-model.md` and `pipeline.md`
 **Verify:** `cargo test -p loong-context`
 
-- [ ] **Step 1:** Procedure; remove from the baseline.
-- [ ] **Step 2:** Commit: `docs(context): contracts for the reversible memory pipeline`.
+- [x] **Step 1:** Procedure; remove from the baseline.
+- [x] **Step 2:** Commit: `docs(context): contracts for the reversible memory pipeline`.
 
 ### Task 31: context tests
 
@@ -625,8 +625,8 @@ Every task follows the Per-Crate Annotation Procedure. The Files list is exact; 
 **Design:** `docs/design/context-ledger.md`
 **Verify:** `cargo test -p loong-context`
 
-- [ ] **Step 1:** Procedure with the test rule; remove from the baseline.
-- [ ] **Step 2:** Commit: `docs(context): each memory test says which invariant it protects`.
+- [x] **Step 1:** Procedure with the test rule; remove from the baseline.
+- [x] **Step 2:** Commit: `docs(context): each memory test says which invariant it protects`.
 
 ### Task 32: server and tui
 
@@ -634,8 +634,8 @@ Every task follows the Per-Crate Annotation Procedure. The Files list is exact; 
 **Design:** `docs/design/sessions-lineage.md` (server), `surfaces.md` (tui)
 **Verify:** `cargo test -p loong-server -p loong-tui`
 
-- [ ] **Step 1:** Procedure; remove from the baseline.
-- [ ] **Step 2:** Commit: `docs(surfaces): contracts for the local server and the terminal client`.
+- [x] **Step 1:** Procedure; remove from the baseline.
+- [x] **Step 2:** Commit: `docs(surfaces): contracts for the local server and the terminal client`.
 
 ### Task 33: cli core
 
@@ -643,8 +643,8 @@ Every task follows the Per-Crate Annotation Procedure. The Files list is exact; 
 **Design:** `docs/design/surfaces.md` (primary), `control-plane.md`, `sessions-lineage.md`
 **Verify:** `cargo test -p loongagent`
 
-- [ ] **Step 1:** Procedure; remove the files from the baseline. Leave `crates/cli/build.rs` exempt.
-- [ ] **Step 2:** Commit: `docs(cli): contracts for every command arm and its wiring`.
+- [x] **Step 1:** Procedure; remove the files from the baseline. Leave `crates/cli/build.rs` exempt.
+- [x] **Step 2:** Commit: `docs(cli): contracts for every command arm and its wiring`.
 
 ### Task 34: cli integration tests
 
@@ -652,8 +652,8 @@ Every task follows the Per-Crate Annotation Procedure. The Files list is exact; 
 **Design:** `docs/design/surfaces.md`
 **Verify:** `cargo test -p loongagent --tests`
 
-- [ ] **Step 1:** Procedure with the test rule; remove from the baseline.
-- [ ] **Step 2:** Commit: `docs(cli): the end-to-end tests name the user journey they protect`.
+- [x] **Step 1:** Procedure with the test rule; remove from the baseline.
+- [x] **Step 2:** Commit: `docs(cli): the end-to-end tests name the user journey they protect`.
 
 ### Task 35: tui-app core
 
@@ -661,8 +661,8 @@ Every task follows the Per-Crate Annotation Procedure. The Files list is exact; 
 **Design:** `docs/design/surfaces.md`
 **Verify:** `cargo test -p loong-tui-app`
 
-- [ ] **Step 1:** Procedure; remove from the baseline.
-- [ ] **Step 2:** Commit: `docs(tui): contracts for the full-screen surface, its wizard and its worker`.
+- [x] **Step 1:** Procedure; remove from the baseline.
+- [x] **Step 2:** Commit: `docs(tui): contracts for the full-screen surface, its wizard and its worker`.
 
 ### Task 36: tui-app tests
 
@@ -670,8 +670,8 @@ Every task follows the Per-Crate Annotation Procedure. The Files list is exact; 
 **Design:** `docs/design/surfaces.md`
 **Verify:** `cargo test -p loong-tui-app`
 
-- [ ] **Step 1:** Procedure with the test rule; remove from the baseline.
-- [ ] **Step 2:** Commit: `docs(tui): each surface test says which rendering promise it holds`.
+- [x] **Step 1:** Procedure with the test rule; remove from the baseline.
+- [x] **Step 2:** Commit: `docs(tui): each surface test says which rendering promise it holds`.
 
 ---
 
@@ -683,13 +683,13 @@ Every task follows the Per-Crate Annotation Procedure. The Files list is exact; 
 - Delete: `scripts/code-contract-baseline.txt` (after it is empty)
 - Modify: anything the audit finds
 
-- [ ] **Step 1: Empty and delete the code baseline.** Run `python3 scripts/check-modules.py`; expect zero missing contracts and zero undocumented items, with the three exemptions named.
-- [ ] **Step 2: Prove the gate still fails on a seeded defect.** Remove a `Serves:` label from one file, add an undocumented `fn`, break one `Design:` path; record each red run; restore.
-- [ ] **Step 3: Run the comment-only proof across the whole migration.** `python3 scripts/check-comment-only.py --base d4af709` (the branch point); expect exit 0 or a report that names only the files whose *documentation* changed. If any file differs in code, stop and fix.
-- [ ] **Step 4: Run the full gate.** `./scripts/check.sh`; expect `all gates passed`, same test counts as before.
-- [ ] **Step 5: Sample ten items across crates.** For each: the `Design:` document exists and describes the code; the `Up:` and `Down:` symbols exist (`grep -n`); the `Verify:` command or test module exists. Record the ten in the commit body.
-- [ ] **Step 6: Read `AGENTS.md`, `docs/README.md` and `docs/design/README.md` end to end.** Confirm the written rule matches what the gates enforce; fix either the rule or the gate if they differ.
-- [ ] **Step 7: Commit** with message `docs(audit): every node has a checked path back to the design`.
+- [x] **Step 1: Empty and delete the code baseline.** Run `python3 scripts/check-modules.py`; expect zero missing contracts and zero undocumented items, with the three exemptions named.
+- [x] **Step 2: Prove the gate still fails on a seeded defect.** Remove a `Serves:` label from one file, add an undocumented `fn`, break one `Design:` path; record each red run; restore.
+- [x] **Step 3: Run the comment-only proof across the whole migration.** `python3 scripts/check-comment-only.py --base d4af709` (the branch point); expect exit 0 or a report that names only the files whose *documentation* changed. If any file differs in code, stop and fix.
+- [x] **Step 4: Run the full gate.** `./scripts/check.sh`; expect `all gates passed`, same test counts as before.
+- [x] **Step 5: Sample ten items across crates.** For each: the `Design:` document exists and describes the code; the `Up:` and `Down:` symbols exist (`grep -n`); the `Verify:` command or test module exists. Record the ten in the commit body.
+- [x] **Step 6: Read `AGENTS.md`, `docs/README.md` and `docs/design/README.md` end to end.** Confirm the written rule matches what the gates enforce; fix either the rule or the gate if they differ.
+- [x] **Step 7: Commit** with message `docs(audit): every node has a checked path back to the design`.
 
 ---
 

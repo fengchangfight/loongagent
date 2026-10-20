@@ -1,5 +1,19 @@
+//! Purpose: The worker thread: own the client, run each blocking command, and send the turn's events back to the screen.
+//!
+//! # Contract
+//! - **Serves:** `surface::run` and the screen's `ToWorker`/`FromWorker` channels.
+//! - **Design:** `docs/design/surfaces.md` §3; `docs/design/sessions-lineage.md` §1 and §5 for the new-session and approval-resume paths.
+//! - **Upstream:** `surface::run` calls `spawn_worker`; the screen sends `ToWorker` commands.
+//! - **Downstream:** `loong_tui::Client`'s methods and `Renderer`, and `FromWorker`, which `App::drain` reads.
+//! - **Verify:** `cargo test -p loong-tui-app` · `./scripts/check.sh`
 use super::*;
 
+/// Purpose: Start the client thread and return its command and event channels, numbering folds from the replayed transcript.
+/// Serves: `surface::run` and the worker tests.
+/// Design: `docs/design/surfaces.md` §3; `docs/design/sessions-lineage.md` §1 and §5.
+/// Up: `surface::run`; the tests.
+/// Down: `ToWorker` commands to `Client::{submit_with, respond, set_auto_approve, expand_last_tool_result, expand_tool_result, models, select_model, new_session, context, pending_decision, pending_approval}`, and `FromWorker` back to `App::drain`.
+/// Verify: `cargo test -p loong-tui-app`.
 /// Own the client on a worker thread so a blocking turn never blocks the screen.
 ///
 /// `folded` is how many folds the transcript already shows, so the worker can number the

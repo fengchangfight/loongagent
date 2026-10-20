@@ -1,10 +1,4 @@
 # Files whose code contract is not complete yet. The gate skips these and fails
 # on an entry that is missing or now passes, so this list only shrinks.
 # Regenerate with: python3 scripts/check-modules.py --emit-baseline scripts/code-contract-baseline.txt
-crates/tui-app/src/lib.rs
-crates/tui-app/src/mention.rs
-crates/tui-app/src/setup.rs
-crates/tui-app/src/surface.rs
 crates/tui-app/src/tests.rs
-crates/tui-app/src/wizard.rs
-crates/tui-app/src/worker.rs

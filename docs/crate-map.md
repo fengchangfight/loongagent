@@ -35,6 +35,6 @@ listed is a violation. The middle column is each crate's own `//!` header.
 | `loong-skills` | Skills and commands: markdown content loaded by description and expanded only on invoke. | `loong-schema`, `loong-tools` |
 | `loong-tools` | Tools behind one interface, with autonomy allocated per action and confinement on children that go through `ExecContext`/`loong_proc` (ADR-0004, ADR-0007). | `loong-proc`, `loong-schema` |
 | `loong-tui` | The terminal client: render the server's event stream and send intents, holding no agent logic. | `loong-protocol`, `loong-schema` |
-| `loong-tui-app` | The full-screen terminal surface (ADR-0009, ADR-0013): a ratatui view over a | `loong-schema`, `loong-tui` |
+| `loong-tui-app` | The full-screen terminal surface: the state machine, layout and palette behind ratatui's screen. | `loong-schema`, `loong-tui` |
 | `loong-web` | Serve the embedded browser page and bridge WebSocket lines to the same JSON-RPC server. | — |
 | `loongagent` | The `loongagent` binary: parse the command line, resolve the one session and the one configuration, and dispatch. | `loong-config`, `loong-context`, `loong-control`, `loong-eventlog`, `loong-hooks`, `loong-http`, `loong-index`, `loong-kernel`, `loong-manifest`, `loong-mcp`, `loong-pack`, `loong-plugin`, `loong-proc`, `loong-protocol`, `loong-providers`, `loong-sandbox`, `loong-schema`, `loong-server`, `loong-skills`, `loong-tools`, `loong-tui`, `loong-tui-app`, `loong-web` |

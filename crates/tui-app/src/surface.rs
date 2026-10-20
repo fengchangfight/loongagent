@@ -1,5 +1,19 @@
+//! Purpose: The full-screen event loop: replay the past, take the terminal, and turn keys and worker messages into frames.
+//!
+//! # Contract
+//! - **Serves:** `crates/cli/src/tui.rs`, the only production caller.
+//! - **Design:** `docs/design/surfaces.md` §3 and §6; `docs/design/sessions-lineage.md` §1 and §5.
+//! - **Upstream:** `crates/cli/src/tui.rs` calls `run` with a connected `Client`.
+//! - **Downstream:** `App` for state and drawing, `spawn_worker` for the client thread, `copy_everywhere` for `/copy`, and `loong_tui::Client` for replay and models.
+//! - **Verify:** `cargo test -p loong-tui-app` · `./scripts/check.sh`
 use super::*;
 
+/// Purpose: Replay the session, spawn the worker, own the terminal and loop: drain, draw, read a key, act, until quit.
+/// Serves: `crates/cli/src/tui.rs`.
+/// Design: `docs/design/surfaces.md` §3; `docs/design/sessions-lineage.md` §1 (replay reads the log) and §5.
+/// Up: `crates/cli/src/tui.rs`.
+/// Down: `Client::{replay, folded_results, models}`, `spawn_worker`, `App` and `copy_everywhere`.
+/// Verify: `cargo test -p loong-tui-app`.
 pub fn run<T: Transport + Send + 'static>(
     client: Client<T>,
     session: String,
@@ -63,7 +77,11 @@ pub fn run<T: Transport + Send + 'static>(
     {
         // `kernel32` — the console input/output code pages.
         extern "system" {
+            /// Purpose: The Windows console output code page setter, declared from `kernel32` rather than owned here.
+            /// Contract: declaration only; `run` calls it under `#[cfg(windows)]` to switch the console to UTF-8.
             fn SetConsoleOutputCP(code_page: u32) -> i32;
+            /// Purpose: The Windows console input code page setter, declared from `kernel32` rather than owned here.
+            /// Contract: declaration only; `run` calls it under `#[cfg(windows)]` beside the output setter.
             fn SetConsoleCP(code_page: u32) -> i32;
         }
         const CP_UTF8: u32 = 65_001;

@@ -1,3 +1,12 @@
+//! Purpose: The full-screen terminal surface: the state machine, layout and palette behind ratatui's screen.
+//!
+//! # Contract
+//! - **Serves:** people running `loongagent tui`; `surface::run` drives it, `worker` feeds it, and the tests in this crate pin what it draws.
+//! - **Design:** `docs/design/surfaces.md` §3 and §6; `docs/design/sessions-lineage.md` §1 and §5 for the replayed past and the resend.
+//! - **Upstream:** `crates/cli/src/tui.rs` reaches it through `loong_tui_app::run`; the screen's own tests build an `App` directly.
+//! - **Downstream:** `loong_tui` for rendered lines, folds and the client; `ratatui` for drawing; `mention`, `wizard` and `setup` for the picker and the first-run forms.
+//! - **Verify:** `cargo test -p loong-tui-app` · `./scripts/check.sh`
+//!
 //! The full-screen terminal surface (ADR-0009, ADR-0013): a ratatui view over a
 //! [`loong_tui::Client`].
 //!
@@ -22,6 +31,12 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 
+/// Purpose: The intents the screen sends to the worker: a prompt, a decision answer, and the read-only refreshes.
+/// Serves: `App::begin_submit`, `App::resend_last_prompt`, `App::switch_to_slot`, `App::answer`, `App::surface_command` and `App::toggle_fold`, plus `worker::spawn_worker`.
+/// Design: `docs/design/surfaces.md` §3 and §6.
+/// Up: `App::handle_key` and `App::surface_command` build them; `surface::run` forwards them to the worker.
+/// Down: `worker::spawn_worker` matches every variant and calls the matching `loong_tui::Client` method.
+/// Verify: `cargo test -p loong-tui-app`.
 /// What the screen wants the worker to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToWorker {
@@ -53,6 +68,12 @@ pub enum ToWorker {
     NewSession,
 }
 
+/// Purpose: The worker's reports back to the screen: rendered lines, streamed deltas, state, folds and failures.
+/// Serves: `App::drain`, the only reader, and `worker::spawn_worker`, the only writer.
+/// Design: `docs/design/surfaces.md` §3; `docs/design/sessions-lineage.md` §1 for the replayed past.
+/// Up: `worker::spawn_worker` sends every variant; the tests in this crate send them directly through a channel.
+/// Down: `App::drain` folds them into `lines`, `pending`, `context`, `models`, `folded` and `finished`.
+/// Verify: `cargo test -p loong-tui-app`.
 /// What the worker reports back.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FromWorker {
@@ -92,6 +113,12 @@ pub enum FromWorker {
     Failed(String),
 }
 
+/// Purpose: What one key press asks the run loop to do, returned rather than done so a caller or a test can assert it.
+/// Serves: `surface::run` (the executor) and every keyboard test in this crate.
+/// Design: `docs/design/surfaces.md` §3 and §6.
+/// Up: `App::handle_key` returns it, as do `App::begin_submit`, `App::resend_last_prompt`, `App::surface_command`, `App::answer` and `App::toggle_fold`.
+/// Down: `surface::run` matches it and performs the terminal or channel work.
+/// Verify: `cargo test -p loong-tui-app`.
 /// What a key press means (returned so the caller — or a test — decides).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
@@ -104,6 +131,8 @@ pub enum Action {
     Quit,
 }
 
+/// Purpose: Put the transcript on the clipboard with OSC 52 and also write it to a session-named temporary file.
+/// Contract: called by `surface::run` for `/copy`; calls `base64` for the escape payload and writes the file the caller names on screen.
 /// Put text on the clipboard with OSC 52 — the escape sequence terminals honour, and the
 /// only way to reach a clipboard from an application that is not the window system's — and
 /// also write it beside the session's other files. The file is the honest half: OSC 52 is
@@ -119,6 +148,12 @@ fn copy_everywhere(text: &str, session: &str) -> String {
     path.display().to_string()
 }
 
+/// Purpose: Encode the OSC 52 clipboard payload, so `/copy` needs no dependency for forty lines.
+/// Serves: `copy_everywhere` and the `base64_is_base64` test.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `copy_everywhere`.
+/// Down: no call; it is a pure encoder.
+/// Verify: `cargo test -p loong-tui-app`.
 /// The forty lines of base64 this needs, rather than a dependency for forty lines.
 fn base64(bytes: &[u8]) -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -146,6 +181,8 @@ fn base64(bytes: &[u8]) -> String {
     out
 }
 
+/// Purpose: The `kind` field of a notification's params, for the places that need to branch on it.
+/// Contract: called by `worker::spawn_worker` and the duplicate-user-line test.
 /// The kind of a notification's params, for the few places that ask.
 fn kind_of(params: &serde_json::Value) -> &str {
     params.get("kind").and_then(|k| k.as_str()).unwrap_or("")
@@ -159,6 +196,8 @@ fn kind_of(params: &serde_json::Value) -> &str {
 /// read as a ceiling when the terminal is short: the transcript keeps at least three rows.
 const DECISION_ROWS: u16 = 9;
 
+/// Purpose: Force a decision detail onto one row and cut it to width, so it cannot push an answer out of the panel.
+/// Contract: called by `draw_approval`; calls `clip` after flattening newlines and tabs.
 /// A string forced onto one line and cut to fit: newlines become `⏎` so a shell command
 /// cannot wrap the answers out of their own box.
 fn one_line(text: &str, width: usize) -> String {
@@ -166,6 +205,12 @@ fn one_line(text: &str, width: usize) -> String {
     clip(&flattened, width)
 }
 
+/// Purpose: Cut one string to display columns, counting a CJK character as two so a clipped detail is one row and visibly ends in an ellipsis.
+/// Serves: `one_line` and `draw_approval`.
+/// Design: `docs/design/surfaces.md` §3 (the decision menu).
+/// Up: `one_line` and `draw_approval`.
+/// Down: `unicode_width` for the column measurement.
+/// Verify: `cargo test -p loong-tui-app`.
 /// One line's worth of a long string, cut to **display columns**.
 ///
 /// Columns, not characters: a Chinese character is two of them, so a 76-character line of
@@ -189,6 +234,12 @@ fn clip(text: &str, columns: usize) -> String {
     format!("{head}…")
 }
 
+/// Purpose: One pending approval as the screen needs it: the request id, action class, reason, tool and arguments.
+/// Serves: `App::approval`, `App::info`, `draw_approval` and the `FromWorker::Approval` path.
+/// Design: `docs/design/surfaces.md` §3 and §6; the surface shows the decision but does not make it.
+/// Up: `worker::spawn_worker` builds it from `loong_tui::PendingDecision`; `App::drain` stores it.
+/// Down: no call; it is data read by `draw_approval` and `info`.
+/// Verify: `cargo test -p loong-tui-app`.
 /// What a pending approval is about: enough to decide, on one screen.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ApprovalInfo {
@@ -246,6 +297,12 @@ const MARK_SUBLINE: [(usize, &str); 3] = [
 /// Violet, for something that wants an answer rather than something that went wrong.
 const MARK_ACCENT_STYLE: Style = Style::new().fg(MARK_ACCENT);
 
+/// Purpose: The classes the transcript paints differently, read from the line's own vocabulary.
+/// Serves: `classify`, `style_for`, `styled` and `transcript_line`.
+/// Design: `docs/design/surfaces.md` §3 ("The TUI's marks and colour").
+/// Up: `classify` returns it; `style_for`, `styled` and `transcript_line` match it.
+/// Down: no call; it is a tag carried to the palette.
+/// Verify: `cargo test -p loong-tui-app`.
 /// What a line is, for colour. Classified from the line's own vocabulary — the renderer
 /// that produces those strings lives in `loong-tui`, next door, and a test renders real
 /// events through it to keep the two in step.
@@ -274,6 +331,12 @@ pub enum LineKind {
     Notice,
 }
 
+/// Purpose: The palette for one line class: terminal colour names and the configured foreground, never fixed RGB.
+/// Serves: `styled`, `transcript_line` and the colour tests.
+/// Design: `docs/design/surfaces.md` §3 ("The TUI's marks and colour").
+/// Up: `styled` and `transcript_line`, plus the tests that read drawn cell colours.
+/// Down: no call; it maps a `LineKind` to a `Style`.
+/// Verify: `cargo test -p loong-tui-app`.
 /// The palette. Muted on purpose: a transcript where everything shouts is harder to read
 /// than one where only the things that matter are loud.
 ///
@@ -303,6 +366,12 @@ pub fn style_for(kind: LineKind) -> Style {
     }
 }
 
+/// Purpose: Decide a rendered line's class from its prefix, so the palette follows the vocabulary `loong_tui` writes.
+/// Serves: `styled`, `transcript_line` and the renderer-agreement test.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `styled` and `transcript_line`, plus the classification tests.
+/// Down: `LineKind`.
+/// Verify: `cargo test -p loong-tui-app`.
 /// Which kind a rendered line is. The prefixes are the client renderer's, so this is a
 /// classifier over a vocabulary this repository owns end to end.
 pub fn classify(line: &str) -> LineKind {
@@ -340,6 +409,12 @@ pub fn classify(line: &str) -> LineKind {
     LineKind::Answer
 }
 
+/// Purpose: Paint one transcript line, keeping the person's `you:` label bright and their own words plain.
+/// Serves: `visible_lines` and `transcript_line`.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `visible_lines` and `transcript_line`.
+/// Down: `classify` and `style_for`.
+/// Verify: `cargo test -p loong-tui-app`.
 /// One line, painted. The user's own words keep a bright label so the eye can find where
 /// a prompt began when scrolling back.
 fn styled(line: &str) -> Line<'static> {
@@ -361,6 +436,8 @@ fn styled(line: &str) -> Line<'static> {
     Line::from(Span::styled(line.to_string(), style_for(kind)))
 }
 
+/// Purpose: A line of the answer while it is still being written: dim and italic, so it is never mistaken for the record.
+/// Contract: called by `visible_lines` for the streamed tail.
 /// A line of the answer while it is still being written: dimmer than the settled text and
 /// italic, so the two are never confused while the words grow. The recorded message
 /// replaces it the moment it arrives — the preview is not the record.
@@ -385,6 +462,8 @@ const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 /// and a mark turning at the redraw rate reads as flicker.
 const SPINNER_MS: u128 = 120;
 
+/// Purpose: The spinner frame for a time already elapsed, read from the clock so a missed redraw cannot freeze it.
+/// Contract: called by `App::draw`'s working title; read by the spinner test.
 /// The frame for a time already elapsed. Read from the clock rather than kept as state, so
 /// a missed redraw cannot freeze the mark, and a test can ask for the frame it wants
 /// instead of racing a timer.
@@ -393,6 +472,12 @@ fn spinner_frame(since: Option<std::time::Instant>) -> &'static str {
     SPINNER[(millis / SPINNER_MS) as usize % SPINNER.len()]
 }
 
+/// Purpose: One tool result the reader opened: the marker it came from, the log's full lines, and its own scroll position.
+/// Serves: `App::open`, `visible_lines`, `toggle_fold`, `scroll_fold` and `opened`.
+/// Design: `docs/design/surfaces.md` §3 (fold and expand).
+/// Up: `App::opened` builds it; `App::drain` and `App::toggle_fold` open it.
+/// Down: no call; `visible_lines` and `scroll_fold` read it.
+/// Verify: `cargo test -p loong-tui-app`.
 /// A tool result the reader opened: the log's full text, not the summary.
 ///
 /// It is held apart from `lines` on purpose. The transcript is a record and the fold is a
@@ -408,6 +493,12 @@ pub struct OpenFold {
     pub scroll: usize,
 }
 
+/// Purpose: The whole screen state: transcript, input, folds, models, the pending decision and the last turn's outcome.
+/// Serves: `surface::run`, which owns one, and every test in this crate.
+/// Design: `docs/design/surfaces.md` §3 and §6; `docs/design/sessions-lineage.md` §1 and §5 for the replayed past.
+/// Up: `surface::run` constructs it with `App::new`; the tests construct it directly.
+/// Down: no call; its methods below read and change it.
+/// Verify: `cargo test -p loong-tui-app`.
 pub struct App {
     /// The rendered conversation, oldest first.
     pub lines: Vec<String>,
@@ -505,6 +596,12 @@ pub struct App {
 const FOLD_KEEP: usize = 32;
 
 impl App {
+    /// Purpose: A screen for one session and schema version, with nothing on it and no work running.
+    /// Serves: `surface::run` and the test helpers that build an `App`.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `surface::run` and the tests.
+    /// Down: no call; it initialises the `App` fields.
+    /// Verify: `cargo test -p loong-tui-app`.
     pub fn new(session: impl Into<String>, schema: impl Into<String>) -> Self {
         Self {
             lines: Vec::new(),
@@ -544,6 +641,12 @@ impl App {
         }
     }
 
+    /// Purpose: The bookkeeping shared by Enter and Alt+R: clear the prompt, mark the turn busy, keep the text for a resend and return the submit action.
+    /// Serves: `App::handle_key`'s Enter arm and `App::resend_last_prompt`.
+    /// Design: `docs/design/surfaces.md` §3; `docs/design/sessions-lineage.md` §5 (retry resends, it does not rewind).
+    /// Up: `App::handle_key` and `App::resend_last_prompt`.
+    /// Down: `App::push_lines`.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// The bookkeeping every send does, so `enter` and `Alt+R` cannot drift apart — an
     /// interface where the resend forgets to mark itself busy would let a second turn
     /// start on top of a running one.
@@ -565,6 +668,12 @@ impl App {
         Action::Send(ToWorker::Submit(text))
     }
 
+    /// Purpose: `Alt+R`: submit the last prompt again to the model selected now, keeping the history.
+    /// Serves: `App::handle_key`'s Alt+R arm and `App::surface_command`'s `/r`.
+    /// Design: `docs/design/surfaces.md` §3; `docs/design/sessions-lineage.md` §5.
+    /// Up: `App::handle_key` and `App::surface_command`.
+    /// Down: `App::begin_submit`, `App::selected_model_label` and `App::push_lines`.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// `Alt+R`: ask the same question again, of whichever model is selected now.
     ///
     /// The retry **keeps the history**. That is the whole design, and it is why this is
@@ -589,6 +698,8 @@ impl App {
         self.begin_submit(text)
     }
 
+    /// Purpose: The current model as every caller should name it, with its slot when it has one.
+    /// Contract: called by `resend_last_prompt` and `drain`'s model-switch line.
     /// What to call the current model on screen — **including** the brackets, so every
     /// caller says the same thing and none of them has to remember to add them.
     fn selected_model_label(&self) -> String {
@@ -601,6 +712,12 @@ impl App {
         }
     }
 
+    /// Purpose: Take the session's model list and current choice, so the bar is right on the first frame.
+    /// Serves: `surface::run` before the first draw, `App::drain` after a switch or a new session, and the tests.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `surface::run`, `App::drain` and the test helpers.
+    /// Down: no call; it assigns `models` and `selected`.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// Take the session's model list, which is a read and arrives before the first
     /// frame. Doing it here rather than on a worker round trip is what keeps the bar
     /// from appearing one frame late, which on a slow link would be the whole session.
@@ -609,6 +726,12 @@ impl App {
         self.selected = list.selected;
     }
 
+    /// Purpose: Record a background model check and say so when it failed, without removing the model.
+    /// Serves: `surface::run`'s health loop and the health tests.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `surface::run` drains the health channel into it; the tests call it directly.
+    /// Down: `App::push_lines`.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// Record what a background check found, and say so when it is bad news.
     ///
     /// The model keeps its slot either way. What a failure means is "the last check did
@@ -624,6 +747,12 @@ impl App {
         }
     }
 
+    /// Purpose: Read the renderer's `⇄ model` line and move the bar with it, so a rule's mid-turn switch is not missed.
+    /// Serves: `App::drain`'s `FromWorker::Lines` arm.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `App::drain`.
+    /// Down: no call; it assigns `selected`.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// Notice a `⇄ model a → b (…)` line and move the bar with it.
     ///
     /// The line is what the renderer already produces for a `model.selected` event, and
@@ -645,6 +774,12 @@ impl App {
         }
     }
 
+    /// Purpose: The model in slot 1..9, or nothing when the slot is out of range: the one definition the bar and both shortcuts share.
+    /// Serves: `App::switch_to_slot`, `App::draw`'s command hint and the model-bar tests.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `App::switch_to_slot` and `App::draw`.
+    /// Down: no call; it indexes `models`.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// The model in slot `1`..`9`, or the reason there is none.
     ///
     /// One place decides what a digit means, so the bar, the Alt shortcut and the `/N`
@@ -656,6 +791,12 @@ impl App {
             .flatten()
     }
 
+    /// Purpose: The next or previous model, wrapping, so Ctrl-N and Ctrl-P never dead-end.
+    /// Serves: `App::handle_key`'s Ctrl-N and Ctrl-P arms.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `App::handle_key`.
+    /// Down: `App::switch_to_slot` and `App::push_lines`.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// The next or previous model, wrapping around the list.
     fn switch_relative(&mut self, delta: isize) -> Action {
         if self.models.is_empty() {
@@ -674,6 +815,12 @@ impl App {
         self.switch_to_slot(next + 1)
     }
 
+    /// Purpose: Turn a slot press into a model switch, saying so when the slot is empty or already current.
+    /// Serves: `App::handle_key`'s Alt+digit arm, `App::surface_command`'s `/N` and `App::switch_relative`.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `App::handle_key`, `App::surface_command` and `App::switch_relative`.
+    /// Down: `App::model_in_slot` and `App::push_lines`.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// The shortcut, shared by `Alt+<digit>` and `/<digit>`.
     fn switch_to_slot(&mut self, slot: usize) -> Action {
         match self.model_in_slot(slot) {
@@ -697,6 +844,8 @@ impl App {
         }
     }
 
+    /// Purpose: Whether the terminal has room for the mark, so a small screen gets the conversation instead.
+    /// Contract: called by `App::draw` for the layout and again before drawing the banner.
     /// The debug panel: what the next request will carry, where the tokens went, and
     /// what has been cleared. Read-only by construction — asking for it records
     /// nothing, so looking cannot change what you are looking at.
@@ -707,6 +856,12 @@ impl App {
         self.logo && area.height >= 22 && area.width >= 52
     }
 
+    /// Purpose: Draw the pending decision as a menu: clipped one-line details, then the three answers, never wrapped.
+    /// Serves: `App::draw` when a decision is pending.
+    /// Design: `docs/design/surfaces.md` §3 and §6.
+    /// Up: `App::draw`.
+    /// Down: `App::info`, `App::options`, `clip`, `one_line` and the mark styles.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// The question, its detail, and the three answers — a menu, because a decision worth
     /// stopping for is worth showing the options for.
     ///
@@ -784,6 +939,8 @@ impl App {
         );
     }
 
+    /// Purpose: The four decision facts as borrowed strings, for the panel that draws them.
+    /// Contract: called by `draw_approval`; reads `App::approval`.
     /// The four facts a decision needs, as borrowed strings.
     fn info(&self) -> Option<(&str, &str, &str, &str)> {
         self.approval.as_ref().map(|info| {
@@ -796,6 +953,12 @@ impl App {
         })
     }
 
+    /// Purpose: Draw the numbered model bar, marking the current and failed models, and drop models before it drops the hint.
+    /// Serves: `App::draw`.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `App::draw`.
+    /// Down: the model list, `MARK_*` styles and `unicode_width`.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// The model bar: what this session can run, numbered, with the current one marked.
     ///
     /// Drawn from the session's own list rather than from a configuration file, because
@@ -875,6 +1038,12 @@ impl App {
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
+    /// Purpose: Draw the owner's five-row mark: the frame, 龍, the fitting inscription and the saying that fits the room.
+    /// Serves: `App::draw` when `show_banner` allows it.
+    /// Design: `docs/design/surfaces.md` §3 ("The TUI's marks and colour").
+    /// Up: `App::draw`.
+    /// Down: no call beyond drawing; it renders the `MARK_*` constants.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// The mark: the owner's frame and ornaments, given room to be imposing — five rows, a
     /// double rule, and the character centred with air around it. The words are unchanged.
     fn draw_banner(&self, frame: &mut Frame, area: ratatui::layout::Rect) {
@@ -968,6 +1137,12 @@ impl App {
         frame.render_widget(Paragraph::new(lines), area);
     }
 
+    /// Purpose: Draw the F2 context panel: token totals, categories, ledger entries and the memory's state.
+    /// Serves: `App::draw` when the debug panel is open.
+    /// Design: `docs/design/surfaces.md` §3; `docs/context/status.md` §11.1 for the memory fields.
+    /// Up: `App::draw`.
+    /// Down: `memory_lines` for the memory block.
+    /// Verify: `cargo test -p loong-tui-app`.
     fn draw_context(&self, frame: &mut Frame, area: ratatui::layout::Rect) {
         let mut lines: Vec<Line> = Vec::new();
         match &self.context {
@@ -1066,6 +1241,12 @@ impl App {
         );
     }
 
+    /// Purpose: The slash commands the screen answers itself, so quitting and the view toggles never reach the agent.
+    /// Serves: `App::handle_key`'s Enter arm, and the command hint in `App::draw`.
+    /// Design: `docs/design/surfaces.md` §3 and §6.
+    /// Up: `App::handle_key`.
+    /// Down: `App::switch_to_slot`, `App::resend_last_prompt`, `App::push_lines` and the `Action` variants.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// The one place that decides which slash commands never reach the agent. Kept
     /// deliberately short: a command belongs here only if the *interface* is what has
     /// to act — quitting, and nothing else so far. `/help` and the rest are skills the
@@ -1155,6 +1336,8 @@ impl App {
         }
     }
 
+    /// Purpose: Ask the server process to stop the running turn, saying "interrupting" rather than "stopped".
+    /// Contract: called by `handle_key`'s Ctrl-C and Esc arms; signals `App::interrupt` and calls `push_lines`.
     /// Ask for the turn to stop. The server stops at the next step boundary — after the
     /// tool that is already running finishes — so the line says "interrupting", not
     /// "stopped".
@@ -1171,6 +1354,8 @@ impl App {
         }
     }
 
+    /// Purpose: The byte offset of a character index in the prompt, for the editing methods.
+    /// Contract: called by `insert`, `delete_before_cursor`, `delete_at_cursor` and `handle_key`'s kill chords.
     fn byte_at(&self, char_index: usize) -> usize {
         self.input
             .char_indices()
@@ -1179,6 +1364,8 @@ impl App {
             .unwrap_or(self.input.len())
     }
 
+    /// Purpose: Insert text at the caret, advance it and refresh the picker.
+    /// Contract: called by `handle_key`'s character arm; calls `byte_at` and `refresh_picker`.
     fn insert(&mut self, text: &str) {
         let at = self.byte_at(self.cursor);
         self.input.insert_str(at, text);
@@ -1186,6 +1373,12 @@ impl App {
         self.refresh_picker();
     }
 
+    /// Purpose: Keep the `@` picker in step with the text and the caret, reading the file list only once.
+    /// Serves: `App::insert`, `App::delete_before_cursor`, `App::delete_at_cursor` and `App::handle_key`.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: every edit and caret move in `App`.
+    /// Down: `mention::FileIndex::read` and `mention::Picker::refresh`.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// Keep the `@` picker in step with the text and the caret.
     ///
     /// `None` when the caret is not inside a reference, which is also how the picker
@@ -1221,6 +1414,8 @@ impl App {
             mention::Picker::refresh(&self.input, self.cursor, files, self.picker.as_ref());
     }
 
+    /// Purpose: How many rows the picker needs: its matches, or one line saying there are none.
+    /// Contract: called by `App::draw` and the picker-height test.
     /// How many rows the picker needs: its matches, or one line saying there are
     /// none — a picker that vanished when a query matched nothing would look like a
     /// crash rather than an empty answer.
@@ -1231,6 +1426,12 @@ impl App {
         }
     }
 
+    /// Purpose: Draw the `@` picker above the input: its matches, the highlighted row, or one honest empty line.
+    /// Serves: `App::draw`.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `App::draw`.
+    /// Down: the stored `mention::Picker` and the mark accent style.
+    /// Verify: `cargo test -p loong-tui-app`.
     fn draw_picker(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
         let Some(picker) = &self.picker else {
             return;
@@ -1272,6 +1473,12 @@ impl App {
         frame.render_widget(widget, area);
     }
 
+    /// Purpose: Insert the highlighted path and close the picker, leaving the caret after the token.
+    /// Serves: `App::handle_key`'s Enter-while-picker arm.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `App::handle_key`.
+    /// Down: `mention::apply`.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// Insert the highlighted path and close the picker.
     fn accept_picker(&mut self) -> Action {
         let Some(picker) = self.picker.as_ref() else {
@@ -1289,6 +1496,8 @@ impl App {
         Action::None
     }
 
+    /// Purpose: Delete one character before the caret and refresh the picker.
+    /// Contract: called by `handle_key`'s Backspace arm; edits through `byte_at` and `refresh_picker`.
     fn delete_before_cursor(&mut self) {
         if self.cursor == 0 {
             return;
@@ -1300,6 +1509,8 @@ impl App {
         self.refresh_picker();
     }
 
+    /// Purpose: Delete the character under the caret and refresh the picker.
+    /// Contract: called by `handle_key`'s Delete arm; edits through `byte_at` and `refresh_picker`.
     fn delete_at_cursor(&mut self) {
         if self.cursor >= self.input.chars().count() {
             return;
@@ -1310,6 +1521,12 @@ impl App {
         self.refresh_picker();
     }
 
+    /// Purpose: How many rows the input box needs for its text, capped so a pasted file cannot eat the conversation.
+    /// Serves: `App::draw` and the wrapping tests.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `App::draw` and the tests.
+    /// Down: `App::wrapped_input`.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// The input line as it should be drawn at this width, plus the caret's column
     /// inside the box. Long input scrolls horizontally so the caret stays visible —
     /// without that, typing past the edge looks like the keys stopped working.
@@ -1322,6 +1539,12 @@ impl App {
             .clamp(1, MAX_INPUT_ROWS as usize) as u16
     }
 
+    /// Purpose: Wrap the input by display columns and say where the caret lands, so the terminal cursor is drawn where typing goes.
+    /// Serves: `App::input_rows`, `App::draw` and the wrapping tests.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `App::input_rows`, `App::draw` and the tests.
+    /// Down: `unicode_width` for column measurement.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// The input, wrapped to `inner_width` **display columns**, plus where the caret
     /// lands in that layout.
     ///
@@ -1366,6 +1589,12 @@ impl App {
         (lines, caret)
     }
 
+    /// Purpose: Append rendered lines to the transcript, splitting embedded newlines and pulling the view back to the newest output.
+    /// Serves: `surface::run`, `App::begin_submit`, `App::resend_last_prompt`, `App::drain` and the tests.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: many `App` methods and `surface::run`.
+    /// Down: no call; it appends to `lines` and resets `scroll`.
+    /// Verify: `cargo test -p loong-tui-app`.
     pub fn push_lines(&mut self, lines: impl IntoIterator<Item = String>) {
         for line in lines {
             for piece in line.split('\n') {
@@ -1376,6 +1605,12 @@ impl App {
         self.scroll = 0;
     }
 
+    /// Purpose: Keep one diagnostic line from the server's stderr, collapsing repeats and the oldest beyond a hundred.
+    /// Serves: `surface::run`'s notes loop and the drawn notes strip.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `surface::run` and the notes test.
+    /// Down: no call; it appends to `notes`.
+    /// Verify: `cargo test -p loong-tui-app`.
     pub fn push_note(&mut self, note: String) {
         if self.notes.last() != Some(&note) {
             self.notes.push(note);
@@ -1385,6 +1620,12 @@ impl App {
         }
     }
 
+    /// Purpose: Fold every message the worker has sent into the screen state, once per pass of the draw loop.
+    /// Serves: `surface::run`'s loop and the tests.
+    /// Design: `docs/design/surfaces.md` §3; `docs/design/sessions-lineage.md` §1 and §5 for a new session and a resumed question.
+    /// Up: `surface::run`; the tests call it directly with a channel.
+    /// Down: `App::set_models`, `App::follow_model_change`, `App::push_lines`, `App::opened` and `App::remember_fold`.
+    /// Verify: `cargo test -p loong-tui-app`.
     pub fn drain(&mut self, worker: &Receiver<FromWorker>) {
         loop {
             match worker.try_recv() {
@@ -1509,6 +1750,12 @@ impl App {
         }
     }
 
+    /// Purpose: Turn one key event into an `Action`, keeping the picker, folds, approval menu and prompt from stealing each other's keys.
+    /// Serves: `surface::run`'s event loop and every keyboard test.
+    /// Design: `docs/design/surfaces.md` §3 and §6.
+    /// Up: `surface::run`; the tests.
+    /// Down: nearly every `App` method, from `App::insert` to `App::answer`.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// The keys that mean something. While an approval is pending the input line is
     /// repurposed: typing a prompt then would be ignored anyway, and saying so is
     /// kinder than silently swallowing it.
@@ -1788,6 +2035,8 @@ impl App {
         }
     }
 
+    /// Purpose: Every fold marker in the transcript, oldest first, so the keyboard and the client agree on which lines are folds.
+    /// Contract: called by `move_fold`, `opened` and the fold-count hint in `draw`.
     /// Every fold marker in the transcript, oldest first. Markers are the client's own
     /// lines (`loong_tui::is_fold_marker`), so the two halves of folding cannot disagree
     /// about which lines the keyboard can land on.
@@ -1800,6 +2049,8 @@ impl App {
             .collect()
     }
 
+    /// Purpose: Which fold a marker is, counting from the oldest: the name both sides of the channel use.
+    /// Contract: called by `toggle_fold`; counts `loong_tui::is_fold_marker` lines before the marker.
     /// Which fold this marker is, counting from the oldest — the name the client knows the
     /// same result by. Both sides count the same lines in the same order, which is the
     /// whole trick: no identifier has to be shown to anybody. From the oldest rather than
@@ -1813,6 +2064,8 @@ impl App {
             .count()
     }
 
+    /// Purpose: Keep the full text of a fold the turn sent, bounded by `FOLD_KEEP` so a long session cannot grow without limit.
+    /// Contract: called by `drain`'s `Fold` arm and `surface::run`'s replayed history.
     /// Keep the full text of a fold this view was shown. A number already held is replaced:
     /// the newest fold is the one anyone is about to open, so what must not survive is the
     /// oldest, and the log still has every one of them.
@@ -1823,6 +2076,12 @@ impl App {
         }
     }
 
+    /// Purpose: Walk the keyboard's fold selection to the older or newer marker, wrapping at either end.
+    /// Serves: `App::handle_key`'s Tab and Shift-Tab arms.
+    /// Design: `docs/design/surfaces.md` §3 (fold and expand).
+    /// Up: `App::handle_key`.
+    /// Down: `App::folds`.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// Move the keyboard to the fold above (`older`) or below, wrapping at either end. A
     /// first press lands on the newest fold — the one just written, which is the one the
     /// reader is looking at.
@@ -1854,6 +2113,8 @@ impl App {
         Action::None
     }
 
+    /// Purpose: Move inside an open fold by rows, in the same direction the transcript scrolls.
+    /// Contract: called by `handle_key`'s paging-over-a-fold arms and by `handle_mouse`.
     /// Move inside an open fold. Positive rows walk back through the output, the same
     /// direction PageUp walks through the transcript.
     fn scroll_fold(&mut self, rows: isize) -> Action {
@@ -1868,6 +2129,12 @@ impl App {
         Action::None
     }
 
+    /// Purpose: Open the fold the keyboard is on, from the text the turn already sent or by asking the log; the same key closes it.
+    /// Serves: `App::handle_key`'s Enter arm.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `App::handle_key`.
+    /// Down: `App::fold_at`, `App::opened`, the `folded` cache and `ToWorker::ExpandAt`.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// Open the fold the keyboard is on, or put it away if it is already open — the same
     /// key both ways, because that is what a fold is.
     fn toggle_fold(&mut self) -> Action {
@@ -1889,6 +2156,12 @@ impl App {
         Action::Send(ToWorker::ExpandAt { at })
     }
 
+    /// Purpose: Open the full result the worker sent, matched by the fold's number rather than by its distance from the end.
+    /// Serves: `App::toggle_fold` and `App::drain`'s `Expanded` arm.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `App::toggle_fold` and `App::drain`.
+    /// Down: `App::folds` and `App::push_lines`.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// Take delivery of a result the reader asked to see in full. The reply is matched by
     /// the name that was asked for, not by where the fold sits from the end: the answer may
     /// arrive after the turn has written more folds, and the name is the one thing that
@@ -1910,11 +2183,23 @@ impl App {
         Action::None
     }
 
+    /// Purpose: The whole transcript as one string, for `/copy`.
+    /// Serves: `surface::run`'s Copy arm and the copy test.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `surface::run` and the copy test.
+    /// Down: no call; it joins `lines`.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// Everything said so far, for `/copy`.
     pub fn transcript(&self) -> String {
         self.lines.join("\n")
     }
 
+    /// Purpose: Scroll the conversation on a wheel event, or the open fold when one is on screen.
+    /// Serves: `surface::run`'s mouse event arm.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `surface::run`.
+    /// Down: `App::scroll_fold`.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// A mouse wheel event: scrolling the conversation is the one thing a wheel
     /// should do here, and it is what people try first. Over an open fold it scrolls the
     /// output instead — the wheel follows what is on screen.
@@ -1933,6 +2218,12 @@ impl App {
         }
     }
 
+    /// Purpose: Turn the highlighted decision into a response: record it on screen, mark the turn busy and send the answer.
+    /// Serves: `App::handle_key`'s Enter, letter and Esc arms while a decision is pending.
+    /// Design: `docs/design/surfaces.md` §3 and §6 (the surface sends the decision; it does not make it).
+    /// Up: `App::handle_key`.
+    /// Down: `App::push_lines` and `ToWorker::Respond`.
+    /// Verify: `cargo test -p loong-tui-app`.
     fn answer(&mut self, granted: bool, scope: loong_schema::generated::ApprovalScope) -> Action {
         let Some(request_id) = self.pending.take() else {
             return Action::None;
@@ -1957,6 +2248,8 @@ impl App {
         })
     }
 
+    /// Purpose: The three answers, in the order they are drawn and selected.
+    /// Contract: called by `draw_approval`, `draw`'s decision height and `handle_key`'s menu arms.
     /// The three answers, in the order they are drawn.
     fn options() -> [(&'static str, bool, loong_schema::generated::ApprovalScope); 3] {
         use loong_schema::generated::ApprovalScope;
@@ -1967,6 +2260,12 @@ impl App {
         ]
     }
 
+    /// Purpose: The transcript rows for a window of this height, including the live preview, the scroll position and a followed fold.
+    /// Serves: `App::draw` and the scrolling tests.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `App::draw` and the tests.
+    /// Down: `App::live_lines`, `App::max_scroll`, `App::transcript_line` and `styled`.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// The scrollback the reader should see at this height.
     ///
     /// An open fold takes the whole area. It is the one thing on screen the reader asked
@@ -2013,6 +2312,8 @@ impl App {
             .collect()
     }
 
+    /// Purpose: The answer being written this moment, as lines; empty once it settles into the transcript.
+    /// Contract: called by `visible_lines` and `max_scroll`; splits `streaming`.
     /// The answer being written this moment, as lines. Empty once it settles into the
     /// transcript, which is the only copy that is recorded.
     fn live_lines(&self) -> Vec<&str> {
@@ -2023,12 +2324,20 @@ impl App {
         }
     }
 
+    /// Purpose: How far back the view can go with a window this tall, capped so a short transcript cannot scroll.
+    /// Contract: called by `visible_lines` and `draw`; reads `lines` and `live_lines`.
     /// How far back the view can go with a window this tall: everything above it. A
     /// transcript shorter than the window has nothing above it, so the answer is zero.
     fn max_scroll(&self, rows: usize) -> usize {
         (self.lines.len() + self.live_lines().len()).saturating_sub(rows.max(1))
     }
 
+    /// Purpose: One transcript row with its fold marker and keyboard highlight added, leaving the record itself unchanged.
+    /// Serves: `App::visible_lines`.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `App::visible_lines`.
+    /// Down: `styled`, `style_for` and `loong_tui::is_fold_marker`.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// One line of the transcript, with the fold's own business applied: the arrow that
     /// marks a summary, and the highlight that says the keyboard is here. Neither is
     /// stored in `lines`: the transcript is the record, and the fold is a way of looking
@@ -2051,6 +2360,12 @@ impl App {
         Line::from(Span::styled(format!("▸ {}", line.trim_start()), style))
     }
 
+    /// Purpose: Draw the whole screen: model bar, mark, notes, transcript, decision, picker, input and key hints.
+    /// Serves: `surface::run`'s loop and every drawing test.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `surface::run` and the tests.
+    /// Down: `draw_model_bar`, `draw_banner`, `draw_approval`, `draw_picker`, `draw_context`, `visible_lines`, `wrapped_input` and `spinner_frame`.
+    /// Verify: `cargo test -p loong-tui-app`.
     pub fn draw(&mut self, frame: &mut Frame) {
         // The context panel takes the right third; the conversation keeps the rest, so
         // turning it on never hides what you were reading.
@@ -2391,6 +2706,12 @@ impl App {
     }
 }
 
+/// Purpose: Draw the layered memory's mode, layer counts, worker statistics and every degradation, keeping off distinct from not-yet-produced.
+/// Serves: `draw_context`.
+/// Design: `docs/context/status.md` §11.1; `docs/design/surfaces.md` §3.
+/// Up: `App::draw_context`.
+/// Down: no call; it builds the panel's lines from `ContextExplain`.
+/// Verify: `cargo test -p loong-tui-app`.
 /// The layered memory's own state, as the debug panel draws it (ADR-0017 §10, §11.1).
 ///
 /// The honest part is what it does **not** do: it reads `memory_mode` rather than

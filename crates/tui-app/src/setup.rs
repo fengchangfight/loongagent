@@ -1,5 +1,19 @@
+//! Purpose: The control-plane first-run form and the terminal guard every full-screen surface asks before drawing.
+//!
+//! # Contract
+//! - **Serves:** `crates/cli/src/tui.rs` (the `tui` command's setup) and `crates/tui-app/src/wizard.rs`.
+//! - **Design:** `docs/design/surfaces.md` §3; `docs/design/control-plane.md` §2 and §4 for what the address, pinned key and token configure.
+//! - **Upstream:** `crates/cli/src/tui.rs` calls `setup_form` and `full_screen_needs_a_terminal`; `wizard::local_wizard` calls the guard.
+//! - **Downstream:** `ratatui` for the form; nothing of its own beyond the form state.
+//! - **Verify:** `cargo test -p loong-tui-app` · `./scripts/check.sh`
 use super::*;
 
+/// Purpose: The first-run control-plane form: address, pinned public key, optional token reference and the caret's field.
+/// Serves: `setup_form`, `draw_setup_form` and the form tests.
+/// Design: `docs/design/surfaces.md` §3; `docs/design/control-plane.md` §2.
+/// Up: `SetupForm::new`, `setup_form` and the tests assign fields.
+/// Down: no call; `answer` and `handle_key` read it.
+/// Verify: `cargo test -p loong-tui-app`.
 /// The TTY-bound part: raw mode, the alternate screen, the event loop.
 ///
 /// `notes` carries the server process's stderr. It must not be printed while a
@@ -18,6 +32,12 @@ pub struct SetupForm {
     pub error: Option<String>,
 }
 
+/// Purpose: What the setup form's keyboard asks the event loop to do.
+/// Serves: `SetupForm::handle_key`, `setup_form` and the tests.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `SetupForm::handle_key` returns it.
+/// Down: `setup_form` matches it.
+/// Verify: `cargo test -p loong-tui-app`.
 #[derive(Debug, PartialEq, Eq)]
 pub enum SetupAction {
     None,
@@ -26,6 +46,12 @@ pub enum SetupAction {
 }
 
 impl SetupForm {
+    /// Purpose: An empty form with the caret on the address.
+    /// Serves: `setup_form` and the form tests.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `setup_form` and the tests.
+    /// Down: no call; it initialises the fields.
+    /// Verify: `cargo test -p loong-tui-app`.
     pub fn new() -> Self {
         SetupForm {
             url: String::new(),
@@ -36,6 +62,8 @@ impl SetupForm {
         }
     }
 
+    /// Purpose: The field the caret is in, mutably, so one edit path serves all three.
+    /// Contract: called by `handle_key`'s Backspace and character arms.
     /// The field the caret is in, mutably. Taking the index first keeps the borrow
     /// checker happy and the call sites readable.
     fn active(&mut self) -> &mut String {
@@ -46,6 +74,12 @@ impl SetupForm {
         }
     }
 
+    /// Purpose: The label for one field, so the form and its test name the same thing.
+    /// Serves: `draw_setup_form` and the field-layout test.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `draw_setup_form` and the tests.
+    /// Down: no call; it maps an index to text.
+    /// Verify: `cargo test -p loong-tui-app`.
     pub fn label(&self, index: usize) -> &'static str {
         match index {
             0 => "control-plane address",
@@ -54,6 +88,12 @@ impl SetupForm {
         }
     }
 
+    /// Purpose: The three values when the form is complete, or `None` when a required field is empty.
+    /// Serves: `SetupForm::handle_key`'s Enter arm and `setup_form`.
+    /// Design: `docs/design/surfaces.md` §3; `docs/design/control-plane.md` §2.
+    /// Up: `handle_key` and `setup_form`.
+    /// Down: no call; it reads the fields.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// `Some((url, public_key, token))` when the form is complete.
     pub fn answer(&self) -> Option<(String, String, String)> {
         if self.url.trim().is_empty() || self.public_key.trim().is_empty() {
@@ -66,6 +106,12 @@ impl SetupForm {
         ))
     }
 
+    /// Purpose: The form's keyboard: edit a field, move between them, submit a complete form, or leave.
+    /// Serves: `setup_form` and the form tests.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `setup_form` and the tests.
+    /// Down: `answer` and `active`.
+    /// Verify: `cargo test -p loong-tui-app`.
     pub fn handle_key(&mut self, key: KeyEvent) -> SetupAction {
         use ratatui::crossterm::event::KeyCode;
         self.error = None;
@@ -102,6 +148,12 @@ impl SetupForm {
     }
 }
 
+/// Purpose: Refuse a full-screen surface when stdout is not a terminal, before asking for anything.
+/// Serves: `setup_form`, `wizard::local_wizard`, `crates/cli/src/tui.rs` and `crates/cli/src/local.rs`.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: those callers.
+/// Down: `std::io::IsTerminal`.
+/// Verify: `cargo test -p loong-tui-app`.
 /// A full-screen surface needs a terminal, and must say so before asking for anything:
 /// discovering the problem after typing three fields would be rude, and in a pipe the
 /// form cannot be drawn at all.
@@ -116,6 +168,12 @@ pub fn full_screen_needs_a_terminal() -> Result<(), String> {
     )
 }
 
+/// Purpose: Draw the three labelled fields and the hint line, so the layout can be asserted without a terminal.
+/// Serves: `setup_form` and the form-layout test.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `setup_form` and the tests.
+/// Down: `SetupForm::{label, field}`.
+/// Verify: `cargo test -p loong-tui-app`.
 /// Draw the first-run form. Separate from the event loop so the layout can be
 /// asserted on (three labelled fields and a hint line) without a terminal.
 pub(super) fn draw_setup_form(frame: &mut ratatui::Frame, form: &SetupForm) {
@@ -177,6 +235,12 @@ pub(super) fn draw_setup_form(frame: &mut ratatui::Frame, form: &SetupForm) {
     );
 }
 
+/// Purpose: Run the full-screen first-run form and return the three values, or `None` when the person skipped it.
+/// Serves: `crates/cli/src/tui.rs`.
+/// Design: `docs/design/surfaces.md` §3; `docs/design/control-plane.md` §2.
+/// Up: `crates/cli/src/tui.rs`.
+/// Down: `full_screen_needs_a_terminal`, `SetupForm` and `draw_setup_form`.
+/// Verify: `cargo test -p loong-tui-app`.
 /// Ask for the control-plane configuration before the session starts, in a small
 /// full-screen form. `Ok(None)` means the user declined — a session without a control
 /// plane is a legitimate state (a local profile, or a provider double).

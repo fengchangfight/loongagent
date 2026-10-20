@@ -1,3 +1,12 @@
+//! Purpose: The `@` file reference: parse the token, rank the workspace's files, and let the picker insert a path.
+//!
+//! # Contract
+//! - **Serves:** `App::refresh_picker` and `App::accept_picker`, which draw and finish the picker, and the picker tests.
+//! - **Design:** `docs/design/surfaces.md` §3 and §6.
+//! - **Upstream:** `App` in `crates/tui-app/src/lib.rs` builds a `FileIndex` and a `Picker` from the prompt text and caret.
+//! - **Downstream:** `git ls-files` (or a bounded walk) for the file list, and the ranking functions in this file.
+//! - **Verify:** `cargo test -p loong-tui-app` · `./scripts/check.sh`
+//!
 //! `@` file references in the prompt (the picker behind `@`).
 //!
 //! # What `@` does here, and what it deliberately does not
@@ -51,6 +60,12 @@ const ALWAYS_IGNORED: &[&str] = &[
     "build",
 ];
 
+/// Purpose: A stable, read-once list of the workspace's files, with the root it was read from.
+/// Serves: `Picker::refresh`, `App::refresh_picker` and the picker tests.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `FileIndex::read` and `FileIndex::from_files`; `App::refresh_picker`; the tests.
+/// Down: no call; `matches` reads it.
+/// Verify: `cargo test -p loong-tui-app`.
 /// The files a workspace offers, in a stable order.
 #[derive(Debug, Clone, Default)]
 pub struct FileIndex {
@@ -59,6 +74,12 @@ pub struct FileIndex {
 }
 
 impl FileIndex {
+    /// Purpose: Read the workspace's files, preferring git and falling back to a bounded walk.
+    /// Serves: `App::refresh_picker`.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `App::refresh_picker` and the tests.
+    /// Down: `git_files` and `walk_files`.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// Read the workspace's files. Prefers git; falls back to a bounded walk.
     pub fn read(root: impl Into<PathBuf>) -> Self {
         let root = root.into();
@@ -66,6 +87,12 @@ impl FileIndex {
         Self { root, files }
     }
 
+    /// Purpose: An index over a fixed list, so a test need not depend on the repository it runs in.
+    /// Serves: the picker tests.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: the picker tests.
+    /// Down: no call; it stores the list.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// An index over a fixed list, for tests and for a caller that already has the
     /// files. Fixing the list is what keeps a test from depending on the repository
     /// it happens to run in.
@@ -76,22 +103,52 @@ impl FileIndex {
         }
     }
 
+    /// Purpose: The directory this index was read from.
+    /// Serves: no caller today; the picker matches relative paths and never joins them back to the root.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: no caller; `FileIndex::read` is the only writer.
+    /// Down: no call; it borrows `root`.
+    /// Verify: `cargo test -p loong-tui-app`.
     pub fn root(&self) -> &Path {
         &self.root
     }
 
+    /// Purpose: How many files the index holds.
+    /// Serves: no caller today; the picker asks `matches` for the rows it needs.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: no caller; `FileIndex::read` and `FileIndex::from_files` are the only writers.
+    /// Down: no call; it reads `files`.
+    /// Verify: `cargo test -p loong-tui-app`.
     pub fn len(&self) -> usize {
         self.files.len()
     }
 
+    /// Purpose: Whether the index holds no files at all.
+    /// Serves: no caller today; the picker asks `matches` for the rows it needs.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: no caller; `FileIndex::read` and `FileIndex::from_files` are the only writers.
+    /// Down: no call; it reads `files`.
+    /// Verify: `cargo test -p loong-tui-app`.
     pub fn is_empty(&self) -> bool {
         self.files.is_empty()
     }
 
+    /// Purpose: Every file in the index, in the order it was read.
+    /// Serves: no caller today; `matches` is the only reader of the list.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: no caller; `FileIndex::read` and `FileIndex::from_files` are the only writers.
+    /// Down: no call; it borrows `files`.
+    /// Verify: `cargo test -p loong-tui-app`.
     pub fn files(&self) -> &[String] {
         &self.files
     }
 
+    /// Purpose: Files whose path matches the query, best first, capped at the picker's limit.
+    /// Serves: `Picker::refresh` and the picker tests.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `Picker::refresh`.
+    /// Down: `rank`.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// Files whose path matches `query`, best first.
     ///
     /// Ranked by *where* the query matches rather than by a fuzzy score: the
@@ -116,6 +173,12 @@ impl FileIndex {
     }
 }
 
+/// Purpose: Score one file against one query: a basename prefix beats a basename hit, which beats a path hit, which beats a subsequence.
+/// Serves: `FileIndex::matches`.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `FileIndex::matches`.
+/// Down: `subsequence_rank`.
+/// Verify: `cargo test -p loong-tui-app`.
 /// A smaller rank is a better match. `None` means "does not match".
 fn rank(file: &str, query: &str) -> Option<u32> {
     if query.is_empty() {
@@ -143,6 +206,12 @@ fn rank(file: &str, query: &str) -> Option<u32> {
     subsequence_rank(&lowered, query).map(|spread| 10_000 + spread)
 }
 
+/// Purpose: Score an in-order subsequence match by the spread of its positions, so `skv` finds `src/kernel/view.rs`.
+/// Serves: `rank`.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `rank`.
+/// Down: no call; it walks the lowercased path.
+/// Verify: `cargo test -p loong-tui-app`.
 fn subsequence_rank(haystack: &str, needle: &str) -> Option<u32> {
     let mut haystack = haystack.chars().enumerate();
     // The haystack index of each matched character, so the spread is the distance
@@ -164,6 +233,12 @@ fn subsequence_rank(haystack: &str, needle: &str) -> Option<u32> {
     Some(spread)
 }
 
+/// Purpose: The `@`-token the caret is inside, as a byte range and the text typed after the trigger.
+/// Serves: `Picker::refresh`.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `Picker::refresh` and the tests.
+/// Down: `char_to_byte`.
+/// Verify: `cargo test -p loong-tui-app`.
 /// The `@`-token the caret is inside, if any.
 ///
 /// Returns the token's **byte range** in `input` and the text typed after the `@`.
@@ -195,6 +270,12 @@ pub fn token_at(input: &str, cursor_chars: usize) -> Option<(std::ops::Range<usi
     Some((at..caret, after_trigger.to_string()))
 }
 
+/// Purpose: Replace a token's byte range with `@path`, quoting a path that contains spaces.
+/// Serves: `App::accept_picker`.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `App::accept_picker`.
+/// Down: `TRIGGER` for the rendered token.
+/// Verify: `cargo test -p loong-tui-app`.
 /// Replace a token's byte range with `@path`, quoting a path that needs it.
 pub fn apply(input: &mut String, range: std::ops::Range<usize>, path: &str) {
     let needs_quotes = path.chars().any(char::is_whitespace);
@@ -206,6 +287,8 @@ pub fn apply(input: &mut String, range: std::ops::Range<usize>, path: &str) {
     input.replace_range(range, &rendered);
 }
 
+/// Purpose: The byte offset of a character index in the prompt, for the token parser.
+/// Contract: called by `token_at`.
 fn char_to_byte(input: &str, char_index: usize) -> usize {
     input
         .char_indices()
@@ -214,6 +297,12 @@ fn char_to_byte(input: &str, char_index: usize) -> usize {
         .unwrap_or(input.len())
 }
 
+/// Purpose: The workspace's files from `git ls-files`, or `None` when git or the repository is unavailable.
+/// Serves: `FileIndex::read`.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `FileIndex::read`.
+/// Down: the `git` child process.
+/// Verify: `cargo test -p loong-tui-app`.
 /// The workspace's files according to git: tracked, plus untracked-and-not-ignored.
 /// `None` when git is unavailable or this is not a repository, so the caller falls
 /// back rather than showing an empty list.
@@ -248,6 +337,12 @@ fn git_files(root: &Path) -> Option<Vec<String>> {
     Some(files)
 }
 
+/// Purpose: A bounded walk of the tree with the always-ignored directories skipped, for a workspace that is not a git repository.
+/// Serves: `FileIndex::read`'s fallback.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `FileIndex::read`.
+/// Down: `std::fs::read_dir` and `ALWAYS_IGNORED`.
+/// Verify: `cargo test -p loong-tui-app`.
 /// A bounded walk, for a workspace that is not a git repository.
 fn walk_files(root: &Path) -> Vec<String> {
     /// Deep enough for a real project, shallow enough that a stray symlink cannot
@@ -286,6 +381,12 @@ fn walk_files(root: &Path) -> Vec<String> {
     out
 }
 
+/// Purpose: The live picker: the token range being replaced, the query, the matches and the highlighted row.
+/// Serves: `App::picker`, `App::draw_picker`, `App::accept_picker` and the tests.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `Picker::refresh` builds it; `App::refresh_picker` stores it.
+/// Down: no call; `draw_picker` and `accept_picker` read it.
+/// Verify: `cargo test -p loong-tui-app`.
 /// The live state of the picker: which files match, and which one is highlighted.
 #[derive(Debug, Clone)]
 pub struct Picker {
@@ -297,6 +398,12 @@ pub struct Picker {
 }
 
 impl Picker {
+    /// Purpose: Build the picker for the current text and caret, or `None` when the caret left the reference.
+    /// Serves: `App::refresh_picker` and the picker tests.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `App::refresh_picker` and the tests.
+    /// Down: `token_at` and `FileIndex::matches`.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// Refresh against the current input and a workspace index. `None` when the
     /// caret is not inside a reference — which is also how the picker closes, so
     /// there is no second piece of state to keep in step with the text.
@@ -326,14 +433,32 @@ impl Picker {
         })
     }
 
+    /// Purpose: Whether the picker has no matches at all.
+    /// Serves: no caller today; `draw_picker` and `accept_picker` check `Picker.matches` directly.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: no caller; `Picker::refresh` is the only writer.
+    /// Down: no call; it reads `matches`.
+    /// Verify: `cargo test -p loong-tui-app`.
     pub fn is_empty(&self) -> bool {
         self.matches.is_empty()
     }
 
+    /// Purpose: The highlighted file, or nothing in an empty list.
+    /// Serves: `App::accept_picker`.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `App::accept_picker`.
+    /// Down: no call; it indexes `matches`.
+    /// Verify: `cargo test -p loong-tui-app`.
     pub fn selected_path(&self) -> Option<&str> {
         self.matches.get(self.selected).map(String::as_str)
     }
 
+    /// Purpose: Move the highlight by `delta`, wrapping, and never leave the list.
+    /// Serves: `App::handle_key`'s Up, Down, Tab and Shift-Tab picker arms.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `App::handle_key`.
+    /// Down: no call; it changes `selected`.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// Move the highlight, wrapping. Never leaves the list.
     pub fn move_by(&mut self, delta: isize) {
         if self.matches.is_empty() {

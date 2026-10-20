@@ -1,5 +1,19 @@
+//! Purpose: The local first-run wizard: one provider, one API key, and the models the vendor answers with.
+//!
+//! # Contract
+//! - **Serves:** `crates/cli/src/local.rs`'s first run, through `local_wizard`, `after_validation` and the choice types re-exported here.
+//! - **Design:** `docs/design/surfaces.md` §3 and §6.
+//! - **Upstream:** `crates/cli/src/local.rs` calls `local_wizard` and builds `ProviderChoice`, `Validation` and `OfferedKey`.
+//! - **Downstream:** `ratatui` for the forms, `setup::full_screen_needs_a_terminal`, and the `MARK_*` palette in this crate.
+//! - **Verify:** `cargo test -p loong-tui-app` · `./scripts/check.sh`
 use super::*;
 
+/// Purpose: One provider the wizard may be pointed at, passed in so this crate never reads the catalog itself.
+/// Serves: `LocalWizard`, `draw_local_wizard` and `crates/cli/src/local.rs`.
+/// Design: `docs/design/surfaces.md` §3 and §6.
+/// Up: `crates/cli/src/local.rs` builds them; the wizard tests build them.
+/// Down: no call; `LocalWizard::{selected, ready, handle_key}` and `draw_local_wizard` read it.
+/// Verify: `cargo test -p loong-tui-app`.
 /// One provider the wizard may be pointed at. Passed in rather than looked up, so
 /// this crate keeps its promise of holding the screen and nothing else — the catalog
 /// lives in `loong-config` and the probe in `loong-providers`, and neither belongs in
@@ -14,6 +28,12 @@ pub struct ProviderChoice {
     pub needs_key: bool,
 }
 
+/// Purpose: What one key-validation attempt found: whether it worked, one rendered summary, the models and an ordering hint.
+/// Serves: `KeyChoice`, `local_wizard` and `crates/cli/src/local.rs`'s validate callback.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `local_wizard` receives it from the callback; `crates/cli/src/local.rs` builds it.
+/// Down: no call; `local_wizard` and `draw_local_wizard` read it.
+/// Verify: `cargo test -p loong-tui-app`.
 /// What one validation attempt found, in shapes a screen can show and a caller can
 /// carry back out. Deliberately primitive: the wizard displays this and hands it on
 /// without needing to know what a "model" is.
@@ -33,6 +53,12 @@ pub struct Validation {
     pub suggest_order: Vec<String>,
 }
 
+/// Purpose: A key that passed validation, with the models chosen to keep.
+/// Serves: `local_wizard`'s return value and `crates/cli/src/local.rs`.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `local_wizard` returns it; `crates/cli/src/local.rs` consumes it.
+/// Down: no call; it is data.
+/// Verify: `cargo test -p loong-tui-app`.
 /// A key that passed validation, and what it turned out to be.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyChoice {
@@ -41,6 +67,12 @@ pub struct KeyChoice {
     pub validation: Validation,
 }
 
+/// Purpose: One model's background-check result, reported so the bar can mark a failure without removing the model.
+/// Serves: `App::note_health` and `crates/cli/src/local.rs`'s health thread.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `crates/cli/src/local.rs` sends it; `surface::run` forwards it; the tests build it.
+/// Down: no call; `App::note_health` reads it.
+/// Verify: `cargo test -p loong-tui-app`.
 /// What a background check found out about one model, as the bar needs it.
 ///
 /// Reported rather than enforced: a model that failed its check is marked, not
@@ -54,6 +86,12 @@ pub struct ModelHealth {
     pub detail: String,
 }
 
+/// Purpose: Which phase the local wizard is in: editing, validating, refused, accepted or choosing models.
+/// Serves: `LocalWizard`, `draw_local_wizard` and `LocalWizard::handle_key`.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `LocalWizard::handle_key` and `local_wizard` set it; the tests set it to arrange a phase.
+/// Down: `handle_key`, `visible`, `chosen` and `draw_local_wizard` match it.
+/// Verify: `cargo test -p loong-tui-app`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WizardState {
     Editing,
@@ -79,6 +117,12 @@ pub enum WizardState {
     },
 }
 
+/// Purpose: A key this machine already had, named by its variable and offered rather than typed into the field.
+/// Serves: `LocalWizard::{offer, offered_key, effective_key}` and `crates/cli/src/local.rs`.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `crates/cli/src/local.rs` builds them; the tests build them.
+/// Down: no call; `LocalWizard` reads it.
+/// Verify: `cargo test -p loong-tui-app`.
 /// The local first run: paste a key, pick who it belongs to, find out.
 ///
 /// A key this machine already had, for one provider.
@@ -95,6 +139,12 @@ pub struct OfferedKey {
     pub key: String,
 }
 
+/// Purpose: The form's state: the typed key, the provider list and choice, the phase and the offered keys.
+/// Serves: `draw_local_wizard`, `local_wizard` and the wizard tests.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `local_wizard` builds it; the tests build it directly.
+/// Down: no call; its methods below change it.
+/// Verify: `cargo test -p loong-tui-app`.
 /// One field and one list. The list exists because a key's shape cannot identify its
 /// owner — no vendor here documents a key format, and `sk-` alone matches four of
 /// them — so the user confirms and the probe decides. A guess only chooses which row
@@ -109,6 +159,12 @@ pub struct LocalWizard {
     pub offered: Vec<OfferedKey>,
 }
 
+/// Purpose: How a turn ended: done, stopped by the person, or failed.
+/// Serves: `Finished`, `App::finished` and the prompt title.
+/// Design: `docs/design/surfaces.md` §3; `docs/design/sessions-lineage.md` §5 (a stop is not a completion).
+/// Up: `App::drain` computes it.
+/// Down: `Finished::line` and `Finished::style` match it.
+/// Verify: `cargo test -p loong-tui-app`.
 /// How a turn ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
@@ -120,6 +176,12 @@ pub enum Outcome {
     Failed,
 }
 
+/// Purpose: The last turn's ending and its duration, held on the prompt box until the next task starts.
+/// Serves: `App::finished`, the prompt title in `App::draw` and the tick tests.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `App::drain` builds it; the tests build it.
+/// Down: `Finished::line` and `Finished::style`.
+/// Verify: `cargo test -p loong-tui-app`.
 /// The last turn's ending, held on screen until the next prompt.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Finished {
@@ -129,6 +191,12 @@ pub struct Finished {
 }
 
 impl Finished {
+    /// Purpose: The one line for this ending, used in both the transcript and the prompt title so the two cannot disagree.
+    /// Serves: `App::drain` and `App::draw`.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `App::drain`, `App::draw` and the tick tests.
+    /// Down: `took_words`.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// The one line that says it, used both as the closing transcript line and as the
     /// prompt's title, so the two can never disagree.
     pub fn line(&self) -> String {
@@ -143,6 +211,12 @@ impl Finished {
         }
     }
 
+    /// Purpose: The colour for this ending: green for done, yellow for stopped, red for failed.
+    /// Serves: `App::draw`.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `App::draw`.
+    /// Down: no call; it maps `Outcome` to a `Style`.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// Its colour, which is half of what makes it readable at a glance.
     pub fn style(&self) -> Style {
         match self.outcome {
@@ -155,6 +229,8 @@ impl Finished {
     }
 }
 
+/// Purpose: Seconds the way a person says them, as the tick line's duration.
+/// Contract: called by `Finished::line`.
 /// Seconds the way a person says them.
 fn took_words(seconds: f64) -> String {
     if seconds < 60.0 {
@@ -168,6 +244,12 @@ fn took_words(seconds: f64) -> String {
     }
 }
 
+/// Purpose: What the wizard's keyboard asks the event loop to do.
+/// Serves: `LocalWizard::handle_key`, `local_wizard` and the wizard tests.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `LocalWizard::handle_key` returns it.
+/// Down: `local_wizard` matches it; the tests assert it.
+/// Verify: `cargo test -p loong-tui-app`.
 #[derive(Debug, PartialEq, Eq)]
 pub enum WizardAction {
     None,
@@ -176,6 +258,12 @@ pub enum WizardAction {
 }
 
 impl LocalWizard {
+    /// Purpose: An empty editing wizard over the given providers.
+    /// Serves: `local_wizard` and the wizard tests.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `local_wizard` and the tests.
+    /// Down: no call; it initialises the `LocalWizard` fields.
+    /// Verify: `cargo test -p loong-tui-app`.
     pub fn new(providers: Vec<ProviderChoice>) -> Self {
         LocalWizard {
             key: String::new(),
@@ -186,10 +274,22 @@ impl LocalWizard {
         }
     }
 
+    /// Purpose: The provider the caret is on, or nothing for an empty list.
+    /// Serves: `ready`, `handle_key`, `draw_local_wizard`, `offered_key` and `local_wizard`.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: those methods.
+    /// Down: no call; it indexes `providers`.
+    /// Verify: `cargo test -p loong-tui-app`.
     pub fn selected(&self) -> Option<&ProviderChoice> {
         self.providers.get(self.provider)
     }
 
+    /// Purpose: Whether the form can be submitted: no key needed, an offer present, or a typed key long enough for a vendor.
+    /// Serves: `LocalWizard::handle_key`'s Enter arm and the wizard tests.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `LocalWizard::handle_key` and the tests.
+    /// Down: `selected` and `offered_key`.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// Whether a key is worth sending anywhere. Not a format check — a length one:
     /// a vendor's own key is at least this long, and an empty field is the only
     /// mistake predictable enough to catch before spending a round trip.
@@ -206,6 +306,12 @@ impl LocalWizard {
         }
     }
 
+    /// Purpose: The key as the form draws it: a three-character prefix then bullets, never the whole secret.
+    /// Serves: `draw_local_wizard` and the never-draws-the-key test.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `draw_local_wizard` and the tests.
+    /// Down: no call; it reads `key`.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// What the field shows. The whole key is never drawn: the person typing it knows
     /// what they pasted, and a screen is a thing other people can see.
     pub fn masked_key(&self) -> String {
@@ -215,6 +321,12 @@ impl LocalWizard {
         format!("{prefix}{}", "•".repeat(chars.len() - visible))
     }
 
+    /// Purpose: The picker rows matching the filter, as indices into the full list so ticks stay put.
+    /// Serves: `handle_choosing`, `draw_model_picker` and the picker tests.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `handle_choosing`, `draw_model_picker` and the tests.
+    /// Down: no call; it reads `WizardState::Choosing`.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// The rows of the picker that match what has been typed, as indices into `all`.
     ///
     /// Indices rather than copies, because the ticks live beside the full list: a filter
@@ -233,6 +345,12 @@ impl LocalWizard {
             .collect()
     }
 
+    /// Purpose: The models that will be written, in the provider's own order.
+    /// Serves: `local_wizard` and the picker tests.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `local_wizard` and the tests.
+    /// Down: no call; it reads the ticks.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// The models that will be written, in the provider's own order.
     pub fn chosen(&self) -> Vec<(String, Option<u64>)> {
         let WizardState::Choosing { all, ticked, .. } = &self.state else {
@@ -245,6 +363,12 @@ impl LocalWizard {
             .collect()
     }
 
+    /// Purpose: The model picker's keyboard: filter, move, tick and finish, with no command stealing a typeable character.
+    /// Serves: `LocalWizard::handle_key`.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `LocalWizard::handle_key`.
+    /// Down: `LocalWizard::visible` and the `WizardState::Choosing` fields.
+    /// Verify: `cargo test -p loong-tui-app`.
     fn handle_choosing(&mut self, key: KeyEvent) -> WizardAction {
         // Read before borrowing the state mutably: the visible rows are a function of it,
         // and a borrow of `self` cannot live inside a borrow of `self.state`.
@@ -328,6 +452,12 @@ impl LocalWizard {
         WizardAction::None
     }
 
+    /// Purpose: Start on the provider an offered key belongs to, without claiming anything about the key.
+    /// Serves: `local_wizard`.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `local_wizard`.
+    /// Down: no call; it sets `provider` and returns the state to editing.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// Start on a particular provider, without claiming anything about its key.
     pub fn preselect(&mut self, provider: &str) {
         if let Some(index) = self.providers.iter().position(|p| p.id == provider) {
@@ -336,6 +466,12 @@ impl LocalWizard {
         self.state = WizardState::Editing;
     }
 
+    /// Purpose: Remember the keys this machine already has, to offer but never type in.
+    /// Serves: `local_wizard` and the wizard tests.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `local_wizard` and the tests.
+    /// Down: no call; it stores `offered`.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// Remember keys this machine already had. They are *offered* from here on: named on
     /// the form, used when `enter` is pressed on an empty field, never typed in on
     /// somebody's behalf.
@@ -343,12 +479,24 @@ impl LocalWizard {
         self.offered = offered;
     }
 
+    /// Purpose: The offered key for the provider now selected, if this machine has one.
+    /// Serves: `ready`, `effective_key` and `draw_local_wizard`.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: those methods and the tests.
+    /// Down: `selected`.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// The key already on this machine for the provider now selected, if any.
     pub fn offered_key(&self) -> Option<&OfferedKey> {
         let id = self.selected()?.id.as_str();
         self.offered.iter().find(|offer| offer.provider == id)
     }
 
+    /// Purpose: The key that would be used: what was typed, else what was offered.
+    /// Serves: `ready` and `local_wizard`.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `local_wizard` and the tests.
+    /// Down: `offered_key`.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// The key that would be used: what was typed, else what was offered.
     pub fn effective_key(&self) -> String {
         if !self.key.trim().is_empty() {
@@ -359,6 +507,12 @@ impl LocalWizard {
             .unwrap_or_default()
     }
 
+    /// Purpose: Float the providers a refusal suggested, keeping the rest in order and never inventing one.
+    /// Serves: `local_wizard` after a failed validation.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `local_wizard`.
+    /// Down: no call; it reorders `providers` and resets the caret.
+    /// Verify: `cargo test -p loong-tui-app`.
     /// Float the named providers to the top, keeping everything else in order.
     ///
     /// Ids that are not offered are ignored: a caller cannot conjure a provider into a
@@ -387,6 +541,12 @@ impl LocalWizard {
         self.provider = 0;
     }
 
+    /// Purpose: The form's keyboard: type or offer a key, move provider, submit or leave, and freeze while validating.
+    /// Serves: `local_wizard` and the wizard tests.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `local_wizard` and the tests.
+    /// Down: `handle_choosing`, `ready` and `selected`.
+    /// Verify: `cargo test -p loong-tui-app`.
     pub fn handle_key(&mut self, key: KeyEvent) -> WizardAction {
         use ratatui::crossterm::event::KeyCode;
         // A form that cannot be left is a form that can strand a terminal.
@@ -448,6 +608,12 @@ impl LocalWizard {
     }
 }
 
+/// Purpose: Draw the API-key form, or hand over to the model picker when the vendor answered with models.
+/// Serves: `local_wizard`.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `local_wizard`.
+/// Down: `draw_model_picker`, `masked_key`, `offered_key` and `selected`.
+/// Verify: `cargo test -p loong-tui-app`.
 pub(super) fn draw_local_wizard(frame: &mut ratatui::Frame, wizard: &LocalWizard) {
     if matches!(wizard.state, WizardState::Choosing { .. }) {
         return draw_model_picker(frame, wizard);
@@ -546,6 +712,12 @@ pub(super) fn draw_local_wizard(frame: &mut ratatui::Frame, wizard: &LocalWizard
     frame.render_widget(Paragraph::new(help).style(style), chunks[3]);
 }
 
+/// Purpose: Draw the model list with ticks, a filter field, a scrolling window and the count of what is chosen.
+/// Serves: `draw_local_wizard`.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `draw_local_wizard`.
+/// Down: `LocalWizard::visible` and the mark palette.
+/// Verify: `cargo test -p loong-tui-app`.
 /// The list a provider answered with, and which of it to keep.
 ///
 /// Every row is `[x] name`, so the state of the whole list is readable at a glance —
@@ -676,6 +848,12 @@ fn draw_model_picker(frame: &mut ratatui::Frame, wizard: &LocalWizard) {
     );
 }
 
+/// Purpose: What to do after a provider answers: accept when it named nothing, choose when it named models.
+/// Serves: `local_wizard`.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `local_wizard` compares a validation against it.
+/// Down: no call; `after_validation` returns it.
+/// Verify: `cargo test -p loong-tui-app`.
 /// What to do once a provider has answered.
 ///
 /// Split out so the rule is stated once and can be tested without a terminal — it is the
@@ -690,6 +868,12 @@ pub enum AfterValidation {
     Choose,
 }
 
+/// Purpose: The one rule for whether a model list is shown: any named model is shown, none is accepted silently.
+/// Serves: `local_wizard`.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `local_wizard`.
+/// Down: no call; it returns the enum.
+/// Verify: `cargo test -p loong-tui-app`.
 /// One model is a choice too.
 pub fn after_validation(models: &[(String, Option<u64>)]) -> AfterValidation {
     if models.is_empty() {
@@ -699,6 +883,12 @@ pub fn after_validation(models: &[(String, Option<u64>)]) -> AfterValidation {
     }
 }
 
+/// Purpose: Run the full-screen first run: ask for a key, validate it, show the models and return the human's choice.
+/// Serves: `crates/cli/src/local.rs`'s first run.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `crates/cli/src/local.rs`.
+/// Down: `full_screen_needs_a_terminal`, `LocalWizard`, `draw_local_wizard` and `after_validation`.
+/// Verify: `cargo test -p loong-tui-app`.
 /// Ask for one API key, validate it, and say what the vendor answered.
 ///
 /// The validation is a callback because this crate must not know how to reach a

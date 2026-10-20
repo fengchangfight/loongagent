@@ -43,7 +43,6 @@ crates/context/tests/synthesis.rs
 crates/context/tests/two_writers.rs
 crates/context/tests/window_cost.rs
 crates/context/tests/worker.rs
-crates/kernel/src/turn/tests.rs
 crates/tui-app/src/lib.rs
 crates/tui-app/src/mention.rs
 crates/tui-app/src/setup.rs

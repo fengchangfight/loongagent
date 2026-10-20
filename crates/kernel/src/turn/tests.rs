@@ -1,3 +1,17 @@
+//! Purpose: Pin the turn's end-to-end behaviour: the gate, approvals, the budget, replay and lineage, routing, skills, hooks, compaction and recall.
+//!
+//! Serves: a regression net under `docs/design/kernel-loop.md` §6: every ending, every
+//! recorded fact and every refusal this repository promises is asserted here.
+//!
+//! # Contract
+//! - **Design:** `docs/design/kernel-loop.md` §6; `docs/design/context-ledger.md`,
+//!   `docs/design/sessions-lineage.md`, `docs/design/tools-permissions.md` and
+//!   `docs/design/extension-model.md` own the behaviour each test reaches.
+//! - **Upstream:** the `turn` module's public API and the `Kernel` it builds.
+//! - **Downstream:** `Temp`, `RecordingModel`, the streaming and stopping models, and
+//!   the scripted helpers below.
+//! - **Verify:** `cargo test -p loong-kernel turn::tests`.
+
 use super::nudge::{leaked_tool_call, looks_like_pasted_file};
 use super::recall::RECALL_MAX_CHARS;
 use super::*;
@@ -9,11 +23,21 @@ use std::sync::{Arc, Mutex};
 
 static N: AtomicU64 = AtomicU64::new(0);
 
+/// Purpose: A temporary workspace with its own session log, removed when the test ends.
+///
+/// Serves: every test starting from a clean directory and a clean log.
+/// Design: `docs/design/kernel-loop.md` §1.
+/// Up: the turn tests that build a kernel.
+/// Down: `Temp::new` and `Temp::drop`; the tests' `dir` and `log` fields.
+/// Verify: `cargo test -p loong-kernel turn::tests`.
 struct Temp {
     dir: PathBuf,
     log: PathBuf,
 }
 impl Temp {
+    /// Purpose: Create a fresh directory and session-log path for one test.
+    ///
+    /// Contract: `turn/tests.rs` fixtures.
     fn new() -> Self {
         let dir = std::env::temp_dir().join(format!(
             "loong-kernel-{}-{}",
@@ -26,11 +50,21 @@ impl Temp {
     }
 }
 impl Drop for Temp {
+    /// Purpose: Remove the temporary directory when the test ends, passing or failing.
+    ///
+    /// Contract: `turn/tests.rs` fixtures.
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
 
+/// Purpose: Install a hook manifest and its scripts, and trust it when the test asks.
+///
+/// Serves: tests that need a real hook set on disk, trusted or deliberately inert.
+/// Design: `docs/design/extension-model.md` §1 and §7.
+/// Up: the hook tests in this file.
+/// Down: `HookSet::load` and `trust_now`; writes `.loongagent/hooks.toml` and the scripts.
+/// Verify: `cargo test -p loong-kernel turn::tests::a_pre_tool_hook_can_deny_what_the_policy_would_allow`.
 /// Install a hook manifest (and its scripts) in the workspace. `trust`
 /// decides whether the hooks are allowed to run at all.
 fn install_hooks(dir: &Path, manifest: &str, scripts: &[(&str, &str)], trust: bool) {
@@ -48,6 +82,9 @@ fn install_hooks(dir: &Path, manifest: &str, scripts: &[(&str, &str)], trust: bo
     }
 }
 
+/// Purpose: Build a tool-call request from an id, a tool name and JSON arguments.
+///
+/// Contract: `turn/tests.rs` fixtures.
 fn call(id: &str, tool: &str, args: serde_json::Value) -> ToolCallRequest {
     ToolCallRequest {
         call_id: id.into(),
@@ -56,6 +93,9 @@ fn call(id: &str, tool: &str, args: serde_json::Value) -> ToolCallRequest {
     }
 }
 
+/// Purpose: Build a model response with optional text, calls and usage.
+///
+/// Contract: `turn/tests.rs` fixtures.
 fn response(calls: Vec<ToolCallRequest>, text: Option<&str>) -> CompletionResponse {
     CompletionResponse {
         text: text.map(|t| t.to_string()),
@@ -67,6 +107,9 @@ fn response(calls: Vec<ToolCallRequest>, text: Option<&str>) -> CompletionRespon
     }
 }
 
+/// Purpose: The event kinds in a log, in order, for an end-to-end assertion.
+///
+/// Contract: `turn/tests.rs` fixtures.
 fn kinds(log: &Path) -> Vec<String> {
     loong_eventlog::replay(log)
         .unwrap()
@@ -76,6 +119,7 @@ fn kinds(log: &Path) -> Vec<String> {
         .collect()
 }
 
+/// Purpose: An allowed `read_file` runs, the model reads its output, and the turn ends with the answer — the baseline the loop is measured against.
 #[test]
 fn a_tool_runs_and_the_turn_finishes() {
     let t = Temp::new();
@@ -126,6 +170,7 @@ fn a_tool_runs_and_the_turn_finishes() {
         .contains("hi from the workspace"));
 }
 
+/// Purpose: `/yolo` turns an out-of-bounds ask into an allow and records `permissions.relaxed` plus a `yolo:` ruling, so the log says why nothing asked.
 #[test]
 fn opting_out_of_prompts_allows_the_action_and_says_so_in_the_log() {
     let t = Temp::new();
@@ -172,6 +217,7 @@ fn opting_out_of_prompts_allows_the_action_and_says_so_in_the_log() {
     let _ = std::fs::remove_file(&escape);
 }
 
+/// Purpose: An out-of-bounds write parks the turn with `approval.requested`, writes nothing, and resumes on a denial with the answer in the log.
 #[test]
 fn an_out_of_bounds_write_asks_then_resumes_on_the_answer() {
     let t = Temp::new();
@@ -217,6 +263,7 @@ fn an_out_of_bounds_write_asks_then_resumes_on_the_answer() {
     assert_eq!(denied.data["ok"], false);
 }
 
+/// Purpose: A granted approval runs the same PEP, and the tool's own guard still refuses a write outside the workspace.
 #[test]
 fn a_granted_approval_still_cannot_escape_the_workspace() {
     let t = Temp::new();
@@ -247,6 +294,7 @@ fn a_granted_approval_still_cannot_escape_the_workspace() {
         .contains("outside the workspace"));
 }
 
+/// Purpose: A session-tightened PDP rule denies an out-of-bounds read without asking, records `session:` as the rule, and feeds the refusal back.
 #[test]
 fn a_tightened_policy_denies_without_asking() {
     let t = Temp::new();
@@ -277,6 +325,7 @@ fn a_tightened_policy_denies_without_asking() {
         .contains("denied by policy"));
 }
 
+/// Purpose: A call to an unknown tool becomes a failed `tool.result` and the turn continues, because a bad call is not a failed turn.
 #[test]
 fn an_unknown_tool_is_reported_not_fatal() {
     let t = Temp::new();
@@ -295,6 +344,7 @@ fn an_unknown_tool_is_reported_not_fatal() {
         .contains("unknown tool"));
 }
 
+/// Purpose: A model that keeps calling tools stops at `max_steps` with the step-limit note, so a spinning model cannot run forever.
 #[test]
 fn the_step_limit_stops_a_spinning_model() {
     let t = Temp::new();
@@ -309,6 +359,7 @@ fn the_step_limit_stops_a_spinning_model() {
     assert!(out.final_text.unwrap().contains("step limit"));
 }
 
+/// Purpose: When one call in a batched message asks, the rest still get `tool.result` saying they did not run, because a provider rejects two calls with one result.
 #[test]
 fn a_message_that_stops_for_an_approval_still_answers_every_call_it_made() {
     // Two calls in one message, the first of which asks. The turn stops there, and the
@@ -359,6 +410,7 @@ fn a_message_that_stops_for_an_approval_still_answers_every_call_it_made() {
     );
 }
 
+/// Purpose: The default `max_steps` lets twenty real tool rounds finish, guarding against the old eight-step death mid-edit.
 #[test]
 fn the_default_step_limit_leaves_room_for_a_real_task() {
     // Writing one page is read, write, run, fix, repeat — dozens of model calls, not
@@ -390,6 +442,7 @@ fn the_default_step_limit_leaves_room_for_a_real_task() {
     assert_eq!(out.final_text.as_deref(), Some("done"));
 }
 
+/// Purpose: `max_steps = 0` means unlimited in both config and a layer, not an empty range that ends before the model is asked.
 #[test]
 fn zero_steps_is_no_limit_rather_than_no_work() {
     // `0` reads as "unset" everywhere a person writes it — `--max-steps 0`, or
@@ -431,6 +484,7 @@ fn zero_steps_is_no_limit_rather_than_no_work() {
     assert_eq!(k.submit("go").unwrap().steps, 1);
 }
 
+/// Purpose: A model's declared `budget_tokens` becomes the session cap and only narrows, so a routed-to model cannot outgrow its window.
 #[test]
 fn a_budget_a_model_declares_is_the_sessions_budget() {
     // The pack this repository ships writes `budget_tokens = 128000` on its only model.
@@ -465,6 +519,7 @@ fn a_budget_a_model_declares_is_the_sessions_budget() {
     assert_eq!(effective_budget(None, &two), Some(32_000));
 }
 
+/// Purpose: With no budget, a model's context window still triggers compaction; with neither, nothing compacts, so an unbounded session is not silent.
 #[test]
 fn the_models_window_bounds_the_context_when_no_budget_does() {
     // Same prompts, same everything but the window: one compacts, the other has nothing
@@ -510,6 +565,7 @@ fn the_models_window_bounds_the_context_when_no_budget_does() {
     );
 }
 
+/// Purpose: Every message has exactly one ledger entry, the system prompt included, pinning the lockstep that makes the ledger the model's view.
 #[test]
 fn the_ledger_and_the_conversation_stay_in_step() {
     let t = Temp::new();
@@ -540,6 +596,8 @@ fn the_ledger_and_the_conversation_stay_in_step() {
 // The escape is stopped by landlock, so this test only means anything where
 // landlock exists. On a platform without a PEP the kernel says `unconfined:`
 // and the same command succeeds — which `sandbox self-test` reports loudly.
+
+/// Purpose: Landlock stops `touch ../file` even though the classifier allowed it: the OS is the enforcement boundary, not the heuristic.
 #[test]
 #[cfg(target_os = "linux")]
 fn the_pep_stops_an_escape_the_classifier_cannot_see() {
@@ -580,6 +638,7 @@ fn the_pep_stops_an_escape_the_classifier_cannot_see() {
     assert!(!escape.exists(), "the escaped file must not exist");
 }
 
+/// Purpose: A workspace write through the shell runs under the same confinement, so the PEP is not a blanket refusal.
 #[test]
 fn the_pep_still_allows_a_workspace_write_through_the_shell() {
     let t = Temp::new();
@@ -605,6 +664,7 @@ fn the_pep_still_allows_a_workspace_write_through_the_shell() {
     assert_eq!(result.data["ok"], true, "{:?}", result.data["output"]);
 }
 
+/// Purpose: A read-only shell verb is classified `Investigate` and allowed, keeping read work free.
 #[test]
 fn a_read_only_shell_command_is_an_investigate_action() {
     let t = Temp::new();
@@ -632,14 +692,27 @@ fn a_read_only_shell_command_is_an_investigate_action() {
         .contains("content here"));
 }
 
+/// Purpose: The bundled fake MCP server used by the MCP tests.
+///
+/// Contract: `turn/tests.rs` MCP fixtures.
 fn fake_mcp() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../mcp/tests/fake_mcp_server.py")
 }
 
+/// Purpose: Install the fake MCP server as trusted, with the given action class, if it can run.
+///
+/// Contract: `turn/tests.rs` MCP fixtures.
 fn install_mcp(dir: &Path, action_class: &str, trust: bool) -> bool {
     install_mcp_mode(dir, action_class, trust, "normal")
 }
 
+/// Purpose: Install the fake MCP server in a given mode and trust it, or report that the fixture cannot run.
+///
+/// Serves: MCP tests that need a live server but must skip cleanly where python3 is absent.
+/// Design: `docs/design/extension-model.md` §3.
+/// Up: the MCP prompt and tool tests.
+/// Down: `fake_mcp`, `std::process::Command` and `McpSet::trust_now`; writes `.loongagent/mcp.toml`.
+/// Verify: `cargo test -p loong-kernel turn::tests::an_mcp_tool_is_just_another_tool`.
 fn install_mcp_mode(dir: &Path, action_class: &str, trust: bool, mode: &str) -> bool {
     let script = fake_mcp();
     if !script.exists()
@@ -668,6 +741,7 @@ fn install_mcp_mode(dir: &Path, action_class: &str, trust: bool, mode: &str) -> 
     true
 }
 
+/// Purpose: A trusted MCP prompt is advertised as `/mcp__server__prompt`, fetched on invoke with its argument substituted, and accounted for in `skill.invoked`.
 #[test]
 fn an_mcp_prompt_becomes_a_command_with_its_body_fetched_on_invoke() {
     let t = Temp::new();
@@ -714,6 +788,7 @@ fn an_mcp_prompt_becomes_a_command_with_its_body_fetched_on_invoke() {
     );
 }
 
+/// Purpose: The `skill` tool fetches an MCP prompt's body from its server and names the origin, so the model can load it on demand.
 #[test]
 fn the_model_can_fetch_an_mcp_prompt_body_with_the_tool() {
     let t = Temp::new();
@@ -744,6 +819,7 @@ fn the_model_can_fetch_an_mcp_prompt_body_with_the_tool() {
     );
 }
 
+/// Purpose: `/help` lists MCP prompts with their argument hints, so a server's commands are discoverable.
 #[test]
 fn help_lists_the_servers_prompts_too() {
     let t = Temp::new();
@@ -767,6 +843,7 @@ fn help_lists_the_servers_prompts_too() {
     assert!(user.contains("Walk the release checklist"), "{user}");
 }
 
+/// Purpose: A server with no prompts adds no commands but keeps its tools, so one empty list does not disable the server.
 #[test]
 fn a_server_without_prompts_contributes_none() {
     let t = Temp::new();
@@ -784,6 +861,7 @@ fn a_server_without_prompts_contributes_none() {
     assert!(k.tools_mut().names().contains(&"mcp__fake__ping"));
 }
 
+/// Purpose: A broken MCP prompt refuses the turn with `skill.invoked` naming the error and never calls the model.
 #[test]
 fn a_prompt_that_fails_to_load_refuses_the_turn_instead_of_reaching_the_model() {
     let t = Temp::new();
@@ -818,6 +896,7 @@ fn a_prompt_that_fails_to_load_refuses_the_turn_instead_of_reaching_the_model() 
     );
 }
 
+/// Purpose: An MCP tool records `tool.call`, a declared-class `policy.decided` and `tool.result` like a built-in: one interface, one audit trail.
 #[test]
 fn an_mcp_tool_is_just_another_tool() {
     let t = Temp::new();
@@ -856,6 +935,7 @@ fn an_mcp_tool_is_just_another_tool() {
         .contains("pong: hello"));
 }
 
+/// Purpose: An MCP tool with the cautious `out_of_bounds` default asks first and resumes through the same approval seam.
 #[test]
 fn an_mcp_tool_with_the_default_class_asks_first() {
     let t = Temp::new();
@@ -884,6 +964,7 @@ fn an_mcp_tool_with_the_default_class_asks_first() {
     assert!(result.data["output"].as_str().unwrap().contains("pong: hi"));
 }
 
+/// Purpose: An `mcp` pre_tool hook can deny a built-in shell call, and `policy.decided` names the hook that did it.
 #[test]
 fn an_mcp_hook_can_gate_a_builtin_tool() {
     let t = Temp::new();
@@ -935,6 +1016,7 @@ fn an_mcp_hook_can_gate_a_builtin_tool() {
     );
 }
 
+/// Purpose: An `mcp` hook whose server is absent records `failed: true` and denies; no server means no consent.
 #[test]
 fn an_mcp_hook_without_a_server_fails_closed() {
     let t = Temp::new();
@@ -962,6 +1044,7 @@ fn an_mcp_hook_without_a_server_fails_closed() {
     assert!(!t.dir.join("nope.txt").exists());
 }
 
+/// Purpose: An untrusted `mcp.toml` starts no server and registers no tools; the note says INERT.
 #[test]
 fn an_untrusted_mcp_manifest_starts_nothing() {
     let t = Temp::new();
@@ -975,6 +1058,7 @@ fn an_untrusted_mcp_manifest_starts_nothing() {
     assert!(!k.tools_mut().names().iter().any(|n| n.starts_with("mcp__")));
 }
 
+/// Purpose: A required MCP server that cannot start fails the session with `KernelError::Mcp` rather than silently dropping a guard.
 #[test]
 fn a_required_server_that_cannot_start_is_fatal() {
     let t = Temp::new();
@@ -997,6 +1081,7 @@ fn a_required_server_that_cannot_start_is_fatal() {
     assert!(matches!(err, KernelError::Mcp(_)), "{err}");
 }
 
+/// Purpose: A `required = false` server that cannot start becomes a note and the session opens, so optional capabilities degrade visibly.
 #[test]
 fn an_optional_server_is_only_a_note() {
     let t = Temp::new();
@@ -1017,6 +1102,13 @@ fn an_optional_server_is_only_a_note() {
     assert!(k.mcp_note().contains("unavailable"), "{}", k.mcp_note());
 }
 
+/// Purpose: A model that answers from a script and records every request it was shown.
+///
+/// Serves: asserting what compaction, replay, routing and nudging actually sent.
+/// Design: `docs/design/kernel-loop.md` §2 and §6.
+/// Up: the compaction, replay, routing and nudge tests.
+/// Down: `RecordingModel::new`, `with_window`, `Model::complete` and the shared `seen` log.
+/// Verify: `cargo test -p loong-kernel turn::tests::compaction_clears_stale_tool_output_before_dropping_anything`.
 /// A model that answers from a script and records what it was shown, which is
 /// the only way to check what compaction actually sent.
 struct RecordingModel {
@@ -1026,10 +1118,20 @@ struct RecordingModel {
 }
 
 impl RecordingModel {
+    /// Purpose: A recording model with no declared window and the shared request log.
+    ///
+    /// Contract: `turn/tests.rs` fixtures.
     fn new(responses: Vec<CompletionResponse>) -> (Self, Arc<Mutex<Vec<Vec<ChatMessage>>>>) {
         Self::with_window(responses, None)
     }
 
+    /// Purpose: A recording model that declares a context window, for the ceiling tests.
+    ///
+    /// Serves: measuring a window that bounds the context when no budget does.
+    /// Design: `docs/design/context-ledger.md` §3.
+    /// Up: the window and compaction tests.
+    /// Down: the `RecordingModel` fields; `Model::context_window` returns the window.
+    /// Verify: `cargo test -p loong-kernel turn::tests::the_models_window_bounds_the_context_when_no_budget_does`.
     /// A model that declares how much it can hold, for the compaction tests.
     fn with_window(
         responses: Vec<CompletionResponse>,
@@ -1048,10 +1150,16 @@ impl RecordingModel {
 }
 
 impl Model for RecordingModel {
+    /// Purpose: The declared window; `None` means this model does not bound the context.
+    ///
+    /// Contract: `turn/tests.rs` fixtures.
     fn context_window(&self) -> Option<u64> {
         self.window
     }
 
+    /// Purpose: Record the request and pop the next scripted response, failing when the script is exhausted.
+    ///
+    /// Contract: `turn/tests.rs` fixtures.
     fn complete(&mut self, request: &CompletionRequest) -> Result<CompletionResponse, ModelError> {
         self.seen.lock().unwrap().push(request.messages.clone());
         self.responses
@@ -1060,6 +1168,9 @@ impl Model for RecordingModel {
     }
 }
 
+/// Purpose: A file big enough that its tool output has to be cleared.
+///
+/// Contract: `turn/tests.rs` compaction fixtures.
 /// A file big enough that its output has to be cleared.
 fn big_file(dir: &Path, name: &str, lines: usize) -> PathBuf {
     let body: String = (0..lines)
@@ -1070,6 +1181,9 @@ fn big_file(dir: &Path, name: &str, lines: usize) -> PathBuf {
     path
 }
 
+/// Purpose: Resolve a real profile from a file, so provenance is not hand-made.
+///
+/// Contract: `turn/tests.rs` configuration fixtures.
 /// A resolved profile from a real file, so the provenance (which the PDP rule
 /// string is built from) is the real thing rather than a hand-made struct.
 fn settings_from(dir: &Path, body: &str) -> Profile {
@@ -1078,12 +1192,16 @@ fn settings_from(dir: &Path, body: &str) -> Profile {
     loong_config::resolve(&[(loong_config::Layer::User, path)], dir).unwrap()
 }
 
+/// Purpose: Install a `/name` command file under `.loongagent/commands`.
+///
+/// Contract: `turn/tests.rs` skill fixtures.
 fn install_command(dir: &Path, name: &str, body: &str) {
     let commands = dir.join(".loongagent/commands");
     std::fs::create_dir_all(&commands).unwrap();
     std::fs::write(commands.join(format!("{name}.md")), body).unwrap();
 }
 
+/// Purpose: `/review HEAD~1` substitutes its argument into the body, and `skill.invoked` records the file source and the argument.
 #[test]
 fn a_command_expands_into_its_body_and_the_event_names_the_file() {
     let t = Temp::new();
@@ -1131,6 +1249,7 @@ Look at $ARGUMENTS and report only real bugs.
     );
 }
 
+/// Purpose: A mistyped `/reveiw` is refused with `/help` named in the error and never reaches the model.
 #[test]
 fn an_unknown_command_is_refused_and_never_reaches_the_model() {
     let t = Temp::new();
@@ -1159,6 +1278,7 @@ fn an_unknown_command_is_refused_and_never_reaches_the_model() {
     );
 }
 
+/// Purpose: `/etc/hosts is misconfigured` is a normal prompt, not a command, because a path is not an invocation.
 #[test]
 fn a_sentence_that_starts_with_a_path_is_a_normal_prompt() {
     let t = Temp::new();
@@ -1178,6 +1298,7 @@ fn a_sentence_that_starts_with_a_path_is_a_normal_prompt() {
     assert!(!events.iter().any(|e| e.kind == ev::SKILL_INVOKED));
 }
 
+/// Purpose: The system prompt carries descriptions only and withholds bodies until invoke, so the catalogue does not pay for every skill.
 #[test]
 fn the_catalogue_is_in_context_and_the_body_is_not() {
     let t = Temp::new();
@@ -1219,6 +1340,7 @@ SECRET-BODY-STEPS
     assert!(loaded.data["names"].as_str().unwrap().contains("release"));
 }
 
+/// Purpose: A plugin's bootstrap skill is seated in full with its source and adaptation notes, and still appears in the catalogue and `skills.loaded`.
 /// ADR-0018: the body of a skill a plugin names is in the prompt from the first
 /// turn — the native form of the `SessionStart` injection this class of plugin
 /// performs with a hook on other harnesses.
@@ -1272,6 +1394,7 @@ ALWAYS-LOOK-FOR-A-SKILL-FIRST
         .contains("using-superpowers"));
 }
 
+/// Purpose: A declared bootstrap name missing from the catalogue refuses the session with reinstall advice, instead of opening with a silent gap.
 #[test]
 fn a_bootstrap_name_that_is_not_a_skill_refuses_the_session() {
     let t = Temp::new();
@@ -1285,6 +1408,7 @@ fn a_bootstrap_name_that_is_not_a_skill_refuses_the_session() {
     assert!(err.contains("reinstall the plugin"), "{err}");
 }
 
+/// Purpose: Config disabling a bootstrap skill is a deliberate off, not a broken declaration, so the session opens without the instruction.
 #[test]
 fn disabling_a_bootstrap_skill_turns_it_off_rather_than_refusing() {
     let t = Temp::new();
@@ -1318,6 +1442,7 @@ ALWAYS-LOOK-FOR-A-SKILL-FIRST
     assert!(!system.contains("/using-superpowers"), "{system}");
 }
 
+/// Purpose: The `skill` tool loads a body by name, classified `Investigate`, so loading instructions is read-only.
 #[test]
 fn the_model_can_load_a_body_by_name() {
     let t = Temp::new();
@@ -1355,6 +1480,7 @@ Step one: breathe.
     );
 }
 
+/// Purpose: Under budget pressure every request still starts with the system prompt and is never empty, pinning the prompt as un-evictable.
 #[test]
 fn compaction_never_drops_the_system_prompt() {
     let t = Temp::new();
@@ -1381,14 +1507,32 @@ fn compaction_never_drops_the_system_prompt() {
     assert!(!sent.last().unwrap().is_empty());
 }
 
+/// Purpose: A model that emits its answer in pieces through `complete_streaming`.
+///
+/// Serves: proving deltas are a preview and never become a second record.
+/// Design: `docs/design/kernel-loop.md` §3.
+/// Up: `deltas_are_a_preview_and_never_the_record`.
+/// Down: `Model::complete_streaming`; `complete` panics because this model has no non-streaming path.
+/// Verify: `cargo test -p loong-kernel turn::tests::deltas_are_a_preview_and_never_the_record`.
 struct StreamingModel {
     pieces: Vec<String>,
 }
 
 impl Model for StreamingModel {
+    /// Purpose: The non-streaming path is unreachable for this model.
+    ///
+    /// Contract: `turn/tests.rs` fixtures.
     fn complete(&mut self, _request: &CompletionRequest) -> Result<CompletionResponse, ModelError> {
         unreachable!("this model is only used through its streaming path")
     }
+
+    /// Purpose: Call `on_delta` for every piece and return the concatenated answer.
+    ///
+    /// Serves: a deterministic delta order and a final message that does not depend on the fragments.
+    /// Design: `docs/design/kernel-loop.md` §3.
+    /// Up: `Kernel::run_inner` through `Kernel::submit_with`.
+    /// Down: the `on_delta` callback and `CompletionResponse`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::deltas_are_a_preview_and_never_the_record`.
     fn complete_streaming(
         &mut self,
         _request: &CompletionRequest,
@@ -1408,6 +1552,7 @@ impl Model for StreamingModel {
     }
 }
 
+/// Purpose: Streaming deltas arrive in order but are not logged and add one assistant ledger entry, so a preview never becomes a second record.
 #[test]
 fn deltas_are_a_preview_and_never_the_record() {
     let t = Temp::new();
@@ -1450,6 +1595,13 @@ fn deltas_are_a_preview_and_never_the_record() {
     assert_eq!(history, 1, "one assistant entry, not one per delta");
 }
 
+/// Purpose: A model that sets the stop flag during its first call, as a signal handler would.
+///
+/// Serves: a stop arriving mid-turn that belongs to that turn only.
+/// Design: `docs/design/kernel-loop.md` §5.
+/// Up: `a_turn_stops_at_the_next_boundary_and_the_log_says_who_stopped_it`.
+/// Down: the shared `AtomicBool` and the `called` counter; `Model::complete`.
+/// Verify: `cargo test -p loong-kernel turn::tests::a_turn_stops_at_the_next_boundary_and_the_log_says_who_stopped_it`.
 /// A model that asks for the turn to stop while it runs — which is what a signal
 /// arriving mid-turn looks like from inside the kernel.
 struct StoppingModel {
@@ -1458,6 +1610,13 @@ struct StoppingModel {
 }
 
 impl Model for StoppingModel {
+    /// Purpose: Set the stop flag on the first call and answer normally afterwards.
+    ///
+    /// Serves: the next turn not inheriting a stop that was meant for the previous one.
+    /// Design: `docs/design/kernel-loop.md` §5.
+    /// Up: `Kernel::run_inner`'s step loop.
+    /// Down: the shared `AtomicBool`; returns a tool call first and an answer later.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_turn_stops_at_the_next_boundary_and_the_log_says_who_stopped_it`.
     fn complete(&mut self, _request: &CompletionRequest) -> Result<CompletionResponse, ModelError> {
         self.called += 1;
         if self.called > 1 {
@@ -1487,6 +1646,9 @@ impl Model for StoppingModel {
     }
 }
 
+/// Purpose: Write a child log the way `loongagent fork` does: one lineage event, nothing copied.
+///
+/// Contract: `turn/tests.rs` lineage fixtures.
 /// Write the child the way `loongagent fork` does: one lineage event, nothing copied.
 fn fork_log(child: &Path, parent_id: &str, at: u64) {
     let mut log = loong_eventlog::SessionLog::create(child).unwrap();
@@ -1501,6 +1663,9 @@ fn fork_log(child: &Path, parent_id: &str, at: u64) {
     .unwrap();
 }
 
+/// Purpose: Whether any request the model saw contained the exact message text.
+///
+/// Contract: `turn/tests.rs` replay fixtures.
 fn saw(seen: &Arc<Mutex<Vec<Vec<ChatMessage>>>>, needle: &str) -> bool {
     seen.lock()
         .unwrap()
@@ -1514,6 +1679,7 @@ fn saw(seen: &Arc<Mutex<Vec<Vec<ChatMessage>>>>, needle: &str) -> bool {
         })
 }
 
+/// Purpose: Reopening a session replays its user and assistant history into the next request, fixing the resume that forgot the conversation.
 #[test]
 fn a_reopened_session_hands_the_model_its_own_history() {
     // The bug this exists for: `messages` started empty, so resuming a session
@@ -1540,6 +1706,7 @@ fn a_reopened_session_hands_the_model_its_own_history() {
         .any(|entry| entry.source == "user"));
 }
 
+/// Purpose: A replay stitches one assistant message with all its calls before the results, so a valid multi-call log can never be unopenable.
 #[test]
 fn a_turn_with_several_tool_calls_replays_every_one_of_them() {
     // The shape a real session has, taken from one: **one** assistant message, then
@@ -1627,6 +1794,7 @@ fn a_turn_with_several_tool_calls_replays_every_one_of_them() {
     );
 }
 
+/// Purpose: A child references its parent and replays the prefix without copying it, labelling inherited history `user from parent`.
 #[test]
 fn a_child_sees_its_parents_prefix_without_copying_it() {
     let t = Temp::new();
@@ -1666,6 +1834,7 @@ fn a_child_sees_its_parents_prefix_without_copying_it() {
     );
 }
 
+/// Purpose: A fork at an earlier sequence leaves later parent turns out of the child's context, pinning `parent_seq` as inclusive and bounded.
 #[test]
 fn forking_earlier_leaves_the_later_parent_turns_behind() {
     let t = Temp::new();
@@ -1689,6 +1858,7 @@ fn forking_earlier_leaves_the_later_parent_turns_behind() {
     assert!(!saw(&seen, "turn two"), "and what it does not");
 }
 
+/// Purpose: A three-generation chain is stitched oldest first with per-ancestor provenance, so deeper lineage is not flattened.
 #[test]
 fn a_chain_of_children_is_stitched_oldest_first() {
     let t = Temp::new();
@@ -1736,6 +1906,7 @@ fn a_chain_of_children_is_stitched_oldest_first() {
     assert!(sources.iter().any(|s| s == "user from b"), "{sources:?}");
 }
 
+/// Purpose: A missing ancestor refuses to open and names the child, the parent and ADR-0014, because a child without its prefix is inoperable.
 #[test]
 fn a_child_without_its_parent_says_which_chain_is_broken() {
     let t = Temp::new();
@@ -1754,6 +1925,7 @@ fn a_child_without_its_parent_says_which_chain_is_broken() {
     assert!(error.contains("ADR-0014"), "and the way out: {error}");
 }
 
+/// Purpose: A cyclic lineage is refused with the repeated session named, so the replay cannot loop forever.
 #[test]
 fn a_cycle_in_the_lineage_is_refused() {
     let t = Temp::new();
@@ -1772,6 +1944,7 @@ fn a_cycle_in_the_lineage_is_refused() {
     assert!(error.contains("cyclic"), "{error}");
 }
 
+/// Purpose: A stop requested mid-turn ends after the current step with `turn.interrupted`, and the next turn runs normally.
 #[test]
 fn a_turn_stops_at_the_next_boundary_and_the_log_says_who_stopped_it() {
     let t = Temp::new();
@@ -1809,6 +1982,7 @@ fn a_turn_stops_at_the_next_boundary_and_the_log_says_who_stopped_it() {
     assert_eq!(second.final_text.as_deref(), Some("done"));
 }
 
+/// Purpose: `context_explain` reports tokens, messages, tools and categories largest first, and reading it writes no event.
 #[test]
 fn the_context_view_says_what_the_next_request_will_carry() {
     let t = Temp::new();
@@ -1862,6 +2036,7 @@ fn the_context_view_says_what_the_next_request_will_carry() {
     );
 }
 
+/// Purpose: The explain view distinguishes memory off from on-but-empty and shows the deterministic digest after a turn.
 #[test]
 fn the_context_view_says_which_memory_is_on_even_before_it_produces_a_map() {
     // "Off" and "on, but nothing produced yet" have the same ledger — neither has
@@ -1928,6 +2103,7 @@ fn the_context_view_says_which_memory_is_on_even_before_it_produces_a_map() {
     );
 }
 
+/// Purpose: A semantic engine reports its mode and summariser name even when the model is unreachable, so a status panel does not guess.
 #[test]
 fn a_semantic_session_names_its_model_in_the_explain_view() {
     let t = Temp::new();
@@ -1962,6 +2138,7 @@ fn a_semantic_session_names_its_model_in_the_explain_view() {
     );
 }
 
+/// Purpose: A router rule switches models on step number and records `model.selected` with the rule and the step, making the switch auditable.
 #[test]
 fn the_router_can_switch_models_and_the_log_says_why() {
     let t = Temp::new();
@@ -2023,6 +2200,7 @@ fn the_router_can_switch_models_and_the_log_says_why() {
     );
 }
 
+/// Purpose: The model switch reaches the live event sink while the turn runs, not after it, fixing a mid-turn switch nobody could see.
 #[test]
 fn a_rule_driven_switch_reaches_a_watcher_while_the_turn_is_still_running() {
     // A model change is news, and news arrives when it happens. Writing it straight
@@ -2073,6 +2251,9 @@ fn a_rule_driven_switch_reaches_a_watcher_while_the_turn_is_still_running() {
     );
 }
 
+/// Purpose: A `ModelSpec` with only a name, for ordering and switching tests.
+///
+/// Contract: `turn/tests.rs` routing fixtures.
 /// A `ModelSpec` with nothing but a name, for tests about ordering and switching
 /// rather than about endpoints.
 fn named(name: &str) -> loong_config::ModelSpec {
@@ -2088,6 +2269,7 @@ fn named(name: &str) -> loong_config::ModelSpec {
     }
 }
 
+/// Purpose: `model_names` follows profile declaration order, not the alphabetical map, and a person's switch survives the next turn and is logged.
 #[test]
 fn the_model_list_is_the_profile_order_and_a_person_can_choose_from_it() {
     let t = Temp::new();
@@ -2152,6 +2334,7 @@ fn the_model_list_is_the_profile_order_and_a_person_can_choose_from_it() {
     );
 }
 
+/// Purpose: Selecting an unknown model is refused with the available names and stores nothing, because reporting a model the session lacks is worse.
 #[test]
 fn a_model_nobody_offers_is_refused_rather_than_stored() {
     let t = Temp::new();
@@ -2179,6 +2362,7 @@ fn a_model_nobody_offers_is_refused_rather_than_stored() {
     );
 }
 
+/// Purpose: Re-selecting the running model records no `model.selected`, keeping the log a record of changes.
 #[test]
 fn choosing_the_model_already_running_records_nothing() {
     let t = Temp::new();
@@ -2201,6 +2385,7 @@ fn choosing_the_model_already_running_records_nothing() {
     );
 }
 
+/// Purpose: A profile's `investigate = deny` narrows the ladder and the ruling names `profile:user:investigate`, so the deciding layer is visible.
 #[test]
 fn a_profile_narrows_the_ladder_and_the_rule_names_the_layer() {
     let t = Temp::new();
@@ -2235,6 +2420,7 @@ fn a_profile_narrows_the_ladder_and_the_rule_names_the_layer() {
         .contains("denied by policy"));
 }
 
+/// Purpose: A profile asking to allow out-of-bounds cannot widen the built-in ask, so configuration can only tighten.
 #[test]
 fn a_profile_can_only_narrow_never_widen() {
     let t = Temp::new();
@@ -2269,6 +2455,7 @@ fn a_profile_can_only_narrow_never_widen() {
     assert_eq!(policy.data["rule"], "builtin:out_of_bounds");
 }
 
+/// Purpose: The stricter of caller and config wins for budget and steps, so a layer's ceiling always holds.
 #[test]
 fn narrow_only_numbers_are_the_strictest_of_the_two() {
     let t = Temp::new();
@@ -2307,6 +2494,7 @@ fn narrow_only_numbers_are_the_strictest_of_the_two() {
     );
 }
 
+/// Purpose: `narrow_budget` keeps the config ceiling when the caller asks for more or for unbounded, and honours a smaller request.
 #[test]
 fn the_session_may_narrow_but_not_widen_a_config_budget() {
     let t = Temp::new();
@@ -2330,6 +2518,7 @@ fn the_session_may_narrow_but_not_widen_a_config_budget() {
     assert_eq!(narrow_budget(None, None), None);
 }
 
+/// Purpose: `skill_dirs` adds a root and `disable_skills` removes a name by identity, with the disabled names recorded in `skills.loaded`.
 #[test]
 fn a_profile_can_add_skill_roots_and_disable_names_by_identity() {
     let t = Temp::new();
@@ -2367,6 +2556,7 @@ fn a_profile_can_add_skill_roots_and_disable_names_by_identity() {
     assert_eq!(loaded.data["disabled"], "local-loud", "{:?}", loaded.data);
 }
 
+/// Purpose: A skill file with no frontmatter fails the session with `KernelError::Skills`, because silently skipping a broken instruction is worse.
 #[test]
 fn a_broken_skill_file_is_fatal() {
     let t = Temp::new();
@@ -2387,6 +2577,7 @@ fn a_broken_skill_file_is_fatal() {
     assert!(err.to_string().contains("frontmatter"));
 }
 
+/// Purpose: Compaction clears old tool bodies first and drops no messages when clearing is enough, leaving a marker and the newest output verbatim.
 #[test]
 fn compaction_clears_stale_tool_output_before_dropping_anything() {
     let t = Temp::new();
@@ -2456,6 +2647,7 @@ fn compaction_clears_stale_tool_output_before_dropping_anything() {
     );
 }
 
+/// Purpose: After compaction every tool result still follows its call and every prompt survives, so no request becomes invalid.
 #[test]
 fn compaction_never_splits_a_tool_pair() {
     let t = Temp::new();
@@ -2512,6 +2704,9 @@ fn compaction_never_splits_a_tool_pair() {
     }
 }
 
+/// Purpose: A response that calls `edit_file` on a fixed path, so recall has work to find.
+///
+/// Contract: `turn/tests.rs` recall fixtures.
 /// A session with a fixed tool and argument, so `recall` has something to find.
 fn scripted_edit(index: usize) -> CompletionResponse {
     response(
@@ -2524,6 +2719,7 @@ fn scripted_edit(index: usize) -> CompletionResponse {
     )
 }
 
+/// Purpose: The pasted-file detector fires on a labelled file block or a prose `write_file`, but not on a snippet or an unlabelled fence.
 #[test]
 fn a_pasted_file_is_recognised_and_a_snippet_is_not() {
     // The failure this exists for, verbatim in shape from a real session: the
@@ -2544,6 +2740,7 @@ fn a_pasted_file_is_recognised_and_a_snippet_is_not() {
     assert!(!looks_like_pasted_file(""));
 }
 
+/// Purpose: The printed-call detector finds a `<tool_call>` or a quoted name plus arguments mid-text, but ignores a mere mention.
 #[test]
 fn a_printed_tool_call_is_recognised_and_prose_is_not() {
     // Verbatim in shape from this project's own session (47x75pvh.jsonl): the call
@@ -2578,6 +2775,7 @@ fn a_printed_tool_call_is_recognised_and_prose_is_not() {
     assert_eq!(leaked_tool_call(""), None);
 }
 
+/// Purpose: The system prompt names the printed-call shape and shows literal braces, so the first half of the nudge fix is actually present.
 #[test]
 fn the_system_prompt_names_the_printed_call_shape_too() {
     // The prompt is the first half of the fix; this asserts it actually carries the
@@ -2600,6 +2798,7 @@ fn the_system_prompt_names_the_printed_call_shape_too() {
     );
 }
 
+/// Purpose: A model that pastes a file gets one correction, then calls the tool and writes the file; the correction is not a user message in the log.
 #[test]
 fn a_model_that_pastes_a_file_gets_one_chance_to_actually_write_it() {
     // First reply: the file in chat, no tool call. Second: the real call. Without
@@ -2654,6 +2853,7 @@ fn a_model_that_pastes_a_file_gets_one_chance_to_actually_write_it() {
     );
 }
 
+/// Purpose: A second paste is accepted as the answer with no tool call, because arguing forever is worse than showing the refusal.
 #[test]
 fn a_model_that_pastes_twice_is_believed_rather_than_looped() {
     // One objection, then accept. A harness that argued forever would be worse
@@ -2675,6 +2875,7 @@ fn a_model_that_pastes_twice_is_believed_rather_than_looped() {
     );
 }
 
+/// Purpose: A printed tool call gets one correction naming that tool, then the real call writes the file.
 #[test]
 fn a_model_that_prints_a_tool_call_gets_one_chance_to_emit_it() {
     // The measured failure this exists for (47x75pvh.jsonl, qwen2.5:7b-instruct):
@@ -2732,6 +2933,7 @@ fn a_model_that_prints_a_tool_call_gets_one_chance_to_emit_it() {
     );
 }
 
+/// Purpose: Reading a file does not excuse printing a different tool's call, because the guard is per tool, not per turn.
 #[test]
 fn a_read_then_printed_write_is_still_corrected() {
     // The guard is per tool, not per turn: reading a file counts as "a tool ran",
@@ -2762,6 +2964,7 @@ fn a_read_then_printed_write_is_still_corrected() {
     assert!(std::fs::read_to_string(t.dir.join("markdown.md")).is_ok());
 }
 
+/// Purpose: Quoting a call for a tool that already ran is a summary and is not nudged, so the file is not written twice.
 #[test]
 fn printing_a_call_for_a_tool_that_already_ran_is_not_corrected() {
     // A model that wrote the file and then quotes the call in its summary is
@@ -2790,6 +2993,7 @@ fn printing_a_call_for_a_tool_that_already_ran_is_not_corrected() {
     );
 }
 
+/// Purpose: After a tool has run, a reply quoting code is accepted, keeping the nudge off honest work.
 #[test]
 fn a_finished_turn_with_tool_calls_is_never_nudged() {
     // The guard that keeps the nudge from firing on honest work: once a tool has
@@ -2814,6 +3018,7 @@ fn a_finished_turn_with_tool_calls_is_never_nudged() {
     );
 }
 
+/// Purpose: `recall` appears in the tool specs only when the context engine exists, because a tool that cannot answer teaches the model not to ask.
 #[test]
 fn recall_is_offered_only_when_there_is_memory_behind_it() {
     let t = Temp::new();
@@ -2835,6 +3040,7 @@ fn recall_is_offered_only_when_there_is_memory_behind_it() {
     assert!(on.tool_specs().iter().any(|s| s.name == "recall"));
 }
 
+/// Purpose: `recall` finds an earlier edit and returns summaries with `seq[...]` citations, and the answer is an auditable `tool.result`.
 #[test]
 fn recall_finds_earlier_work_and_cites_it() {
     let t = Temp::new();
@@ -2876,6 +3082,7 @@ fn recall_finds_earlier_work_and_cites_it() {
     );
 }
 
+/// Purpose: An empty recall is a real answer that says so, not an error that teaches the model the memory is broken.
 #[test]
 fn recall_says_so_when_it_finds_nothing_rather_than_failing() {
     // "Nothing matched" is a real answer. An error would teach the model that
@@ -2913,6 +3120,7 @@ fn recall_says_so_when_it_finds_nothing_rather_than_failing() {
     assert!(output.contains("real answer"), "{output}");
 }
 
+/// Purpose: A recall with no query, entity, tool or expand id is refused with what to provide instead.
 #[test]
 fn recall_refuses_a_request_with_nothing_to_search_for() {
     let t = Temp::new();
@@ -2941,6 +3149,7 @@ fn recall_refuses_a_request_with_nothing_to_search_for() {
     );
 }
 
+/// Purpose: An unknown summary id is named in the reply rather than silently returning empty.
 #[test]
 fn expand_returns_the_summary_with_its_original_events() {
     let t = Temp::new();
@@ -2975,6 +3184,7 @@ fn expand_returns_the_summary_with_its_original_events() {
     );
 }
 
+/// Purpose: Every recall answer stays under `RECALL_MAX_CHARS`, so retrieval cannot spend the context it exists to save.
 #[test]
 fn a_recall_answer_is_capped_and_says_it_was_capped() {
     // The thin foreground depends on retrieval being bounded: an unbounded
@@ -3020,6 +3230,7 @@ fn a_recall_answer_is_capped_and_says_it_was_capped() {
     }
 }
 
+/// Purpose: The L4 map is a pinned system message after the system prompt, refreshed in one ledger entry rather than one per step.
 #[test]
 fn the_layered_engine_puts_a_map_in_front_of_the_model() {
     let t = Temp::new();
@@ -3075,6 +3286,7 @@ fn the_layered_engine_puts_a_map_in_front_of_the_model() {
     assert!(positions.len() >= 2, "the map is its own system message");
 }
 
+/// Purpose: With the engine on, no compaction drops an exchange and the first turn is still in the request: ADR-0017's core promise.
 #[test]
 fn with_the_engine_on_a_long_session_never_drops_an_exchange() {
     // The core promise of ADR-0017: the original stays reachable, so the one
@@ -3119,6 +3331,7 @@ fn with_the_engine_on_a_long_session_never_drops_an_exchange() {
     );
 }
 
+/// Purpose: With the engine explicitly off, compaction drops exchanges again, so the rollback path is the old behaviour exactly.
 #[test]
 fn with_the_engine_off_compaction_still_drops_exchanges() {
     // The rollback path has to be exactly the old behaviour, not an
@@ -3150,6 +3363,7 @@ fn with_the_engine_off_compaction_still_drops_exchanges() {
     assert!(dropped >= 1, "off means the old behaviour: {dropped}");
 }
 
+/// Purpose: With no tool output to clear, compaction still drops the oldest exchange while the current prompt survives.
 #[test]
 fn compaction_drops_the_oldest_exchange_when_clearing_is_not_enough() {
     let t = Temp::new();
@@ -3186,6 +3400,7 @@ fn compaction_drops_the_oldest_exchange_when_clearing_is_not_enough() {
     );
 }
 
+/// Purpose: A budget smaller than one turn stops dropping rather than emptying the prompt being answered.
 #[test]
 fn a_budget_that_cannot_be_met_stops_dropping_rather_than_emptying_the_prompt() {
     let t = Temp::new();
@@ -3202,6 +3417,7 @@ fn a_budget_that_cannot_be_met_stops_dropping_rather_than_emptying_the_prompt() 
     );
 }
 
+/// Purpose: A trusted `pre_tool` shell hook can deny what the PDP would allow, and `policy.decided` names `hook:guard`.
 #[test]
 fn a_pre_tool_hook_can_deny_what_the_policy_would_allow() {
     let t = Temp::new();
@@ -3254,6 +3470,7 @@ fn a_pre_tool_hook_can_deny_what_the_policy_would_allow() {
     );
 }
 
+/// Purpose: A hook's ask parks the turn, fires all four permission seams once, and a granted answer runs the call.
 #[test]
 fn a_hook_that_asks_stops_the_turn_for_a_human() {
     let t = Temp::new();
@@ -3323,6 +3540,7 @@ fn a_hook_that_asks_stops_the_turn_for_a_human() {
     );
 }
 
+/// Purpose: An untrusted hook is never asked: no `hook.fired`, and the tool proceeds.
 #[test]
 fn an_untrusted_hook_is_inert() {
     let t = Temp::new();
@@ -3351,6 +3569,7 @@ fn an_untrusted_hook_is_inert() {
     assert!(t.dir.join("ran.txt").exists(), "the call proceeded");
 }
 
+/// Purpose: A `user_prompt_submit` hook refuses before any model call, records the prompt, and reports `refused` with zero steps.
 #[test]
 fn a_prompt_hook_refuses_the_turn_before_the_model_is_called() {
     let t = Temp::new();
@@ -3387,6 +3606,7 @@ fn a_prompt_hook_refuses_the_turn_before_the_model_is_called() {
     );
 }
 
+/// Purpose: `session_start` hooks fire while the kernel is built, so a guard sees the session before any work.
 #[test]
 fn session_start_hooks_fire_when_the_session_opens() {
     let t = Temp::new();
@@ -3407,6 +3627,7 @@ fn session_start_hooks_fire_when_the_session_opens() {
     assert_eq!(fired.data["verdict"], "allow");
 }
 
+/// Purpose: A malformed `hooks.toml` fails the session with `KernelError::Hooks`, because a guard that cannot parse must not vanish.
 #[test]
 fn a_malformed_manifest_refuses_to_open_a_session() {
     let t = Temp::new();
@@ -3420,6 +3641,7 @@ fn a_malformed_manifest_refuses_to_open_a_session() {
     assert!(err.to_string().contains("hooks.toml"));
 }
 
+/// Purpose: The derived index sits beside the log, holds no stale marker, and answers a search with the matching event.
 #[test]
 fn the_derived_index_answers_queries_over_the_session() {
     let t = Temp::new();
@@ -3448,6 +3670,7 @@ fn the_derived_index_answers_queries_over_the_session() {
     assert!(k.search("nothing like this").unwrap().is_empty());
 }
 
+/// Purpose: A stale index refuses queries as `OutOfOrder`, and `rebuild_index` restores answers from the log.
 #[test]
 fn a_stale_index_refuses_to_answer_instead_of_lying() {
     let t = Temp::new();
@@ -3465,6 +3688,7 @@ fn a_stale_index_refuses_to_answer_instead_of_lying() {
     );
 }
 
+/// Purpose: Deleting the SQLite index and reopening rebuilds it from the log, proving the index is disposable.
 #[test]
 fn reopening_a_session_rebuilds_the_index_from_the_log() {
     let t = Temp::new();
@@ -3486,6 +3710,7 @@ fn reopening_a_session_rebuilds_the_index_from_the_log() {
     assert_eq!(out.final_text.as_deref(), Some("second"));
 }
 
+/// Purpose: A submit while an approval is pending, or an answer with the wrong id, is `OutOfOrder`; the correct answer resumes.
 #[test]
 fn submitting_while_an_approval_is_pending_is_refused() {
     let t = Temp::new();

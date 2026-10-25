@@ -74,6 +74,9 @@ logs/
 # Personal instruction files, wherever a workspace keeps one.
 AGENTS.local.md
 
+# Harness session-memory scratch: a timestamp and a uuid, never a project file.
+*.ses
+
 # The same artifacts when a session is deliberately put somewhere else in the repository
 # (`--session ./tmp/s.jsonl`). Both extensions are produced only by this tool, so unlike
 # a bare `*.jsonl` these cannot collide with a fixture somebody wants to commit. The

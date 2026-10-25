@@ -126,8 +126,10 @@ be a heuristic, but a write tool that disagrees with it still refuses.
 built: `WorkspacePolicy::new(&config.cwd)` becomes a `LandlockConfinement`,
 whose `confine` installs a `pre_exec` hook. In the forked child, before exec,
 `WorkspacePolicy::apply` adds a read-only rule for `/`, a read-write rule for the
-workspace, sets `PR_SET_NO_NEW_PRIVS`, and restricts itself. The restriction is
-irreversible and inherited — it lands on the child and never on the server.
+workspace and for `/dev/null` (ordinary tools open it read-write at startup, and
+it stores nothing), sets `PR_SET_NO_NEW_PRIVS`, and restricts itself. The
+restriction is irreversible and inherited — it lands on the child and never on
+the server.
 When Landlock is unavailable the kernel falls back to `NoConfinement` and
 records why in `Kernel::confinement_note()` (`unconfined: …`) for diagnostics
 and tests. The startup log does not read that string; it reports the sandbox
@@ -141,8 +143,9 @@ scratch files and its own process group, just before `spawn`. The shell tool
 passes `ctx.confinement.confine` through, so the kernel's policy is the child's.
 `sandbox self-test`
 (`crates/sandbox/src/sandbox.rs`) proves the mechanism by having a confined
-child attempt one allowed and one forbidden write; a mechanism that cannot
-demonstrate denial is reported as `Broken`, not as present. `bubblewrap` is
+child attempt one allowed write, one forbidden write and a `/dev/null` open; a
+mechanism that cannot demonstrate denial is reported as `Broken`, not as
+present. `bubblewrap` is
 detected and named, not applied.
 
 The process-level seam is worth stating: an **MCP server process** is started by

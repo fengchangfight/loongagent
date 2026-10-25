@@ -15,8 +15,10 @@
 //! current process confines every subprocess a tool spawns.
 //!
 //! The rules this module installs: read and execute everywhere, **write only
-//! under the workspace root**. Everything else in the handled set is denied by
-//! omission, which is what makes the boundary structural rather than advisory.
+//! under the workspace root** — plus `/dev/null`, the one sink that stores
+//! nothing and that ordinary tools open read-write. Everything else in the
+//! handled set is denied by omission, which is what makes the boundary
+//! structural rather than advisory.
 
 use std::ffi::c_long;
 use std::os::unix::fs::OpenOptionsExt;
@@ -203,7 +205,7 @@ pub fn read_only_mask(abi: u32) -> u64 {
 
 /// What is permitted under the workspace root.
 /// Purpose: What the workspace root grants: the read-only set plus writes, removal and creation.
-/// Serves: the one writable path in the policy.
+/// Serves: the workspace's writable rule.
 /// Design: `docs/design/tools-permissions.md` §4.
 /// Up: `WorkspacePolicy::apply` and `confine_workspace`.
 /// Down: `read_only_mask`.
@@ -225,6 +227,46 @@ pub fn read_write_mask(abi: u32) -> u64 {
         m |= TRUNCATE;
     }
     m
+}
+
+/// The only paths outside the workspace a confined child may open for writing:
+/// sinks that store nothing. `/dev/null` is opened read-write by ordinary tools
+/// at startup — git does it before it parses any argument — so denying the
+/// write breaks commands that never touch the workspace.
+/// Purpose: The only paths outside the workspace that a confined child may write.
+/// Serves: `add_device_rules`, the self-test and the mask test.
+/// Design: `docs/design/tools-permissions.md` §4.
+/// Up: `add_device_rules`.
+/// Down: nothing; it is a policy constant.
+/// Verify: `cargo test -p loong-sandbox`.
+pub const WRITABLE_DEVICES: &[&std::ffi::CStr] = &[c"/dev/null"];
+
+/// What a writable device grants: read and write, but nothing that creates or
+/// removes entries. `/dev/null` stores nothing, so this widens nothing real.
+/// Purpose: What a writable device grants.
+/// Serves: `add_device_rules`.
+/// Design: `docs/design/tools-permissions.md` §4.
+/// Up: `add_device_rules` and the mask test.
+/// Down: the `READ_FILE` and `WRITE_FILE` right constants.
+/// Verify: `cargo test -p loong-sandbox`.
+pub fn device_write_mask() -> u64 {
+    READ_FILE | WRITE_FILE
+}
+
+/// Add the writable-device rules to a prepared ruleset. The success path
+/// allocates nothing, so `WorkspacePolicy::apply` may call it between `fork`
+/// and `exec`.
+/// Purpose: Add the writable-device rules to a prepared ruleset.
+/// Serves: `WorkspacePolicy::apply` and `confine_workspace`.
+/// Design: `docs/design/tools-permissions.md` §4.
+/// Up: those two functions.
+/// Down: `WRITABLE_DEVICES`, `device_write_mask` and `add_path_rule_raw`.
+/// Verify: `cargo test -p loong-sandbox`.
+fn add_device_rules(ruleset_fd: i32) -> Result<(), LandlockError> {
+    for path in WRITABLE_DEVICES {
+        add_path_rule_raw(ruleset_fd, path, device_write_mask())?;
+    }
+    Ok(())
 }
 
 /// A workspace policy **prepared in the parent** so a forked child can apply it
@@ -300,6 +342,7 @@ impl WorkspacePolicy {
         let result = (|| {
             add_path_rule_raw(ruleset as i32, c"/", read_only_mask(abi))?;
             add_path_rule_raw(ruleset as i32, &self.root, read_write_mask(abi))?;
+            add_device_rules(ruleset as i32)?;
             if unsafe { prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
                 return Err(errno("prctl(PR_SET_NO_NEW_PRIVS)"));
             }
@@ -413,6 +456,7 @@ pub fn confine_workspace(workspace: &Path) -> Result<(), LandlockError> {
     let result = (|| {
         add_path_rule(ruleset as i32, Path::new("/"), read_only_mask(abi))?;
         add_path_rule(ruleset as i32, workspace, read_write_mask(abi))?;
+        add_device_rules(ruleset as i32)?;
         if unsafe { prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
             return Err(errno("prctl(PR_SET_NO_NEW_PRIVS)"));
         }
@@ -512,6 +556,22 @@ mod tests {
             "reading stays allowed everywhere"
         );
         assert_eq!(rw & EXECUTE, EXECUTE);
+    }
+
+    #[test]
+    /// Purpose: Pin that only `/dev/null` is writable outside the workspace, and only for reads and writes.
+    fn the_only_writable_place_outside_the_workspace_is_dev_null() {
+        assert_eq!(WRITABLE_DEVICES.len(), 1, "one sink is deliberately chosen");
+        assert_eq!(WRITABLE_DEVICES[0], c"/dev/null");
+        let m = device_write_mask();
+        assert_eq!(
+            m & WRITE_FILE,
+            WRITE_FILE,
+            "ordinary tools open /dev/null read-write"
+        );
+        assert_eq!(m & READ_FILE, READ_FILE);
+        assert_eq!(m & MAKE_REG, 0, "no device may be created");
+        assert_eq!(m & REMOVE_FILE, 0, "no device may be removed");
     }
 
     #[test]

@@ -15,8 +15,9 @@
 //! * The PDP decides, the PEP enforces — this module is only the PEP.
 //! * `sandbox self-test` runs **before** the first tool call, and it does not
 //!   report "available": it runs a confined child that tries to write outside
-//!   the workspace and checks that the write is refused. A mechanism that cannot
-//!   demonstrate denial is reported as broken, not as present.
+//!   the workspace, checks that the write is refused, and checks that the
+//!   `/dev/null` open ordinary tools rely on still works. A mechanism that
+//!   cannot demonstrate denial is reported as broken, not as present.
 
 use crate::landlock;
 use std::path::{Path, PathBuf};
@@ -134,8 +135,9 @@ impl SelfTestReport {
     }
 }
 
-/// Run the self-test: a confined child attempts one allowed write and one
-/// forbidden write, and only the expected outcomes count as success.
+/// Run the self-test: a confined child attempts one allowed write, one
+/// forbidden write and the `/dev/null` open ordinary tools rely on, and only
+/// the expected outcomes count as success.
 /// Purpose: Run the probe child and turn its exit code into an honest report.
 /// Serves: `sandbox self-test`, before the first tool call.
 /// Design: `docs/design/tools-permissions.md` §4.
@@ -266,6 +268,11 @@ pub fn interpret(
                 "even the allowed write inside the workspace failed, so confinement is too strict: {stderr}"
             ),
         },
+        Some(5) => SelfTest::Broken {
+            detail: format!(
+                "the confined child could not open /dev/null read-write, so ordinary tools (git, cargo) would fail: {stderr}"
+            ),
+        },
         other => SelfTest::Broken {
             detail: format!("the probe exited with {other:?}: {stderr}"),
         },
@@ -274,7 +281,7 @@ pub fn interpret(
 
 /// The child side of the self-test: confine this process, then prove both
 /// directions. Exit codes: 0 enforced, 2 could not confine, 3 escaped,
-/// 4 over-restricted.
+/// 4 over-restricted, 5 `/dev/null` not writable.
 /// Purpose: The child side of the self-test: confine this process, then prove both directions.
 /// Serves: `loongagent sandbox probe`.
 /// Design: `docs/design/tools-permissions.md` §4.
@@ -303,6 +310,20 @@ pub fn probe_main() -> i32 {
         return 4;
     }
     let _ = std::fs::remove_file(&inside);
+
+    // Ordinary tools open `/dev/null` read-write at startup — git does, before
+    // it parses any argument. Denying that write turns every git command into
+    // `fatal: could not open '/dev/null'`, so prove the writable-device rule
+    // instead of leaving it to surface as a mysterious tool failure.
+    if std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/null")
+        .is_err()
+    {
+        eprintln!("probe: the confined child could not open /dev/null read-write");
+        return 5;
+    }
 
     match std::fs::write(&outside, b"should not be possible") {
         Ok(_) => {
@@ -373,6 +394,10 @@ mod tests {
         }
         match interpret(&c, Some(4), "too strict", ws) {
             SelfTest::Broken { detail } => assert!(detail.contains("too strict"), "{detail}"),
+            other => panic!("expected Broken, got {other:?}"),
+        }
+        match interpret(&c, Some(5), "no /dev/null", ws) {
+            SelfTest::Broken { detail } => assert!(detail.contains("/dev/null"), "{detail}"),
             other => panic!("expected Broken, got {other:?}"),
         }
         assert!(matches!(

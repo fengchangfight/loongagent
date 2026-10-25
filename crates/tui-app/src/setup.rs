@@ -247,7 +247,7 @@ pub(super) fn draw_setup_form(frame: &mut ratatui::Frame, form: &SetupForm) {
 pub fn setup_form() -> Result<Option<(String, String, String)>, String> {
     full_screen_needs_a_terminal()?;
     use ratatui::backend::CrosstermBackend;
-    use ratatui::crossterm::event::{self, Event};
+    use ratatui::crossterm::event::{self, Event, KeyEventKind};
     use ratatui::crossterm::execute;
     use ratatui::crossterm::terminal::{
         disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -269,7 +269,12 @@ pub fn setup_form() -> Result<Option<(String, String, String)>, String> {
         if !event::poll(std::time::Duration::from_millis(120)).map_err(|e| e.to_string())? {
             continue;
         }
+        // Crossterm's Windows backend reports a Release alongside every Press;
+        // acting on both makes one keystroke do the thing twice.
         if let Event::Key(key) = event::read().map_err(|e| e.to_string())? {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
             match form.handle_key(key) {
                 SetupAction::Submit => break form.answer(),
                 SetupAction::Cancel => break None,

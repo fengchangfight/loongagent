@@ -25,7 +25,7 @@ pub fn run<T: Transport + Send + 'static>(
     health: Option<Receiver<ModelHealth>>,
 ) -> Result<(), String> {
     use ratatui::backend::CrosstermBackend;
-    use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture};
+    use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, KeyEventKind};
     use ratatui::crossterm::execute;
     use ratatui::crossterm::terminal::{
         disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -124,32 +124,36 @@ pub fn run<T: Transport + Send + 'static>(
 
             if event::poll(std::time::Duration::from_millis(80)).map_err(|e| e.to_string())? {
                 match event::read().map_err(|e| e.to_string())? {
-                    event::Event::Key(key) => match app.handle_key(key) {
-                        Action::Send(command) => {
-                            let _ = to_worker.send(command);
-                        }
-                        // The interface cannot reach the terminal or the clipboard from
-                        // `handle_key`; the loop that owns them does it here.
-                        Action::Copy => {
-                            let text = app.transcript();
-                            let path = copy_everywhere(&text, &app.session);
-                            app.push_lines(vec![format!(
-                                "⧉ copied {} line(s) → {path}",
-                                text.lines().count()
-                            )]);
-                        }
-                        Action::Mouse(on) => {
-                            let backend = terminal.backend_mut();
-                            if on {
-                                let _ = execute!(backend, EnableMouseCapture);
-                            } else {
-                                let _ = execute!(backend, DisableMouseCapture);
+                    // Crossterm's Windows backend reports a Release alongside
+                    // every Press; only Press may act.
+                    event::Event::Key(key) if key.kind == KeyEventKind::Press => {
+                        match app.handle_key(key) {
+                            Action::Send(command) => {
+                                let _ = to_worker.send(command);
                             }
-                            // The screen is redrawn next pass; the terminal is what changed.
+                            // The interface cannot reach the terminal or the clipboard from
+                            // `handle_key`; the loop that owns them does it here.
+                            Action::Copy => {
+                                let text = app.transcript();
+                                let path = copy_everywhere(&text, &app.session);
+                                app.push_lines(vec![format!(
+                                    "⧉ copied {} line(s) → {path}",
+                                    text.lines().count()
+                                )]);
+                            }
+                            Action::Mouse(on) => {
+                                let backend = terminal.backend_mut();
+                                if on {
+                                    let _ = execute!(backend, EnableMouseCapture);
+                                } else {
+                                    let _ = execute!(backend, DisableMouseCapture);
+                                }
+                                // The screen is redrawn next pass; the terminal is what changed.
+                            }
+                            Action::Quit => return Ok(()),
+                            Action::None => {}
                         }
-                        Action::Quit => return Ok(()),
-                        Action::None => {}
-                    },
+                    }
                     event::Event::Mouse(mouse) => app.handle_mouse(mouse.kind),
                     _ => {}
                 }

@@ -1,7 +1,7 @@
 # Flow: one tool approval
 
 - **Up:** [tools-permissions.md](../tools-permissions.md) · [design/README.md](../README.md)
-- **Authority:** [ADR-0007](../../decisions/0007-permission-sandbox-engine.md) · [ADR-0004](../../decisions/0004-microkernel-extension-model.md)
+- **Authority:** [ADR-0007](../../decisions/0007-permission-sandbox-engine.md) · [ADR-0004](../../decisions/0004-microkernel-extension-model.md) · [ADR-0019](../../decisions/0019-mid-turn-permissions.md)
 - **Code:** `crates/kernel/src/turn/loop.rs`, `crates/tools/src/lib.rs`, `crates/sandbox/`
 - **Verify:** `cargo test -p loong-kernel -p loong-tools -p loong-sandbox` · `./scripts/check.sh`
 
@@ -37,6 +37,17 @@ the action classes, the PDP ladder and the two enforcers are owned by
 The same PEPs apply on allow and on a granted approval; they are tools-permissions §4.
 `recall` is the one call that skips the gate: `dispatch` answers it before the registry
 and the PDP with `tool.call` and `tool.result`.
+
+**`/yolo` on a turn that is already running.** A `permissions.set` request would be
+read only after the turn ends, because the turn owns the connection; that is exactly
+the wait `/yolo` exists to prevent. The surface therefore carries the request on a
+private control channel — a pipe whose write end never leaves the surface process — and
+the server leaves it in `Kernel.permissions_request`. The kernel applies it at the next
+boundary where nothing is half-done: the top of a step, and `dispatch` before
+`Pdp::decide`, so the call that would have asked is allowed instead. The turn still
+writes `permissions.relaxed` itself, so the log keeps one writer and one order. The
+interface may show the switch at once — that is the point of the command — and the
+event is the confirmation that it happened.
 
 ## 2. One approval, in sequence
 

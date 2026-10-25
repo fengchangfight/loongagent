@@ -21,6 +21,7 @@
 //! responsive: the worker owns the client, the UI owns the screen, and they talk
 //! over two channels.
 
+pub mod commands;
 pub mod mention;
 use loong_tui::{Client, Transport};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -525,6 +526,10 @@ pub struct App {
     /// How to ask the server to stop the running turn. `None` when the surface has no
     /// process to signal: the interface then says so instead of pretending.
     pub interrupt: Option<Box<dyn Fn()>>,
+    /// How to change approval prompts while a turn owns the connection. `None` when the
+    /// surface has no private control channel (Windows, today): `/yolo` then waits for
+    /// the worker like any other command.
+    pub set_permissions: Option<Box<dyn Fn(bool)>>,
     /// What the running turn is doing, and since when — the interface's answer to "is
     /// it stuck, or working?".
     pub activity: Option<String>,
@@ -556,6 +561,12 @@ pub struct App {
     /// would do nothing — which is what the test caught. Cleared as soon as the text
     /// or the caret changes, so the next `@` opens normally.
     mention_dismissed: bool,
+    /// Which command the prompt's menu highlights, by index into its candidates.
+    command_choice: usize,
+    /// Set when esc put the command menu away for the text it had. Like the `@`
+    /// picker's flag, one key later re-arms it: the menu is derived from what is
+    /// typed, and this only covers the keystroke that asked for it to go.
+    commands_dismissed: bool,
     pub streaming: String,
     /// Lines scrolled up from the bottom.
     pub scroll: usize,
@@ -621,6 +632,7 @@ impl App {
             logo: true,
             mouse: false,
             interrupt: None,
+            set_permissions: None,
             activity: None,
             busy_since: None,
             debug: false,
@@ -629,6 +641,8 @@ impl App {
             picker: None,
             mention_files: None,
             mention_dismissed: false,
+            command_choice: 0,
+            commands_dismissed: false,
             scroll: 0,
             fold: None,
             open: None,
@@ -1254,28 +1268,18 @@ impl App {
     fn surface_command(&mut self, text: &str) -> Option<Action> {
         let trimmed = text.trim();
         // `/1`..`/9`: the same shortcut as Alt+digit, for a terminal whose Alt never
-        // reaches the program (tmux, some macOS setups). Checked before the exact match
-        // below because it is a whole family of commands, not one.
-        if let Some(digit) = trimmed
-            .strip_prefix('/')
-            .filter(|rest| rest.chars().count() == 1)
-        {
-            if let Some(slot) = digit.chars().next().and_then(|c| c.to_digit(10)) {
-                if (1..=9).contains(&slot) {
-                    self.input.clear();
-                    self.cursor = 0;
-                    return Some(self.switch_to_slot(slot as usize));
-                }
-            }
-        }
-        // `/r`: the resend, for the same terminals that eat Alt.
-        if trimmed.eq_ignore_ascii_case("/r") {
+        // reaches the program (tmux, some macOS setups). Checked before the table
+        // because it is a whole family of commands, not one.
+        if let Some(slot) = commands::slot(trimmed) {
             self.input.clear();
             self.cursor = 0;
-            return Some(self.resend_last_prompt());
+            return Some(self.switch_to_slot(slot as usize));
         }
-        match trimmed.to_ascii_lowercase().as_str() {
-            "/exit" | "/quit" | "/q" => {
+        // The table owns the names and the aliases, so a spelling the menu offers is
+        // a spelling this dispatcher knows. It does not own what each one *does*:
+        // that stays here, next to the action it asks for.
+        match commands::primary(trimmed)? {
+            "/exit" => {
                 self.input.clear();
                 self.cursor = 0;
                 Some(Action::Quit)
@@ -1305,15 +1309,27 @@ impl App {
                 Some(Action::Mouse(self.mouse))
             }
             // Opting out of the prompts, for a session that is unattended on purpose.
+            // While a turn owns the connection a queued request would wait for the turn
+            // to end — the very wait `/yolo` exists to prevent. With the private control
+            // channel the change goes now: the screen flips at once, the kernel applies
+            // it at its next decision boundary, and `permissions.relaxed` confirms it.
             "/yolo" => {
                 self.input.clear();
                 self.cursor = 0;
-                Some(Action::Send(ToWorker::Yolo(!self.yolo)))
+                let target = !self.yolo;
+                if self.busy && self.set_permissions.is_some() {
+                    self.yolo = target;
+                    if let Some(tell) = &self.set_permissions {
+                        tell(target);
+                    }
+                    return Some(Action::None);
+                }
+                Some(Action::Send(ToWorker::Yolo(target)))
             }
             // A fresh session. `/clear` is the same thing and not a screen wipe: the
             // context is what people mean when they ask for a clean start, and clearing
             // only the view would leave the model still reading everything above.
-            "/new" | "/clear" | "/reset" => {
+            "/new" => {
                 self.input.clear();
                 self.cursor = 0;
                 Some(Action::Send(ToWorker::NewSession))
@@ -1331,6 +1347,12 @@ impl App {
                 self.cursor = 0;
                 self.logo = !self.logo;
                 Some(Action::None)
+            }
+            // `/r`: the resend, for the same terminals that eat Alt.
+            "/r" => {
+                self.input.clear();
+                self.cursor = 0;
+                Some(self.resend_last_prompt())
             }
             _ => None,
         }
@@ -1412,6 +1434,146 @@ impl App {
         let files = self.mention_files.as_ref().expect("just read");
         self.picker =
             mention::Picker::refresh(&self.input, self.cursor, files, self.picker.as_ref());
+    }
+
+    /// Purpose: The command candidates the prompt is offering, or `None` when no menu belongs on screen.
+    /// Serves: `App::handle_key`, `App::draw`, `App::command_rows`, `App::draw_commands` and the command tests.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `App::handle_key` and `App::draw`.
+    /// Down: `commands::matches`.
+    /// Verify: `cargo test -p loong-tui-app`.
+    /// What the command menu should list right now.
+    ///
+    /// The menu is derived from the text, like the `@` picker: a command is the whole
+    /// line while it is being typed, so a space — or a caret moved into the middle of
+    /// the word — means the person is no longer naming a command and the menu is not
+    /// what their keys mean. `commands_dismissed` only covers the key that asked it to
+    /// go; every later key derives it again.
+    fn command_candidates(&self) -> Option<Vec<commands::Candidate>> {
+        if self.pending.is_some() || self.commands_dismissed {
+            return None;
+        }
+        if !self.input.starts_with('/')
+            || self.input.chars().any(char::is_whitespace)
+            || self.cursor != self.input.chars().count()
+        {
+            return None;
+        }
+        let mut found = commands::matches(&self.input);
+        // `/r` is only a command once there is something to resend; offering it
+        // before that would promise an action the next enter cannot take. It stays
+        // an exact name — enter still answers "nothing to resend yet" — it is just
+        // not a menu row until then.
+        if self.last_prompt.is_none() {
+            found.retain(|candidate| candidate.insert != "/r");
+            if found.is_empty() && commands::is_exact(&self.input) {
+                return None;
+            }
+        }
+        Some(found)
+    }
+
+    /// Purpose: How many commands the prompt is offering.
+    /// Contract: called by `handle_key`'s list keys; reads `command_candidates`.
+    fn command_menu_len(&self) -> usize {
+        self.command_candidates().map_or(0, |found| found.len())
+    }
+
+    /// Purpose: Whether Enter should complete the highlighted command rather than run or send what is typed.
+    /// Contract: called by `handle_key`'s enter arm; false for nothing to complete and for an exact command.
+    fn command_to_complete(&self) -> bool {
+        let Some(found) = self.command_candidates() else {
+            return false;
+        };
+        !found.is_empty() && !commands::is_exact(&self.input)
+    }
+
+    /// Purpose: Move the command menu's highlight, wrapping at either end.
+    /// Contract: called by the arrow, tab and shift-tab arms while the menu has candidates.
+    fn move_command(&mut self, delta: isize) {
+        if let Some(found) = self.command_candidates() {
+            if found.is_empty() {
+                return;
+            }
+            let count = found.len() as isize;
+            let current = self.command_choice.min(found.len() - 1) as isize;
+            self.command_choice = (current + delta).rem_euclid(count) as usize;
+        }
+    }
+
+    /// Purpose: Write the highlighted command into the prompt, leaving the running of it to the next enter.
+    /// Serves: `App::handle_key`'s enter arm while a prefix is being completed; the command tests.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `App::handle_key`.
+    /// Down: `commands::Candidate::insert`.
+    /// Verify: `cargo test -p loong-tui-app`.
+    /// Complete, never run: `/ex` prefixes both `/exit` and `/expand`, and an enter
+    /// that ran the highlighted one could leave the program on a half-typed name.
+    fn accept_command(&mut self) -> Action {
+        let Some(found) = self.command_candidates() else {
+            return Action::None;
+        };
+        if found.is_empty() {
+            return Action::None;
+        }
+        let chosen = &found[self.command_choice.min(found.len() - 1)];
+        self.input = chosen.insert.clone();
+        self.cursor = self.input.chars().count();
+        self.command_choice = 0;
+        Action::None
+    }
+
+    /// Purpose: How many rows the command menu needs: its commands, or one line saying why nothing matched.
+    /// Contract: called by `App::draw` and the command menu's height test.
+    fn command_rows(&self) -> u16 {
+        match self.command_candidates() {
+            None => 0,
+            Some(found) => found.len().max(1) as u16,
+        }
+    }
+
+    /// Purpose: Draw the command menu above the input: the matching commands and their one-line meanings, or one honest empty line.
+    /// Serves: `App::draw`.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `App::draw`.
+    /// Down: `commands::Candidate` and the mark accent style.
+    /// Verify: `cargo test -p loong-tui-app`.
+    fn draw_commands(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+        let Some(found) = self.command_candidates() else {
+            return;
+        };
+        let exact = commands::is_exact(&self.input);
+        let typed = self.input.trim();
+        let title = if exact {
+            "commands — enter runs this · esc closes".to_string()
+        } else if typed == "/" {
+            "commands — ↑/↓ choose · enter completes · esc closes".to_string()
+        } else {
+            format!("commands matching {typed} — ↑/↓ choose · enter completes · esc closes")
+        };
+        let body = if found.is_empty() {
+            vec![Line::from(
+                "  not one of this screen's commands — enter still sends it (skills like /help live there)",
+            )]
+        } else {
+            let chosen = self.command_choice.min(found.len() - 1);
+            found
+                .iter()
+                .enumerate()
+                .map(|(index, candidate)| {
+                    let marker = if index == chosen { "▸ " } else { "  " };
+                    let line = format!("{marker}{} — {}", candidate.insert, candidate.description);
+                    if index == chosen {
+                        Line::from(line).style(MARK_ACCENT_STYLE)
+                    } else {
+                        Line::from(line)
+                    }
+                })
+                .collect()
+        };
+        let widget =
+            Paragraph::new(body).block(Block::default().borders(Borders::ALL).title(title));
+        frame.render_widget(widget, area);
     }
 
     /// Purpose: How many rows the picker needs: its matches, or one line saying there are none.
@@ -1710,25 +1872,33 @@ impl App {
                     self.push_lines(lines);
                 }
                 Ok(FromWorker::State { pending }) => {
+                    // A turn that stopped for a question is **paused**, not finished: the
+                    // question is the state on screen, and the turn still has work to resume.
+                    // Recording an ending here put a tick in the transcript while the work
+                    // was still to come — the one line that lies about what is happening.
+                    let paused = pending.is_some();
                     self.pending = pending;
                     self.busy = false;
                     self.activity = None;
                     self.streaming.clear();
-                    // How long the turn took, once, as bookkeeping: the per-step timings
-                    // are on the tool results, and this is the total they add up to.
-                    let outcome = if self.stopping {
-                        Outcome::Stopped
-                    } else {
-                        Outcome::Done
-                    };
-                    self.stopping = false;
-                    let seconds = self
-                        .busy_since
-                        .take()
-                        .map(|since| since.elapsed().as_secs_f64());
-                    let finished = Finished { seconds, outcome };
-                    self.push_lines(vec![finished.line()]);
-                    self.finished = Some(finished);
+                    if !paused {
+                        // How long the turn took, from the submit to the end. A pause for
+                        // a question is part of it: the turn had not ended, and a clock
+                        // that restarted afterwards would be timing something else.
+                        let outcome = if self.stopping {
+                            Outcome::Stopped
+                        } else {
+                            Outcome::Done
+                        };
+                        self.stopping = false;
+                        let seconds = self
+                            .busy_since
+                            .take()
+                            .map(|since| since.elapsed().as_secs_f64());
+                        let finished = Finished { seconds, outcome };
+                        self.push_lines(vec![finished.line()]);
+                        self.finished = Some(finished);
+                    }
                 }
                 Ok(FromWorker::Failed(message)) => {
                     let seconds = self
@@ -1761,6 +1931,9 @@ impl App {
     /// kinder than silently swallowing it.
     pub fn handle_key(&mut self, key: KeyEvent) -> Action {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        // A menu put away by esc covered the text it had; the next key derives it
+        // again, exactly as the `@` picker's dismissal works.
+        self.commands_dismissed = false;
         // One refresh per key, before the match: the picker is derived from the text
         // and the caret, so keeping it in step belongs in one place rather than in
         // every branch that happens to move either. Escape re-arms nothing because it
@@ -1850,6 +2023,32 @@ impl App {
                 Action::None
             }
             KeyCode::Enter if self.picker.is_some() => self.accept_picker(),
+            // The command menu owns the list keys while it is open, for the same
+            // reason the `@` picker does: a list on screen is what up/down mean.
+            // Enter runs a complete command and only *completes* a prefix — `/ex`
+            // is both `/exit` and `/expand`, and running the highlighted one could
+            // leave the program on a name nobody finished typing.
+            KeyCode::Esc if self.command_candidates().is_some() => {
+                self.commands_dismissed = true;
+                Action::None
+            }
+            KeyCode::Up if self.command_menu_len() > 0 => {
+                self.move_command(-1);
+                Action::None
+            }
+            KeyCode::Down if self.command_menu_len() > 0 => {
+                self.move_command(1);
+                Action::None
+            }
+            KeyCode::Tab if self.command_menu_len() > 0 => {
+                self.move_command(1);
+                Action::None
+            }
+            KeyCode::BackTab if self.command_menu_len() > 0 => {
+                self.move_command(-1);
+                Action::None
+            }
+            KeyCode::Enter if self.command_to_complete() => self.accept_command(),
             KeyCode::Esc if self.open.is_some() && self.pending.is_none() => {
                 self.open = None;
                 Action::None
@@ -2240,6 +2439,10 @@ impl App {
         };
         self.push_lines(vec![format!("⧗ {how}: {request_id}")]);
         self.busy = true;
+        // The question paused the turn; this resumes it. The turn's clock keeps running
+        // across that pause (a pause is not an ending), so it is only filled in when a
+        // turn has none — `busy` with no clock is a title frozen at "⠋ working 0s".
+        self.busy_since.get_or_insert_with(std::time::Instant::now);
         self.error = None;
         Action::Send(ToWorker::Respond {
             request_id,
@@ -2360,6 +2563,26 @@ impl App {
         Line::from(Span::styled(format!("▸ {}", line.trim_start()), style))
     }
 
+    /// Purpose: The warning that stays in front of the prompt title while approval prompts are off.
+    /// Contract: called by `draw`'s title arms; reads `App::yolo`.
+    fn yolo_mark(&self) -> &'static str {
+        if self.yolo {
+            "⚠ YOLO · "
+        } else {
+            ""
+        }
+    }
+
+    /// Purpose: The prompt title's colour: red while approvals are off, otherwise whatever the status asked for.
+    /// Contract: called by `draw`'s title arms; reads `App::yolo`.
+    fn title_style(&self, status: Style) -> Style {
+        if self.yolo {
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+        } else {
+            status
+        }
+    }
+
     /// Purpose: Draw the whole screen: model bar, mark, notes, transcript, decision, picker, input and key hints.
     /// Serves: `surface::run`'s loop and every drawing test.
     /// Design: `docs/design/surfaces.md` §3.
@@ -2413,6 +2636,14 @@ impl App {
                 } else {
                     0
                 }),
+                // The command menu sits directly above the input too: the list and
+                // the line it fills are one gesture, and a menu drawn in the title
+                // would have to compete with the running turn's status.
+                Constraint::Length(if self.command_rows() == 0 {
+                    0
+                } else {
+                    self.command_rows() + 2
+                }),
                 // The `@` picker sits directly above the input box it is filling in,
                 // so the eye does not travel between the list and the token it will
                 // replace. Nothing is taken from the transcript when it is closed.
@@ -2427,8 +2658,9 @@ impl App {
             .split(conversation);
         // Named, because five anonymous slices is how the notes strip once ended up
         // drawn over the mark.
-        let (models, banner, notes, transcript, decision, picker, entry, keys) = (
+        let (models, banner, notes, transcript, decision, menu, picker, entry, keys) = (
             areas[0], areas[1], areas[2], areas[3], areas[4], areas[5], areas[6], areas[7],
+            areas[8],
         );
 
         if !self.models.is_empty() {
@@ -2439,6 +2671,9 @@ impl App {
         }
         if self.pending.is_some() {
             self.draw_approval(frame, decision);
+        }
+        if self.command_rows() > 0 {
+            self.draw_commands(frame, menu);
         }
         if self.picker_rows() > 0 {
             self.draw_picker(frame, picker);
@@ -2480,21 +2715,20 @@ impl App {
         frame.render_widget(body, transcript);
 
         let (title, style) = match &self.pending {
-            Some(_) if self.yolo => (
-                "⚠ YOLO — NOT ASKING · this session approves for you".to_string(),
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ),
+            // The question is the state, whatever else is true: a menu that does not
+            // say what it is asking is worse than no menu. Under YOLO the mark goes in
+            // front rather than replacing the sentence.
             Some(_) => (
-                "waiting for your decision — ↑/↓ choose · enter confirm · esc deny".to_string(),
-                MARK_ACCENT_STYLE,
+                format!(
+                    "{}waiting for your decision — ↑/↓ choose · enter confirm · esc deny",
+                    self.yolo_mark()
+                ),
+                self.title_style(MARK_ACCENT_STYLE),
             ),
             // Busy: what it is doing and for how long. "working…" for two minutes
-            // tells nobody whether it is thinking or stuck.
-            // The one state that must never be invisible.
-            None if self.yolo => (
-                "⚠ YOLO — approvals off, sandbox still on (/yolo to restore)".to_string(),
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ),
+            // tells nobody whether it is thinking or stuck. Under YOLO this used to be
+            // replaced by the warning, so the one state that must never be invisible was
+            // the one nobody could see; the mark rides in front of it instead.
             None if self.busy => {
                 let secs = self
                     .busy_since
@@ -2508,8 +2742,12 @@ impl App {
                 (
                     // The mark turns, so the line proves the process is alive even while
                     // the words beside it are the same ones it said ten seconds ago.
-                    format!("{} working {secs}s{doing}", spinner_frame(self.busy_since)),
-                    Style::default().fg(Color::Cyan),
+                    format!(
+                        "{}{} working {secs}s{doing}",
+                        self.yolo_mark(),
+                        spinner_frame(self.busy_since)
+                    ),
+                    self.title_style(Style::default().fg(Color::Cyan)),
                 )
             }
             // The last turn's ending, held on screen until the next prompt starts.
@@ -2522,7 +2760,10 @@ impl App {
             // answers it only for somebody who is already scrolling.
             None if self.finished.is_some() && !self.input.starts_with('/') => {
                 let finished = self.finished.expect("just checked");
-                (finished.line(), finished.style())
+                (
+                    format!("{}{}", self.yolo_mark(), finished.line()),
+                    self.title_style(finished.style()),
+                )
             }
             // A leading `/` is a command: say where the list of them is.
             None if self.input.starts_with('/') => {
@@ -2531,56 +2772,74 @@ impl App {
                 // disagreed with it would be worse than no hint.
                 let typed = self.input.trim().to_ascii_lowercase();
                 (
-                    match typed.as_str() {
-                        // Once it is unambiguous, say what will happen rather than where to
-                        // read about it.
-                        "/exit" | "/quit" | "/q" | "/exi" | "/qui" => {
-                            "enter leaves loongagent (ctrl-c does too)".to_string()
-                        }
-                        "/logo" => "enter shows or hides the mark".to_string(),
-                        "/expand" => {
-                            "enter shows the last tool result in full (tab walks the folds)"
-                                .to_string()
-                        }
-                        "/yolo" => {
-                            "enter turns approval prompts off (the sandbox stays)".to_string()
-                        }
-                        "/copy" => "enter copies the whole transcript".to_string(),
-                        "/new" | "/clear" | "/reset" => {
-                            "enter starts a new session — this one is kept, its context is not"
-                                .to_string()
-                        }
-                        "/mouse" => "enter hands the mouse back to your terminal".to_string(),
-                        // The model shortcuts, said in full only when they would work: a
-                        // completion that promises a switch in a session with one model
-                        // is a completion that lies.
-                        "/r" if self.last_prompt.is_some() => {
-                            "enter asks the last prompt again, of the current model".to_string()
-                        }
-                        _ => match typed
-                            .strip_prefix('/')
-                            .and_then(|n| n.parse::<usize>().ok())
-                        {
-                            Some(slot) if (1..=9).contains(&slot) => {
-                                match self.model_in_slot(slot) {
-                                    Some(offering) => {
-                                        format!("enter switches to [{slot}] {}", offering.name)
-                                    }
-                                    None => format!("no model in slot {slot}"),
-                                }
+                    format!(
+                        "{}{}",
+                        self.yolo_mark(),
+                        match typed.as_str() {
+                            // Once it is unambiguous, say what will happen rather than where to
+                            // read about it.
+                            "/exit" | "/quit" | "/q" => {
+                                "enter leaves loongagent (ctrl-c does too)".to_string()
                             }
-                            // `/help` stays in front: it is the answer to "where is the
-                            // rest", and a hint that dropped it to make room for a
-                            // newcomer would be trading one dead end for another.
-                            _ => {
-                                "command — /help · /new · /exit · /logo · /mouse · /copy · /expand"
+                            "/logo" => "enter shows or hides the mark".to_string(),
+                            "/expand" => {
+                                "enter shows the last tool result in full (tab walks the folds)"
                                     .to_string()
                             }
-                        },
-                    },
-                    Style::default().fg(Color::Green),
+                            "/yolo" => {
+                                "enter turns approval prompts off (the sandbox stays)".to_string()
+                            }
+                            "/copy" => "enter copies the whole transcript".to_string(),
+                            "/new" | "/clear" | "/reset" => {
+                                "enter starts a new session — this one is kept, its context is not"
+                                    .to_string()
+                            }
+                            "/mouse" => "enter hands the mouse back to your terminal".to_string(),
+                            // The model shortcuts, said in full only when they would work: a
+                            // completion that promises a switch in a session with one model
+                            // is a completion that lies.
+                            "/r" if self.last_prompt.is_some() => {
+                                "enter asks the last prompt again, of the current model".to_string()
+                            }
+                            "/r" => "nothing to resend yet — ask something first".to_string(),
+                            _ => match typed
+                                .strip_prefix('/')
+                                .and_then(|n| n.parse::<usize>().ok())
+                            {
+                                Some(slot) if (1..=9).contains(&slot) => {
+                                    match self.model_in_slot(slot) {
+                                        Some(offering) => {
+                                            format!("enter switches to [{slot}] {}", offering.name)
+                                        }
+                                        None => format!("no model in slot {slot}"),
+                                    }
+                                }
+                                // A prefix of exactly one command is worth saying in full: it
+                                // is the name the menu is about to complete, and the sentence
+                                // is what that command will do. Several, or none, are the
+                                // menu's job to explain.
+                                _ => {
+                                    let found = commands::matches(&self.input);
+                                    match found.len() {
+                                    1 => format!("enter {}", found[0].description),
+                                    0 => "not one of this screen's commands — enter still sends it"
+                                        .to_string(),
+                                    _ => "command — ↑/↓ choose · enter completes".to_string(),
+                                }
+                                }
+                            },
+                        }
+                    ),
+                    self.title_style(Style::default().fg(Color::Green)),
                 )
             }
+            // Nothing to report but the relaxed session itself. This one keeps the full
+            // sentence, because there is room for it; every other state carries the short
+            // mark in front, so the warning is never the price of the status.
+            None if self.yolo => (
+                "⚠ YOLO — approvals off, sandbox still on (/yolo to restore)".to_string(),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
             None => ("prompt".to_string(), Style::default()),
         };
         let inner_width = entry.width.saturating_sub(2);

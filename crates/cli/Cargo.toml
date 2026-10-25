@@ -31,6 +31,12 @@ serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 
+# `dup2` in `pre_exec`: the private control channel's read end is handed to the server
+# child as fd 3. Windows has no descriptor inheritance, and the surface there keeps the
+# queued `/yolo` behaviour.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tungstenite = "0.30"
 loong-schema.workspace = true

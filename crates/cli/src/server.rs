@@ -23,6 +23,18 @@ use crate::session::session_dir;
 /// Verify: `cargo test -p loongagent --test vertical_slice`.
 pub(crate) fn serve(args: Args) -> Result<(), String> {
     args.ensure_parent()?;
+    // The control descriptor must be checked before anything opens a file. If the number
+    // is not an open descriptor, the session log can be handed that very number a moment
+    // later, and the reader thread would then adopt (and close) the log instead of a
+    // channel. A surface always passes a real one; a person running the server by hand
+    // can still mistype it.
+    #[cfg(unix)]
+    if let Some(fd) = args.control_fd {
+        // Safety: `F_GETFD` only reads a flag; it has no memory contract.
+        if unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
+            return Err(format!("--control-fd {fd}: not an open descriptor"));
+        }
+    }
     // `--debug-model`: point the provider's raw-exchange dump at a sidecar beside this
     // session's log. Set before any model is built, and only when the environment does
     // not already name a file — an explicit `LOONGAGENT_DEBUG_MODEL` wins, so a person
@@ -153,10 +165,24 @@ pub(crate) fn serve(args: Args) -> Result<(), String> {
         let path = session_dir(&factory_args.cwd).join(format!("{id}.jsonl"));
         build_kernel(&factory_args, &factory_settings, &path).map(|kernel| (id, kernel))
     });
-    Server::new(kernel, args.session_id())
-        .with_factory(factory)
-        .run_stdio()
-        .map_err(|e| e.to_string())
+    // The surface that spawned us may have opened a private control channel, which is how
+    // `/yolo` reaches a turn that owns the connection. The slot is created here because
+    // the kernel is built here; the server re-installs it on `session.new`.
+    #[cfg(unix)]
+    let permissions = args
+        .control_fd
+        .map(|_| std::sync::Arc::new(std::sync::Mutex::new(None)));
+    #[cfg(unix)]
+    if let Some(slot) = &permissions {
+        kernel.use_permissions_requester(std::sync::Arc::clone(slot));
+    }
+    let server = Server::new(kernel, args.session_id()).with_factory(factory);
+    #[cfg(unix)]
+    let server = match (&permissions, args.control_fd) {
+        (Some(slot), Some(fd)) => server.with_permissions(std::sync::Arc::clone(slot), fd),
+        _ => server,
+    };
+    server.run_stdio().map_err(|e| e.to_string())
 }
 
 /// Purpose: Turn the flags and the resolved profile into the one kernel configuration every session build uses.

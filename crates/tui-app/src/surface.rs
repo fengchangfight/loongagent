@@ -21,6 +21,7 @@ pub fn run<T: Transport + Send + 'static>(
     notes: Option<Receiver<String>>,
     intro: Vec<String>,
     interrupt: Option<Box<dyn Fn()>>,
+    permissions: Option<Box<dyn Fn(bool)>>,
     health: Option<Receiver<ModelHealth>>,
 ) -> Result<(), String> {
     use ratatui::backend::CrosstermBackend;
@@ -51,6 +52,7 @@ pub fn run<T: Transport + Send + 'static>(
     let (to_worker, from_worker) = spawn_worker(client, shown);
     let mut app = App::new(session, schema);
     app.interrupt = interrupt;
+    app.set_permissions = permissions;
     if let Some(list) = models {
         app.set_models(list);
     }

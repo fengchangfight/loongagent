@@ -94,7 +94,7 @@ pub(crate) fn web(args: Args) -> Result<(), String> {
             state.summary()
         );
     }
-    let (transport, notes) = ChildTransport::spawn(&args, true)?;
+    let (transport, notes, _control) = ChildTransport::spawn(&args, true)?;
     if let Some(notes) = notes {
         // The server's own diagnostics go to this terminal, where the operator is.
         std::thread::spawn(move || {

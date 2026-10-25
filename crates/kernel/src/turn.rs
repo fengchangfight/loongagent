@@ -386,6 +386,11 @@ pub struct Kernel {
     /// next step boundary. Cooperative on purpose: a tool that has begun finishes, and the
     /// turn stops between steps rather than in the middle of one.
     interrupted: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// A permissions change asked for from outside the turn — the surface's private
+    /// control channel. It cannot write the log (the turn is the only writer), so it
+    /// leaves the request here and the turn applies it at the next decision boundary,
+    /// recording `permissions.relaxed` itself and in order.
+    permissions_request: std::sync::Arc<std::sync::Mutex<Option<bool>>>,
     /// Ledger entry per message, in lockstep with `messages` (ADR-0006: the
     /// ledger decides, the wire view follows).
     entry_of: Vec<Option<u64>>,

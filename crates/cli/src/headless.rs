@@ -19,7 +19,7 @@ use crate::tui::ChildTransport;
 /// Verify: `cargo test -p loongagent --test vertical_slice`.
 pub(crate) fn headless(args: Args, prompt: &str) -> Result<(), String> {
     args.ensure_parent()?;
-    let (transport, _) = ChildTransport::spawn(&args, false)?;
+    let (transport, _, _) = ChildTransport::spawn(&args, false)?;
     let mut client = Client::new(transport, args.session_id());
     client.attach(&args.cwd.to_string_lossy(), "headless")?;
     // Headless output stays in order: the turn's events, then the answer. Streaming

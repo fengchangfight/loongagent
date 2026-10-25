@@ -1,8 +1,8 @@
 # Surfaces: one server, many thin clients
 
 - **Up:** [design/README.md](README.md) · [04 System overview](../04-system-overview.md)
-- **Authority:** [ADR-0001](../decisions/0001-one-binary-client-server.md) · [ADR-0002](../decisions/0002-json-rpc-wire-protocol.md) · [ADR-0009](../decisions/0009-surfaces.md)
-- **Code:** `crates/cli/src/main.rs`, `crates/server/src/lib.rs`, `crates/tui/src/lib.rs`, `crates/tui-app/src/lib.rs`, `crates/web/src/lib.rs`
+- **Authority:** [ADR-0001](../decisions/0001-one-binary-client-server.md) · [ADR-0002](../decisions/0002-json-rpc-wire-protocol.md) · [ADR-0009](../decisions/0009-surfaces.md) · [ADR-0019](../decisions/0019-mid-turn-permissions.md)
+- **Code:** `crates/cli/src/main.rs`, `crates/server/src/lib.rs`, `crates/tui/src/lib.rs`, `crates/tui-app/src/lib.rs`, `crates/tui-app/src/commands.rs`, `crates/web/src/lib.rs`
 - **Verify:** `cargo test -p loongagent -p loong-server -p loong-tui -p loong-tui-app -p loong-web` · `./scripts/check.sh`
 
 The architecture is one local agent server and thin clients that render its event stream and
@@ -73,6 +73,28 @@ drawing are driven from ratatui's `TestBackend` in the tests. The full-screen su
 presentation and intents: the model picker, the context panel, fold/expand of long tool output,
 `/yolo`, `/new`, and interrupt. The interruption is a signal to the server process, not a
 protocol method.
+
+The slash commands that belong to the screen are offered while they are typed: a `/` opens a
+menu above the input, narrowed by the prefix, one line saying what each command does. ↑/↓ walks
+it, enter runs an exact name and only *completes* a prefix, esc puts it away. The menu sits
+above the input rather than in the prompt title so that a running turn's `working …` status and
+the command being typed are both visible; that matters because `/yolo` is exactly the command
+someone reaches for during a turn. The menu and the dispatcher read one table
+(`crates/tui-app/src/commands.rs`), so a spelling the menu offers cannot be one the dispatcher
+does not know — the drift that made `/qui` look like a command while enter sent it to the
+model. Everything not in that table still goes to the agent, where `/help` and the workspace's
+skills live, and the menu says so instead of pretending the word does not exist.
+
+Two rules keep the prompt title honest. The turn's status always wins it — working, waiting,
+finished — and the YOLO warning is a red mark in front of that status, never a replacement: a
+session that stops asking is dangerous, but a title that says only that is a session nobody can
+tell is alive. And a turn that stops for a question is **paused, not finished**: the question is
+the state, no `✓ 完成` is recorded, and the turn's clock keeps running across the pause, because
+it measures the turn rather than the work.
+
+`/yolo` must not wait for a turn to end: the launcher gives the server a private control
+channel, so it reaches the running kernel at its next boundary and the screen flips at
+once (`permissions.relaxed` confirms). Unix: a socketpair; Windows keeps the queued path.
 
 ### The TUI's marks and colour
 

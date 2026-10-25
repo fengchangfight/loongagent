@@ -49,7 +49,7 @@ fn print_streaming(client: &mut Client<ChildTransport>, text: &str) -> Result<Ve
 /// Verify: `cargo test -p loongagent --test tui_surface`.
 pub(crate) fn repl(args: Args) -> Result<(), String> {
     args.ensure_parent()?;
-    let (transport, _) = ChildTransport::spawn(&args, false)?;
+    let (transport, _, _) = ChildTransport::spawn(&args, false)?;
     let mut client = Client::new(transport, args.session_id());
     let cwd = args.cwd.to_string_lossy().to_string();
     let attached = client.attach(&cwd, "tui")?;

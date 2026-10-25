@@ -1,7 +1,7 @@
 # Kernel loop: one turn
 
 - **Up:** [design/README.md](README.md) · [04 System overview](../04-system-overview.md)
-- **Authority:** [ADR-0004](../decisions/0004-microkernel-extension-model.md) · [ADR-0006](../decisions/0006-context-engine.md)
+- **Authority:** [ADR-0004](../decisions/0004-microkernel-extension-model.md) · [ADR-0006](../decisions/0006-context-engine.md) · [ADR-0019](../decisions/0019-mid-turn-permissions.md)
 - **Code:** `crates/kernel/src/turn.rs`, `crates/kernel/src/turn/loop.rs`, `crates/kernel/src/turn/model.rs`
 - **Verify:** `cargo test -p loong-kernel` · `./scripts/check.sh`
 
@@ -150,6 +150,13 @@ history. An id mismatch, or an answer with nothing pending, is
 **`/yolo`.** `Kernel::set_auto_approve` records `permissions.relaxed` and flips
 `Kernel.auto_approve`. The ask arm then executes instead of parking and records
 that the ruling was relaxed; the sandbox is a different axis and still applies.
+
+A `/yolo` typed **while the turn is running** arrives through the surface's private
+control channel and waits in `Kernel.permissions_request`.
+`Kernel::apply_requested_permissions` takes it at the top of every step and at the start
+of `dispatch`, before `Pdp::decide`; the server calls the same method before handling a
+request, which catches one that arrived after the last boundary. The turn remains the
+only writer of `permissions.relaxed`.
 
 **Session resume is not approval resume.** `Kernel::open` rebuilds the
 conversation with `Kernel::replay_history`, so the next turn sees the history it

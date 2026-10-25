@@ -2010,6 +2010,7 @@ mod tests {
             control_system: false,
             port: 0,
             stdio: false,
+            control_fd: None,
             budget: None,
             keep_newest: None,
             max_steps: None,

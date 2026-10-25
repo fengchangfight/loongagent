@@ -1,7 +1,7 @@
 # Tools and permissions: one gate, two enforcers
 
 - **Up:** [design/README.md](README.md) · [04 System overview](../04-system-overview.md)
-- **Authority:** [ADR-0004](../decisions/0004-microkernel-extension-model.md) · [ADR-0007](../decisions/0007-permission-sandbox-engine.md)
+- **Authority:** [ADR-0004](../decisions/0004-microkernel-extension-model.md) · [ADR-0007](../decisions/0007-permission-sandbox-engine.md) · [ADR-0019](../decisions/0019-mid-turn-permissions.md)
 - **Code:** `crates/tools/src/lib.rs`, `crates/sandbox/src/`, `crates/kernel/src/turn/confinement.rs`, `crates/proc/src/lib.rs`
 - **Verify:** `cargo test -p loong-tools -p loong-sandbox` · `./scripts/check.sh`
 
@@ -109,6 +109,8 @@ The three arms:
   `approval.decided` and either runs the call or records a refusal. `/yolo`
   (`Kernel::set_auto_approve`) turns an ask into an allow, and says so with a
   second `policy.decided` and a second `tool.call`. The sequence is [tool-approval.md](flows/tool-approval.md).
+  A `/yolo` asked for while a turn is running reaches the kernel at its next decision
+  boundary through the surface's private control channel — [ADR-0019](../decisions/0019-mid-turn-permissions.md).
 - **Deny** — record `tool.result` with `ok: false` and the rule and reason. The
   model reads it and continues; a denial is not an error.
 

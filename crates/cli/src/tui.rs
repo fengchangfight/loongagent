@@ -49,7 +49,7 @@ impl ChildTransport {
     pub(crate) fn spawn(
         args: &Args,
         capture_notes: bool,
-    ) -> Result<(Self, Option<Receiver<String>>), String> {
+    ) -> Result<(Self, Option<Receiver<String>>, Option<Box<dyn Fn(bool)>>), String> {
         // Same binary by default; overridable so a *test* binary can point at the
         // built server (an integration test's current_exe is the test harness).
         let exe = match std::env::var_os("LOONGAGENT_SERVER_BIN") {
@@ -97,6 +97,41 @@ impl ChildTransport {
         if let Some(steps) = args.max_steps {
             command.arg("--max-steps").arg(steps.to_string());
         }
+        // The private control channel: how `/yolo` reaches a turn that owns the
+        // connection. A socketpair is made here; the read end is handed to the child as
+        // descriptor 3, and the write end never leaves this process — so nothing the
+        // agent runs (a shell tool, an MCP server) can reach it and turn the prompts off.
+        // Windows has no descriptor inheritance; there the surface keeps the queued
+        // behaviour, and `ARGV` below is not passed.
+        #[cfg(unix)]
+        let (_control_read, control_write) = {
+            use std::os::unix::io::AsRawFd;
+            use std::os::unix::process::CommandExt;
+            let (write, read) = std::os::unix::net::UnixStream::pair()
+                .map_err(|e| format!("the control channel: {e}"))?;
+            let read_fd = read.as_raw_fd();
+            // Safety: this runs after fork and before exec, and `dup2` allocates nothing
+            // and takes no lock.
+            unsafe {
+                command.pre_exec(move || {
+                    if read_fd == 3 {
+                        // Already the number the child expects. `dup2` onto itself does
+                        // nothing on Linux, and the descriptor still carries `CLOEXEC`,
+                        // which would close it at exec — so clear that flag instead.
+                        let flags = libc::fcntl(3, libc::F_GETFD);
+                        if flags < 0 || libc::fcntl(3, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0
+                        {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                    } else if libc::dup2(read_fd, 3) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+            command.arg("--control-fd").arg("3");
+            (read, write)
+        };
         let mut child = command
             .arg("--stdio")
             .arg("--session")
@@ -130,6 +165,21 @@ impl ChildTransport {
         } else {
             None
         };
+        // The closure the screen calls when `/yolo` must reach a running turn. Writing
+        // to the pipe cannot fail silently in a way that matters: if it does, the turn
+        // that owns the connection is already gone. The `permissions.relaxed` event is
+        // the confirmation; the write only asks.
+        #[cfg(unix)]
+        let control: Option<Box<dyn Fn(bool)>> = {
+            let write = std::sync::Arc::new(control_write);
+            Some(Box::new(move |on: bool| {
+                use std::io::Write;
+                let line = if on { "yolo on\n" } else { "yolo off\n" };
+                let _ = (&*write).write_all(line.as_bytes());
+            }))
+        };
+        #[cfg(not(unix))]
+        let control: Option<Box<dyn Fn(bool)>> = None;
         Ok((
             Self {
                 child,
@@ -137,6 +187,7 @@ impl ChildTransport {
                 stdout,
             },
             notes,
+            control,
         ))
     }
 }
@@ -211,7 +262,7 @@ pub(crate) fn full_screen(args: Args) -> Result<(), String> {
     if let Some(profile) = &resolved_settings {
         session_needs_a_model(&args, local, profile)?;
     }
-    let (transport, notes) = ChildTransport::spawn(&args, true)?;
+    let (transport, notes, control) = ChildTransport::spawn(&args, true)?;
     // Taken before the transport moves into the client: the interface needs the pid to
     // stop a turn, and the client is blocked on the transport while one runs.
     let server_pid = transport.pid();
@@ -320,6 +371,7 @@ pub(crate) fn full_screen(args: Args) -> Result<(), String> {
         notes,
         intro,
         Some(Box::new(move || loong_tui::interrupt(server_pid))),
+        control,
         health,
     );
     // Leaving the interface — by `/exit`, ctrl-c, or an error — says where the session

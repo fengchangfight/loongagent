@@ -217,6 +217,124 @@ fn opting_out_of_prompts_allows_the_action_and_says_so_in_the_log() {
     let _ = std::fs::remove_file(&escape);
 }
 
+/// Purpose: A permissions request from outside the turn is applied at the next decision, and recorded before the call it relaxes.
+#[test]
+fn a_permissions_request_is_applied_at_the_next_decision() {
+    let t = Temp::new();
+    let escape = t.dir.parent().unwrap().join("loong-kernel-control.txt");
+    let _ = std::fs::remove_file(&escape);
+    let model = ScriptedModel::new(vec![
+        response(
+            vec![call(
+                "c1",
+                "write_file",
+                json!({"path": escape.to_string_lossy(), "content": "x"}),
+            )],
+            None,
+        ),
+        response(vec![], Some("done")),
+    ]);
+    let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+
+    // The surface's private control channel leaves the request; the turn applies it.
+    *k.permissions_requestor().lock().unwrap() = Some(true);
+    let outcome = k.submit("write outside").unwrap();
+    assert!(
+        outcome.pending_approval.is_none(),
+        "the request arrived before the decision, so nothing asks: {:?}",
+        outcome.pending_approval
+    );
+    let events = loong_eventlog::replay(&t.log).unwrap().events;
+    let relaxed = events
+        .iter()
+        .position(|event| event.kind == gen::event::PERMISSIONS_RELAXED)
+        .expect("the opt-out is in the log");
+    let called = events
+        .iter()
+        .position(|event| event.kind == ev::TOOL_CALL)
+        .expect("the call is in the log");
+    assert!(
+        relaxed < called,
+        "the relaxation is recorded before the call it allowed"
+    );
+    let ruling = events
+        .iter()
+        .filter(|event| event.kind == ev::POLICY_DECIDED)
+        .find(|event| {
+            event.data["rule"]
+                .as_str()
+                .unwrap_or("")
+                .starts_with("yolo:")
+        })
+        .expect("the override is recorded, so the log says why nothing asked");
+    assert_eq!(ruling.data["verdict"], "allow");
+    let _ = std::fs::remove_file(&escape);
+}
+
+/// Purpose: A request that arrives while the model is answering is applied before the next call is judged, not after the turn.
+#[test]
+fn a_permissions_request_during_a_model_call_still_allows_the_call() {
+    /// Purpose: A scripted model that leaves a permissions request as it answers the first call.
+    /// Serves: `a_permissions_request_during_a_model_call_still_allows_the_call`.
+    /// Design: `docs/design/flows/tool-approval.md`.
+    /// Up: the test constructs it, and the kernel calls it.
+    /// Down: `ScriptedModel::complete` and the request slot.
+    /// Verify: `cargo test -p loong-kernel`.
+    struct AsksMidCall {
+        inner: ScriptedModel,
+        slot: std::sync::Arc<std::sync::Mutex<Option<bool>>>,
+        fired: bool,
+    }
+    impl Model for AsksMidCall {
+        /// Purpose: Leave the request on the first call, then behave like the script.
+        /// Contract: kernel test fixture.
+        fn complete(
+            &mut self,
+            request: &CompletionRequest,
+        ) -> Result<CompletionResponse, ModelError> {
+            if !self.fired {
+                self.fired = true;
+                *self.slot.lock().unwrap() = Some(true);
+            }
+            self.inner.complete(request)
+        }
+    }
+
+    let t = Temp::new();
+    let escape = t.dir.parent().unwrap().join("loong-kernel-midcall.txt");
+    let _ = std::fs::remove_file(&escape);
+    let scripted = ScriptedModel::new(vec![
+        response(
+            vec![call(
+                "c1",
+                "write_file",
+                json!({"path": escape.to_string_lossy(), "content": "x"}),
+            )],
+            None,
+        ),
+        response(vec![], Some("done")),
+    ]);
+    let slot = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let mut k = Kernel::create(
+        &t.log,
+        KernelConfig::new(&t.dir),
+        Box::new(AsksMidCall {
+            inner: scripted,
+            slot: std::sync::Arc::clone(&slot),
+            fired: false,
+        }),
+    )
+    .unwrap();
+    k.use_permissions_requester(slot);
+    let outcome = k.submit("write outside").unwrap();
+    assert!(
+        outcome.pending_approval.is_none(),
+        "the request arrived while the model was answering, and the call is still allowed: {:?}",
+        outcome.pending_approval
+    );
+    let _ = std::fs::remove_file(&escape);
+}
+
 /// Purpose: An out-of-bounds write parks the turn with `approval.requested`, writes nothing, and resumes on a denial with the answer in the log.
 #[test]
 fn an_out_of_bounds_write_asks_then_resumes_on_the_answer() {
@@ -662,6 +780,33 @@ fn the_pep_still_allows_a_workspace_write_through_the_shell() {
     let events = loong_eventlog::replay(&t.log).unwrap().events;
     let result = events.iter().find(|e| e.kind == ev::TOOL_RESULT).unwrap();
     assert_eq!(result.data["ok"], true, "{:?}", result.data["output"]);
+}
+
+/// Purpose: A confined child keeps `/dev/null` writable: git opens it read-write at startup, so denying the write broke every git command.
+#[test]
+#[cfg(target_os = "linux")]
+fn the_pep_keeps_dev_null_writable_for_ordinary_tools() {
+    let t = Temp::new();
+    let model = ScriptedModel::new(vec![
+        response(
+            vec![call("c1", "shell", json!({"command": "git --version"}))],
+            None,
+        ),
+        response(vec![], Some("done")),
+    ]);
+    let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+    assert!(
+        k.confinement_note().contains("landlock"),
+        "the kernel must confine tool children: {}",
+        k.confinement_note()
+    );
+    k.submit("check git").unwrap();
+
+    let events = loong_eventlog::replay(&t.log).unwrap().events;
+    let result = events.iter().find(|e| e.kind == ev::TOOL_RESULT).unwrap();
+    let output = result.data["output"].as_str().unwrap_or_default();
+    assert_eq!(result.data["ok"], true, "output was: {output}");
+    assert!(output.contains("git version"), "output was: {output}");
 }
 
 /// Purpose: A read-only shell verb is classified `Investigate` and allowed, keeping read work free.

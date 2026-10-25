@@ -468,6 +468,7 @@ impl Kernel {
             auto_approve: false,
             event_sink: None,
             interrupted: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            permissions_request: std::sync::Arc::new(std::sync::Mutex::new(None)),
             entry_of: Vec::new(),
             pending: None,
             approvals: 0,

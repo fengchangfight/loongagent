@@ -332,6 +332,10 @@ impl Kernel {
         let mut ran: Vec<String> = Vec::new();
         let mut nudged = false;
         for step in 1..=self.config.max_steps {
+            // A permissions change asked for from outside is applied here, before the
+            // step's model call and its tool decisions: the question this step would
+            // have asked must never be asked after the person already said yes.
+            self.apply_requested_permissions()?;
             // A stop asked for between steps stops here: after the last tool finished,
             // before the next model call. Nothing half-done is left behind.
             if self.interrupted() {
@@ -509,6 +513,9 @@ impl Kernel {
         call: &ToolCallRequest,
         events: &mut Vec<u64>,
     ) -> Result<Dispatch, KernelError> {
+        // The last boundary before a verdict: a request that arrived while the model was
+        // returning this call applies now, so the call is allowed rather than asked about.
+        self.apply_requested_permissions()?;
         // `recall` is answered from this session's derived memory rather than from
         // the filesystem, so it is not in the registry — but it is still a tool the
         // model may call. It bypasses the registry *and* the PDP, on purpose: it is
@@ -736,6 +743,50 @@ impl Kernel {
     /// Verify: `cargo test -p loong-kernel turn::tests::opting_out_of_prompts_allows_the_action_and_says_so_in_the_log`.
     pub fn auto_approve(&self) -> bool {
         self.auto_approve
+    }
+
+    /// Purpose: Hand out the slot a control channel writes a permissions request into.
+    /// Serves: `Server::with_permissions`, whose reader thread receives the surface's
+    /// `/yolo` while a turn owns the connection.
+    /// Design: `docs/design/kernel-loop.md` §5; `docs/design/flows/tool-approval.md`.
+    /// Up: `Server::with_permissions` and the server's `session.new` handler.
+    /// Down: `Kernel::permissions_request`, read by `apply_requested_permissions`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_permissions_request_is_applied_at_the_next_decision`.
+    pub fn permissions_requestor(&self) -> std::sync::Arc<std::sync::Mutex<Option<bool>>> {
+        std::sync::Arc::clone(&self.permissions_request)
+    }
+
+    /// Purpose: Adopt a process-owned permissions request slot, so `/new` does not leave the
+    /// session with an unreachable one.
+    /// Serves: a server that owns one control channel for every kernel it installs.
+    /// Design: `docs/design/kernel-loop.md` §5.
+    /// Up: `Server::with_permissions` and the server's `session.new` handler.
+    /// Down: `Kernel::permissions_request`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_permissions_request_is_applied_at_the_next_decision`.
+    pub fn use_permissions_requester(
+        &mut self,
+        slot: std::sync::Arc<std::sync::Mutex<Option<bool>>>,
+    ) {
+        self.permissions_request = slot;
+    }
+
+    /// Purpose: Apply a permissions request that arrived from outside the turn, at the next
+    /// boundary where no work is half-done.
+    /// Serves: `/yolo` reaching a running turn instead of waiting for it to end.
+    /// Design: `docs/design/kernel-loop.md` §5; `docs/design/flows/tool-approval.md`.
+    /// Up: `Kernel::run_inner`, `Kernel::dispatch` and `Server::dispatch`.
+    /// Down: `Kernel::set_auto_approve`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_permissions_request_is_applied_at_the_next_decision`.
+    pub fn apply_requested_permissions(&mut self) -> Result<(), KernelError> {
+        let asked = self
+            .permissions_request
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take());
+        if let Some(on) = asked {
+            self.set_auto_approve(on)?;
+        }
+        Ok(())
     }
 
     /// The flag a signal handler sets to stop the running turn. Handing it out is how the

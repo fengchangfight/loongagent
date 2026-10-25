@@ -992,6 +992,7 @@ dependencies = [
 name = "loongagent"
 version = "0.0.1"
 dependencies = [
+ "libc",
  "loong-config",
  "loong-context",
  "loong-control",

@@ -64,6 +64,19 @@ pub fn spawn_worker<T: Transport + Send + 'static>(
                         {
                             return;
                         }
+                        // A permissions change made while this turn was running arrives
+                        // as an event (the control channel already asked for it); it is
+                        // the confirmation the screen waits for before it can trust its
+                        // own optimistic flip.
+                        if kind_of(params) == loong_schema::generated::event::PERMISSIONS_RELAXED {
+                            if let Some(on) = params
+                                .get("data")
+                                .and_then(|data| data.get("auto_approve"))
+                                .and_then(|on| on.as_bool())
+                            {
+                                let _ = events.send(FromWorker::Yolo(on));
+                            }
+                        }
                         if let Some(line) = renderer.render(params) {
                             let kind = params.get("kind").and_then(|k| k.as_str()).unwrap_or("");
                             // The summary is what the transcript keeps and what this line

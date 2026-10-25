@@ -262,17 +262,200 @@ fn an_approval_repurposes_the_input_line_and_answers_it() {
     );
 }
 
-/// Purpose: A leading `/` shows the command hint while the text stays an ordinary prompt.
+/// Purpose: A question pauses a turn without ending its clock, so the resumed work still has a moving title.
 #[test]
-fn typing_a_slash_says_where_the_commands_are_listed() {
+fn answering_a_question_keeps_the_turn_clock_running() {
     let mut app = App::new("s", "v");
-    type_text(&mut app, "/rev");
-    let screen = draw(&mut app, 70, 16);
-    assert!(screen.contains("command — /help"), "{screen}");
-    assert!(screen.contains("/exit"), "and the way out: {screen}");
-    assert!(screen.contains("/logo"), "and what else is here: {screen}");
-    // And it is only a hint: the text is still a normal prompt buffer.
-    assert_eq!(app.input, "/rev");
+    // A turn runs, then stops for a question. The pause is not an ending: the turn
+    // still has work to resume, and its clock is what says how long it has been going.
+    app.busy = true;
+    app.busy_since = Some(std::time::Instant::now());
+    app.pending = Some("appr-1".to_string());
+    fed(
+        &mut app,
+        FromWorker::State {
+            pending: Some("appr-1".to_string()),
+        },
+    );
+    assert!(
+        app.busy_since.is_some(),
+        "the pause does not throw the turn's clock away"
+    );
+
+    // Answering resumes the turn. A busy surface with no clock reads "⠋ working 0s"
+    // for as long as the resumed work takes: the number cannot count and the frame
+    // cannot turn, which is exactly the "is it stuck?" the title exists to answer.
+    match app.handle_key(key(KeyCode::Enter)) {
+        Action::Send(_) => {}
+        other => panic!("expected the answer to be sent, got {other:?}"),
+    }
+    let started = app
+        .busy_since
+        .expect("the resumed turn is timed from its submit");
+    // One second in, both halves of the title have moved with that clock.
+    app.busy_since = Some(started - std::time::Duration::from_secs(1));
+    let screen = draw(&mut app, 80, 20);
+    assert!(screen.contains("working 1s"), "the clock counts: {screen}");
+    assert!(
+        SPINNER
+            .iter()
+            .any(|frame| *frame != SPINNER[0] && screen.contains(frame)),
+        "and the mark turns: {screen}"
+    );
+}
+
+/// Purpose: A turn that stops for a question is not recorded as finished, so no tick claims the work is over.
+#[test]
+fn a_turn_paused_for_a_question_is_not_recorded_as_finished() {
+    let mut app = App::new("s", "v");
+    app.busy = true;
+    app.busy_since = Some(std::time::Instant::now());
+    fed(
+        &mut app,
+        FromWorker::State {
+            pending: Some("appr-1".to_string()),
+        },
+    );
+    assert!(app.pending.is_some(), "the question is the state");
+    assert!(!app.busy);
+    assert!(
+        app.finished.is_none(),
+        "a question is not an ending: {:?}",
+        app.finished
+    );
+    assert!(
+        !app.lines.iter().any(|line| line.contains("完成")),
+        "and nothing in the transcript says it finished: {:?}",
+        app.lines
+    );
+}
+
+/// Purpose: Typing `/` lists the commands this screen answers, including the ones a prefix used to hide.
+#[test]
+fn typing_a_slash_offers_the_commands_this_screen_answers() {
+    let mut app = App::new("s", "v");
+    type_text(&mut app, "/");
+    let screen = draw(&mut app, 100, 24);
+    assert!(screen.contains("commands"), "the menu is named: {screen}");
+    for command in [
+        "/new", "/exit", "/yolo", "/copy", "/mouse", "/logo", "/expand",
+    ] {
+        assert!(screen.contains(command), "{command} is offered: {screen}");
+    }
+    // And it is still a normal prompt buffer under the menu.
+    assert_eq!(app.input, "/");
+}
+
+/// Purpose: A prefix narrows the menu and the title says what the one match will do, so `/yo` is not invisible.
+#[test]
+fn a_prefix_narrows_the_menu_and_says_what_the_command_will_do() {
+    let mut app = App::new("s", "v");
+    type_text(&mut app, "/yo");
+    let screen = draw(&mut app, 100, 24);
+    assert!(screen.contains("/yolo"), "the match is offered: {screen}");
+    assert!(
+        screen.contains("turns approval prompts"),
+        "and what it does is beside it: {screen}"
+    );
+    assert!(
+        !screen.contains("/new"),
+        "a narrowing menu keeps only the match: {screen}"
+    );
+    // The prompt title carries the same sentence, because that is where the person
+    // is looking when the menu is not in the way.
+    assert!(
+        box_titles(&screen).contains(&despaced("enter turns approval prompts")),
+        "{screen}"
+    );
+}
+
+/// Purpose: The command menu is visible while a turn runs — the state title used to be the only thing on that row.
+#[test]
+fn the_command_menu_is_visible_while_a_turn_runs() {
+    let mut app = App::new("s", "v");
+    app.busy = true;
+    app.busy_since = Some(std::time::Instant::now());
+    type_text(&mut app, "/yol");
+    let screen = draw(&mut app, 100, 24);
+    assert!(
+        box_titles(&screen).contains("working"),
+        "the turn still says it is working: {screen}"
+    );
+    assert!(
+        screen.contains("/yolo") && screen.contains("approval prompts"),
+        "and the command being typed is still offered: {screen}"
+    );
+}
+
+/// Purpose: Enter completes a prefix first and runs a complete command, so a half-typed name can never fire.
+#[test]
+fn enter_completes_a_prefix_before_it_runs() {
+    let mut app = App::new("s", "v");
+    type_text(&mut app, "/yo");
+    assert_eq!(
+        app.handle_key(key(KeyCode::Enter)),
+        Action::None,
+        "a prefix is completed, not run"
+    );
+    assert_eq!(app.input, "/yolo");
+    assert_eq!(
+        app.handle_key(key(KeyCode::Enter)),
+        Action::Send(ToWorker::Yolo(true)),
+        "the completed name runs on the next enter, as it always did"
+    );
+}
+
+/// Purpose: Arrows walk the menu, esc puts it away without touching the draft, and a comment word is still the agent's.
+#[test]
+fn arrows_walk_the_command_menu_and_esc_puts_it_away() {
+    let mut app = App::new("s", "v");
+    type_text(&mut app, "/e");
+    // `/ex` prefixes both `/exit` and `/expand`; the arrow picks, enter completes.
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(app.input, "/expand", "the highlighted match was taken");
+
+    // Esc closes the list and keeps the line: "not now", not "throw it away".
+    let mut app = App::new("s", "v");
+    type_text(&mut app, "/yo");
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(app.input, "/yo");
+    let screen = draw(&mut app, 100, 24);
+    assert!(
+        !screen.contains("commands matching"),
+        "the menu is gone: {screen}"
+    );
+
+    // A word this screen does not answer is the server's, and the menu says so.
+    let mut app = App::new("s", "v");
+    type_text(&mut app, "/he");
+    let screen = draw(&mut app, 100, 24);
+    assert!(screen.contains("/help"), "the skills are named: {screen}");
+    assert!(screen.contains("enter still sends it"), "{screen}");
+    assert_eq!(
+        app.handle_key(key(KeyCode::Enter)),
+        Action::Send(ToWorker::Submit("/he".to_string())),
+        "and enter sends it to the agent, where the skills live"
+    );
+}
+
+/// Purpose: An alias is a way to the same command, so its prefix offers the command it names, and a slot is exact.
+#[test]
+fn an_alias_prefix_offers_the_command_it_names() {
+    assert_eq!(commands::primary("/CLEAR"), Some("/new"));
+    assert!(commands::is_exact("/clear"));
+    let offered = commands::matches("/cl");
+    assert_eq!(offered.len(), 1, "{offered:?}");
+    assert_eq!(offered[0].insert, "/new");
+
+    // `/7` is a model slot, not a table row: it is exact, so enter switches rather
+    // than completing, and the menu still says what it is.
+    assert!(commands::is_exact("/7"));
+    assert_eq!(commands::slot("/7"), Some(7));
+    assert_eq!(
+        commands::matches("/7")[0].description,
+        "switch to that model slot"
+    );
 }
 
 /// Purpose: A long shell command is flattened to one row, so all three answers stay in the panel.
@@ -1057,14 +1240,13 @@ fn the_hint_says_what_exit_will_do() {
     let screen = draw(&mut app, 100, 16);
     assert!(screen.contains("enter leaves loongagent"), "{screen}");
 
-    // And while it is still ambiguous, it names both the skills and the way out.
+    // And a word this screen does not answer says where it will go — the server's
+    // commands (`/help`, the workspace's skills) are still reachable from here.
     let mut app = App::new("s", "v");
     type_text(&mut app, "/he");
     let screen = draw(&mut app, 100, 16);
-    assert!(screen.contains("/help"), "{screen}");
-    assert!(screen.contains("/copy"), "and the copy command: {screen}");
-    assert!(screen.contains("/mouse"), "and the mouse one: {screen}");
-    assert!(screen.contains("/exit"), "{screen}");
+    assert!(screen.contains("/help"), "the skills are named: {screen}");
+    assert!(screen.contains("enter still sends it"), "{screen}");
 }
 
 /// Purpose: F2 opens the context panel by asking for its data, and closing asks for nothing.
@@ -1727,6 +1909,127 @@ fn yolo_is_a_command_and_is_never_invisible() {
     assert!(screen.contains("/yolo"), "{screen}");
 }
 
+/// Purpose: `/yolo` during a turn reaches the server at once through the control channel, and the screen flips without waiting for the queue.
+#[test]
+fn yolo_during_a_turn_flips_at_once_and_tells_the_server() {
+    let mut app = App::new("s", "v");
+    app.busy = true;
+    app.busy_since = Some(std::time::Instant::now());
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let log = std::rc::Rc::clone(&asked);
+    app.set_permissions = Some(Box::new(move |on| log.borrow_mut().push(on)));
+    type_text(&mut app, "/yolo");
+
+    assert_eq!(
+        app.handle_key(key(KeyCode::Enter)),
+        Action::None,
+        "nothing is queued for the worker"
+    );
+    assert!(app.yolo, "the screen shows the change at once");
+    assert_eq!(
+        *asked.borrow(),
+        vec![true],
+        "and the running turn was told now, not after it ends"
+    );
+    assert!(app.input.is_empty());
+
+    // The event is the confirmation, and it is still recorded in the transcript.
+    fed(&mut app, FromWorker::Yolo(true));
+    assert!(
+        app.lines
+            .iter()
+            .any(|line| line.contains("approval prompts off")),
+        "the log line still arrives: {:?}",
+        app.lines
+    );
+}
+
+/// Purpose: Without a control channel `/yolo` still goes through the worker, and nothing is claimed before the server answers.
+#[test]
+fn yolo_without_a_control_channel_still_goes_through_the_worker() {
+    let mut app = App::new("s", "v");
+    app.busy = true;
+    type_text(&mut app, "/yolo");
+    assert_eq!(
+        app.handle_key(key(KeyCode::Enter)),
+        Action::Send(ToWorker::Yolo(true)),
+        "the platform without a channel keeps the queued path rather than a lie"
+    );
+    assert!(!app.yolo, "nothing is claimed before the server answers");
+}
+
+/// Purpose: A running turn under YOLO still shows the spinner and clock; the warning rides in front instead of replacing them.
+#[test]
+fn a_running_turn_under_yolo_still_shows_that_it_is_working() {
+    let mut app = App::new("s", "v");
+    app.yolo = true;
+    app.busy = true;
+    app.busy_since = Some(std::time::Instant::now());
+    app.activity = Some("shell: cargo test".to_string());
+    let screen = draw(&mut app, 110, 24);
+    let titles = box_titles(&screen);
+    assert!(
+        titles.contains("working"),
+        "the turn says it is working: {screen}"
+    );
+    assert!(
+        titles.contains(&despaced("shell: cargo test")),
+        "and names the step: {screen}"
+    );
+    assert!(
+        titles.contains("YOLO"),
+        "and the warning is still there: {screen}"
+    );
+}
+
+/// Purpose: A finished turn under YOLO still says it finished; the warning is a mark, not a replacement for the status.
+#[test]
+fn a_finished_turn_under_yolo_still_says_it_finished() {
+    let mut app = App::new("s", "v");
+    app.yolo = true;
+    app.busy = true;
+    app.busy_since = Some(std::time::Instant::now());
+    fed(&mut app, FromWorker::State { pending: None });
+    let screen = draw(&mut app, 110, 24);
+    let titles = box_titles(&screen);
+    assert!(
+        titles.contains(&despaced("✓ 完成")),
+        "the finish is on the prompt box: {screen}"
+    );
+    assert!(titles.contains("YOLO"), "{screen}");
+}
+
+/// Purpose: A question under YOLO is still described as a question, never as "not asking".
+#[test]
+fn a_question_under_yolo_still_says_it_is_a_question() {
+    let mut app = App::new("s", "v");
+    app.yolo = true;
+    app.pending = Some("appr-1".to_string());
+    let screen = draw(&mut app, 110, 24);
+    let titles = box_titles(&screen);
+    assert!(
+        titles.contains(&despaced("waiting for your decision")),
+        "the question is still a question: {screen}"
+    );
+    assert!(!titles.contains(&despaced("NOT ASKING")), "{screen}");
+    assert!(titles.contains("YOLO"), "and the state is named: {screen}");
+}
+
+/// Purpose: Under YOLO a typed command keeps its hint; the warning goes in front rather than in place of it.
+#[test]
+fn a_command_under_yolo_keeps_its_hint() {
+    let mut app = App::new("s", "v");
+    app.yolo = true;
+    type_text(&mut app, "/yol");
+    let screen = draw(&mut app, 110, 24);
+    let titles = box_titles(&screen);
+    assert!(
+        titles.contains(&despaced("turns approval prompts")),
+        "the hint is on the box: {screen}"
+    );
+    assert!(titles.contains("YOLO"), "{screen}");
+}
+
 /// Purpose: `/copy` writes the transcript to a session-named file and returns the copy action.
 #[test]
 fn copy_puts_the_transcript_on_the_clipboard_and_in_a_file() {
@@ -2237,6 +2540,71 @@ fn the_second_question_of_a_session_reaches_the_screen() {
     for answer in ["Allow once", "Allow in this project", "Deny"] {
         assert!(screen.contains(answer), "{answer} is on screen: {screen}");
     }
+}
+
+/// Purpose: A permissions event on the turn's stream reaches the screen as the confirmation of an immediate `/yolo`.
+#[test]
+fn a_permissions_event_during_a_turn_confirms_the_immediate_yolo() {
+    /// Purpose: A transport that answers from a queue of canned JSON-RPC lines.
+    /// Serves: `a_permissions_event_during_a_turn_confirms_the_immediate_yolo`.
+    /// Design: `docs/design/flows/tool-approval.md`.
+    /// Up: the test builds it and the client calls it.
+    /// Down: no call; the `loong_tui::Transport` impl below answers.
+    /// Verify: `cargo test -p loong-tui-app`.
+    struct Queue(std::cell::RefCell<std::collections::VecDeque<String>>);
+    impl loong_tui::Transport for Queue {
+        /// Purpose: Accept the request line; the answer comes from the queue.
+        /// Contract: called by `loong_tui::Client`.
+        fn send(&mut self, _line: &str) -> Result<(), String> {
+            Ok(())
+        }
+        /// Purpose: Pop the next canned line, or `None` when the queue is empty.
+        /// Contract: called by `loong_tui::Client`.
+        fn recv_line(&mut self) -> Result<Option<String>, String> {
+            Ok(self.0.borrow_mut().pop_front())
+        }
+    }
+    let line = |value: serde_json::Value| value.to_string();
+    let queue = vec![
+        // The kernel applied the control request between two steps and streamed it.
+        line(
+            serde_json::json!({"jsonrpc": "2.0", "method": "event", "params": {
+            "seq": 3, "kind": "permissions.relaxed",
+            "data": {"auto_approve": true, "reason": "the person asked for it with /yolo"}}}),
+        ),
+        line(
+            serde_json::json!({"jsonrpc": "2.0", "id": 1, "result": {"turn_id": 1, "accepted": true}}),
+        ),
+        // The worker asks for the context view after every command.
+        line(serde_json::json!({"jsonrpc": "2.0", "id": 9, "result": {
+            "context_tokens": 10, "budget_tokens": 0, "messages": 1, "tools": 1,
+            "compactions": 0, "categories": [], "entries": []}})),
+    ];
+    let client = Client::new(Queue(std::cell::RefCell::new(queue.into())), "s-e");
+    let (to_worker, from_worker) = spawn_worker(client, 0);
+    let mut app = App::new("s-e", "v");
+    app.busy = true;
+    app.busy_since = Some(std::time::Instant::now());
+    // The screen already flipped; the event is what makes it trustworthy.
+    app.yolo = true;
+    to_worker.send(ToWorker::Submit("go".to_string())).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline
+        && !app
+            .lines
+            .iter()
+            .any(|line| line.contains("approval prompts off"))
+    {
+        app.drain(&from_worker);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(
+        app.lines
+            .iter()
+            .any(|line| line.contains("approval prompts off") && line.contains("sandbox")),
+        "the confirmation and its record reach the screen: {:?}",
+        app.lines
+    );
 }
 
 /// Purpose: A fold the turn streamed is openable while the turn still owns the connection.

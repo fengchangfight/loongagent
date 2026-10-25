@@ -181,6 +181,10 @@ struct Args {
     control_system: bool,
     port: u16,
     stdio: bool,
+    /// The read end of a private control channel the surface opened for this server
+    /// (`--control-fd N`). Only a surface that spawns the server passes it; a person
+    /// running `server --stdio` by hand does not need one.
+    control_fd: Option<i32>,
     /// Context budget in tokens; 0 means unbounded.
     budget: Option<u64>,
     /// Newest context left verbatim when compaction runs.
@@ -243,6 +247,7 @@ impl Args {
             control_system: false,
             port: 8737,
             stdio: false,
+            control_fd: None,
             budget: None,
             keep_newest: None,
             max_steps: None,
@@ -288,6 +293,15 @@ impl Args {
                         Some(PathBuf::from(rest.get(i).ok_or("--profile needs a path")?));
                 }
                 "--stdio" => args.stdio = true,
+                "--control-fd" => {
+                    i += 1;
+                    args.control_fd = Some(
+                        rest.get(i)
+                            .ok_or("--control-fd needs a descriptor")?
+                            .parse()
+                            .map_err(|_| "--control-fd needs a number")?,
+                    );
+                }
                 "--local" => args.local = true,
                 // `setup`: the control plane. Flags exist so a machine can be
                 // provisioned without a prompt; without them it asks.

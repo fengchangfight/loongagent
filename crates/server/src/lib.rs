@@ -280,7 +280,25 @@ pub struct Server {
     /// Lines with nowhere to go yet (no connection, which only tests and programs using
     /// `handle_line` hit).
     pending_lines: Vec<String>,
+    /// The permissions control channel, when a surface gave this server one: the slot its
+    /// reader thread writes a `/yolo` request into, and the descriptor to read. The kernel
+    /// applies the request at its next decision boundary.
+    permissions: Option<PermissionsChannel>,
     turns: u64,
+}
+
+/// Purpose: The private parent→child control channel a surface uses for `/yolo` while a turn owns the connection.
+/// Serves: `Server::with_permissions`, `run_stdio` and the server's `session.new` handler.
+/// Design: `docs/design/flows/tool-approval.md`; `docs/design/surfaces.md` §3.
+/// Up: `crates/cli/src/tui.rs` builds it and `Server::with_permissions` stores it.
+/// Down: `Kernel::permissions_requestor` and the reader thread in `run_stdio`.
+/// Verify: `cargo test -p loong-server`.
+struct PermissionsChannel {
+    /// What the reader thread leaves for the kernel: `Some(true|false)` is a request not
+    /// yet applied at a decision boundary.
+    slot: std::sync::Arc<std::sync::Mutex<Option<bool>>>,
+    /// The read end of the private pipe, inherited from the surface that spawned us.
+    fd: i32,
 }
 
 impl Server {
@@ -298,8 +316,24 @@ impl Server {
             last_sent: 0,
             connection: None,
             pending_lines: Vec::new(),
+            permissions: None,
             turns: 0,
         }
+    }
+
+    /// Purpose: Take the permission control channel a surface opened for this server.
+    /// Serves: `/yolo` reaching a running turn instead of waiting for it to end.
+    /// Design: `docs/design/flows/tool-approval.md`.
+    /// Up: `crates/cli/src/server.rs`; the surface passed the descriptor when it spawned us.
+    /// Down: `run_stdio` (the reader thread) and `Kernel::use_permissions_requester`.
+    /// Verify: `cargo test -p loong-server`.
+    pub fn with_permissions(
+        mut self,
+        slot: std::sync::Arc<std::sync::Mutex<Option<bool>>>,
+        fd: i32,
+    ) -> Self {
+        self.permissions = Some(PermissionsChannel { slot, fd });
+        self
     }
 
     /// Purpose: Give the server a way to start a session it was not handed.
@@ -383,6 +417,17 @@ impl Server {
     /// Verify: `cargo test -p loong-server`.
     fn dispatch(&mut self, request: Request) -> Vec<String> {
         let id = request.id.clone().unwrap_or(Value::Null);
+        // A request that arrived after the turn's last decision boundary is applied here,
+        // before this request's own events, so the log and the stream keep one order.
+        // The event it records is sent now rather than with the next turn: a permission
+        // change whose record waits for another request is one the surface cannot show.
+        let before = self.kernel.last_seq();
+        if let Err(e) = self.kernel.apply_requested_permissions() {
+            return self.fail(id, e);
+        }
+        if let Err(e) = self.stream_since(before) {
+            return self.fail(id, e);
+        }
         match request.method.as_str() {
             gen::method::SESSION_NEW => {
                 let params: gen::SessionOnlyParams = match request.params_as() {
@@ -411,6 +456,12 @@ impl Server {
                 // next Ctrl-C would stop nothing while still saying "interrupting…".
                 if let Some(flag) = INTERRUPT.get() {
                     self.kernel.use_interruptor(std::sync::Arc::clone(flag));
+                }
+                // The control channel belongs to the process too: a new kernel must
+                // still be reachable from the surface that is watching this server.
+                if let Some(control) = &self.permissions {
+                    self.kernel
+                        .use_permissions_requester(std::sync::Arc::clone(&control.slot));
                 }
                 self.session_id = session_id.clone();
                 // The new session has its own log, so every counter about the old one is
@@ -623,6 +674,26 @@ impl Server {
         }
     }
 
+    /// Purpose: Send the events recorded after one sequence number, and advance the sent mark past them.
+    /// Serves: `dispatch`, after a permission request applied outside a turn.
+    /// Design: `docs/design/flows/tool-approval.md`.
+    /// Up: `Server::dispatch`.
+    /// Down: `Kernel::events_since` and the connection or the pending list.
+    /// Verify: `cargo test -p loong-server`.
+    fn stream_since(&mut self, after: u64) -> Result<(), KernelError> {
+        for event in self.kernel.events_since(after)? {
+            self.last_sent = self.last_sent.max(event.seq);
+            if let Ok(value) = serde_json::to_value(&event) {
+                let line = Notification::event(&value).to_line();
+                match &self.connection {
+                    Some(out) => out.line(&line),
+                    None => self.pending_lines.push(line),
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Purpose: Send the events recorded since the last one sent, to the connection or the pending list.
     /// Contract: called by `respond` and `refuse`.
     /// Events recorded since the last one sent go to the connection now: they are news,
@@ -762,6 +833,13 @@ impl Server {
     pub fn run_stdio(mut self) -> Result<(), ServerError> {
         // Ctrl-C stops the turn; the process stays for the next one.
         self.catch_interrupts()?;
+        // The private control channel, when a surface opened one. Its reader thread only
+        // records the request; the kernel applies it at the next decision boundary, so
+        // the turn stays the only writer of the log.
+        #[cfg(unix)]
+        if let Some(control) = &self.permissions {
+            spawn_permissions_reader(control.fd, std::sync::Arc::clone(&control.slot));
+        }
         let stdin = std::io::stdin();
         let mut stdout = std::io::stdout();
         // One handle for the whole connection: progress is written and flushed the moment
@@ -779,6 +857,43 @@ impl Server {
         }
         Ok(())
     }
+}
+
+/// Purpose: Read the surface's private control channel and leave each `/yolo` request for the kernel.
+/// Serves: `Server::run_stdio`, which starts it when the surface passed a descriptor.
+/// Design: `docs/design/flows/tool-approval.md`; `docs/design/surfaces.md` §3.
+/// Up: `Server::run_stdio`.
+/// Down: `PermissionsChannel::slot`, read by `Kernel::apply_requested_permissions`.
+/// Verify: `cargo test -p loong-server`.
+#[cfg(unix)]
+fn spawn_permissions_reader(fd: i32, slot: std::sync::Arc<std::sync::Mutex<Option<bool>>>) {
+    use std::io::BufRead;
+    use std::os::unix::io::FromRawFd;
+    std::thread::spawn(move || {
+        // Safety: the surface passed this descriptor at spawn and nothing else reads it;
+        // this thread owns it for the life of the process.
+        let pipe = unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
+        // Keep the channel out of every tool child: it would inherit fd 3 otherwise and
+        // could read (and so swallow) a request meant for this thread. Reading is not
+        // writing, so this is not a way to turn prompts off — but a lost `/yolo` is its
+        // own bug, and the descriptor is none of a tool's business.
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            if flags >= 0 {
+                libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+            }
+        }
+        for line in std::io::BufReader::new(pipe).lines().map_while(Result::ok) {
+            let on = match line.trim() {
+                "yolo on" => true,
+                "yolo off" => false,
+                _ => continue,
+            };
+            if let Ok(mut pending) = slot.lock() {
+                *pending = Some(on);
+            }
+        }
+    });
 }
 
 #[cfg(test)]
@@ -1731,5 +1846,59 @@ mod tests {
                 "{method} must not answer for another session: {value}"
             );
         }
+    }
+
+    /// Purpose: A permissions request applied between turns is recorded and streamed before the response.
+    #[test]
+    fn a_permissions_request_between_turns_is_streamed_before_the_response() {
+        let t = Temp::new();
+        let kernel = Kernel::create(
+            t.0.join("s.jsonl"),
+            KernelConfig::new(&t.0),
+            Box::new(scripted(vec![], Some("hi"))),
+        )
+        .unwrap();
+        // The surface's reader thread left this between two turns.
+        *kernel.permissions_requestor().lock().unwrap() = Some(true);
+        let mut server = Server::new(kernel, "s");
+        let lines = lines_of(
+            &mut server,
+            &Request::new(2, gen::method::CONTEXT_EXPLAIN, json!({"session_id": "s"})).to_line(),
+        );
+        let kinds: Vec<&str> = lines
+            .iter()
+            .filter_map(|line| line.pointer("/params/kind").and_then(|kind| kind.as_str()))
+            .collect();
+        assert!(
+            kinds.contains(&gen::event::PERMISSIONS_RELAXED),
+            "the relaxation is news, and it is sent: {kinds:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.get("result").is_some()),
+            "and the request that flushed it is still answered"
+        );
+    }
+
+    /// Purpose: The private control channel turns a line into a permissions request the kernel can apply.
+    #[cfg(unix)]
+    #[test]
+    fn the_control_channel_leaves_a_permissions_request_for_the_kernel() {
+        use std::io::Write;
+        use std::os::unix::io::IntoRawFd;
+        let (write, read) = std::os::unix::net::UnixStream::pair().unwrap();
+        let slot = std::sync::Arc::new(std::sync::Mutex::new(None));
+        spawn_permissions_reader(read.into_raw_fd(), std::sync::Arc::clone(&slot));
+        let wait_for = |wanted: Option<bool>| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while *slot.lock().unwrap() != wanted && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            assert_eq!(*slot.lock().unwrap(), wanted);
+        };
+
+        (&write).write_all(b"yolo on\n").unwrap();
+        wait_for(Some(true));
+        (&write).write_all(b"yolo off\n").unwrap();
+        wait_for(Some(false));
     }
 }

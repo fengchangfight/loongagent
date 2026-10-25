@@ -203,6 +203,11 @@ The extension does not compute edits; it reports what happened.
 - At the end of a turn, one `stream.button` ("Review N changed files") runs a command that opens
   `vscode.diff` per file. Per-hunk accept/reject is not available on stable APIs (no extension API
   exposes it), so there is none — the diff is for reading, and `git` is for undoing.
+- **A "before" belongs to the turn that recorded it.** The turn's identity travels in the diff URI
+  alongside the path, and the window keeps the last few turns' snapshots, so clicking an older
+  reply's button shows that turn's before rather than the newest turn's. A turn whose snapshots have
+  been evicted falls back to `git` and says so in the left pane; it never silently serves another
+  turn's content.
 
 ### 4.6 Sessions, workspace, lifecycle
 

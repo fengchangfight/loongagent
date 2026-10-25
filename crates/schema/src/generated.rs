@@ -161,7 +161,7 @@ pub struct CompactionApplied {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionAttachParams {
     pub cwd: String,
-    /// tui | web | acp
+    /// tui | web | vscode | acp
     pub client: String,
 }
 

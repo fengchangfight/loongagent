@@ -193,7 +193,7 @@ name = "SessionAttachParams"
 kind = "struct"
 fields = [
   { name = "cwd", type = "string" },
-  { name = "client", type = "string", doc = "tui | web | acp" },
+  { name = "client", type = "string", doc = "tui | web | vscode | acp" },
 ]
 
 [[types]]

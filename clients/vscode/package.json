@@ -1,0 +1,66 @@
+{
+  "name": "loongagent-vscode",
+  "displayName": "loongagent",
+  "description": "loongagent in the editor: the local agent in VS Code's own chat view.",
+  "private": true,
+  "version": "0.0.1",
+  "publisher": "loongagent",
+  "engines": { "vscode": "^1.138.0" },
+  "categories": ["AI", "Other"],
+  "main": "./dist/extension.js",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "The agent works on this workspace and runs its own tools under its own sandbox and approval rules."
+    }
+  },
+  "contributes": {
+    "chatParticipants": [
+      {
+        "id": "loongagent.chat",
+        "name": "loong",
+        "fullName": "loongagent",
+        "description": "Ask the local loongagent",
+        "isSticky": true,
+        "commands": [
+          { "name": "new", "description": "Start a new session" },
+          { "name": "model", "description": "Choose the model for this session" },
+          { "name": "context", "description": "Explain what the next request will carry" },
+          { "name": "yolo", "description": "Turn approval prompts off for this session" }
+        ]
+      }
+    ],
+    "commands": [
+      {
+        "command": "loongagent.smoke",
+        "title": "loongagent: Smoke test (spawn, attach, one prompt)"
+      },
+      {
+        "command": "loongagent.reviewChanges",
+        "title": "loongagent: Review the changes from a turn",
+        "description": "Opens the before/after diff for the files a turn changed. Normally reached from the button in the reply."
+      }
+    ],
+    "configuration": {
+      "title": "loongagent",
+      "properties": {
+        "loongagent.path": { "type": "string", "default": "loongagent", "description": "The loongagent binary." },
+        "loongagent.model": { "type": "string", "default": "", "description": "Passed as --model when the server starts." },
+        "loongagent.autoApprove": { "type": "boolean", "default": false, "description": "Turn approval prompts off for this session (recorded as permissions.relaxed)." },
+        "loongagent.extraArgs": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Extra arguments for loongagent server." }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "node esbuild.mjs && tsc --noEmit",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test test/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/vscode": "1.138.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.6.0"
+  }
+}

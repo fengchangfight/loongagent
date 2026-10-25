@@ -13,8 +13,13 @@
 //! unknown to the dispatcher — the drift that made `/qui` look like a command while
 //! enter sent it to the model.
 
-/// One command the screen answers itself: the name it shows, the other spellings
-/// that mean it, and what it does.
+/// Purpose: One command the screen answers itself: its name, aliases and one-line meaning.
+///
+/// Serves: the command menu, completion and `App::surface_command`.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `COMMANDS`.
+/// Down: `Command::name`, `aliases` and `description`.
+/// Verify: `cargo test -p loong-tui-app`.
 #[derive(Debug, Clone, Copy)]
 pub struct Command {
     /// The name the menu shows and completes to, with its slash.
@@ -71,7 +76,12 @@ pub const COMMANDS: &[Command] = &[
 ];
 
 /// Purpose: The command this exact text runs, if the screen answers it itself.
-/// Contract: called by `surface_command`; matches a name or an alias, case-insensitively.
+///
+/// Serves: `is_exact`, `matches` and `App::surface_command`.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `App::surface_command`, `is_exact` and `matches`.
+/// Down: `COMMANDS`.
+/// Verify: `cargo test -p loong-tui-app`.
 pub fn primary(typed: &str) -> Option<&'static str> {
     let typed = typed.trim().to_ascii_lowercase();
     COMMANDS
@@ -83,13 +93,23 @@ pub fn primary(typed: &str) -> Option<&'static str> {
 }
 
 /// Purpose: Whether this exact text is one of the screen's commands — a name, an alias, or a `/1`..`/9` model slot.
-/// Contract: called by `handle_key`'s enter arm to tell "run it" from "complete it".
+///
+/// Serves: `handle_key`'s enter arm, which tells "run it" from "complete it".
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `App::handle_key`.
+/// Down: `primary` and `slot`.
+/// Verify: `cargo test -p loong-tui-app`.
 pub fn is_exact(typed: &str) -> bool {
     primary(typed).is_some() || slot(typed).is_some()
 }
 
 /// Purpose: The number of the model slot the text names, if it names one exactly (`/1`..`/9`).
-/// Contract: called by `is_exact`, `matches` and `App::surface_command`; reads only the text.
+///
+/// Serves: `is_exact`, `matches` and `App::surface_command`.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `is_exact`, `matches` and `App::surface_command`.
+/// Down: no callee; it reads only the text.
+/// Verify: `cargo test -p loong-tui-app`.
 pub fn slot(typed: &str) -> Option<u8> {
     let rest = typed.trim().strip_prefix('/')?;
     let mut chars = rest.chars();
@@ -100,7 +120,13 @@ pub fn slot(typed: &str) -> Option<u8> {
     Some(digit as u8)
 }
 
-/// One row of the command menu: what choosing it writes, and what it does.
+/// Purpose: One row of the command menu: what choosing it writes, and what it does.
+///
+/// Serves: `App::command_candidates` and the menu drawing.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `matches`.
+/// Down: `Candidate::insert` and `description`.
+/// Verify: `cargo test -p loong-tui-app`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
     /// What choosing it writes into the prompt.
@@ -110,7 +136,12 @@ pub struct Candidate {
 }
 
 /// Purpose: The commands whose name or an alias starts with the text, in menu order, plus the model slot the text names.
-/// Contract: called by `App::command_candidates`; takes the whole prompt line and returns its candidates.
+///
+/// Serves: `App::command_candidates`.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `App::command_candidates`.
+/// Down: `primary`, `slot` and `COMMANDS`.
+/// Verify: `cargo test -p loong-tui-app`.
 pub fn matches(typed: &str) -> Vec<Candidate> {
     let typed = typed.trim().to_ascii_lowercase();
     if !typed.starts_with('/') {

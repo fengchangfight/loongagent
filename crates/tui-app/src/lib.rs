@@ -14,7 +14,7 @@
 
 pub mod mention;
 use loong_tui::{Client, Transport};
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -2931,7 +2931,12 @@ pub fn setup_form() -> Result<Option<(String, String, String)>, String> {
         if !event::poll(std::time::Duration::from_millis(120)).map_err(|e| e.to_string())? {
             continue;
         }
+        // Crossterm's Windows backend reports a Release alongside every Press;
+        // acting on both makes one keystroke do the thing twice.
         if let Event::Key(key) = event::read().map_err(|e| e.to_string())? {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
             match form.handle_key(key) {
                 SetupAction::Submit => break form.answer(),
                 SetupAction::Cancel => break None,
@@ -3693,7 +3698,12 @@ pub fn local_wizard(
         if !event::poll(std::time::Duration::from_millis(120)).map_err(|e| e.to_string())? {
             continue;
         }
+        // Crossterm's Windows backend reports a Release alongside every Press;
+        // acting on both makes one keystroke do the thing twice.
         if let Event::Key(key) = event::read().map_err(|e| e.to_string())? {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
             match wizard.handle_key(key) {
                 WizardAction::Submit => {
                     // Finishing the picker: the models that are ticked are the ones that
@@ -3877,32 +3887,36 @@ pub fn run<T: Transport + Send + 'static>(
 
             if event::poll(std::time::Duration::from_millis(80)).map_err(|e| e.to_string())? {
                 match event::read().map_err(|e| e.to_string())? {
-                    event::Event::Key(key) => match app.handle_key(key) {
-                        Action::Send(command) => {
-                            let _ = to_worker.send(command);
-                        }
-                        // The interface cannot reach the terminal or the clipboard from
-                        // `handle_key`; the loop that owns them does it here.
-                        Action::Copy => {
-                            let text = app.transcript();
-                            let path = copy_everywhere(&text, &app.session);
-                            app.push_lines(vec![format!(
-                                "⧉ copied {} line(s) → {path}",
-                                text.lines().count()
-                            )]);
-                        }
-                        Action::Mouse(on) => {
-                            let backend = terminal.backend_mut();
-                            if on {
-                                let _ = execute!(backend, EnableMouseCapture);
-                            } else {
-                                let _ = execute!(backend, DisableMouseCapture);
+                    // Crossterm's Windows backend reports a Release alongside
+                    // every Press; only Press may act.
+                    event::Event::Key(key) if key.kind == KeyEventKind::Press => {
+                        match app.handle_key(key) {
+                            Action::Send(command) => {
+                                let _ = to_worker.send(command);
                             }
-                            // The screen is redrawn next pass; the terminal is what changed.
+                            // The interface cannot reach the terminal or the clipboard from
+                            // `handle_key`; the loop that owns them does it here.
+                            Action::Copy => {
+                                let text = app.transcript();
+                                let path = copy_everywhere(&text, &app.session);
+                                app.push_lines(vec![format!(
+                                    "⧉ copied {} line(s) → {path}",
+                                    text.lines().count()
+                                )]);
+                            }
+                            Action::Mouse(on) => {
+                                let backend = terminal.backend_mut();
+                                if on {
+                                    let _ = execute!(backend, EnableMouseCapture);
+                                } else {
+                                    let _ = execute!(backend, DisableMouseCapture);
+                                }
+                                // The screen is redrawn next pass; the terminal is what changed.
+                            }
+                            Action::Quit => return Ok(()),
+                            Action::None => {}
                         }
-                        Action::Quit => return Ok(()),
-                        Action::None => {}
-                    },
+                    }
                     event::Event::Mouse(mouse) => app.handle_mouse(mouse.kind),
                     _ => {}
                 }

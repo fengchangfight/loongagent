@@ -21,6 +21,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The human-written gate diffs against the base commit; a shallow
+          # clone would not contain it.
+          fetch-depth: 0
 
       - name: toolchain
         # Mirror first, upstream when the mirror does not carry this version — a
@@ -41,6 +45,10 @@ jobs:
         run: cc --version
 
       - name: gates
+        env:
+          # The base the human-written check compares against: the pull request's
+          # base, or the previous commit on a push.
+          HUMAN_WRITTEN_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: ./scripts/check.sh
 
   # A tag builds the artifact a colleague installs, rather than a binary from

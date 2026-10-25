@@ -3882,3 +3882,164 @@ fn submitting_while_an_approval_is_pending_is_refused() {
     k.respond_to_approval(&pending.request_id, false, ApprovalScope::Once, None)
         .unwrap();
 }
+
+/// Purpose: A file's instructions sit after the system prompt and before the conversation, accounted as pinned rules.
+#[test]
+fn instructions_are_seated_after_the_system_prompt() {
+    let t = Temp::new();
+    let (model, seen) = RecordingModel::new(vec![response(vec![], Some("ok"))]);
+    let mut config = KernelConfig::new(&t.dir);
+    config.instructions = vec![InstructionBlock {
+        scope: InstructionScope::Project,
+        source: "/repo/AGENTS.md".to_string(),
+        text: "ALWAYS-READ-THE-SPEC".to_string(),
+    }];
+    let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+    k.submit("say hi").unwrap();
+
+    let seen = seen.lock().unwrap();
+    let sent = &seen[0];
+    assert!(matches!(sent.first(), Some(ChatMessage::System { .. })));
+    let instructions = match sent.get(1) {
+        Some(ChatMessage::System { text }) => text,
+        other => panic!("the second message is the instruction block, got {other:?}"),
+    };
+    assert!(instructions.contains("Project instructions from /repo/AGENTS.md"));
+    assert!(instructions.contains("ALWAYS-READ-THE-SPEC"));
+    assert!(
+        instructions.contains("do not grant permissions"),
+        "the block says it is advisory: {instructions}"
+    );
+
+    let row = k
+        .ledger()
+        .explain()
+        .into_iter()
+        .find(|row| row.source == "/repo/AGENTS.md")
+        .expect("the instruction has a ledger entry");
+    assert_eq!(row.category, "rules");
+    assert!(row.pinned, "rules are pinned");
+}
+
+/// Purpose: No instruction files means the request has exactly the system prompt and the user message.
+#[test]
+fn no_instructions_means_no_extra_messages() {
+    let t = Temp::new();
+    let (model, seen) = RecordingModel::new(vec![response(vec![], Some("ok"))]);
+    let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+    k.submit("say hi").unwrap();
+
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen[0].len(), 2, "system prompt plus the user message");
+    assert!(!seen[0].iter().any(|m| matches!(
+        m,
+        ChatMessage::System { text } if text.contains("instructions from")
+    )));
+}
+
+/// Purpose: The context view reports loaded instructions under the rules category.
+#[test]
+fn context_explain_reports_instructions_as_rules() {
+    let t = Temp::new();
+    let mut config = KernelConfig::new(&t.dir);
+    config.instructions = vec![InstructionBlock {
+        scope: InstructionScope::User,
+        source: "/home/person/.loongagent/AGENTS.md".to_string(),
+        text: "PREFER-SMALL-DIFFS".to_string(),
+    }];
+    let k = Kernel::create(&t.log, config, Box::new(ScriptedModel::saying("hi"))).unwrap();
+
+    let explain = k.context_explain();
+    let entry = explain
+        .entries
+        .iter()
+        .find(|entry| entry.source == "/home/person/.loongagent/AGENTS.md")
+        .expect("the instruction is in the context view");
+    assert_eq!(entry.category, "rules");
+}
+
+/// Purpose: Dropping the oldest exchange keeps every leading system block, instructions included.
+#[test]
+fn compaction_keeps_leading_system_blocks() {
+    let t = Temp::new();
+    let model = ScriptedModel::new(vec![
+        response(vec![], Some("one")),
+        response(vec![], Some("two")),
+    ]);
+    let mut config = KernelConfig::new(&t.dir);
+    config.instructions = vec![InstructionBlock {
+        scope: InstructionScope::Project,
+        source: "AGENTS.md".to_string(),
+        text: "RULES-SURVIVE-COMPACTION".to_string(),
+    }];
+    let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+    k.submit("first").unwrap();
+    k.submit("second").unwrap();
+
+    let dropped = k.drop_oldest_exchange();
+    assert_eq!(dropped, 2, "the first user turn and its answer");
+    let leading_systems = k
+        .messages()
+        .iter()
+        .take_while(|m| matches!(m, ChatMessage::System { .. }))
+        .count();
+    assert_eq!(leading_systems, 2, "the prompt and the instruction block");
+    assert!(matches!(
+        k.messages().get(2),
+        Some(ChatMessage::User { text }) if text == "second"
+    ));
+    assert!(k
+        .ledger()
+        .explain()
+        .iter()
+        .any(|row| row.category == "rules" && row.source == "AGENTS.md"));
+}
+
+/// Purpose: The cognitive map follows the instruction blocks instead of sitting between the prompt and them.
+#[test]
+fn the_map_follows_instruction_blocks() {
+    let t = Temp::new();
+    let (model, seen) = RecordingModel::new(vec![
+        response(
+            vec![call(
+                "c1",
+                "edit_file",
+                json!({"path": "src/kernel/a.rs", "new_string": "x"}),
+            )],
+            None,
+        ),
+        response(vec![], Some("done")),
+        response(vec![], Some("second turn")),
+    ]);
+    let mut config = KernelConfig::new(&t.dir);
+    config.instructions = vec![InstructionBlock {
+        scope: InstructionScope::Project,
+        source: "AGENTS.md".to_string(),
+        text: "RULES-BEFORE-MAP".to_string(),
+    }];
+    config.context_engine = Some(crate::context_engine::ContextEngineConfig::new(
+        t.dir.join("session.context.db"),
+        t.log.clone(),
+    ));
+    let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+    k.submit("修一下 src/kernel/a.rs").unwrap();
+    k.submit("继续").unwrap();
+
+    let seen = seen.lock().unwrap();
+    let last = seen.last().expect("a request happened");
+    let positions: Vec<usize> = last
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| matches!(m, ChatMessage::System { .. }))
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(positions, vec![0, 1, 2], "prompt, instructions, map");
+    assert!(matches!(
+        &last[1],
+        ChatMessage::System { text } if text.contains("RULES-BEFORE-MAP")
+    ));
+    assert!(matches!(
+        &last[2],
+        ChatMessage::System { text } if text.starts_with("L4")
+    ));
+}

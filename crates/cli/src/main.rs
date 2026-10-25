@@ -2,9 +2,9 @@
 //!
 //! # Contract
 //! - **Serves:** every command the binary offers; this file is the composition root that turns flags into one configured server (ADR-0009 §2).
-//! - **Design:** `docs/design/surfaces.md` §2; `docs/design/sessions-lineage.md` §5; `docs/design/control-plane.md` §1.
+//! - **Design:** `docs/design/surfaces.md` §2; `docs/design/sessions-lineage.md` §5; `docs/design/control-plane.md` §1; `docs/design/instructions.md` §1.
 //! - **Upstream:** `std::env::args`; the command modules are its callees and its submodules.
-//! - **Downstream:** every command module (`local`, `tui`, `server`, `session`, `control`, `config_cmd`, `context`, `plugin`, `hooks`, `mcp`, `sandbox`, `repl`, `web`, `headless`) and `loong_config` for the layer choice.
+//! - **Downstream:** every command module (`local`, `tui`, `server`, `session`, `control`, `config_cmd`, `context`, `plugin`, `hooks`, `instructions`, `mcp`, `sandbox`, `repl`, `web`, `headless`) and `loong_config` for the layer choice.
 //! - **Verify:** `cargo test -p loongagent` · `./scripts/check.sh`
 //!
 //! loongagent — one binary, many faces (ADR-0009).
@@ -41,6 +41,7 @@ mod context;
 mod control;
 mod headless;
 mod hooks;
+mod instructions;
 mod local;
 mod mcp;
 mod plugin;

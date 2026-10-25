@@ -171,11 +171,13 @@ impl Kernel {
                     // is worth the most.
                     true,
                 );
-                // After the system prompt, before the conversation.
-                let at = usize::from(matches!(
-                    self.messages.first(),
-                    Some(ChatMessage::System { .. })
-                ));
+                // After all leading system blocks (prompt, instructions), before the
+                // conversation.
+                let at = self
+                    .messages
+                    .iter()
+                    .take_while(|m| matches!(m, ChatMessage::System { .. }))
+                    .count();
                 self.messages.insert(at, ChatMessage::System { text });
                 self.entry_of.insert(at, Some(entry));
                 self.map_entry = Some(entry);
@@ -334,11 +336,13 @@ impl Kernel {
         if self.messages.len() < 2 {
             return 0;
         }
-        // The system prompt is not an exchange: it stays for the session's life.
-        let start = usize::from(matches!(
-            self.messages.first(),
-            Some(ChatMessage::System { .. })
-        ));
+        // Every leading System message is a pinned block, not an exchange: the
+        // operator's prompt, the workspace's instructions, and the cognitive map.
+        let start = self
+            .messages
+            .iter()
+            .take_while(|m| matches!(m, ChatMessage::System { .. }))
+            .count();
         let end = self
             .messages
             .iter()

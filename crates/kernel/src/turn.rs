@@ -37,6 +37,7 @@ mod compaction;
 mod confinement;
 mod events;
 mod hooks;
+mod instructions;
 mod r#loop;
 mod model;
 mod nudge;
@@ -216,7 +217,42 @@ pub fn steps_or_unlimited(steps: usize) -> usize {
     }
 }
 
-/// Purpose: Everything a turn needs that is not a capability: cwd, profile, limits, engine and bootstrap skills.
+/// Purpose: Which layer of the instruction stack a file belongs to.
+///
+/// Serves: the header line the model reads, and the loader's ordering.
+/// Design: `docs/design/instructions.md` §2.
+/// Up: `crates/cli/src/instructions.rs` builds the blocks; `Kernel::seat_instructions` reads them.
+/// Down: `InstructionBlock::scope`.
+/// Verify: `cargo test -p loong-kernel turn::tests::instructions_are_seated_after_the_system_prompt`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstructionScope {
+    /// The person's own `~/.loongagent/AGENTS.md`.
+    User,
+    /// A repository's `AGENTS.md`, from the git root down to the working directory.
+    Project,
+    /// The workspace-local `.loongagent/AGENTS.local.md`.
+    Local,
+}
+
+/// Purpose: One instruction file, already read and capped by the caller.
+///
+/// Serves: the kernel seats text without touching the filesystem, so tests and
+/// every other surface can supply exactly what the model will see.
+/// Design: `docs/design/instructions.md` §2.
+/// Up: `crates/cli/src/instructions.rs` reads the file; `KernelConfig.instructions` carries it.
+/// Down: `Kernel::seat_instructions`.
+/// Verify: `cargo test -p loong-kernel turn::tests::instructions_are_seated_after_the_system_prompt`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstructionBlock {
+    /// Which layer the file came from; it names the block in the model's prompt.
+    pub scope: InstructionScope,
+    /// The file path, used as the ledger source.
+    pub source: String,
+    /// The file body after the loader's truncation.
+    pub text: String,
+}
+
+/// Purpose: Everything a turn needs that is not a capability: cwd, profile, limits, engine, bootstrap skills and instructions.
 ///
 /// Serves: one resolved configuration object, narrowed before the first step.
 /// Design: `docs/design/kernel-loop.md` §1 and §4.
@@ -254,6 +290,13 @@ pub struct KernelConfig {
     /// Adaptation lines seated above those bodies, for a plugin written for a harness
     /// whose tools have different names.
     pub bootstrap_notes: Vec<String>,
+    /// Instruction files for this session, least specific first.
+    ///
+    /// Each block is one file, already read and truncated by the caller; the kernel
+    /// never touches the filesystem for instructions. Empty is the default, and the
+    /// rollback path: a session with no blocks behaves exactly as it did before the
+    /// feature existed.
+    pub instructions: Vec<InstructionBlock>,
 }
 
 impl KernelConfig {
@@ -277,6 +320,7 @@ impl KernelConfig {
             context_engine: None,
             bootstrap_skills: Vec::new(),
             bootstrap_notes: Vec::new(),
+            instructions: Vec::new(),
         }
     }
 

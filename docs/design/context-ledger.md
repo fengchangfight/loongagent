@@ -17,10 +17,11 @@ ADR-0006 §1 calls the ledger the *only* write path to the model: blocks are
 proposed by rules, memory, MCP servers, skills and retrieval, and the kernel
 appends them. In the code that is not an API the proposer calls. Every function
 that pushes a `ChatMessage` into a live conversation — `record_user`,
-`record_assistant`, `record_tool_result`, `seat_system_prompt`, `refresh_map` —
-adds its entry in the same call, and the replay path rebuilds the same pairs
-from the log. §6 names the two blocks still outside that lockstep; the proposal
-door ADR-0006 describes for out-of-kernel contributors does not exist yet.
+`record_assistant`, `record_tool_result`, `seat_system_prompt`,
+`seat_instructions`, `refresh_map` — adds its entry in the same call, and the
+replay path rebuilds the same pairs from the log. §6 names the two blocks still
+outside that lockstep; the proposal door ADR-0006 describes for out-of-kernel
+contributors does not exist yet.
 
 ## 1. Proposal → ledger → model
 
@@ -30,6 +31,7 @@ flowchart LR
         P1["user / assistant / tool result<br/>record_user · record_assistant · record_tool_result"]
         P2["system prompt + skill catalogue<br/>seat_system_prompt"]
         P3["L4 global map<br/>refresh_map"]
+        P4["AGENTS.md instruction blocks<br/>seat_instructions"]
     end
     subgraph led["Ledger — the account (crates/kernel/src/ledger.rs)"]
         ADD["Ledger::add(category, source, text, lifetime, pinned)"]
@@ -46,11 +48,13 @@ flowchart LR
     P1 --> ADD
     P2 --> ADD
     P3 --> ADD
+    P4 --> ADD
     ADD --> ENT
     MUT --> ENT
     P1 --> MSG
     P2 --> MSG
     P3 --> MSG
+    P4 --> MSG
     ENT --- IDX
     MSG --- IDX
     MSG --> REQ
@@ -60,8 +64,8 @@ flowchart LR
 `Kernel.entry_of` is the join. It is a `Vec<Option<u64>>` parallel to
 `messages`, so clearing a tool output or dropping an exchange can find the entry
 that describes the message it is about to change, and `context.explain` can go
-the other way. The lockstep is by construction in those five functions, not by
-a type that forbids a sixth writer.
+the other way. The lockstep is by construction in those six functions, not by
+a type that forbids a seventh writer.
 
 ## 2. Entries: category, source, lifetime
 
@@ -69,7 +73,7 @@ a type that forbids a sixth writer.
 |---|---|---|---|
 | `SystemPrompt` | 0 — last to go | `seat_system_prompt` | `system` |
 | `Tools` | 30 | nothing yet | — |
-| `Rules` | 40 | nothing yet | `AGENTS.md` (the design's example) |
+| `Rules` | 40 | `seat_instructions`, pinned | `AGENTS.md`, `AGENTS.local.md` |
 | `CognitiveMap` | 45 | `refresh_map`, after the first `Ledger::add` and then `Ledger::replace` | `context-engine:L4` |
 | `Memory` | 50 | nothing yet | — |
 | `McpTools` | 70 | nothing yet | — |
@@ -80,12 +84,13 @@ Higher priority is evicted first (`Category::eviction_priority`). The order is
 a property of the category, so the entries with no writer still have a decided
 place; `retrieval_is_evicted_before_rules` pins it.
 
-`Lifetime` is `Turn`, `Session` or `Persistent`. Today the system prompt is
-`Persistent`, user and assistant messages and the map are `Session`, and tool
-results are `Turn`. It is mapped to a string for `context.explain` and the wire
-`ContextExplain`, but no behaviour depends on it: clearing is decided by category
-and source, dropping by the exchange boundary. Treat a tool result's `Turn`
-lifetime as the stated intent, not as the switch that clears it.
+`Lifetime` is `Turn`, `Session` or `Persistent`. Today the system prompt and
+the instruction blocks are `Persistent`, user and assistant messages and the map
+are `Session`, and tool results are `Turn`. It is mapped to a string for
+`context.explain` and the wire `ContextExplain`, but no behaviour depends on it:
+clearing is decided by category and source, dropping by the exchange boundary.
+Treat a tool result's `Turn` lifetime as the stated intent, not as the switch
+that clears it.
 
 `estimate_tokens` counts characters and rounds up at four characters per token
 until a real tokenizer is wired in. Every budget number in this document is that

@@ -22,7 +22,7 @@ callback.
 | Input | Where it comes from |
 |---|---|
 | The prompt | Either plain text, or `/name args` expanded by `SkillSet::invoke`; an MCP prompt with no local body is fetched by `Kernel::fetch_mcp_prompt`. |
-| Conversation | `Kernel.messages`: the system prompt seated once by `Kernel::seat_system_prompt`, then the history rebuilt by `Kernel::replay_history`. |
+| Conversation | `Kernel.messages`: the system prompt seated once by `Kernel::seat_system_prompt`, the instruction files seated by `Kernel::seat_instructions`, then the history rebuilt by `Kernel::replay_history`. |
 | Limits | `KernelConfig` (`max_steps`, budget, compaction thresholds), narrowed when the kernel is built. |
 | Capabilities | `Kernel.tools` (`Registry`), `Kernel.pdp`, `Kernel.models` + `Kernel.router`, `Kernel.hooks`, `Kernel.skills`. |
 | Preview stream | `on_delta`; the provider calls it, and it changes no record. |
@@ -82,7 +82,7 @@ If the loop completes every step without an answer, it appends one assistant
 |---|---|---|
 | **Model call** | `Kernel::run_inner` → `Model::complete_streaming` | Sends `Kernel.messages` plus the tool specs. Streaming deltas are a preview: they are not logged, not ledgered, and do not change the outcome. |
 | **Tool call** | `Kernel::dispatch` → `Pdp::decide` → `Kernel::execute` | The PDP returns allow / ask / deny plus the rule. `Kernel::execute` is the PEP: it builds an `ExecContext` from `Kernel.config.cwd` and `Kernel.confinement`, then calls the `Tool` in `Kernel.tools`. |
-| **Ledger append** | `Kernel::record_user`, `Kernel::record_assistant`, `Kernel::record_tool_result` | Each adds a `Ledger` entry *and* pushes the matching `ChatMessage`. That lockstep is what makes `Kernel.messages` the ledger's view — with the one exception in §4. The system prompt and the L4 map are seated the same way by `Kernel::seat_system_prompt` and `Kernel::refresh_map`. `Kernel::compact_if_needed` is the only code that drops messages or clears tool output; the system prompt and the map are pinned, and the map is refreshed in place. |
+| **Ledger append** | `Kernel::record_user`, `Kernel::record_assistant`, `Kernel::record_tool_result` | Each adds a `Ledger` entry *and* pushes the matching `ChatMessage`. That lockstep is what makes `Kernel.messages` the ledger's view — with the one exception in §4. The system prompt, the instruction files and the L4 map are seated the same way by `Kernel::seat_system_prompt`, `Kernel::seat_instructions` and `Kernel::refresh_map`. `Kernel::compact_if_needed` is the only code that drops messages or clears tool output; the leading system blocks are pinned, and the map is refreshed in place. |
 | **Event append** | `Kernel::append` | Writes to `SessionLog`, mirrors the event into the derived `Index` (a failure marks `index_stale` rather than failing the turn), and calls the live `event_sink`. Every event the loop emits goes through it. |
 
 Inside one registry tool call the events normally run: `tool.call`, any
@@ -106,6 +106,11 @@ configuration's `max_steps` with a plain `min` when the kernel is built, and
 `steps_or_unlimited` maps a configured `0` to `usize::MAX`, meaning no limit. The
 step limit is a guard against a model that spins; it is not the cost limit —
 compaction and the token budget are.
+
+The leading `System` messages — the operator's prompt, the instruction files and
+the L4 map — are not exchanges. `Kernel::drop_oldest_exchange` skips every one of
+them before it looks for a user turn, so compaction removes history and never the
+prompt or its instructions.
 
 The **nudge** exists because a model sometimes answers with a file pasted into
 chat, or with a tool call printed as text. In the no-tool-call branch, before

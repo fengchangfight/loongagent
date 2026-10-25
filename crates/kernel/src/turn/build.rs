@@ -492,6 +492,9 @@ impl Kernel {
         };
         // The catalogue enters context before any work does.
         kernel.seat_system_prompt()?;
+        // The workspace's own instructions follow the operator's prompt and precede
+        // the history (ADR-0008; docs/design/instructions.md).
+        kernel.seat_instructions();
         // Then the conversation the log already holds — its own events, preceded by any
         // ancestor prefix (ADR-0015). Without this, resuming a session hands the model a
         // conversation it cannot see and an instruction to carry on.

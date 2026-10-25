@@ -18,6 +18,6 @@ pub mod turn;
 pub use context_engine::{ContextEngine, ContextEngineConfig};
 pub use ledger::{estimate_tokens, Category, Entry, EvictionReport, ExplainRow, Ledger, Lifetime};
 pub use turn::{
-    effective_budget, steps_or_unlimited, Kernel, KernelConfig, KernelError, PendingCall,
-    TurnOutcome, DEFAULT_MAX_STEPS, DEFAULT_RESERVED_CONTEXT,
+    effective_budget, steps_or_unlimited, InstructionBlock, InstructionScope, Kernel, KernelConfig,
+    KernelError, PendingCall, TurnOutcome, DEFAULT_MAX_STEPS, DEFAULT_RESERVED_CONTEXT,
 };

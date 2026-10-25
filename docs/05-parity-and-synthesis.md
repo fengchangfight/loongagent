@@ -54,9 +54,10 @@ rows below are what "not losing" means concretely.
 
 | CC feature | Our status | Where | Next |
 |---|---|---|---|
-| Instruction hierarchy: managed → user → project → local, most-specific last | ✅ | ADR-0008 | — |
+| Instruction hierarchy: managed → user → project → local, most-specific last | ⚠️ | ADR-0008; user/project/local implemented in [instructions.md](design/instructions.md) | managed/org layer |
 | `@path` imports with depth limit | ❌ | — | small; fold into **T-25** |
-| AGENTS.md native + CLAUDE.md compatibility | ✅ | ADR-0008 | importer |
+| AGENTS.md native (user → project → local) | ✅ | ADR-0008; [instructions.md](design/instructions.md) | — |
+| CLAUDE.md compatibility | ❌ | ADR-0008 requires an explicit one-time import | importer |
 | **Model-written auto memory** with bounded index + topic files | ⚠️ | ADR-0006 (propose-and-confirm), T-10 | define the bounded-index shape |
 | `/init`, `/doctor` (generate / trim instruction files) | ❌ | — | new **T-25** |
 

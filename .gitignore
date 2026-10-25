@@ -54,6 +54,11 @@ logs/
 #                    server, which is precisely what the gate exists to
 #                    prevent.
 #   env               the secrets file, when the home points into the repository.
+#   AGENTS.local.md   the person's own instruction file: local guidance is not
+#                    shared, and committing one would push it onto every checkout.
+#                    It sits beside `AGENTS.md`, not under `.loongagent/`, because
+#                    that directory is also the skill/command scan root and a
+#                    frontmatter-less markdown file there is a broken command.
 #
 # Its **subdirectories** are state (`projects/`, `control/`), never configuration.
 .loongagent/*.jsonl
@@ -65,6 +70,9 @@ logs/
 .loongagent/env
 .loongagent/projects/
 .loongagent/control/
+
+# Personal instruction files, wherever a workspace keeps one.
+AGENTS.local.md
 
 # The same artifacts when a session is deliberately put somewhere else in the repository
 # (`--session ./tmp/s.jsonl`). Both extensions are produced only by this tool, so unlike

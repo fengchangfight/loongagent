@@ -353,6 +353,17 @@ fn build_kernel(
     // are built by one code path and cannot disagree.
     let plugins = installed_plugins(&args.cwd)?;
     let mut config = kernel_config(args, settings, path);
+    // The workspace's and the person's own instructions (ADR-0008;
+    // docs/design/instructions.md). Read here, once per session, so the kernel
+    // never depends on the filesystem for a test.
+    let loaded = crate::instructions::load(&args.cwd, &loong_config::loongagent_home());
+    for warning in &loaded.warnings {
+        eprintln!("[instructions] {warning}");
+    }
+    if !loaded.blocks.is_empty() {
+        eprintln!("[instructions] {}", loaded.summary);
+    }
+    config.instructions = loaded.blocks;
     config.settings.skill_dirs.extend(plugins.skill_dirs());
     config.bootstrap_skills = plugins.bootstrap_skills();
     config.bootstrap_notes = plugins.bootstrap_notes();
@@ -638,5 +649,53 @@ mod endpoint_key_tests {
                 "{url} is not loopback, so a keyless request may 401"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod instruction_wiring_tests {
+    use super::build_kernel;
+    use crate::Args;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static N: AtomicU64 = AtomicU64::new(0);
+
+    /// Purpose: A real build reads AGENTS.md and seats it as a rules entry, not just an empty config field.
+    #[test]
+    fn build_kernel_seats_agents_md_as_a_rule() {
+        let dir = std::env::temp_dir().join(format!(
+            "loong-cli-instructions-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::SeqCst)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("AGENTS.md"), "WIRING-MARKER").unwrap();
+        let session = dir.join("session.jsonl");
+        let argv: Vec<String> = vec![
+            "run".into(),
+            "hi".into(),
+            "--cwd".into(),
+            dir.display().to_string(),
+            "--session".into(),
+            session.display().to_string(),
+            "--model".into(),
+            "echo".into(),
+            "--local".into(),
+        ];
+        let args = Args::parse(&argv).unwrap();
+        let settings = loong_config::Profile::default();
+        let kernel = build_kernel(&args, &settings, &session).unwrap();
+
+        let explain = kernel.context_explain();
+        assert!(
+            explain
+                .entries
+                .iter()
+                .any(|entry| entry.category == "rules" && entry.source.ends_with("AGENTS.md")),
+            "{:?}",
+            explain.entries
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

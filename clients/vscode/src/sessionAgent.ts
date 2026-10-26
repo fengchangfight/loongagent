@@ -2,34 +2,34 @@ import * as vscode from "vscode";
 import { spawnAgent } from "./agentSession.ts";
 import { withStoredSession } from "./resume.ts";
 import { LoongSession } from "./session.ts";
-import { TurnController, TurnGate } from "./turn.ts";
-import { EVENTS } from "../../ts/protocol.generated.ts";
+import { SessionCore } from "./sessionCore.ts";
 import type { AgentSession } from "./agentSession.ts";
-import type { TurnSink } from "./turn.ts";
+import type { TurnController, TurnSink } from "./turn.ts";
 import type { EventEnvelope } from "../../ts/protocol.generated.ts";
 
-/** Where this workspace's session id is remembered between windows. */
+/** Where this workspace's resumed session id is remembered between windows. */
 const SESSION_KEY = "loongagent.sessionId";
 /** Whether this workspace last chose to stop being asked (ADR-0007 §5). */
 const AUTO_APPROVE_KEY = "loongagent.autoApprove";
 
 /**
- * The agent for one workspace folder: the child process, the session, and the
- * process's lifecycle as the output channel tells it.
+ * One tab's agent: the child process, the session, and the turn gate.
  *
- * It holds no policy and renders nothing. It spawns the same binary the TUI and
- * the browser talk to, in the same way, and gives the participant something to
- * run turns on.
+ * It holds no policy and renders nothing. `sessionId` attaches exactly that
+ * session (a history or restored tab) and throws when it cannot; `fresh` starts
+ * a new one; neither uses the workspace's remembered id with one fallback.
  */
-export class WorkspaceAgent {
+export class SessionAgent {
   private readonly folder: vscode.WorkspaceFolder;
   private readonly output: vscode.OutputChannel;
   private readonly context: vscode.ExtensionContext;
-  private gateInstance: TurnGate | undefined;
+  private readonly binaryPath: string;
+  private readonly fixedSessionId: string | undefined;
+  private readonly fresh: boolean;
+  private readonly core = new SessionCore();
   private opening: Promise<LoongSession> | undefined;
   private resumed = false;
   private agent: AgentSession | undefined;
-  private live: LoongSession | undefined;
   private announced = false;
   private lastExit: { code: number | null; signal: string | null } | undefined;
 
@@ -37,14 +37,20 @@ export class WorkspaceAgent {
     folder: vscode.WorkspaceFolder;
     output: vscode.OutputChannel;
     context: vscode.ExtensionContext;
+    binaryPath: string;
+    sessionId?: string;
+    fresh?: boolean;
   }) {
     this.folder = options.folder;
     this.output = options.output;
     this.context = options.context;
+    this.binaryPath = options.binaryPath;
+    this.fixedSessionId = options.sessionId;
+    this.fresh = options.fresh === true;
   }
 
   get sessionId(): string | undefined {
-    return this.live?.sessionId;
+    return this.core.session?.sessionId;
   }
 
   /** The last answer to "stop asking?", or nothing if this workspace never answered. */
@@ -68,17 +74,15 @@ export class WorkspaceAgent {
   /**
    * Spawn if needed and attach; resolves to the live session.
    *
-   * A session id stored from a previous window is resumed — and if it no longer
-   * resolves (the log was deleted, or it belongs to another checkout), that is
-   * said out loud and a new session is started **once**. Retrying a name the
-   * server refuses is how a client turns a bad id into a loop.
+   * A fixed session id is attached exactly and a failure propagates. With
+   * neither a fixed id nor a fresh request, the workspace's remembered id is
+   * tried once and a refusal starts a new session with a word said out loud.
    */
   async ensure(): Promise<LoongSession> {
-    if (this.live !== undefined) return this.live;
-    // One child per cold start: two chat tabs opened at once would otherwise each
-    // spawn a server, attach to its own new session, and orphan one of them.
+    const live = this.core.session;
+    if (live !== undefined) return live;
     if (this.opening !== undefined) return this.opening;
-    this.opening = this.resumeOrStart();
+    this.opening = this.openInitial();
     try {
       return await this.opening;
     } finally {
@@ -86,7 +90,9 @@ export class WorkspaceAgent {
     }
   }
 
-  private async resumeOrStart(): Promise<LoongSession> {
+  private async openInitial(): Promise<LoongSession> {
+    if (this.fixedSessionId !== undefined) return this.open(this.fixedSessionId);
+    if (this.fresh) return this.open(undefined);
     return withStoredSession(
       this.storedSessionId(),
       (id) => this.open(id),
@@ -99,12 +105,19 @@ export class WorkspaceAgent {
     );
   }
 
-  /** A brand new session, remembered so the next window resumes it. */
-  async startFresh(): Promise<string> {
-    const session = await this.ensure();
-    const id = await session.newSession();
-    await this.context.workspaceState.update(SESSION_KEY, id);
-    return id;
+  /** A brand new session in this tab. */
+  async startNew(): Promise<string> {
+    const agent = this.agent;
+    this.agent = undefined;
+    this.core.forget();
+    if (agent !== undefined) await agent.dispose();
+    this.opening = this.open(undefined);
+    try {
+      const session = await this.opening;
+      return session.sessionId ?? "";
+    } finally {
+      this.opening = undefined;
+    }
   }
 
   /** How the previous child died, once, so the next reply can say why it restarted. */
@@ -118,40 +131,35 @@ export class WorkspaceAgent {
    * Where a *reopened* session was, once per activation.
    *
    * Gated on having actually resumed (`--session`), not on the log being
-   * non-empty: a brand-new session already carries its own first event, so
-   * "resumed" would be a false claim on the first prompt of every session.
+   * non-empty: a brand-new session already carries its own first event.
    */
   takeResume(): { sessionId: string; events: EventEnvelope[] } | undefined {
     if (this.announced || !this.resumed) return undefined;
     this.announced = true;
-    const sessionId = this.live?.sessionId;
-    const events = this.live?.events ?? [];
+    const sessionId = this.core.session?.sessionId;
+    const events = this.core.session?.events ?? [];
     if (sessionId === undefined || events.length === 0) return undefined;
     return { sessionId, events };
   }
 
-  /**
-   * Take the session's turn for this request, or throw `TurnBusyError`.
-   *
-   * One gate per session, so the busy check is about the session and not about
-   * this call: two chat tabs cannot both hold the turn.
-   */
+  /** Take the session's turn, or throw `TurnBusyError` without touching the sink. */
   async beginTurn(sink: TurnSink): Promise<TurnController> {
-    const session = await this.ensure();
-    if (this.gateInstance === undefined) this.gateInstance = new TurnGate(session);
+    await this.ensure();
+    const gate = this.core.turnGate;
+    if (gate === undefined) throw new Error("the session has no turn gate");
     this.output.appendLine("turn running");
-    return this.gateInstance.begin(sink);
+    return gate.begin(sink);
   }
 
   /** Give the turn back. */
   endTurn(): void {
-    this.gateInstance?.end();
+    this.core.turnGate?.end();
   }
 
   dispose(): void {
     const agent = this.agent;
     this.agent = undefined;
-    this.live = undefined;
+    this.core.forget();
     if (agent !== undefined) {
       this.output.appendLine("stopped: disposing the loongagent server");
       void agent.dispose();
@@ -166,11 +174,8 @@ export class WorkspaceAgent {
   private async open(stored: string | undefined): Promise<LoongSession> {
     const cwd = this.folder.uri.fsPath;
     const configuration = vscode.workspace.getConfiguration("loongagent", this.folder.uri);
-    const command = configuration.get<string>("path", "loongagent");
     const model = configuration.get<string>("model", "");
     const extra = configuration.get<string[]>("extraArgs", []);
-    // `--session <id>` resumes; `--new` says a fresh one is wanted on purpose,
-    // rather than letting the CLI pick whatever is newest in this project.
     const args = ["server", "--stdio", "--cwd", cwd];
     if (model !== "") args.push("--model", model);
     args.push(...extra);
@@ -178,40 +183,38 @@ export class WorkspaceAgent {
     else args.push("--session", stored);
     this.resumed = stored !== undefined;
 
-    this.output.appendLine(`spawning: ${command} ${args.join(" ")}`);
-    const agent = spawnAgent(command, args, cwd, {
+    this.output.appendLine(`spawning: ${this.binaryPath} ${args.join(" ")}`);
+    const agent = spawnAgent(this.binaryPath, args, cwd, {
       onNotification: () => {},
       onLog: (line) => this.output.appendLine(`[server] ${line}`),
       onExit: (code, signal) => {
         this.output.appendLine(`stopped: the loongagent server exited (${signal ?? `code ${code}`})`);
-        // Only clear what this child owned: a respawn must not be forgotten by
-        // the exit of the process it replaced.
         if (this.agent === agent) {
           this.agent = undefined;
-          this.live = undefined;
+          this.core.forget();
           this.lastExit = { code, signal };
         }
       },
     });
 
+    this.agent = agent;
     const session = new LoongSession(agent);
     let attached;
     try {
       attached = await session.attach(cwd);
     } catch (error) {
-      // A child that never attached is of no use to anyone; do not keep it.
+      if (this.agent === agent) this.agent = undefined;
+      this.core.forget();
       await agent.dispose();
       throw error;
     }
-    this.agent = agent;
-    this.live = session;
+    if (this.agent !== agent) throw new Error("the loongagent server exited before attach completed");
+    this.core.adopt(session);
     await this.context.workspaceState.update(SESSION_KEY, attached.session_id);
     this.output.appendLine(
       `ready: session ${attached.session_id} (schema ${attached.schema_version}, ` +
       `${attached.existing_events} events already)`,
     );
-    // A workspace that chose to stop being asked comes back that way — and the
-    // session records it, so the log still explains itself.
     if (this.preferredAutoApprove()) {
       await session.setAutoApprove(true);
       this.output.appendLine("ready: approval prompts are off for this session (permissions.relaxed)");

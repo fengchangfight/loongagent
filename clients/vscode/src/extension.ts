@@ -8,7 +8,7 @@ import { promptText } from "./prompt.ts";
 import { pathsInArgs, Renderer } from "./render.ts";
 import { FileSnapshots } from "./snapshots.ts";
 import { TurnBusyError } from "./turn.ts";
-import { WorkspaceAgent } from "./workspaceAgent.ts";
+import { SessionAgent } from "./sessionAgent.ts";
 import { EVENTS } from "../../ts/protocol.generated.ts";
 import type { DiffUris } from "./diffProvider.ts";
 import type { UiPart } from "./render.ts";
@@ -120,12 +120,16 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(output);
   output.appendLine("loongagent: activated");
 
-  const agents = new Map<string, WorkspaceAgent>();
-  const agentFor = (folder: vscode.WorkspaceFolder): WorkspaceAgent => {
+  const agents = new Map<string, SessionAgent>();
+  const agentFor = (folder: vscode.WorkspaceFolder): SessionAgent => {
     const key = folder.uri.toString();
     const existing = agents.get(key);
     if (existing !== undefined) return existing;
-    const made = new WorkspaceAgent({ folder, output, context });
+    const made = new SessionAgent({
+      folder, output, context,
+      binaryPath: vscode.workspace.getConfiguration("loongagent", folder.uri)
+        .get<string>("path", "loongagent"),
+    });
     agents.set(key, made);
     // The child dies with the extension: a window that closes must not leave a
     // server behind, and neither must a reload.
@@ -195,7 +199,7 @@ async function handleRequest(
   stream: vscode.ChatResponseStream,
   token: vscode.CancellationToken,
   output: vscode.OutputChannel,
-  agentFor: (folder: vscode.WorkspaceFolder) => WorkspaceAgent,
+  agentFor: (folder: vscode.WorkspaceFolder) => SessionAgent,
 ): Promise<void> {
   const folder = vscode.workspace.workspaceFolders?.[0];
   const refusal = refusalToStart({
@@ -223,13 +227,13 @@ async function handleRequest(
 }
 
 async function startFreshSession(
-  agent: WorkspaceAgent,
+  agent: SessionAgent,
   stream: vscode.ChatResponseStream,
   output: vscode.OutputChannel,
 ): Promise<void> {
   try {
     // Through the agent, so the new id is remembered for the next window.
-    const id = await agent.startFresh();
+    const id = await agent.startNew();
     output.appendLine(`ready: new session ${id}`);
     stream.markdown(`Started a new session: \`${id}\`.`);
   } catch (error) {
@@ -262,7 +266,7 @@ export async function decideFromModal(request: ApprovalRequest): Promise<Approva
 }
 
 async function toggleAutoApprove(
-  agent: WorkspaceAgent,
+  agent: SessionAgent,
   stream: vscode.ChatResponseStream,
   output: vscode.OutputChannel,
   folder: vscode.WorkspaceFolder,
@@ -286,7 +290,7 @@ async function toggleAutoApprove(
 }
 
 async function chooseModel(
-  agent: WorkspaceAgent,
+  agent: SessionAgent,
   stream: vscode.ChatResponseStream,
   output: vscode.OutputChannel,
 ): Promise<void> {
@@ -310,7 +314,7 @@ async function chooseModel(
 }
 
 async function showContext(
-  agent: WorkspaceAgent,
+  agent: SessionAgent,
   stream: vscode.ChatResponseStream,
   output: vscode.OutputChannel,
 ): Promise<void> {
@@ -328,7 +332,7 @@ async function runTurn(
   stream: vscode.ChatResponseStream,
   token: vscode.CancellationToken,
   output: vscode.OutputChannel,
-  agent: WorkspaceAgent,
+  agent: SessionAgent,
   folder: vscode.WorkspaceFolder,
 ): Promise<void> {
   let session: LoongSession;
@@ -468,7 +472,7 @@ function explain(error: unknown): string {
 async function runSmoke(
   folder: vscode.WorkspaceFolder,
   output: vscode.OutputChannel,
-  agentFor: (folder: vscode.WorkspaceFolder) => WorkspaceAgent,
+  agentFor: (folder: vscode.WorkspaceFolder) => SessionAgent,
 ): Promise<void> {
   const agent = agentFor(folder);
   let controller: TurnController;

@@ -60,7 +60,7 @@ write_workspace = "ask"
 
 ## 当前功能
 
-- 流式回答、工具卡片、Stop
+- 流式回答、工具卡片、Stop；等第一个 token 时显示带转圈的 `Thinking…`
 - 模型下拉（来自 `model.list` / `model.select`）
 - `@ file` 附件：输入 `@`，输入框上方出现文件列表，直接输入前缀过滤；选中后输入框保留 `@相对路径`，文字不会被删掉
 - 编辑器里选中代码后自动带上，不需要 selection 按钮

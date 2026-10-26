@@ -338,12 +338,10 @@ function renderEmpty(): void {
   empty.append(element("h1", "empty-title", "loongagent"));
   empty.append(element("p", "empty-copy",
     "Ask for a change in this workspace. Files you attach and the editor selection become part of the prompt."));
-  if (state.busy) {
-    empty.append(element("p", "empty-meta", "Thinking…"));
-  } else if (state.binary === undefined) {
+  if (state.binary === undefined) {
     empty.append(element("p", "empty-warn",
       "The loongagent binary was not found. Set loongagent.path or run \"loongagent: Locate the binary\"."));
-  } else {
+  } else if (!state.busy) {
     empty.append(element("p", "empty-meta",
       `${state.binary.path} · version ${state.binary.version} · schema ${state.binary.schema}`));
   }
@@ -444,6 +442,21 @@ function renderPart(part: UiPart): HTMLElement | undefined {
   }
 }
 
+function thinkingVisible(): boolean {
+  if (!state.busy || state.live !== "") return false;
+  const last = state.parts[state.parts.length - 1];
+  return last === undefined || last.kind === "user";
+}
+
+function appendThinking(): void {
+  const row = element("div", "thinking");
+  row.setAttribute("role", "status");
+  row.setAttribute("aria-label", "loongagent is thinking");
+  row.append(element("span", "thinking-spinner"));
+  row.append(element("span", "thinking-label", "Thinking…"));
+  transcript.append(row);
+}
+
 function render(): void {
   transcript.replaceChildren();
   if (state.parts.length === 0 && state.live === "") {
@@ -459,6 +472,7 @@ function render(): void {
       transcript.append(live);
     }
   }
+  if (thinkingVisible()) appendThinking();
   renderStatus();
   transcript.scrollTop = transcript.scrollHeight;
 }

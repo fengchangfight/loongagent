@@ -220,6 +220,32 @@ button:disabled {
   visibility: hidden;
 }
 
+.thinking {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 2px 2px 0;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.95em;
+}
+
+.thinking-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: thinking-spin 0.8s linear infinite;
+}
+
+@keyframes thinking-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .thinking-spinner { animation: none; }
+}
+
 .transcript {
   flex: 1;
   overflow-y: auto;

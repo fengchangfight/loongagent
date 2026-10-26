@@ -81,7 +81,9 @@ transcript, never a file the extension reads.
   typed message stays visible. There is no file browser, no window-level picker, and no
   separate button.
 - The active editor selection is inlined automatically: path, line range and text, because
-  `read_file` has no line-range parameter. A passive chip names it; deselecting removes it.
+  `read_file` has no line-range parameter. A passive chip names it; it survives clicking into
+  the chat (the active editor becomes undefined), and a new tab inherits it. Deselecting or
+  switching to another text editor clears it.
 - The model dropdown comes from `model.list`; a change is `model.select` and is recorded as
   `model.selected`.
 - While a turn is running without a live delta, the bottom of the transcript shows an animated

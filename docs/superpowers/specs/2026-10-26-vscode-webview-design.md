@@ -407,7 +407,9 @@ is set with `textContent`.
   stores `{path, startLine, endLine, text}`. On send, the prompt appends one fenced block
   with the path, the line range and the text. This is the one inlined body, because
   `read_file` has no line-range parameter. The Webview shows a passive chip; deselecting,
-  switching files, leaving the workspace, or selecting an empty range removes it.
+  switching files, leaving the workspace, or selecting an empty range removes it. Clicking
+  into the chat does not remove it (the active editor may become undefined), and a new tab
+  inherits the current selection.
 - File attachments are per tab and live in the host; the Webview renders chips and can
   remove them. Removing one updates the host's list. The current selection is a host
   fact, not a removable attachment: it stays for the next send while the editor still

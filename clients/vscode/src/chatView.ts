@@ -97,14 +97,15 @@ export class ChatViewProvider {
     this.binary = options.binary;
     this.tabs.open({ id: "tab-1", title: "New session", status: "idle" });
     this.context.subscriptions.push(
-      vscode.window.onDidChangeTextEditorSelection(() => this.refreshSelection()),
-      vscode.window.onDidChangeActiveTextEditor(() => this.refreshSelection()),
+      vscode.window.onDidChangeTextEditorSelection((event) =>
+        this.captureSelection(event.textEditor)),
+      vscode.window.onDidChangeActiveTextEditor((editor) => this.captureSelection(editor)),
       vscode.workspace.onDidChangeWorkspaceFolders(() => {
-        this.refreshSelection();
+        this.captureSelection(vscode.window.activeTextEditor);
         void this.refreshFiles();
       }),
     );
-    this.refreshSelection();
+    this.captureSelection(vscode.window.activeTextEditor);
 
     const leftUris: DiffUris<vscode.Uri> = {
       make: (token, path, label) =>
@@ -600,10 +601,18 @@ export class ChatViewProvider {
     this.postAttachments(tabId);
   }
 
-  private refreshSelection(): void {
+  /**
+   * Capture a selection, but do not clear it when focus leaves the editor.
+   *
+   * Clicking the chat webview changes the active editor to `undefined`; treating
+   * that as an empty selection made the chip disappear exactly when the person
+   * switched to the chat to use it. An actual empty/collapsed selection in a
+   * text editor, or a switch to another text editor, still clears it.
+   */
+  private captureSelection(editor: vscode.TextEditor | undefined): void {
+    if (editor === undefined) return;
     const folder = vscode.workspace.workspaceFolders?.[0];
-    const editor = vscode.window.activeTextEditor;
-    const next = folder === undefined || editor === undefined
+    const next = folder === undefined
       ? undefined
       : selectionAttachment({
         path: editor.document.uri.fsPath,

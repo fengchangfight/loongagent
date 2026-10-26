@@ -26,6 +26,20 @@ test("the first sighting is the one kept", () => {
   }
 });
 
+test("a relative path is read against the workspace, not process.cwd", () => {
+  const dir = tempDir("relative");
+  try {
+    writeFileSync(join(dir, "demo.txt"), "relative content");
+    const snapshots = new FileSnapshots({ workspace: dir });
+    snapshots.see(["demo.txt"]);
+    const left = snapshots.left(join(dir, "demo.txt"));
+    assert.equal(left?.content, "relative content");
+    assert.equal(left?.source, "snapshot");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a path outside the workspace is never read", () => {
   const workspace = tempDir("in");
   const outside = tempDir("out");

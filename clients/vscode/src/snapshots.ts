@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { resolve, sep } from "node:path";
+import { isAbsolute, resolve, sep } from "node:path";
 
 /** What a path held, and where that answer came from. */
 export interface Snapshot {
@@ -36,30 +36,35 @@ export class FileSnapshots {
   /** Read and keep each path's current content. The first sighting wins. */
   see(paths: string[]): void {
     for (const path of paths) {
-      if (this.kept.has(path)) continue;
-      this.kept.set(path, this.read(path));
+      const absolute = this.absolute(path);
+      if (this.kept.has(absolute)) continue;
+      this.kept.set(absolute, this.read(absolute));
     }
   }
 
   left(path: string): Snapshot | undefined {
-    return this.kept.get(path);
+    return this.kept.get(this.absolute(path));
   }
 
   clear(): void {
     this.kept.clear();
   }
 
+  private absolute(path: string): string {
+    return isAbsolute(path) ? resolve(path) : resolve(this.workspace, path);
+  }
+
   private read(path: string): Snapshot {
-    const resolved = resolve(path);
+    const resolved = this.absolute(path);
     if (resolved !== this.workspace && !resolved.startsWith(this.workspace + sep)) {
-      return { path, content: undefined, source: "none", note: "outside the workspace" };
+      return { path: resolved, content: undefined, source: "none", note: "outside the workspace" };
     }
     try {
-      return { path, content: readFileSync(resolved, "utf8"), source: "snapshot" };
+      return { path: resolved, content: readFileSync(resolved, "utf8"), source: "snapshot" };
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code ?? "unknown";
       return {
-        path,
+        path: resolved,
         content: undefined,
         source: "none",
         note: code === "ENOENT" ? "new file" : `unreadable (${code})`,

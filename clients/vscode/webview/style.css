@@ -289,3 +289,29 @@ button:disabled {
   gap: 8px;
   padding-top: 6px;
 }
+
+.card .actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-top: 4px;
+}
+
+.card .actions button {
+  padding: 2px 8px;
+  font-size: 0.9em;
+}
+
+.card .actions button.yes {
+  border-color: var(--vscode-testing-iconPassed, var(--vscode-editorInfo-foreground));
+}
+
+.card .actions button.no {
+  border-color: var(--vscode-errorForeground);
+}
+
+.card .actions button.secondary {
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border-color: var(--vscode-input-border, var(--vscode-panel-border));
+}

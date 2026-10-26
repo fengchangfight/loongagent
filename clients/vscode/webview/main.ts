@@ -83,7 +83,9 @@ function setBusy(value: boolean): void {
 
 function renderStatus(): void {
   const tab = activeTab();
-  status.textContent = state.busy ? "running…" : tab?.status === "stopped" ? "stopped" : "idle";
+  status.textContent = state.busy
+    ? tab?.status === "waiting" ? "waiting for approval…" : "running…"
+    : tab?.status === "stopped" ? "stopped" : "idle";
   status.className = `status ${state.busy ? "busy" : ""}`;
 }
 
@@ -147,17 +149,51 @@ function renderPart(part: UiPart): HTMLElement | undefined {
         `approval — ${part.actionClass}${part.state === "pending" ? "" : ` (${part.state})`}`));
       card.append(element("div", "reason", part.reason));
       if (part.diff !== undefined) {
+        card.append(element("div", "paths",
+          `${part.diff.added} added · ${part.diff.removed} removed${part.diff.truncated ? " · truncated" : ""}`));
         card.append(element("pre", "diff", part.diff.unified));
       }
-      if (part.state === "pending") {
-        card.append(element("div", "hint", "Approval buttons arrive with the approval task."));
+      const actions = element("div", "actions");
+      if (part.diff !== undefined && part.paths[0] !== undefined) {
+        const open = element("button", "secondary", "Open full diff");
+        open.addEventListener("click", () => {
+          if (state.activeTabId !== undefined) {
+            api.postMessage({ type: "openDiff", tabId: state.activeTabId,
+              token: part.requestId, path: part.paths[0] });
+          }
+        });
+        actions.append(open);
       }
+      if (part.state === "pending") {
+        const answer = (choice: "once" | "always" | "deny") => {
+          if (state.activeTabId === undefined) return;
+          api.postMessage({ type: "approval", tabId: state.activeTabId,
+            requestId: part.requestId, choice });
+          actions.querySelectorAll("button").forEach((button) => { button.disabled = true; });
+        };
+        const once = element("button", "yes", "Allow once");
+        once.addEventListener("click", () => answer("once"));
+        const always = element("button", "yes", "Allow always");
+        always.addEventListener("click", () => answer("always"));
+        const deny = element("button", "no", "Deny");
+        deny.addEventListener("click", () => answer("deny"));
+        actions.append(once, always, deny);
+      }
+      if (actions.childElementCount > 0) card.append(actions);
       return card;
     }
     case "review": {
       const card = element("div", "card review");
       card.append(element("div", "card-title", `Review ${part.paths.length} changed files`));
       card.append(element("div", "paths", part.paths.join(" · ")));
+      const open = element("button", "secondary", "Open diffs");
+      open.addEventListener("click", () => {
+        if (state.activeTabId !== undefined) {
+          api.postMessage({ type: "review", tabId: state.activeTabId,
+            token: part.token, paths: part.paths });
+        }
+      });
+      card.append(open);
       return card;
     }
   }
@@ -185,6 +221,14 @@ function render(): void {
 function upsert(part: UiPart): void {
   if (part.kind === "tool") {
     const index = state.parts.findIndex((entry) => entry.kind === "tool" && entry.callId === part.callId);
+    if (index >= 0) {
+      state.parts[index] = part;
+      return;
+    }
+  }
+  if (part.kind === "approval") {
+    const index = state.parts.findIndex((entry) =>
+      entry.kind === "approval" && entry.requestId === part.requestId);
     if (index >= 0) {
       state.parts[index] = part;
       return;

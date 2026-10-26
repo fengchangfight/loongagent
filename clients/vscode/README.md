@@ -1,6 +1,7 @@
 # loongagent for VS Code
 
-这是 loongagent 的 VS Code 侧边栏：扩展自己的 Activity Bar 窗口，不是 Copilot 的聊天框。
+这是 loongagent 的 VS Code 面板：编辑器区的一个 tab，从编辑器标题栏的 loongagent 图标或
+`loongagent: Open Chat` 打开；不是 Copilot 的聊天框，也不是 Activity Bar 侧边栏。
 它不需要 Copilot 登录，也不需要选 VS Code 的模型；模型来自 `loongagent server`。
 
 ## 运行
@@ -15,7 +16,8 @@ mkdir -p /tmp/loong-vscode-scratch
 code --extensionDevelopmentPath="$PWD" --new-window /tmp/loong-vscode-scratch
 ```
 
-开发宿主窗口里打开 Activity Bar 的 loongagent 图标。F5 需要本地 `.vscode/launch.json`
+开发宿主窗口里点编辑器标题栏的 loongagent 图标，或命令面板执行 `loongagent: Open Chat`。
+没有打开编辑器时，标题栏没有这个图标，用命令面板即可。F5 需要本地 `.vscode/launch.json`
 （仓库不提交 `.vscode/`），命令行方式更省事。
 
 ## 找到 loongagent binary
@@ -75,7 +77,7 @@ write_workspace = "ask"
 - `shell` 的写入没有预览，只有策略/审批卡片。
 - Windows 上 Stop 未实现（POSIX `SIGINT`）。
 - 一个窗口一个会话；跨窗口的 write token 不在本阶段。
-- 原生 `@loong` participant 已移除；VS Code 入口就是侧边栏。
+- 原生 `@loong` participant 已移除；VS Code 入口就是这个编辑器面板。
 
 设计与实现计划：
 

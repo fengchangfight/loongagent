@@ -38,13 +38,13 @@ interface TurnReview {
 }
 
 /**
- * The sidebar's Webview provider: tabs, one session agent, one transcript.
+ * The chat's Webview host: one editor panel, tabs, one session agent, one transcript.
  *
  * The host owns every fact the view needs; the Webview only renders `UiPart`s
  * and sends intents. A turn's streamed fragments are not stored as parts; the
  * final `message.appended` is the record that goes into the transcript.
  */
-export class ChatViewProvider implements vscode.WebviewViewProvider {
+export class ChatViewProvider {
   static readonly viewType = "loongagent.chat";
 
   private readonly context: vscode.ExtensionContext;
@@ -57,7 +57,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private readonly pendingAnswers = new Map<string, Promise<ApprovalAnswer>>();
   private readonly left: DiffProvider<vscode.Uri>;
   private readonly preview: PreviewProvider<vscode.Uri>;
-  private view: vscode.WebviewView | undefined;
+  private panel: vscode.WebviewPanel | undefined;
   private binary: HostBinary | undefined;
   private agent: Agent | undefined;
   private models: ModelList | undefined;
@@ -117,22 +117,35 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     );
   }
 
-  resolveWebviewView(view: vscode.WebviewView): void {
-    this.view = view;
-    view.webview.options = {
-      enableScripts: true,
-      localResourceRoots: [
-        this.context.extensionUri,
-        vscode.Uri.joinPath(this.context.extensionUri, "dist"),
-        vscode.Uri.joinPath(this.context.extensionUri, "webview"),
-        vscode.Uri.joinPath(this.context.extensionUri, "media"),
-      ],
-    };
-    view.webview.html = this.html(view.webview);
-    view.webview.onDidReceiveMessage((raw) => this.handle(raw));
-    view.onDidDispose(() => {
-      this.denyPending("webview closed");
-      this.view = undefined;
+  /** Open the chat as an editor tab, or reveal the tab that is already open. */
+  openPanel(): void {
+    if (this.panel !== undefined) {
+      this.panel.reveal(vscode.ViewColumn.Active);
+      return;
+    }
+    const panel = vscode.window.createWebviewPanel(
+      ChatViewProvider.viewType,
+      "loongagent",
+      vscode.ViewColumn.Active,
+      {
+        enableScripts: true,
+        retainContextWhenHidden: true,
+        localResourceRoots: [
+          this.context.extensionUri,
+          vscode.Uri.joinPath(this.context.extensionUri, "dist"),
+          vscode.Uri.joinPath(this.context.extensionUri, "webview"),
+          vscode.Uri.joinPath(this.context.extensionUri, "media"),
+        ],
+      },
+    );
+    this.panel = panel;
+    panel.iconPath = vscode.Uri.joinPath(this.context.extensionUri, "media", "loong-48.png");
+    panel.webview.html = this.html(panel.webview);
+    panel.webview.onDidReceiveMessage((raw) => this.handle(raw));
+    panel.onDidDispose(() => {
+      this.denyPending("tab closed");
+      this.panel = undefined;
+      this.ready = false;
     });
   }
 
@@ -143,14 +156,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   post(message: HostMessage): void {
-    void this.view?.webview.postMessage(message);
+    void this.panel?.webview.postMessage(message);
   }
 
   dispose(): void {
     this.denyPending("webview closed");
+    this.panel?.dispose();
+    this.panel = undefined;
+    this.ready = false;
     this.agent?.dispose();
     this.agent = undefined;
-    this.view = undefined;
   }
 
   private denyPending(reason: string): void {

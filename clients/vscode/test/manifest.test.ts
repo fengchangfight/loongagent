@@ -17,13 +17,13 @@ test("an untrusted workspace is only partly supported", () => {
   assert.equal(pkg.capabilities.untrustedWorkspaces.supported, "limited");
   assert.ok(pkg.capabilities.untrustedWorkspaces.description.length > 0);
 });
-test("the sidebar is contributed", () => {
-  const [container] = pkg.contributes.viewsContainers.activitybar;
-  assert.equal(container.id, "loongagent");
-  assert.equal(container.icon, "media/loong-48.png");
-  const [view] = pkg.contributes.views.loongagent;
-  assert.equal(view.id, "loongagent.chat");
-  assert.equal(view.type, "webview");
+test("the chat is an editor panel opened from the editor title icon", () => {
+  assert.equal(pkg.contributes.viewsContainers, undefined);
+  assert.equal(pkg.contributes.views, undefined);
+  const [item] = pkg.contributes.menus["editor/title"];
+  assert.equal(item.command, "loongagent.openChat");
+  assert.equal(item.icon, "media/loong-24.png");
+  assert.equal(item.group, "navigation");
 });
 test("the native chat surface and placeholder model are gone", () => {
   assert.equal(pkg.contributes.chatParticipants, undefined);
@@ -34,11 +34,11 @@ test("the binary path is machine-scoped", () => {
   assert.equal(pkg.contributes.configuration.properties["loongagent.autoApprove"].scope, "machine");
   assert.equal(pkg.contributes.configuration.properties["loongagent.extraArgs"].scope, "machine");
 });
-test("the sidebar commands are contributed", () => {
+test("the panel commands are contributed", () => {
   const ids = pkg.contributes.commands.map((c: { command: string }) => c.command);
   for (const id of ["loongagent.openChat", "loongagent.locateBinary",
     "loongagent.reviewChanges"]) assert.ok(ids.includes(id));
-  assert.equal(pkg.contributes.menus, undefined, "selection is automatic; no attach command");
+  assert.ok(!ids.includes("loongagent.attachSelection"), "selection is automatic");
 });
 test("the derived icons exist", () => {
   for (const name of ["loong-24.png", "loong-48.png", "loong-128.png"]) {

@@ -1,25 +1,26 @@
-# The VS Code sidebar
+# The VS Code panel
 
 - **Up:** [surfaces.md](surfaces.md)
-- **Authority:** [ADR-0009](../decisions/0009-surfaces.md) · [VS Code sidebar spec](../superpowers/specs/2026-10-26-vscode-webview-design.md)
+- **Authority:** [ADR-0009](../decisions/0009-surfaces.md) · [VS Code surface spec](../superpowers/specs/2026-10-26-vscode-webview-design.md)
 - **Code:** `clients/vscode/src/extension.ts`, `clients/vscode/src/chatView.ts`,
   `clients/vscode/src/sessionAgent.ts`, `clients/vscode/src/binary.ts`,
   `clients/vscode/webview/main.ts`
 - **Verify:** `cd clients/vscode && npm run compile && npm test` · `./scripts/check.sh`
 
-The VS Code surface is a client of the same local server as the TUI and the browser. It renders
-in its own Activity Bar `WebviewView`, not in VS Code's native Chat view: that view is the
-Copilot surface, requires a VS Code language model, and no longer supports `@` participants in
-the Copilot harness. The sidebar needs neither Copilot nor a VS Code model.
+The VS Code surface is a client of the same local server as the TUI and the browser. It opens
+an editor `WebviewPanel` from a loongagent icon in the editor title bar (and from
+`loongagent: Open Chat`), not in VS Code's native Chat view: that view is the Copilot surface,
+requires a VS Code language model, and no longer supports `@` participants in the Copilot
+harness. The panel needs neither Copilot nor a VS Code model.
 
 ## 1. Topology
 
 ```text
-Activity Bar WebviewView  loongagent.chat
+Editor tab WebviewPanel  loongagent.chat
   │  typed JSON messages
   ▼
 Extension host
-  ├── ChatViewProvider       view, message bridge, commands, diff providers
+  ├── ChatViewProvider       panel, message bridge, commands, diff providers
   ├── TabManager             tabs, active tab, the five-tab ceiling
   ├── SessionAgent           one child, one LoongSession, one TurnGate, one transcript
   ├── Renderer               EventEnvelope -> UiPart
@@ -37,8 +38,9 @@ again instead of replaying events.
 
 A tab owns one session and one server child. A new conversation starts with `--new`; a reopened
 one uses `--session <id>`. The same session is never opened twice in one window; the existing tab
-is focused instead. Tabs are capped at five; closing a tab disposes its child and denies any
-pending approval with reason `tab closed`.
+is focused instead. Tabs are capped at five; closing an internal tab disposes its child and
+denies any pending approval with reason `tab closed`. Closing the editor panel denies pending
+approvals with `tab closed` but keeps the agent, so reopening the panel continues the session.
 
 The tab model caps at five, and `session.list` is the server capability the history needs.
 
@@ -103,4 +105,4 @@ Locate.
 - No syntax highlighting, images or URL context.
 - Stop is a POSIX `SIGINT`; Windows is documented as unsupported.
 - One window per session: the server has no cross-window write token yet.
-- The native `@loong` participant is gone; the sidebar is the VS Code entry point.
+- The native `@loong` participant is gone; the editor panel is the VS Code entry point.

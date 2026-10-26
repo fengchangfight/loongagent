@@ -166,7 +166,7 @@ built. `loongagent web` is the localhost path only.
 
 ADR-0002 makes ACP a dialect of this protocol over JSON-RPC; ADR-0009 places the adapter after
 the TUI and web. There is no `acp` command, crate or adapter in the tree. The only trace is the
-`"acp"` label the schema allows in `SessionAttachParams.client`. The VS Code sidebar is a
+`"acp"` label the schema allows in `SessionAttachParams.client`. The VS Code panel is a
 separate Webview client: [vscode-surface.md](vscode-surface.md).
 
 ## 6. What a surface may do, and what it may not

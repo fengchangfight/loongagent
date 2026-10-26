@@ -1,5 +1,11 @@
 # VS Code sidebar surface: an independent chat window with sessions and review-before-write
 
+> **Surface amendment (2026-10-26):** The implemented surface is an editor
+> `WebviewPanel` opened from a loongagent icon in the editor title bar and the
+> `loongagent.openChat` command. The Activity Bar `WebviewView` described below was
+> the initial surface. The session, tab, approval, attachment and protocol sections
+> still apply; read `WebviewView` as `WebviewPanel` where they name the container.
+
 - **Date:** 2026-10-26
 - **Status:** Approved on 2026-10-26. The implementation plan is written from this
   file.

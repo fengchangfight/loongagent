@@ -67,8 +67,8 @@ profile/control pack，显式加 `--centered`。`local.toml` 里的 `mode = "loc
 
 其他界面（同一个内核、同一份会话）：`loongagent web`（浏览器，只监听 loopback）、
 `loongagent repl`（行模式，不需要 TTY）、`loongagent run "…"`（无界面跑一轮）、
-`loongagent sessions` / `resume [ID]` / `fork [ID]` / `delete ID`，以及 VS Code 侧边栏
-（`clients/vscode`，自带 Webview，不依赖 Copilot）。
+`loongagent sessions` / `resume [ID]` / `fork [ID]` / `delete ID`，以及 VS Code 面板
+（`clients/vscode`，编辑器 tab，自带 Webview，不依赖 Copilot）。
 
 ---
 

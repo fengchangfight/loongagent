@@ -143,10 +143,11 @@ runs a scripted model with no API key at all (`./scripts/demo.sh [web|tui|run]`)
 Sessions are plain JSONL — `cat` them. `LOONGAGENT_SERVER_BIN` overrides which
 binary the TUI spawns as its server (used by the end-to-end test).
 
-## The VS Code sidebar
+## The VS Code panel
 
 The extension is TypeScript, not a Rust crate. It drives the same `loongagent server --stdio`
-child and renders in its own Activity Bar Webview; see
+child and renders in an editor `WebviewPanel` opened from the editor title icon or
+`loongagent: Open Chat`; see
 [docs/design/vscode-surface.md](docs/design/vscode-surface.md) and
 [clients/vscode/README.md](clients/vscode/README.md).
 

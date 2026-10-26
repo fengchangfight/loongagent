@@ -134,10 +134,15 @@ export class ChatViewProvider {
     );
   }
 
-  /** Open the chat as an editor tab, or reveal the tab that is already open. */
+  /**
+   * Open the chat as an editor tab. Once the panel is already open, the same
+   * action starts another conversation in a new internal tab; that is what the
+   * title icon means after the first click.
+   */
   openPanel(): void {
     if (this.panel !== undefined) {
       this.panel.reveal(vscode.ViewColumn.Active);
+      void this.newTab();
       return;
     }
     const panel = vscode.window.createWebviewPanel(

@@ -11,7 +11,8 @@ The VS Code surface is a client of the same local server as the TUI and the brow
 an editor `WebviewPanel` from a loongagent icon in the editor title bar (and from
 `loongagent: Open Chat`), not in VS Code's native Chat view: that view is the Copilot surface,
 requires a VS Code language model, and no longer supports `@` participants in the Copilot
-harness. The panel needs neither Copilot nor a VS Code model.
+harness. The panel needs neither Copilot nor a VS Code model. The first click opens the panel;
+clicking the icon again starts another conversation in a new internal tab.
 
 ## 1. Topology
 

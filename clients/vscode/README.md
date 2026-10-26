@@ -17,7 +17,8 @@ code --extensionDevelopmentPath="$PWD" --new-window /tmp/loong-vscode-scratch
 ```
 
 开发宿主窗口里点编辑器标题栏的 loongagent 图标，或命令面板执行 `loongagent: Open Chat`。
-没有打开编辑器时，标题栏没有这个图标，用命令面板即可。F5 需要本地 `.vscode/launch.json`
+第一次点击打开面板；面板已经打开时，每次再点图标都会新建一个会话 tab。没有打开编辑器时，
+标题栏没有这个图标，用命令面板即可。F5 需要本地 `.vscode/launch.json`
 （仓库不提交 `.vscode/`），命令行方式更省事。
 
 ## 找到 loongagent binary

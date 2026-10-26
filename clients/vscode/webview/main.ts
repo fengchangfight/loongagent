@@ -1,4 +1,5 @@
-import type { Attachment, BinaryStatus, HostMessage, TabState, UiPart } from "../src/webviewProtocol.ts";
+import type { Attachment, BinaryStatus, FileChoice, HostMessage, TabState, UiPart } from "../src/webviewProtocol.ts";
+import { matchingFiles, mentionAt } from "../src/mention.ts";
 
 type Models = Extract<HostMessage, { type: "bootstrap" }>["models"];
 
@@ -40,6 +41,10 @@ const composer = document.createElement("footer");
 composer.className = "composer";
 const attachmentsBar = document.createElement("div");
 attachmentsBar.className = "attachments";
+const mentionBox = document.createElement("div");
+mentionBox.className = "mention";
+mentionBox.hidden = true;
+mentionBox.setAttribute("role", "listbox");
 const input = document.createElement("textarea");
 input.className = "input";
 input.rows = 3;
@@ -59,7 +64,7 @@ const hint = document.createElement("span");
 hint.className = "hint";
 hint.textContent = "Type @ to attach a file · Enter sends · Shift+Enter newline";
 controls.append(fileButton, hint, send);
-composer.append(attachmentsBar, input, controls);
+composer.append(attachmentsBar, mentionBox, input, controls);
 shell.append(header, transcript, composer);
 root.append(shell);
 
@@ -73,12 +78,16 @@ interface State {
   model?: string;
   attachments: Attachment[];
   selection?: Attachment;
+  files: FileChoice[];
+  filesLoaded: boolean;
+  mention?: { start: number; query: string; index: number };
   busy: boolean;
   yolo: boolean;
 }
 
 const state: State = {
-  parts: [], live: "", tabs: [], models: [], attachments: [], selection: undefined, busy: false, yolo: false,
+  parts: [], live: "", tabs: [], models: [], attachments: [], selection: undefined, files: [],
+  filesLoaded: false, mention: undefined, busy: false, yolo: false,
 };
 
 function element(tag: string, className: string, text?: string): HTMLElement {
@@ -144,6 +153,67 @@ function renderAttachments(): void {
     chip.append(remove);
     attachmentsBar.append(chip);
   }
+}
+
+function mentionMatches(): FileChoice[] {
+  return state.mention === undefined ? [] : matchingFiles(state.files, state.mention.query);
+}
+
+function renderMention(): void {
+  const mention = state.mention;
+  if (mention === undefined) {
+    mentionBox.hidden = true;
+    mentionBox.replaceChildren();
+    return;
+  }
+  const matches = mentionMatches();
+  if (matches.length === 0) mention.index = 0;
+  else if (mention.index >= matches.length) mention.index = matches.length - 1;
+  mentionBox.hidden = false;
+  mentionBox.replaceChildren();
+  if (matches.length === 0) {
+    mentionBox.append(element("div", "mention-empty",
+      state.filesLoaded ? "No matching files" : "Loading workspace files…"));
+    return;
+  }
+  matches.forEach((file, index) => {
+    const item = element("button", "mention-item", file.label);
+    item.setAttribute("type", "button");
+    item.setAttribute("role", "option");
+    item.setAttribute("aria-selected", index === mention.index ? "true" : "false");
+    if (index === mention.index) item.classList.add("active");
+    item.addEventListener("mousedown", (event) => {
+      event.preventDefault();
+      chooseMention(file);
+    });
+    mentionBox.append(item);
+  });
+}
+
+function openMention(start: number, query: string): void {
+  state.mention = { start, query, index: 0 };
+  renderMention();
+}
+
+function closeMention(): void {
+  state.mention = undefined;
+  renderMention();
+}
+
+function chooseMention(file: FileChoice): void {
+  const mention = state.mention;
+  if (mention === undefined) return;
+  const start = mention.start;
+  const end = Math.min(start + 1 + mention.query.length, input.value.length);
+  if (input.value.slice(start, start + 1) === "@") {
+    input.value = input.value.slice(0, start) + input.value.slice(end);
+    input.setSelectionRange(start, start);
+  }
+  closeMention();
+  if (state.activeTabId !== undefined) {
+    api.postMessage({ type: "attachFile", tabId: state.activeTabId, path: file.path });
+  }
+  input.focus();
 }
 
 function renderStatus(): void {
@@ -330,6 +400,7 @@ function submit(): void {
       return;
     }
   }
+  closeMention();
   state.live = "";
   api.postMessage({ type: "send", tabId: state.activeTabId, text });
   input.value = "";
@@ -346,20 +417,45 @@ stop.addEventListener("click", () => {
 send.addEventListener("click", submit);
 fileButton.addEventListener("click", () => {
   if (state.activeTabId === undefined) return;
-  api.postMessage({ type: "pickFile", tabId: state.activeTabId });
+  openMention(input.selectionStart ?? input.value.length, "");
+  input.focus();
 });
 modelSelect.addEventListener("change", () => {
   if (state.activeTabId === undefined || state.busy || modelSelect.value === "") return;
   api.postMessage({ type: "selectModel", tabId: state.activeTabId, name: modelSelect.value });
 });
+input.addEventListener("input", () => {
+  const found = mentionAt(input.value, input.selectionStart ?? 0);
+  if (found === undefined) closeMention();
+  else openMention(found.start, found.query);
+});
 input.addEventListener("keydown", (event) => {
-  if (event.key === "@" && !event.isComposing) {
-    const before = input.value.slice(0, input.selectionStart ?? 0);
-    if (before === "" || /\s$/.test(before)) {
+  if (state.mention !== undefined) {
+    const matches = mentionMatches();
+    if (event.key === "ArrowDown") {
       event.preventDefault();
-      if (state.activeTabId !== undefined) {
-        api.postMessage({ type: "pickFile", tabId: state.activeTabId });
+      if (matches.length > 0) {
+        state.mention.index = (state.mention.index + 1) % matches.length;
+        renderMention();
       }
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      if (matches.length > 0) {
+        state.mention.index = (state.mention.index - 1 + matches.length) % matches.length;
+        renderMention();
+      }
+      return;
+    }
+    if ((event.key === "Enter" || event.key === "Tab") && matches.length > 0) {
+      event.preventDefault();
+      chooseMention(matches[state.mention.index] ?? matches[0]);
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeMention();
       return;
     }
   }
@@ -367,6 +463,12 @@ input.addEventListener("keydown", (event) => {
     event.preventDefault();
     submit();
   }
+});
+document.addEventListener("mousedown", (event) => {
+  if (state.mention === undefined) return;
+  const target = event.target as Node | null;
+  if (target === null || target === input || target === fileButton || mentionBox.contains(target)) return;
+  closeMention();
 });
 
 window.addEventListener("message", (event: MessageEvent<HostMessage>) => {
@@ -380,11 +482,15 @@ window.addEventListener("message", (event: MessageEvent<HostMessage>) => {
       state.models = message.models;
       state.model = message.model;
       state.selection = message.selection;
+      state.files = [];
+      state.filesLoaded = false;
+      state.mention = undefined;
       state.live = "";
       state.busy = activeTab()?.status === "running" || activeTab()?.status === "waiting";
       setBusy(state.busy);
       renderModels();
       renderAttachments();
+      renderMention();
       render();
       break;
     case "tabs":
@@ -432,6 +538,11 @@ window.addEventListener("message", (event: MessageEvent<HostMessage>) => {
     case "selection":
       state.selection = message.selection;
       renderAttachments();
+      break;
+    case "files":
+      state.files = message.files;
+      state.filesLoaded = true;
+      if (state.mention !== undefined) renderMention();
       break;
     default:
       break;

@@ -327,6 +327,40 @@ button:disabled {
   padding: 2px 4px;
 }
 
+.mention {
+  max-height: 220px;
+  overflow-y: auto;
+  margin-bottom: 4px;
+  border: 1px solid var(--vscode-editorSuggestWidget-border, var(--vscode-panel-border));
+  background: var(--vscode-editorSuggestWidget-background, var(--vscode-input-background));
+}
+
+.mention-item {
+  display: block;
+  width: 100%;
+  padding: 4px 8px;
+  border: 0;
+  background: transparent;
+  color: var(--vscode-foreground);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mention-item.active,
+.mention-item:hover {
+  background: var(--vscode-list-activeSelectionBackground);
+  color: var(--vscode-list-activeSelectionForeground);
+}
+
+.mention-empty {
+  padding: 6px 8px;
+  color: var(--vscode-descriptionForeground);
+}
+
 .attachments {
   display: flex;
   flex-wrap: wrap;

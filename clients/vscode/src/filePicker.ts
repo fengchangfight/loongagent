@@ -1,12 +1,7 @@
 import { isAbsolute, relative } from "node:path";
+import type { FileChoice } from "./webviewProtocol.ts";
 
-/** One workspace file offered by the `@` quick pick. */
-export interface FileChoice {
-  /** The path shown to the person, relative to the workspace and slash-normalized. */
-  label: string;
-  /** The absolute path stored in the attachment. */
-  path: string;
-}
+export type { FileChoice } from "./webviewProtocol.ts";
 
 function inside(workspace: string, path: string): boolean {
   const relativePath = relative(workspace, path);
@@ -14,7 +9,7 @@ function inside(workspace: string, path: string): boolean {
 }
 
 /**
- * Turn `findFiles` results into sorted QuickPick choices.
+ * Turn `findFiles` results into sorted choices for the inline @ picker.
  *
  * Only files inside the workspace are offered; anything else would be a path
  * the agent cannot read. The label is relative so the list stays readable, and

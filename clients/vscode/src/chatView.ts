@@ -82,7 +82,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.context.subscriptions.push(
       vscode.window.onDidChangeTextEditorSelection(() => this.refreshSelection()),
       vscode.window.onDidChangeActiveTextEditor(() => this.refreshSelection()),
-      vscode.workspace.onDidChangeWorkspaceFolders(() => this.refreshSelection()),
+      vscode.workspace.onDidChangeWorkspaceFolders(() => {
+        this.refreshSelection();
+        void this.refreshFiles();
+      }),
     );
     this.refreshSelection();
 
@@ -213,8 +216,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       case "context":
         void this.showContext();
         break;
-      case "pickFile":
-        void this.pickFile();
+      case "attachFile":
+        this.attachFile(message.path);
         break;
       case "removeAttachment":
         this.removeAttachment(message.id);
@@ -265,6 +268,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.ready = true;
     this.postBootstrap();
     this.postAttachments();
+    void this.refreshFiles();
     if (this.binary === undefined) return;
     try {
       const session = await this.ensureSession();
@@ -359,37 +363,31 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private async pickFile(): Promise<void> {
+  private async refreshFiles(): Promise<void> {
     const folder = vscode.workspace.workspaceFolders?.[0];
-    if (folder === undefined) {
-      this.postError("Open a folder first — the agent works on a workspace.");
+    try {
+      const files = folder === undefined
+        ? []
+        : fileChoices(
+          (await vscode.workspace.findFiles("**/*", "**/{node_modules,.git}/**", 2000))
+            .map((uri) => uri.fsPath),
+          folder.uri.fsPath,
+        );
+      this.post({ type: "files", files });
+    } catch (error) {
+      this.post({ type: "files", files: [] });
+      this.output.appendLine(`files: could not list the workspace: ${explain(error)}`);
+    }
+  }
+
+  private attachFile(path: string): void {
+    const folder = vscode.workspace.workspaceFolders?.[0];
+    if (folder === undefined || !isInside(folder.uri.fsPath, path)) {
+      this.postError("That file is outside the workspace.");
       return;
     }
-    try {
-      const files = await vscode.workspace.findFiles(
-        "**/*",
-        "**/{node_modules,.git}/**",
-        2000,
-      );
-      const choices = fileChoices(files.map((uri) => uri.fsPath), folder.uri.fsPath);
-      if (choices.length === 0) {
-        this.postError("There are no workspace files to attach.");
-        return;
-      }
-      const picked = await vscode.window.showQuickPick(choices, {
-        placeHolder: "Attach a workspace file — type to filter",
-        matchOnDescription: true,
-      });
-      if (picked === undefined) return;
-      this.attachments.push({
-        id: `att-${this.nextAttachment++}`,
-        kind: "file",
-        path: picked.path,
-      });
-      this.postAttachments();
-    } catch (error) {
-      this.postError(`I could not list the workspace files: ${explain(error)}`);
-    }
+    this.attachments.push({ id: `att-${this.nextAttachment++}`, kind: "file", path });
+    this.postAttachments();
   }
 
   private refreshSelection(): void {

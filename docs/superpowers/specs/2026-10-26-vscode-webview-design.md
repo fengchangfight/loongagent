@@ -112,9 +112,9 @@ Boundaries:
 
 - **The Webview has no `vscode` import and no protocol knowledge.** It renders parts,
   holds input, attachments and scroll position, and sends intents (`send`, `approval`,
-  `cancel`, `newTab`, `selectTab`, `closeTab`, `history`, `pickFile`,
-  `selectModel`, `review`, `openDiff`, `yolo`). The editor selection is host state, not a
-  Webview intent.
+  `cancel`, `newTab`, `selectTab`, `closeTab`, `history`, `attachFile`,
+  `selectModel`, `review`, `openDiff`, `yolo`). The editor selection and the workspace file
+  list are host state, not Webview intents.
 - **The extension host holds every fact the view needs.** A hidden or rebuilt Webview is
   restored by sending `bootstrap` with the tabs and the active transcript, not by
   replaying agent logic.
@@ -249,10 +249,11 @@ session.list   { limit?: number }
 - **Approval card:** path, `-N +M`, folded unified diff for `write_file`/`edit`,
   `Open full diff`, three buttons. A closed card is Deny. `project` scope is not
   offered.
-- **Composer:** Enter sends, Shift+Enter newlines, Esc stops; `@` opens a workspace file
-  quick pick; the active editor selection is attached automatically when non-empty and
-  shown as a passive chip. File attachments have remove buttons; deselecting removes the
-  selection.
+- **Composer:** Enter sends, Shift+Enter newlines, Esc stops; `@` at a word boundary opens
+  an inline file list above the input; typing filters by prefix, ↑/↓ moves, Enter/Tab
+  attaches, Esc closes. The active editor selection is attached automatically when
+  non-empty and shown as a passive chip. File attachments have remove buttons; deselecting
+  removes the selection.
 - **Slash commands:** `/new` opens a new tab, `/model` focuses the model dropdown,
   `/context` asks the host for `context.explain` and renders the numbers as a notice,
   and `/yolo` toggles approval prompts after an explicit confirmation. `/yolo` never
@@ -284,6 +285,8 @@ type HostMessage =
   | { type: "part"; tabId: string; part: UiPart }
   | { type: "assistantFinal"; tabId: string; text: string; html: string }
   | { type: "attachments"; tabId: string; items: Attachment[] }
+  | { type: "selection"; selection?: Attachment }
+  | { type: "files"; files: FileChoice[] }
   | { type: "sessions"; sessions: SessionInfo[] }
   | { type: "error"; tabId?: string; message: string; detail?: string };
 ```
@@ -303,7 +306,7 @@ type WebviewMessage =
   | { type: "openSession"; sessionId: string }
   | { type: "selectModel"; tabId: string; name: string }
   | { type: "context"; tabId: string }
-  | { type: "pickFile"; tabId: string }
+  | { type: "attachFile"; tabId: string; path: string }
   | { type: "removeAttachment"; tabId: string; id: string }
   | { type: "review"; tabId: string; token: string; paths: string[] }
   | { type: "openDiff"; tabId: string; token: string; path: string }
@@ -383,12 +386,13 @@ is set with `textContent`.
 
 ## 10. Attachments and selection
 
-- **File:** typing `@` at a word boundary, or clicking the `@ file` button, opens
-  `showQuickPick` over workspace files; typing filters the labels, and there is no file
-  browser. The list is `workspace.findFiles`, capped at 2000, excluding `node_modules`
-  and `.git`, sorted by relative path. The attachment stores an absolute path. The prompt
-  appends `referenced files:\n- <path>`; the kernel's own read tools fetch the content.
-  The extension does not inline file bodies.
+- **File:** typing `@` at a word boundary, or clicking the `@ file` button, opens an
+  inline list above the input; there is no file browser and no window-level picker.
+  Typing filters the labels by prefix, ↑/↓ moves, Enter/Tab attaches, and Esc closes. The
+  list is `workspace.findFiles`, capped at 2000, excluding `node_modules` and `.git`,
+  sorted by relative path and sent to the Webview once. The attachment stores an absolute
+  path. The prompt appends `referenced files:\n- <path>`; the kernel's own read tools
+  fetch the content. The extension does not inline file bodies.
 - **Selection:** the host listens to `onDidChangeTextEditorSelection` and
   `onDidChangeActiveTextEditor`; a non-empty selection in a workspace file becomes an
   attachment automatically, with no button or context-menu command. The attachment

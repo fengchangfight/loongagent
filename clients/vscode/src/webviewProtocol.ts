@@ -62,6 +62,12 @@ export type Attachment =
       text: string;
     };
 
+/** One workspace file offered by the inline `@` picker. */
+export interface FileChoice {
+  label: string;
+  path: string;
+}
+
 /** One session in the history list. */
 export interface SessionInfo {
   id: string;
@@ -98,6 +104,7 @@ export type HostMessage =
   | { type: "assistantFinal"; tabId: string; text: string; html: string }
   | { type: "attachments"; tabId: string; items: Attachment[] }
   | { type: "selection"; selection?: Attachment }
+  | { type: "files"; files: FileChoice[] }
   | { type: "sessions"; sessions: SessionInfo[] }
   | { type: "error"; tabId?: string; message: string; detail?: string };
 
@@ -119,7 +126,7 @@ export type WebviewMessage =
   | { type: "openSession"; sessionId: string }
   | { type: "selectModel"; tabId: string; name: string }
   | { type: "context"; tabId: string }
-  | { type: "pickFile"; tabId: string }
+  | { type: "attachFile"; tabId: string; path: string }
   | { type: "removeAttachment"; tabId: string; id: string }
   | { type: "review"; tabId: string; token: string; paths: string[] }
   | { type: "openDiff"; tabId: string; token: string; path: string }
@@ -162,10 +169,14 @@ export function parseWebviewMessage(raw: unknown): WebviewMessage | undefined {
     case "cancel":
     case "selectTab":
     case "closeTab":
-    case "context":
-    case "pickFile": {
+    case "context": {
       const tabId = str(raw.tabId);
       return tabId === undefined ? undefined : { type, tabId };
+    }
+    case "attachFile": {
+      const tabId = str(raw.tabId);
+      const path = str(raw.path);
+      return tabId === undefined || path === undefined ? undefined : { type, tabId, path };
     }
     case "newTab":
       return { type };

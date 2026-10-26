@@ -15,3 +15,9 @@ test("unknown and malformed messages are ignored", () => {
   assert.equal(parseWebviewMessage({ type: "send", text: "hi" }), undefined);
   assert.equal(parseWebviewMessage(null), undefined);
 });
+
+test("an attached file path is validated", () => {
+  assert.deepEqual(parseWebviewMessage({ type: "attachFile", tabId: "t1", path: "/w/a.ts" }),
+    { type: "attachFile", tabId: "t1", path: "/w/a.ts" });
+  assert.equal(parseWebviewMessage({ type: "attachFile", tabId: "t1" }), undefined);
+});

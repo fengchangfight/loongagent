@@ -75,7 +75,7 @@ export function pathsInArgs(args: JsonValue, cwd: string): string[] {
 export class Renderer {
   private readonly cwd: string;
   private readonly files: string[] = [];
-  private readonly calls = new Map<string, { tool: string; actionClass: string }>();
+  private readonly calls = new Map<string, { tool: string; actionClass: string; paths: string[] }>();
 
   constructor(options: { cwd: string }) {
     this.cwd = options.cwd;
@@ -191,7 +191,7 @@ export class Renderer {
     for (const path of paths) {
       if (!this.files.includes(path)) this.files.push(path);
     }
-    this.calls.set(call.call_id, { tool: call.tool, actionClass: call.action_class });
+    this.calls.set(call.call_id, { tool: call.tool, actionClass: call.action_class, paths });
     return [{
       kind: "tool",
       callId: call.call_id,
@@ -213,7 +213,7 @@ export class Renderer {
       callId: result.call_id,
       tool: call?.tool ?? "tool",
       actionClass: call?.actionClass ?? "",
-      paths: [],
+      paths: call?.paths ?? [],
       status: result.ok ? "ok" : "failed",
       output: output.slice(0, MAX_TOOL_OUTPUT_CHARS),
       ...(dropped === undefined ? {} : { truncated: dropped }),

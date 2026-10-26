@@ -156,6 +156,11 @@ export class SessionAgent {
     this.core.turnGate?.end();
   }
 
+  /** Stop the running turn; the child survives. */
+  cancel(): void {
+    this.core.session?.cancel();
+  }
+
   dispose(): void {
     const agent = this.agent;
     this.agent = undefined;

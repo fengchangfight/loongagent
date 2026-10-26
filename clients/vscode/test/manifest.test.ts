@@ -22,8 +22,11 @@ test("the chat is an editor panel opened from the editor title icon", () => {
   assert.equal(pkg.contributes.views, undefined);
   const [item] = pkg.contributes.menus["editor/title"];
   assert.equal(item.command, "loongagent.openChat");
-  assert.equal(item.icon, "media/loong-24.png");
   assert.equal(item.group, "navigation");
+  const open = pkg.contributes.commands.find((command: { command: string }) =>
+    command.command === "loongagent.openChat");
+  assert.equal(open.icon, "media/loong-24.png",
+    "the editor-title action gets its icon from the command, not the menu item");
 });
 test("the native chat surface and placeholder model are gone", () => {
   assert.equal(pkg.contributes.chatParticipants, undefined);

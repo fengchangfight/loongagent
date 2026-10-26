@@ -18,7 +18,8 @@
     "commands": [
       {
         "command": "loongagent.openChat",
-        "title": "loongagent: Open Chat"
+        "title": "loongagent: Open Chat",
+        "icon": "media/loong-24.png"
       },
       {
         "command": "loongagent.locateBinary",
@@ -34,8 +35,7 @@
       "editor/title": [
         {
           "command": "loongagent.openChat",
-          "group": "navigation",
-          "icon": "media/loong-24.png"
+          "group": "navigation"
         }
       ]
     },

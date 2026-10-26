@@ -115,3 +115,6 @@ vendor/
 # keeping (`REPORT.md`, say), commit it explicitly: git add -f .emb-research/REPORT.md
 .research/
 .emb-research/
+
+# Local git worktrees created by the agent workflow.
+.worktrees/

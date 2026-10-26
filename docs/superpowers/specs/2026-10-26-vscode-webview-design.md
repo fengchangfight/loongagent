@@ -1,8 +1,8 @@
 # VS Code sidebar surface: an independent chat window with sessions and review-before-write
 
 - **Date:** 2026-10-26
-- **Status:** Draft for review. The implementation plan is written only after the human
-  approves this file.
+- **Status:** Approved on 2026-10-26. The implementation plan is written from this
+  file.
 - **Scope:** a personal-use VS Code extension that drives the existing
   `loongagent server --stdio` through its existing JSON-RPC wire, rendered in its own
   Activity Bar Webview. One additional read-only protocol method, `session.list`, is

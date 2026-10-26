@@ -8,6 +8,7 @@ import { DiffProvider } from "./diffProvider.ts";
 import { refusalToStart } from "./guards.ts";
 import { PreviewProvider } from "./previewProvider.ts";
 import { promptText } from "./prompt.ts";
+import { sameSelection, selectionAttachment } from "./selection.ts";
 import { pathsInArgs, Renderer } from "./render.ts";
 import { SessionAgent } from "./sessionAgent.ts";
 import { FileSnapshots } from "./snapshots.ts";
@@ -60,9 +61,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private agent: Agent | undefined;
   private models: ModelList | undefined;
   private readonly attachments: Attachment[] = [];
+  private selection: Attachment | undefined;
   private nextAttachment = 1;
   private ready = false;
-  private readonly readyWaiters: Array<() => void> = [];
   private running = false;
   private nextTurn = 1;
   private pendingTool: { callId: string; tool?: string; path?: string; preview?: Preview } | undefined;
@@ -77,6 +78,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.output = options.output;
     this.binary = options.binary;
     this.tabs.open({ id: "tab-1", title: "New session", status: "idle" });
+    this.context.subscriptions.push(
+      vscode.window.onDidChangeTextEditorSelection(() => this.refreshSelection()),
+      vscode.window.onDidChangeActiveTextEditor(() => this.refreshSelection()),
+      vscode.workspace.onDidChangeWorkspaceFolders(() => this.refreshSelection()),
+    );
+    this.refreshSelection();
 
     const leftUris: DiffUris<vscode.Uri> = {
       make: (token, path, label) =>
@@ -131,13 +138,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     if (this.ready) void this.onReady();
   }
 
-  /** The editor context-menu command: reveal, wait for the view, attach the selection. */
-  async attachSelection(): Promise<void> {
-    await vscode.commands.executeCommand("workbench.view.extension.loongagent");
-    await this.whenReady();
-    this.pickSelection();
-  }
-
   post(message: HostMessage): void {
     void this.view?.webview.postMessage(message);
   }
@@ -164,11 +164,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.tabs.close(tabId);
     this.postBootstrap();
     this.postTabs();
-  }
-
-  private whenReady(): Promise<void> {
-    if (this.ready) return Promise.resolve();
-    return new Promise((resolve) => this.readyWaiters.push(resolve));
   }
 
   /** Open the before/after diff for a turn's changed files; used by the command. */
@@ -220,9 +215,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       case "pickFile":
         void this.pickFile();
         break;
-      case "pickSelection":
-        this.pickSelection();
-        break;
       case "removeAttachment":
         this.removeAttachment(message.id);
         break;
@@ -250,6 +242,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       ...(this.models?.selected === undefined ? {} : { model: this.models.selected }),
       ...(this.agent?.sessionId === undefined ? {} : { sessionId: this.agent.sessionId }),
       ...(this.binary === undefined ? {} : { binary: this.binary }),
+      ...(this.selection === undefined ? {} : { selection: { ...this.selection } }),
     });
   }
 
@@ -268,10 +261,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async onReady(): Promise<void> {
-    if (!this.ready) {
-      this.ready = true;
-      for (const resolve of this.readyWaiters.splice(0)) resolve();
-    }
+    this.ready = true;
     this.postBootstrap();
     this.postAttachments();
     if (this.binary === undefined) return;
@@ -387,27 +377,28 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.postAttachments();
   }
 
-  private pickSelection(): void {
+  private refreshSelection(): void {
+    const folder = vscode.workspace.workspaceFolders?.[0];
     const editor = vscode.window.activeTextEditor;
-    if (editor === undefined) {
-      this.postError("There is no active editor to take a selection from.");
-      return;
-    }
-    if (editor.selection.isEmpty) {
-      this.postError("Select some code in the editor first.");
-      return;
-    }
-    const path = editor.document.uri.fsPath;
-    const selection = editor.selection;
-    this.attachments.push({
-      id: `att-${this.nextAttachment++}`,
-      kind: "selection",
-      path,
-      startLine: selection.start.line + 1,
-      endLine: selection.end.line + 1,
-      text: editor.document.getText(selection),
+    const next = folder === undefined || editor === undefined
+      ? undefined
+      : selectionAttachment({
+        path: editor.document.uri.fsPath,
+        startLine: editor.selection.start.line + 1,
+        endLine: editor.selection.end.line + 1,
+        text: editor.selection.isEmpty ? "" : editor.document.getText(editor.selection),
+      }, folder.uri.fsPath, `att-${this.nextAttachment}`);
+    if (sameSelection(this.selection, next)) return;
+    if (next !== undefined) this.nextAttachment++;
+    this.selection = next;
+    this.postSelection();
+  }
+
+  private postSelection(): void {
+    this.post({
+      type: "selection",
+      ...(this.selection === undefined ? {} : { selection: { ...this.selection } }),
     });
-    this.postAttachments();
   }
 
   private removeAttachment(id: string): void {
@@ -505,7 +496,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       context: this.context,
       binaryPath: this.binary.path,
     });
-    const prompt = promptText(text, this.attachments);
+    const prompt = promptText(text, this.selection === undefined
+      ? this.attachments
+      : [...this.attachments, this.selection]);
     this.attachments.length = 0;
     this.postAttachments();
     const renderer = new Renderer({ cwd: folder.uri.fsPath });

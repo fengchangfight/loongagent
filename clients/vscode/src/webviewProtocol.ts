@@ -89,6 +89,7 @@ export type HostMessage =
       model?: string;
       sessionId?: string;
       binary?: BinaryStatus;
+      selection?: Attachment;
     }
   | { type: "tabs"; tabs: TabState[] }
   | { type: "transcript"; tabId: string; parts: UiPart[] }
@@ -96,6 +97,7 @@ export type HostMessage =
   | { type: "part"; tabId: string; part: UiPart }
   | { type: "assistantFinal"; tabId: string; text: string; html: string }
   | { type: "attachments"; tabId: string; items: Attachment[] }
+  | { type: "selection"; selection?: Attachment }
   | { type: "sessions"; sessions: SessionInfo[] }
   | { type: "error"; tabId?: string; message: string; detail?: string };
 
@@ -118,7 +120,6 @@ export type WebviewMessage =
   | { type: "selectModel"; tabId: string; name: string }
   | { type: "context"; tabId: string }
   | { type: "pickFile"; tabId: string }
-  | { type: "pickSelection"; tabId: string }
   | { type: "removeAttachment"; tabId: string; id: string }
   | { type: "review"; tabId: string; token: string; paths: string[] }
   | { type: "openDiff"; tabId: string; token: string; path: string }
@@ -162,8 +163,7 @@ export function parseWebviewMessage(raw: unknown): WebviewMessage | undefined {
     case "selectTab":
     case "closeTab":
     case "context":
-    case "pickFile":
-    case "pickSelection": {
+    case "pickFile": {
       const tabId = str(raw.tabId);
       return tabId === undefined ? undefined : { type, tabId };
     }

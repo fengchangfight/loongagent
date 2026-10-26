@@ -51,10 +51,6 @@ const fileButton = document.createElement("button");
 fileButton.className = "secondary";
 fileButton.textContent = "@ file";
 fileButton.setAttribute("aria-label", "Attach a workspace file");
-const selectionButton = document.createElement("button");
-selectionButton.className = "secondary";
-selectionButton.textContent = "selection";
-selectionButton.setAttribute("aria-label", "Attach the editor selection");
 const send = document.createElement("button");
 send.className = "send";
 send.textContent = "Send";
@@ -62,7 +58,7 @@ send.setAttribute("aria-label", "Send the message");
 const hint = document.createElement("span");
 hint.className = "hint";
 hint.textContent = "Enter sends · Shift+Enter newline";
-controls.append(fileButton, selectionButton, hint, send);
+controls.append(fileButton, hint, send);
 composer.append(attachmentsBar, input, controls);
 shell.append(header, transcript, composer);
 root.append(shell);
@@ -76,12 +72,13 @@ interface State {
   models: Models;
   model?: string;
   attachments: Attachment[];
+  selection?: Attachment;
   busy: boolean;
   yolo: boolean;
 }
 
 const state: State = {
-  parts: [], live: "", tabs: [], models: [], attachments: [], busy: false, yolo: false,
+  parts: [], live: "", tabs: [], models: [], attachments: [], selection: undefined, busy: false, yolo: false,
 };
 
 function element(tag: string, className: string, text?: string): HTMLElement {
@@ -125,6 +122,13 @@ function renderModels(): void {
 
 function renderAttachments(): void {
   attachmentsBar.replaceChildren();
+  if (state.selection !== undefined && state.selection.kind === "selection") {
+    const chip = element("span", "chip selection");
+    const label = `selection · ${state.selection.path}:${state.selection.startLine}-${state.selection.endLine}`;
+    chip.append(element("span", "chip-label", label));
+    chip.title = "From the active editor selection; deselect to remove";
+    attachmentsBar.append(chip);
+  }
   for (const attachment of state.attachments) {
     const chip = element("span", "chip");
     const label = attachment.kind === "file"
@@ -154,7 +158,7 @@ function renderEmpty(): void {
   const empty = element("div", "empty");
   empty.append(element("h1", "empty-title", "loongagent"));
   empty.append(element("p", "empty-copy",
-    "Ask for a change in this workspace. Files and selections you attach become part of the prompt."));
+    "Ask for a change in this workspace. Files you attach and the editor selection become part of the prompt."));
   if (state.busy) {
     empty.append(element("p", "empty-meta", "Thinking…"));
   } else if (state.binary === undefined) {
@@ -344,10 +348,6 @@ fileButton.addEventListener("click", () => {
   if (state.activeTabId === undefined) return;
   api.postMessage({ type: "pickFile", tabId: state.activeTabId });
 });
-selectionButton.addEventListener("click", () => {
-  if (state.activeTabId === undefined) return;
-  api.postMessage({ type: "pickSelection", tabId: state.activeTabId });
-});
 modelSelect.addEventListener("change", () => {
   if (state.activeTabId === undefined || state.busy || modelSelect.value === "") return;
   api.postMessage({ type: "selectModel", tabId: state.activeTabId, name: modelSelect.value });
@@ -369,6 +369,7 @@ window.addEventListener("message", (event: MessageEvent<HostMessage>) => {
       state.binary = message.binary;
       state.models = message.models;
       state.model = message.model;
+      state.selection = message.selection;
       state.live = "";
       state.busy = activeTab()?.status === "running" || activeTab()?.status === "waiting";
       setBusy(state.busy);
@@ -416,6 +417,10 @@ window.addEventListener("message", (event: MessageEvent<HostMessage>) => {
     case "attachments":
       if (message.tabId !== state.activeTabId) break;
       state.attachments = message.items;
+      renderAttachments();
+      break;
+    case "selection":
+      state.selection = message.selection;
       renderAttachments();
       break;
     default:

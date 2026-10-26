@@ -35,7 +35,7 @@ conversations open.
 | # | Criterion | How it is verified |
 |---|---|---|
 | 1 | The sidebar opens and streams an answer without Copilot sign-in or a VS Code language model | Open the view in a fresh profile; type a prompt; markdown appears incrementally |
-| 2 | Code selection and file references reach the agent | Attach a selection and a file; the prompt shown in the log names the path, the line range, and the selected text |
+| 2 | Code selection and file references reach the agent | Select code and attach a file; on send the prompt shown in the log names the path, the line range, and the selected text; no selection button is needed |
 | 3 | The model comes from loongagent, not VS Code | The model dropdown lists `model.list`; selecting one records `model.selected` |
 | 4 | A write can be reviewed before it happens | With `write_workspace = "ask"`, the approval card shows a diff; Deny leaves the file byte-identical; Allow writes it |
 | 5 | A turn's changes are reviewable afterwards | Every path the turn touched opens in `vscode.diff` with the content it held at first mention |
@@ -112,8 +112,9 @@ Boundaries:
 
 - **The Webview has no `vscode` import and no protocol knowledge.** It renders parts,
   holds input, attachments and scroll position, and sends intents (`send`, `approval`,
-  `cancel`, `newTab`, `selectTab`, `closeTab`, `history`, `pickFile`, `pickSelection`,
-  `selectModel`, `review`, `openDiff`, `yolo`).
+  `cancel`, `newTab`, `selectTab`, `closeTab`, `history`, `pickFile`,
+  `selectModel`, `review`, `openDiff`, `yolo`). The editor selection is host state, not a
+  Webview intent.
 - **The extension host holds every fact the view needs.** A hidden or rebuilt Webview is
   restored by sending `bootstrap` with the tabs and the active transcript, not by
   replaying agent logic.
@@ -228,11 +229,11 @@ session.list   { limit?: number }
 │  ✓ approval granted (once)
 │  [Review 2 changed files]
 ├──────────────────────────────────────────────────────────────────────────────
-│  attachments: [src/a.ts ×] [selection src/a.ts:10-18 ×]
+│  attachments: [src/a.ts ×] [selection · src/a.ts:10-18]
 │  ┌────────────────────────────────────────────────────────────┐
 │  │ Ask loongagent…                                            │
 │  └────────────────────────────────────────────────────────────┘
-│  [@ file] [selection] [Send]
+│  [@ file] [Send]
 └ status: running · waiting for approval · idle
 ```
 
@@ -249,8 +250,9 @@ session.list   { limit?: number }
   `Open full diff`, three buttons. A closed card is Deny. `project` scope is not
   offered.
 - **Composer:** Enter sends, Shift+Enter newlines, Esc stops; `@` opens a workspace file
-  quick pick; a selection button and an editor context-menu command attach the active
-  selection. Attachments are chips with remove buttons.
+  quick pick; the active editor selection is attached automatically when non-empty and
+  shown as a passive chip. File attachments have remove buttons; deselecting removes the
+  selection.
 - **Slash commands:** `/new` opens a new tab, `/model` focuses the model dropdown,
   `/context` asks the host for `context.explain` and renders the numbers as a notice,
   and `/yolo` toggles approval prompts after an explicit confirmation. `/yolo` never
@@ -302,7 +304,6 @@ type WebviewMessage =
   | { type: "selectModel"; tabId: string; name: string }
   | { type: "context"; tabId: string }
   | { type: "pickFile"; tabId: string }
-  | { type: "pickSelection"; tabId: string }
   | { type: "removeAttachment"; tabId: string; id: string }
   | { type: "review"; tabId: string; token: string; paths: string[] }
   | { type: "openDiff"; tabId: string; token: string; path: string }
@@ -386,14 +387,17 @@ is set with `textContent`.
   workspace; the attachment stores an absolute path. The prompt appends
   `referenced files:\n- <path>`; the kernel's own read tools fetch the content. The
   extension does not inline file bodies.
-- **Selection:** the composer's selection button and the editor context-menu command
-  read `vscode.window.activeTextEditor`. The attachment stores
-  `{path, startLine, endLine, text}`. On send, the prompt appends one fenced block with
-  the path, the line range and the text. This is the one inlined body, because
-  `read_file` has no line-range parameter; it is an explicit owner attachment, not
-  context assembly by the surface.
-- Attachments are per tab and live in the host; the Webview renders chips and can
-  remove them. Removing one updates the host's list.
+- **Selection:** the host listens to `onDidChangeTextEditorSelection` and
+  `onDidChangeActiveTextEditor`; a non-empty selection in a workspace file becomes an
+  attachment automatically, with no button or context-menu command. The attachment
+  stores `{path, startLine, endLine, text}`. On send, the prompt appends one fenced block
+  with the path, the line range and the text. This is the one inlined body, because
+  `read_file` has no line-range parameter. The Webview shows a passive chip; deselecting,
+  switching files, leaving the workspace, or selecting an empty range removes it.
+- File attachments are per tab and live in the host; the Webview renders chips and can
+  remove them. Removing one updates the host's list. The current selection is a host
+  fact, not a removable attachment: it stays for the next send while the editor still
+  has it selected.
 
 ## 11. Binary discovery and version
 
@@ -479,9 +483,9 @@ clients/vscode/
 - Add `viewsContainers.activitybar` with `media/loong-48.png`, and `views.loongagent`
   with `{id: "loongagent.chat", type: "webview"}`.
 - Commands: `loongagent.openChat`, `loongagent.locateBinary`,
-  `loongagent.attachSelection`, `loongagent.reviewChanges`. The `loongagent.smoke`
-  command and its `runSmoke` handler are removed; the wire proof is the test suite and
-  the manual acceptance below.
+  `loongagent.reviewChanges`. Selection is automatic, so there is no attach command or
+  editor context-menu item. The `loongagent.smoke` command and its `runSmoke` handler are
+  removed; the wire proof is the test suite and the manual acceptance below.
 - `scripts/check.sh`: the extension step becomes `npm run compile && npm test` so the
   Webview bundle is built in the gate.
 - Rust: `crates/schema/protocol.toml`, regenerated files, `crates/server/src/lib.rs`,

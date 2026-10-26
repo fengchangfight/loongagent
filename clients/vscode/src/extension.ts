@@ -31,8 +31,6 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       provider.setBinary(binary);
     }),
-    vscode.commands.registerCommand("loongagent.attachSelection", () =>
-      provider.attachSelection()),
     vscode.commands.registerCommand("loongagent.reviewChanges", (token?: string, paths?: string[]) =>
       provider.reviewChanges(token, paths)),
   );

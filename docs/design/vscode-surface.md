@@ -66,9 +66,9 @@ transcript, never a file the extension reads.
 
 ## 4. Attachments and model
 
-- `#file` attachments are absolute paths; the kernel reads the content.
-- A selection is the one inlined body: path, line range and text, because `read_file` has no
-  line-range parameter.
+- `@ file` attachments are absolute paths; the kernel reads the content.
+- The active editor selection is inlined automatically: path, line range and text, because
+  `read_file` has no line-range parameter. A passive chip names it; deselecting removes it.
 - The model dropdown comes from `model.list`; a change is `model.select` and is recorded as
   `model.selected`.
 - `/new`, `/model`, `/context` and `/yolo` are composer commands. `/yolo` asks for a modal

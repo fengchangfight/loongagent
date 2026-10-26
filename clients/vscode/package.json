@@ -35,24 +35,11 @@
         "title": "loongagent: Locate the binary"
       },
       {
-        "command": "loongagent.attachSelection",
-        "title": "loongagent: Attach selection to chat"
-      },
-      {
         "command": "loongagent.reviewChanges",
         "title": "loongagent: Review the changes from a turn",
         "description": "Opens the before/after diff for the files a turn changed. Normally reached from the button in the reply."
       }
     ],
-    "menus": {
-      "editor/context": [
-        {
-          "command": "loongagent.attachSelection",
-          "when": "editorHasSelection",
-          "group": "navigation"
-        }
-      ]
-    },
     "configuration": {
       "title": "loongagent",
       "properties": {

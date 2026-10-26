@@ -59,7 +59,8 @@ write_workspace = "ask"
 
 - 流式回答、工具卡片、Stop
 - 模型下拉（来自 `model.list` / `model.select`）
-- `@ file` 附件、编辑器选区附件；发送后附件清空
+- `@ file` 附件；编辑器里选中代码后自动带上，不需要 selection 按钮
+- 发送后手动 `@ file` 清空；编辑器选区还在就保留，下一条继续带
 - 写入前 diff 卡片：Allow once / Allow always / Deny；Open full diff
 - 一轮结束后的 Review 卡片：逐个打开 `vscode.diff`，左边是该轮第一次提到文件时的内容
 - `permissions.relaxed` 显示

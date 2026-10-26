@@ -34,11 +34,11 @@ test("the binary path is machine-scoped", () => {
   assert.equal(pkg.contributes.configuration.properties["loongagent.autoApprove"].scope, "machine");
   assert.equal(pkg.contributes.configuration.properties["loongagent.extraArgs"].scope, "machine");
 });
-test("the sidebar commands and selection menu are contributed", () => {
+test("the sidebar commands are contributed", () => {
   const ids = pkg.contributes.commands.map((c: { command: string }) => c.command);
   for (const id of ["loongagent.openChat", "loongagent.locateBinary",
-    "loongagent.attachSelection", "loongagent.reviewChanges"]) assert.ok(ids.includes(id));
-  assert.equal(pkg.contributes.menus["editor/context"][0].command, "loongagent.attachSelection");
+    "loongagent.reviewChanges"]) assert.ok(ids.includes(id));
+  assert.equal(pkg.contributes.menus, undefined, "selection is automatic; no attach command");
 });
 test("the derived icons exist", () => {
   for (const name of ["loong-24.png", "loong-48.png", "loong-128.png"]) {

@@ -1,0 +1,53 @@
+:root {
+  color-scheme: light dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  color: var(--vscode-foreground);
+  background: var(--vscode-sideBar-background);
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size);
+}
+
+#app {
+  min-height: 100vh;
+}
+
+.empty {
+  padding: 24px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.empty-title {
+  margin: 0;
+  font-size: 1.35em;
+  font-weight: 600;
+}
+
+.empty-copy {
+  margin: 0;
+  color: var(--vscode-descriptionForeground);
+  line-height: 1.5;
+}
+
+.empty-meta {
+  margin: 8px 0 0;
+  color: var(--vscode-descriptionForeground);
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.9em;
+  overflow-wrap: anywhere;
+}
+
+.empty-warn {
+  margin: 8px 0 0;
+  color: var(--vscode-errorForeground);
+  line-height: 1.5;
+}

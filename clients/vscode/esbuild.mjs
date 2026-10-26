@@ -1,6 +1,6 @@
 import { build, context } from "esbuild";
 
-const options = {
+const extension = {
   entryPoints: ["src/extension.ts"],
   bundle: true,
   platform: "node",
@@ -12,9 +12,23 @@ const options = {
   logLevel: "info",
 };
 
+const webview = {
+  entryPoints: ["webview/main.ts"],
+  bundle: true,
+  platform: "browser",
+  format: "iife",
+  target: "es2022",
+  outfile: "dist/webview.js",
+  sourcemap: true,
+  logLevel: "info",
+};
+
 if (process.argv.includes("--watch")) {
-  const ctx = await context(options);
-  await ctx.watch();
+  const [extensionContext, webviewContext] = await Promise.all([
+    context(extension),
+    context(webview),
+  ]);
+  await Promise.all([extensionContext.watch(), webviewContext.watch()]);
 } else {
-  await build(options);
+  await Promise.all([build(extension), build(webview)]);
 }

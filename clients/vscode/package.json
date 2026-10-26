@@ -1,7 +1,7 @@
 {
   "name": "loongagent-vscode",
   "displayName": "loongagent",
-  "description": "loongagent in the editor: the local agent in VS Code's own chat view.",
+  "description": "loongagent in the editor: a local agent in its own sidebar.",
   "private": true,
   "version": "0.0.1",
   "publisher": "loongagent",
@@ -15,25 +15,28 @@
     }
   },
   "contributes": {
-    "chatParticipants": [
-      {
-        "id": "loongagent.chat",
-        "name": "loong",
-        "fullName": "loongagent",
-        "description": "Ask the local loongagent",
-        "isSticky": true,
-        "commands": [
-          { "name": "new", "description": "Start a new session" },
-          { "name": "model", "description": "Choose the model for this session" },
-          { "name": "context", "description": "Explain what the next request will carry" },
-          { "name": "yolo", "description": "Turn approval prompts off for this session" }
-        ]
-      }
-    ],
+    "viewsContainers": {
+      "activitybar": [
+        { "id": "loongagent", "title": "loongagent", "icon": "media/loong-48.png" }
+      ]
+    },
+    "views": {
+      "loongagent": [
+        { "id": "loongagent.chat", "name": "Chat", "type": "webview" }
+      ]
+    },
     "commands": [
       {
-        "command": "loongagent.smoke",
-        "title": "loongagent: Smoke test (spawn, attach, one prompt)"
+        "command": "loongagent.openChat",
+        "title": "loongagent: Open Chat"
+      },
+      {
+        "command": "loongagent.locateBinary",
+        "title": "loongagent: Locate the binary"
+      },
+      {
+        "command": "loongagent.attachSelection",
+        "title": "loongagent: Attach selection to chat"
       },
       {
         "command": "loongagent.reviewChanges",
@@ -41,13 +44,43 @@
         "description": "Opens the before/after diff for the files a turn changed. Normally reached from the button in the reply."
       }
     ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "loongagent.attachSelection",
+          "when": "editorHasSelection",
+          "group": "navigation"
+        }
+      ]
+    },
     "configuration": {
       "title": "loongagent",
       "properties": {
-        "loongagent.path": { "type": "string", "default": "loongagent", "description": "The loongagent binary." },
-        "loongagent.model": { "type": "string", "default": "", "description": "Passed as --model when the server starts." },
-        "loongagent.autoApprove": { "type": "boolean", "default": false, "description": "Turn approval prompts off for this session (recorded as permissions.relaxed)." },
-        "loongagent.extraArgs": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Extra arguments for loongagent server." }
+        "loongagent.path": {
+          "type": "string",
+          "default": "loongagent",
+          "scope": "machine",
+          "description": "The loongagent binary. A bare name is looked up on PATH; Locate stores an explicit choice."
+        },
+        "loongagent.model": {
+          "type": "string",
+          "default": "",
+          "scope": "resource",
+          "description": "Passed as --model when the server starts."
+        },
+        "loongagent.autoApprove": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine",
+          "description": "Turn approval prompts off for this workspace (recorded as permissions.relaxed)."
+        },
+        "loongagent.extraArgs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "scope": "machine",
+          "description": "Extra arguments for loongagent server."
+        }
       }
     }
   },

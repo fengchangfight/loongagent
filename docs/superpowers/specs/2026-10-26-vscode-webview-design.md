@@ -386,13 +386,13 @@ is set with `textContent`.
 
 ## 10. Attachments and selection
 
-- **File:** typing `@` at a word boundary, or clicking the `@ file` button, opens an
-  inline list above the input; there is no file browser and no window-level picker.
-  Typing filters the labels by prefix, ↑/↓ moves, Enter/Tab attaches, and Esc closes. The
-  list is `workspace.findFiles`, capped at 2000, excluding `node_modules` and `.git`,
-  sorted by relative path and sent to the Webview once. The attachment stores an absolute
-  path. The prompt appends `referenced files:\n- <path>`; the kernel's own read tools
-  fetch the content. The extension does not inline file bodies.
+- **File:** typing `@` at a word boundary opens an inline list above the input; there is
+  no file browser, no window-level picker, and no separate button. Typing filters the
+  labels by prefix, ↑/↓ moves, Enter/Tab attaches, and Esc closes. The list is
+  `workspace.findFiles`, capped at 2000, excluding `node_modules` and `.git`, sorted by
+  relative path and sent to the Webview once. The attachment stores an absolute path. The
+  prompt appends `referenced files:\n- <path>`; the kernel's own read tools fetch the
+  content. The extension does not inline file bodies.
 - **Selection:** the host listens to `onDidChangeTextEditorSelection` and
   `onDidChangeActiveTextEditor`; a non-empty selection in a workspace file becomes an
   attachment automatically, with no button or context-menu command. The attachment

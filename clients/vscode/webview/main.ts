@@ -52,10 +52,6 @@ input.placeholder = "Ask loongagent…";
 input.setAttribute("aria-label", "Message loongagent");
 const controls = document.createElement("div");
 controls.className = "controls";
-const fileButton = document.createElement("button");
-fileButton.className = "secondary";
-fileButton.textContent = "@ file";
-fileButton.setAttribute("aria-label", "Attach a workspace file");
 const send = document.createElement("button");
 send.className = "send";
 send.textContent = "Send";
@@ -63,7 +59,7 @@ send.setAttribute("aria-label", "Send the message");
 const hint = document.createElement("span");
 hint.className = "hint";
 hint.textContent = "Type @ to attach a file · Enter sends · Shift+Enter newline";
-controls.append(fileButton, hint, send);
+controls.append(hint, send);
 composer.append(attachmentsBar, mentionBox, input, controls);
 shell.append(header, transcript, composer);
 root.append(shell);
@@ -415,11 +411,6 @@ stop.addEventListener("click", () => {
   render();
 });
 send.addEventListener("click", submit);
-fileButton.addEventListener("click", () => {
-  if (state.activeTabId === undefined) return;
-  openMention(input.selectionStart ?? input.value.length, "");
-  input.focus();
-});
 modelSelect.addEventListener("change", () => {
   if (state.activeTabId === undefined || state.busy || modelSelect.value === "") return;
   api.postMessage({ type: "selectModel", tabId: state.activeTabId, name: modelSelect.value });
@@ -467,7 +458,7 @@ input.addEventListener("keydown", (event) => {
 document.addEventListener("mousedown", (event) => {
   if (state.mention === undefined) return;
   const target = event.target as Node | null;
-  if (target === null || target === input || target === fileButton || mentionBox.contains(target)) return;
+  if (target === null || target === input || mentionBox.contains(target)) return;
   closeMention();
 });
 

@@ -11,7 +11,7 @@ use super::*;
 
 use crate::config_cmd::resolve_reference;
 use crate::plugin::{installed_plugins, load_catalogue};
-use crate::session::session_dir;
+use crate::session::{session_dir, session_infos};
 
 // ---------------------------------------------------------------- the server
 
@@ -176,7 +176,10 @@ pub(crate) fn serve(args: Args) -> Result<(), String> {
     if let Some(slot) = &permissions {
         kernel.use_permissions_requester(std::sync::Arc::clone(slot));
     }
-    let server = Server::new(kernel, args.session_id()).with_factory(factory);
+    let session_cwd = args.cwd.clone();
+    let server = Server::new(kernel, args.session_id())
+        .with_factory(factory)
+        .with_session_lister(Box::new(move |limit| session_infos(&session_cwd, limit)));
     #[cfg(unix)]
     let server = match (&permissions, args.control_fd) {
         (Some(slot), Some(fd)) => server.with_permissions(std::sync::Arc::clone(slot), fd),

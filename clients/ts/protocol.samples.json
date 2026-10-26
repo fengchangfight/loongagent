@@ -78,6 +78,27 @@
         {}
       ]
     },
+    "SessionListParams": {
+      "limit": 1
+    },
+    "SessionInfo": {
+      "id": "<string>",
+      "title": "<string>",
+      "updated_at": 1,
+      "events": 1,
+      "turns": 1
+    },
+    "SessionListResult": {
+      "sessions": [
+        {
+          "id": "<string>",
+          "title": "<string>",
+          "updated_at": 1,
+          "events": 1,
+          "turns": 1
+        }
+      ]
+    },
     "PromptSubmitParams": {
       "session_id": "<string>",
       "text": "<string>"
@@ -290,6 +311,11 @@
       "name": "session.replay",
       "params": "SessionOnlyParams",
       "result": "SessionReplayResult"
+    },
+    {
+      "name": "session.list",
+      "params": "SessionListParams",
+      "result": "SessionListResult"
     },
     {
       "name": "prompt.submit",

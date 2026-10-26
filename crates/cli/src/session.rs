@@ -277,6 +277,65 @@ fn session_summaries(cwd: &Path) -> Vec<SessionSummary> {
     session_summaries_in(&session_dir(cwd), &project_slug(cwd))
 }
 
+/// Purpose: Map this project's session summaries to the read-only `session.list` result the surface asks for.
+/// Serves: `crates/cli/src/server.rs`'s injected `session.list` lister.
+/// Design: `docs/design/sessions-lineage.md` §1 and §3; `docs/design/vscode-surface.md` §2.
+/// Up: `crates/cli/src/server.rs` calls it from the server's lister closure.
+/// Down: `session_summaries`, `session_title` and `SessionSummary`.
+/// Verify: `cargo test -p loongagent session_infos`.
+pub(crate) fn session_infos(cwd: &Path, limit: u64) -> Vec<loong_schema::generated::SessionInfo> {
+    session_infos_from(session_summaries(cwd), limit)
+}
+
+/// Purpose: The mapping half of `session_infos`, so a test can inject summaries without the environment.
+/// Serves: `session_infos` and `session_infos_maps_titles_counts_and_the_limit`.
+/// Design: `docs/design/sessions-lineage.md` §1 and §3; `docs/design/vscode-surface.md` §2.
+/// Up: `session_infos` and the session tests.
+/// Down: `SessionSummary`, `session_title` and `SessionInfo`.
+/// Verify: `cargo test -p loongagent session_infos`.
+fn session_infos_from(
+    sessions: Vec<SessionSummary>,
+    limit: u64,
+) -> Vec<loong_schema::generated::SessionInfo> {
+    sessions
+        .into_iter()
+        .take(limit as usize)
+        .map(|summary| loong_schema::generated::SessionInfo {
+            id: summary.id,
+            title: session_title(summary.first_prompt.as_deref()),
+            updated_at: summary
+                .modified
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_secs())
+                .unwrap_or(0),
+            events: summary.events,
+            turns: summary.turns,
+        })
+        .collect()
+}
+
+/// Purpose: The label a history row shows: the first prompt, whitespace-collapsed and cut to 80 characters.
+/// Serves: `session_infos_from`.
+/// Design: `docs/design/sessions-lineage.md` §1; `docs/design/vscode-surface.md` §2.
+/// Up: `session_infos_from`.
+/// Down: `first_prompt` and `String`.
+/// Verify: `cargo test -p loongagent a_long_first_prompt`.
+fn session_title(first_prompt: Option<&str>) -> String {
+    let Some(first_prompt) = first_prompt else {
+        return "New session".to_string();
+    };
+    let collapsed = first_prompt
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let title: String = collapsed.chars().take(80).collect();
+    if title.is_empty() {
+        "New session".to_string()
+    } else {
+        title
+    }
+}
+
 /// Purpose: Every project's sessions, newest first.
 /// Contract: `session.rs` listing; `list_sessions --all` and `resume` reach it through resolution.
 /// Every project's sessions, newest first. `--all` for the list, and how `resume` finds
@@ -1098,6 +1157,41 @@ mod session_tests {
         assert_eq!(one.turns, 2);
         assert_eq!(one.events, 5, "one skills.loaded plus two exchanges");
         assert_eq!(one.first_prompt.as_deref(), Some("first question"));
+    }
+
+    /// Purpose: `session.list` maps summaries to the surface's five fields and honors the limit.
+    #[test]
+    fn session_infos_maps_titles_counts_and_the_limit() {
+        let root = temp_root("infos");
+        let cwd = Path::new("/tmp/project");
+        let dir = session_dir_in(&root, cwd);
+        write_session(&dir.join("aaaa1111.jsonl"), &["first question", "second"]);
+        std::fs::write(
+            dir.join("bbbb2222.jsonl"),
+            "{\"kind\":\"skills.loaded\",\"data\":{\"count\":1},\"seq\":1,\"time_ms\":1,\"id\":\"e1\"}\n",
+        )
+        .unwrap();
+        let infos = session_infos_from(session_summaries_in(&dir, "project"), 10);
+        assert_eq!(infos.len(), 2);
+        assert_eq!(infos[0].id, "aaaa1111");
+        assert_eq!(infos[0].title, "first question");
+        assert_eq!(infos[0].turns, 2);
+        assert_eq!(infos[0].events, 5);
+        assert!(infos[0].updated_at > 0);
+        assert_eq!(infos[1].title, "New session");
+        assert_eq!(
+            session_infos_from(session_summaries_in(&dir, "project"), 1).len(),
+            1
+        );
+    }
+
+    /// Purpose: The title collapses whitespace and cuts at 80 characters without splitting a character.
+    #[test]
+    fn a_long_first_prompt_is_collapsed_and_cut_at_eighty_characters() {
+        let long = format!("  one\n\ntwo {}", "x".repeat(100));
+        assert_eq!(session_title(Some(&long)).chars().count(), 80);
+        assert!(session_title(Some(&long)).starts_with("one two "));
+        assert_eq!(session_title(Some("   ")), "New session");
     }
 
     /// Purpose: An exact id, an unambiguous prefix, `latest` and a bare path each resolve to the right file.

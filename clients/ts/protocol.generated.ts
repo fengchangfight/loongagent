@@ -128,6 +128,25 @@ export interface SessionReplayResult {
   events: Json[];
 }
 
+/** How many sessions a client wants from a project's log directory. The server clamps it to 1..200. */
+export interface SessionListParams {
+  limit?: number;
+}
+
+/** One session a project can reopen: its id, its first-prompt title, when it was last written, and its size. */
+export interface SessionInfo {
+  id: string;
+  title: string;
+  updated_at: number;
+  events: number;
+  turns: number;
+}
+
+/** This project's sessions, newest first. */
+export interface SessionListResult {
+  sessions: SessionInfo[];
+}
+
 export interface PromptSubmitParams {
   session_id: string;
   text: string;
@@ -364,6 +383,7 @@ export const METHODS = {
   sessionAttach: "session.attach",
   permissionsSet: "permissions.set",
   sessionReplay: "session.replay",
+  sessionList: "session.list",
   promptSubmit: "prompt.submit",
   approvalRespond: "approval.respond",
 } as const;

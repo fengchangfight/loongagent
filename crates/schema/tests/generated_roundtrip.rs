@@ -100,6 +100,25 @@ fn roundtrip_session_replay_result() {
 }
 
 #[test]
+fn roundtrip_session_list_params() {
+    roundtrip::<g::SessionListParams>(r#"{"limit": 1}"#);
+}
+
+#[test]
+fn roundtrip_session_info() {
+    roundtrip::<g::SessionInfo>(
+        r#"{"id": "<string>","title": "<string>","updated_at": 1,"events": 1,"turns": 1}"#,
+    );
+}
+
+#[test]
+fn roundtrip_session_list_result() {
+    roundtrip::<g::SessionListResult>(
+        r#"{"sessions": [{"id": "<string>","title": "<string>","updated_at": 1,"events": 1,"turns": 1}]}"#,
+    );
+}
+
+#[test]
 fn roundtrip_prompt_submit_params() {
     roundtrip::<g::PromptSubmitParams>(r#"{"session_id": "<string>","text": "<string>"}"#);
 }

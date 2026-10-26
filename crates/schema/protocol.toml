@@ -214,6 +214,34 @@ fields = [
 ]
 
 [[types]]
+name = "SessionListParams"
+kind = "struct"
+doc = "How many sessions a client wants from a project's log directory. The server clamps it to 1..200."
+fields = [
+  { name = "limit", type = "u64", optional = true },
+]
+
+[[types]]
+name = "SessionInfo"
+kind = "struct"
+doc = "One session a project can reopen: its id, its first-prompt title, when it was last written, and its size."
+fields = [
+  { name = "id", type = "string" },
+  { name = "title", type = "string" },
+  { name = "updated_at", type = "u64" },
+  { name = "events", type = "u64" },
+  { name = "turns", type = "u64" },
+]
+
+[[types]]
+name = "SessionListResult"
+kind = "struct"
+doc = "This project's sessions, newest first."
+fields = [
+  { name = "sessions", type = "SessionInfo", list = true },
+]
+
+[[types]]
 name = "PromptSubmitParams"
 kind = "struct"
 fields = [
@@ -422,6 +450,12 @@ name = "session.replay"
 doc = "Replay the session's own log, so an attaching client is not blind to its past. A read: it records nothing."
 params = "SessionOnlyParams"
 result = "SessionReplayResult"
+
+[[methods]]
+name = "session.list"
+doc = "List this project's sessions for a history surface. A read: it records nothing and never parses the session directory in the client."
+params = "SessionListParams"
+result = "SessionListResult"
 
 [[methods]]
 name = "prompt.submit"

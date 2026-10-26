@@ -178,6 +178,28 @@ pub struct SessionReplayResult {
     pub events: Vec<serde_json::Value>,
 }
 
+/// How many sessions a client wants from a project's log directory. The server clamps it to 1..200.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionListParams {
+    pub limit: Option<u64>,
+}
+
+/// One session a project can reopen: its id, its first-prompt title, when it was last written, and its size.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionInfo {
+    pub id: String,
+    pub title: String,
+    pub updated_at: u64,
+    pub events: u64,
+    pub turns: u64,
+}
+
+/// This project's sessions, newest first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionListResult {
+    pub sessions: Vec<SessionInfo>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PromptSubmitParams {
     pub session_id: String,
@@ -447,6 +469,8 @@ pub mod method {
     pub const PERMISSIONS_SET: &str = "permissions.set";
     /// Replay the session's own log, so an attaching client is not blind to its past. A read: it records nothing.
     pub const SESSION_REPLAY: &str = "session.replay";
+    /// List this project's sessions for a history surface. A read: it records nothing and never parses the session directory in the client.
+    pub const SESSION_LIST: &str = "session.list";
     /// Submit a user turn.
     pub const PROMPT_SUBMIT: &str = "prompt.submit";
     /// Answer a pending approval request; recorded as an event either way (ADR-0007 §6).

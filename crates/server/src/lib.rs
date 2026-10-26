@@ -259,6 +259,14 @@ impl From<std::io::Error> for ServerError {
 /// needs to be able to ask for another one.
 pub type KernelFactory = Box<dyn FnMut() -> Result<(String, Kernel), String>>;
 
+/// Purpose: A project-scoped session lister the CLI injects; it reads the logs, not the client.
+/// Serves: `Server::with_session_lister` and `dispatch`'s `session.list` arm.
+/// Design: `docs/design/sessions-lineage.md` §1 and §3.
+/// Up: `crates/cli/src/server.rs` supplies it from `session_infos`.
+/// Down: `dispatch` calls it with the clamped limit.
+/// Verify: `cargo test -p loong-server session_list`.
+pub type SessionLister = Box<dyn Fn(u64) -> Vec<gen::SessionInfo>>;
+
 /// Purpose: One process serving one session: the kernel, the id it owns and the stream bookkeeping.
 /// Serves: `run_stdio` and `crates/cli/src/server.rs`.
 /// Design: `docs/design/surfaces.md` §1; `docs/design/sessions-lineage.md` §1.
@@ -272,6 +280,9 @@ pub struct Server {
     /// was handed one kernel and nothing else — it then simply cannot start new sessions,
     /// and says so rather than pretending.
     factory: Option<KernelFactory>,
+    /// The project's session listing. Absent when no CLI lister was injected; then
+    /// `session.list` answers empty rather than inventing entries.
+    session_lister: Option<SessionLister>,
     /// Highest sequence already streamed to the client.
     last_sent: u64,
     /// The connection this call is writing to, so a response can stream the events it
@@ -313,6 +324,7 @@ impl Server {
             kernel,
             session_id: session_id.into(),
             factory: None,
+            session_lister: None,
             last_sent: 0,
             connection: None,
             pending_lines: Vec::new(),
@@ -333,6 +345,17 @@ impl Server {
         fd: i32,
     ) -> Self {
         self.permissions = Some(PermissionsChannel { slot, fd });
+        self
+    }
+
+    /// Purpose: Give the server a way to list this project's sessions for a history surface.
+    /// Serves: `crates/cli/src/server.rs`.
+    /// Design: `docs/design/sessions-lineage.md` §1; `docs/design/vscode-surface.md` §2.
+    /// Up: `crates/cli/src/server.rs` injects the log-backed lister.
+    /// Down: `dispatch`'s `session.list` arm.
+    /// Verify: `cargo test -p loong-server session_list`.
+    pub fn with_session_lister(mut self, lister: SessionLister) -> Self {
+        self.session_lister = Some(lister);
         self
     }
 
@@ -580,6 +603,21 @@ impl Server {
                     })
                     .unwrap_or_default();
                 self.respond(id, gen::SessionReplayResult { events }, "session.replay")
+            }
+            gen::method::SESSION_LIST => {
+                let params: gen::SessionListParams = match request.params_as() {
+                    Ok(p) => p,
+                    Err(e) => return vec![e.to_line()],
+                };
+                // A read: it records nothing, and a server without a lister says
+                // "none" rather than inspecting a directory it does not own.
+                let limit = params.limit.unwrap_or(50).clamp(1, 200);
+                let sessions = self
+                    .session_lister
+                    .as_ref()
+                    .map(|lister| lister(limit))
+                    .unwrap_or_default();
+                self.respond(id, gen::SessionListResult { sessions }, "session.list")
             }
             gen::method::PROMPT_SUBMIT => {
                 let params: gen::PromptSubmitParams = match request.params_as() {
@@ -984,6 +1022,56 @@ mod tests {
             .into_iter()
             .map(|l| serde_json::from_str(&l).expect("every outbound line is JSON"))
             .collect()
+    }
+
+    /// Purpose: `session.list` answers from the injected lister and clamps its limit.
+    /// Verify: `cargo test -p loong-server session_list`.
+    #[test]
+    fn session_list_answers_from_the_injected_lister() {
+        let t = Temp::new();
+        let kernel = Kernel::create(
+            t.0.join("s.jsonl"),
+            KernelConfig::new(&t.0),
+            Box::new(scripted(vec![], Some("hi"))),
+        )
+        .unwrap();
+        let mut server = Server::new(kernel, "s1").with_session_lister(Box::new(|limit| {
+            assert_eq!(limit, 5);
+            vec![gen::SessionInfo {
+                id: "a".into(),
+                title: "first".into(),
+                updated_at: 1,
+                events: 2,
+                turns: 1,
+            }]
+        }));
+        let out = lines_of(
+            &mut server,
+            &Request::new(1, gen::method::SESSION_LIST, json!({"limit": 5})).to_line(),
+        );
+        let response = out.last().expect("a response");
+        assert_eq!(response["result"]["sessions"][0]["id"], "a");
+        assert_eq!(response["result"]["sessions"][0]["title"], "first");
+    }
+
+    /// Purpose: Without a lister, `session.list` is empty rather than an error or invented data.
+    /// Verify: `cargo test -p loong-server session_list`.
+    #[test]
+    fn session_list_without_a_lister_is_empty() {
+        let t = Temp::new();
+        let kernel = Kernel::create(
+            t.0.join("s.jsonl"),
+            KernelConfig::new(&t.0),
+            Box::new(scripted(vec![], Some("hi"))),
+        )
+        .unwrap();
+        let mut server = Server::new(kernel, "s1");
+        let out = lines_of(
+            &mut server,
+            &Request::new(1, gen::method::SESSION_LIST, json!({})).to_line(),
+        );
+        let response = out.last().expect("a response");
+        assert_eq!(response["result"]["sessions"], serde_json::json!([]));
     }
 
     /// Purpose: Pin that every session-naming method refuses with the request's own id.

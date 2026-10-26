@@ -32,6 +32,11 @@ jobs:
 
       # Gitea's cache action is optional; without it the job is slower, not wrong.
 
+      - name: node, for the VS Code extension tests
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
       - name: a C compiler, for bundled SQLite and the TLS backend
         run: cc --version
 

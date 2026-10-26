@@ -124,6 +124,7 @@ file that does not exist yet.
 | [extending/](extending/) | The four procedures in detail — built-in tool, event, hook, routing — each with its proof command | Living |
 | [design/](design/) | Subsystem design: one document per mechanism, one per flow; the layer between the overview and the code. | Living |
 | [design/flows/](design/flows/) | End-to-end sequences: turn lifecycle, tool approval, resume/fork, context compaction, pack install — each names the functions and events, and links up to its subsystem. | Living |
+| [design/vscode-surface.md](design/vscode-surface.md) | The VS Code sidebar: its own Webview, approvals with diffs, attachments, binary discovery and limits | Living |
 | human-written/ | The human's own notes — input, never edited by an agent (`AGENTS.md`, `scripts/check-human-written.sh`) | — |
 | [crate-map.md](crate-map.md) | The workspace's crates and the dependency edges allowed between them — generated from `scripts/layering_rules.py`, so it must never be hand-edited | Generated |
 | [dsh-plugin-ecosystem.md](research/dsh-plugin-ecosystem.md) | DSH plugin ecosystem — can our extension model host DSH-style plugins? | Research note (input to a future ADR-0004 revision) |

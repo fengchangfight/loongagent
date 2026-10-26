@@ -1,0 +1,75 @@
+# loongagent for VS Code
+
+这是 loongagent 的 VS Code 侧边栏：扩展自己的 Activity Bar 窗口，不是 Copilot 的聊天框。
+它不需要 Copilot 登录，也不需要选 VS Code 的模型；模型来自 `loongagent server`。
+
+## 运行
+
+```bash
+cd clients/vscode
+npm ci
+npm run compile          # dist/extension.js + dist/webview.js，然后 tsc --noEmit
+npm test                 # node --test，纯逻辑模块
+
+mkdir -p /tmp/loong-vscode-scratch
+code --extensionDevelopmentPath="$PWD" --new-window /tmp/loong-vscode-scratch
+```
+
+开发宿主窗口里打开 Activity Bar 的 loongagent 图标。F5 需要本地 `.vscode/launch.json`
+（仓库不提交 `.vscode/`），命令行方式更省事。
+
+## 找到 loongagent binary
+
+扩展不打包 Rust binary。解析顺序：
+
+1. `loongagent.path`（machine scope）
+2. **loongagent: Locate the binary** 选过的路径
+3. PATH 里的 `loongagent`
+4. `~/.cargo/bin`、`~/.local/bin`、`/usr/local/bin`、`/opt/homebrew/bin`
+
+如果从桌面图标启动 VS Code，PATH 可能没有 `~/.cargo/bin`，这时在设置里写绝对路径：
+
+```json
+"loongagent.path": "/home/you/.cargo/bin/loongagent"
+```
+
+或者命令面板执行 **loongagent: Locate the binary**。输出面板 `loongagent` 会显示实际路径、
+版本和 schema。
+
+## 写入前审阅
+
+要让 `write_file` / `edit` 在落盘前弹出 diff 卡片，在策略里写：
+
+```toml
+[permissions]
+write_workspace = "ask"
+```
+
+扩展不修改策略。如果策略是 `allow`，写入会直接发生，聊天里会提示“written unreviewed”，
+之后仍可用 Review 卡片查看 diff。
+
+## 当前功能
+
+- 流式回答、工具卡片、Stop
+- 模型下拉（来自 `model.list` / `model.select`）
+- `@ file` 附件、编辑器选区附件；发送后附件清空
+- 写入前 diff 卡片：Allow once / Allow always / Deny；Open full diff
+- 一轮结束后的 Review 卡片：逐个打开 `vscode.diff`，左边是该轮第一次提到文件时的内容
+- `permissions.relaxed` 显示
+- `/new`、`/model`、`/context`、`/yolo` 命令
+- 重载后恢复当前会话与最近消息
+
+## 限制
+
+- 当前是单会话窗口；多 tab 和历史列表是下一阶段。
+- 不做逐 hunk 接受/拒绝；只做整个文件的 diff。
+- `shell` 的写入没有预览，只有策略/审批卡片。
+- Windows 上 Stop 未实现（POSIX `SIGINT`）。
+- 一个窗口一个会话；跨窗口的 write token 不在本阶段。
+- 原生 `@loong` participant 已移除；VS Code 入口就是侧边栏。
+
+设计与实现计划：
+
+- [docs/design/vscode-surface.md](../../docs/design/vscode-surface.md)
+- [M1 计划](../../docs/superpowers/plans/2026-10-26-vscode-webview-m1.md)
+- [M2 计划](../../docs/superpowers/plans/2026-10-26-vscode-webview-m2.md)

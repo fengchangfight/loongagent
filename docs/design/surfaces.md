@@ -10,7 +10,6 @@ send intents. The implementation is narrower than the decision in two places, an
 stated up front: the server speaks **stdio**, not the unix socket ADR-0001 describes, and a
 surface **spawns its own server child** rather than attaching to a shared per-user daemon. The
 TUI, web, line mode and headless run all speak the same JSON-RPC protocol over that child.
-ACP is decided in ADR-0009 and not built.
 
 ## 1. The server owns the session while it runs
 
@@ -167,8 +166,8 @@ built. `loongagent web` is the localhost path only.
 
 ADR-0002 makes ACP a dialect of this protocol over JSON-RPC; ADR-0009 places the adapter after
 the TUI and web. There is no `acp` command, crate or adapter in the tree. The only trace is the
-`"acp"` label the schema allows in `SessionAttachParams.client`. An IDE integration would be a
-client of the same server and the same methods; it is not a second stack.
+`"acp"` label the schema allows in `SessionAttachParams.client`. The VS Code sidebar is a
+separate Webview client: [vscode-surface.md](vscode-surface.md).
 
 ## 6. What a surface may do, and what it may not
 

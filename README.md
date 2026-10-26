@@ -67,7 +67,8 @@ loongagent sessions --all              # 列出所有工程下的会话
 
 其他界面（同一个内核、同一份会话）：`loongagent web --local`（浏览器，只监听 loopback）、
 `loongagent repl --local`（行模式，不需要 TTY）、`loongagent run --local "…"`（无界面跑一轮）、
-`loongagent sessions` / `resume [ID]` / `fork [ID]` / `delete ID`。
+`loongagent sessions` / `resume [ID]` / `fork [ID]` / `delete ID`，以及 VS Code 侧边栏
+（`clients/vscode`，自带 Webview，不依赖 Copilot）。
 
 ---
 

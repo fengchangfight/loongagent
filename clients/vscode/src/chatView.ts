@@ -730,6 +730,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private cancel(): void {
     if (!this.running) return;
     this.output.appendLine("turn running: the person asked to stop");
+    for (const tab of this.tabs.tabs) this.approvals.denyTab(tab.id, "stopped by the person");
     this.agent?.cancel();
   }
 

@@ -57,7 +57,7 @@ bold "the VS Code surface: types and unit tests"
 # No VS Code needed here: the logic modules (transport, turn loop, renderer,
 # snapshots, diff side, prompt) carry no `vscode` import, so `node --test` covers
 # them without an extension host. The host-facing glue is verified in the editor.
-( cd clients/vscode && npm ci --silent && npm run typecheck && npm test )
+( cd clients/vscode && npm ci --silent && npm run compile && npm test )
 
 if [ "${FAST:-0}" = "1" ]; then
   bold "release build"

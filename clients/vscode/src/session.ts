@@ -8,6 +8,7 @@ import type {
   ModelList,
   SessionAttachResult,
 } from "../../ts/protocol.generated.ts";
+import type { SessionInfo } from "./webviewProtocol.ts";
 
 /**
  * The server refuses a request that names a session it is not on rather than
@@ -82,6 +83,12 @@ export class LoongSession {
     const result = await this.call<{ session_id: string }>(METHODS.sessionNew, this.mine());
     this.current = result.session_id;
     return result.session_id;
+  }
+
+  /** List this project's sessions for the history surface; the method records nothing. */
+  async listSessions(limit = 50): Promise<SessionInfo[]> {
+    const result = await this.call<{ sessions: SessionInfo[] }>(METHODS.sessionList, { limit });
+    return result.sessions;
   }
 
   async replay(): Promise<EventEnvelope[]> {

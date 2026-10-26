@@ -1,4 +1,4 @@
-import type { Attachment, BinaryStatus, FileChoice, HostMessage, TabState, UiPart } from "../src/webviewProtocol.ts";
+import type { Attachment, BinaryStatus, FileChoice, HostMessage, SessionInfo, TabState, UiPart } from "../src/webviewProtocol.ts";
 import { matchingFiles, mentionAt } from "../src/mention.ts";
 
 type Models = Extract<HostMessage, { type: "bootstrap" }>["models"];
@@ -17,6 +17,8 @@ const shell = document.createElement("div");
 shell.className = "shell";
 const header = document.createElement("header");
 header.className = "header";
+const tabbar = document.createElement("div");
+tabbar.className = "tabbar";
 const brand = document.createElement("span");
 brand.className = "brand";
 brand.textContent = "loongagent";
@@ -37,6 +39,9 @@ transcript.className = "transcript";
 transcript.setAttribute("role", "log");
 transcript.setAttribute("aria-live", "polite");
 
+const historyOverlay = document.createElement("div");
+historyOverlay.className = "history-overlay";
+historyOverlay.hidden = true;
 const composer = document.createElement("footer");
 composer.className = "composer";
 const attachmentsBar = document.createElement("div");
@@ -61,7 +66,7 @@ hint.className = "hint";
 hint.textContent = "Type @ to attach a file · Enter sends · Shift+Enter newline";
 controls.append(hint, send);
 composer.append(attachmentsBar, mentionBox, input, controls);
-shell.append(header, transcript, composer);
+shell.append(header, tabbar, transcript, composer, historyOverlay);
 root.append(shell);
 
 interface State {
@@ -69,6 +74,8 @@ interface State {
   live: string;
   tabs: TabState[];
   activeTabId?: string;
+  sessions: SessionInfo[];
+  historyOpen: boolean;
   binary?: BinaryStatus;
   models: Models;
   model?: string;
@@ -82,9 +89,118 @@ interface State {
 }
 
 const state: State = {
-  parts: [], live: "", tabs: [], models: [], attachments: [], selection: undefined, files: [],
+  parts: [], live: "", tabs: [], activeTabId: undefined, sessions: [], historyOpen: false,
+  models: [], attachments: [], selection: undefined, files: [],
   filesLoaded: false, mention: undefined, busy: false, yolo: false,
 };
+
+const cachedParts = new Map<string, UiPart[]>();
+const cachedLive = new Map<string, string>();
+
+function partsFor(tabId: string): UiPart[] {
+  const existing = cachedParts.get(tabId);
+  if (existing !== undefined) return existing;
+  const created: UiPart[] = [];
+  cachedParts.set(tabId, created);
+  return created;
+}
+
+function renderTabs(): void {
+  tabbar.replaceChildren();
+  for (const tab of state.tabs) {
+    const button = element("button", `tab${tab.id === state.activeTabId ? " active" : ""}`);
+    button.setAttribute("type", "button");
+    button.setAttribute("role", "tab");
+    button.setAttribute("aria-selected", tab.id === state.activeTabId ? "true" : "false");
+    if (tab.status === "running" || tab.status === "waiting") {
+      button.append(element("span", `tab-dot ${tab.status}`));
+    }
+    button.append(element("span", "tab-title", tab.title));
+    button.addEventListener("click", () => {
+      if (tab.id === state.activeTabId) return;
+      state.activeTabId = tab.id;
+      state.parts = partsFor(tab.id);
+      state.live = cachedLive.get(tab.id) ?? "";
+      state.busy = tab.status === "running" || tab.status === "waiting";
+      setBusy(state.busy);
+      renderTabs();
+      render();
+      input.focus();
+      api.postMessage({ type: "selectTab", tabId: tab.id });
+    });
+    const close = element("button", "tab-close", "×");
+    close.setAttribute("type", "button");
+    close.setAttribute("aria-label", `Close ${tab.title}`);
+    close.addEventListener("click", (event) => {
+      event.stopPropagation();
+      api.postMessage({ type: "closeTab", tabId: tab.id });
+    });
+    button.append(close);
+    tabbar.append(button);
+  }
+  const add = element("button", "tab-action", "+");
+  add.setAttribute("type", "button");
+  add.setAttribute("aria-label", "New tab");
+  add.addEventListener("click", () => api.postMessage({ type: "newTab" }));
+  const history = element("button", "tab-action", "History");
+  history.setAttribute("type", "button");
+  history.addEventListener("click", () => {
+    state.historyOpen = true;
+    renderHistory();
+    api.postMessage({ type: "history" });
+  });
+  tabbar.append(add, history);
+}
+
+historyOverlay.addEventListener("click", (event) => {
+  if (event.target !== historyOverlay) return;
+  state.historyOpen = false;
+  renderHistory();
+});
+
+function renderHistory(): void {
+  historyOverlay.hidden = !state.historyOpen;
+  historyOverlay.replaceChildren();
+  if (!state.historyOpen) return;
+  const card = element("div", "history-card");
+  const head = element("div", "history-head");
+  head.append(element("strong", "", "Sessions"));
+  const close = element("button", "tab-action", "Close");
+  close.setAttribute("type", "button");
+  close.addEventListener("click", () => { state.historyOpen = false; renderHistory(); });
+  head.append(close);
+  card.append(head);
+  if (state.sessions.length === 0) {
+    card.append(element("div", "history-empty", "No sessions yet."));
+  }
+  for (const session of state.sessions) {
+    const row = element("button", "history-row");
+    row.setAttribute("type", "button");
+    row.append(element("span", "history-title", session.title));
+    row.append(element("span", "history-meta",
+      `${new Date(session.updated_at * 1000).toLocaleString()} · ${session.turns} turns`));
+    row.addEventListener("click", () => {
+      state.historyOpen = false;
+      renderHistory();
+      api.postMessage({ type: "openSession", sessionId: session.id });
+    });
+    card.append(row);
+  }
+  historyOverlay.append(card);
+}
+
+function upsertInto(parts: UiPart[], part: UiPart): void {
+  if (part.kind === "tool") {
+    const index = parts.findIndex((entry) => entry.kind === "tool" && entry.callId === part.callId);
+    if (index >= 0) { parts[index] = part; return; }
+  }
+  if (part.kind === "approval") {
+    const index = parts.findIndex((entry) =>
+      entry.kind === "approval" && entry.requestId === part.requestId);
+    if (index >= 0) { parts[index] = part; return; }
+  }
+  parts.push(part);
+}
 
 function element(tag: string, className: string, text?: string): HTMLElement {
   const node = document.createElement(tag);
@@ -350,24 +466,6 @@ function render(): void {
   transcript.scrollTop = transcript.scrollHeight;
 }
 
-function upsert(part: UiPart): void {
-  if (part.kind === "tool") {
-    const index = state.parts.findIndex((entry) => entry.kind === "tool" && entry.callId === part.callId);
-    if (index >= 0) {
-      state.parts[index] = part;
-      return;
-    }
-  }
-  if (part.kind === "approval") {
-    const index = state.parts.findIndex((entry) =>
-      entry.kind === "approval" && entry.requestId === part.requestId);
-    if (index >= 0) {
-      state.parts[index] = part;
-      return;
-    }
-  }
-  state.parts.push(part);
-}
 
 function submit(): void {
   const text = input.value.trim();
@@ -468,6 +566,9 @@ window.addEventListener("message", (event: MessageEvent<HostMessage>) => {
     case "bootstrap":
       state.tabs = message.tabs;
       state.activeTabId = message.activeTabId ?? message.tabs[0]?.id;
+      if (state.activeTabId !== undefined) {
+        cachedParts.set(state.activeTabId, message.activeTranscript);
+      }
       state.parts = message.activeTranscript;
       state.binary = message.binary;
       state.models = message.models;
@@ -476,40 +577,62 @@ window.addEventListener("message", (event: MessageEvent<HostMessage>) => {
       // The file list is host state. A second bootstrap (models ready) must
       // not erase a list the earlier `files` message already delivered.
       state.mention = undefined;
-      state.live = "";
+      state.live = state.activeTabId === undefined
+        ? ""
+        : cachedLive.get(state.activeTabId) ?? "";
       state.busy = activeTab()?.status === "running" || activeTab()?.status === "waiting";
       setBusy(state.busy);
       renderModels();
       renderAttachments();
       renderMention();
+      renderTabs();
       render();
       break;
     case "tabs":
       state.tabs = message.tabs;
+      if (state.activeTabId === undefined || !state.tabs.some((tab) => tab.id === state.activeTabId)) {
+        state.activeTabId = state.tabs[0]?.id;
+        state.parts = state.activeTabId === undefined ? [] : partsFor(state.activeTabId);
+      }
       state.busy = activeTab()?.status === "running" || activeTab()?.status === "waiting";
       if (!state.busy) state.live = "";
       setBusy(state.busy);
+      renderTabs();
       render();
       break;
     case "delta":
+      cachedLive.set(message.tabId, (cachedLive.get(message.tabId) ?? "") + message.text);
       if (message.tabId !== state.activeTabId) break;
-      state.live += message.text;
+      state.live = cachedLive.get(message.tabId) ?? "";
       render();
       break;
-    case "part":
+    case "part": {
+      const parts = partsFor(message.tabId);
+      upsertInto(parts, message.part);
       if (message.tabId !== state.activeTabId) break;
-      upsert(message.part);
+      state.parts = parts;
       render();
       break;
-    case "assistantFinal":
+    }
+    case "assistantFinal": {
+      const parts = partsFor(message.tabId);
+      cachedLive.set(message.tabId, "");
+      parts.push({ kind: "assistant", text: message.text, html: message.html });
       if (message.tabId !== state.activeTabId) break;
+      state.parts = parts;
       state.live = "";
-      state.parts.push({ kind: "assistant", text: message.text, html: message.html });
       render();
       break;
+    }
     case "error": {
-      if (message.tabId !== undefined && message.tabId !== state.activeTabId) break;
       const text = message.detail === undefined ? message.message : `${message.message}\n${message.detail}`;
+      const tabId = message.tabId ?? state.activeTabId;
+      if (message.tabId !== undefined && message.tabId !== state.activeTabId) {
+        if (tabId !== undefined) {
+          partsFor(tabId).push({ kind: "notice", level: "error", text });
+        }
+        break;
+      }
       state.live = "";
       state.parts.push({ kind: "notice", level: "error", text });
       setBusy(false);
@@ -517,6 +640,7 @@ window.addEventListener("message", (event: MessageEvent<HostMessage>) => {
       break;
     }
     case "transcript":
+      cachedParts.set(message.tabId, message.parts);
       if (message.tabId !== state.activeTabId) break;
       state.parts = message.parts;
       render();
@@ -534,6 +658,11 @@ window.addEventListener("message", (event: MessageEvent<HostMessage>) => {
       state.files = message.files;
       state.filesLoaded = true;
       if (state.mention !== undefined) renderMention();
+      break;
+    case "sessions":
+      state.sessions = message.sessions;
+      state.historyOpen = true;
+      renderHistory();
       break;
     default:
       break;

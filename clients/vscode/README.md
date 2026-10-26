@@ -68,15 +68,16 @@ write_workspace = "ask"
 - 一轮结束后的 Review 卡片：逐个打开 `vscode.diff`，左边是该轮第一次提到文件时的内容
 - `permissions.relaxed` 显示
 - `/new`、`/model`、`/context`、`/yolo` 命令
-- 重载后恢复当前会话与最近消息
+- 多 tab：一个 tab 一个会话、一个子进程；最多 5 个；同一 session 只开一个
+- 关闭 tab 即拒绝 pending approval 并 dispose 子进程；`History` 打开最近会话
+- 重载后恢复 tab、活动 tab、会话和最近消息
 
 ## 限制
 
-- 当前是单会话窗口；多 tab 和历史列表是下一阶段。
 - 不做逐 hunk 接受/拒绝；只做整个文件的 diff。
 - `shell` 的写入没有预览，只有策略/审批卡片。
 - Windows 上 Stop 未实现（POSIX `SIGINT`）。
-- 一个窗口一个会话；跨窗口的 write token 不在本阶段。
+- 一个窗口最多 5 个会话；跨窗口的 write token 不在本阶段。
 - 原生 `@loong` participant 已移除；VS Code 入口就是这个编辑器面板。
 
 设计与实现计划：

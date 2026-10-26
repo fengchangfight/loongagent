@@ -22,7 +22,8 @@ Editor tab WebviewPanel  loongagent.chat
 Extension host
   ├── ChatViewProvider       panel, message bridge, commands, diff providers
   ├── TabManager             tabs, active tab, the five-tab ceiling
-  ├── SessionAgent           one child, one LoongSession, one TurnGate, one transcript
+  ├── tabStore               persisted tab ids, session ids and titles
+  ├── SessionAgent           one child, one LoongSession, one TurnGate per tab
   ├── Renderer               EventEnvelope -> UiPart
   └── BinaryResolver         setting, picked path, PATH, common install locations
         │  newline-delimited JSON-RPC 2.0
@@ -42,7 +43,11 @@ is focused instead. Tabs are capped at five; closing an internal tab disposes it
 denies any pending approval with reason `tab closed`. Closing the editor panel denies pending
 approvals with `tab closed` but keeps the agent, so reopening the panel continues the session.
 
-The tab model caps at five, and `session.list` is the server capability the history needs.
+Tabs persist as `{id, sessionId, title}` in workspace state; the active tab is a separate key.
+A reload restores them, attaches the active tab, and lazily starts the others on first
+activation. A session that cannot attach is dropped with a visible message. History is
+backed by the read-only `session.list`, injected by the CLI; the extension never reads the
+session directory. Tabs are capped at five, and history returns the newest sessions first.
 
 ## 3. Approvals and diffs
 

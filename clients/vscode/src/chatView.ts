@@ -12,6 +12,7 @@ import { promptText } from "./prompt.ts";
 import { sameSelection, selectionAttachment } from "./selection.ts";
 import { pathsInArgs, Renderer } from "./render.ts";
 import { SessionAgent } from "./sessionAgent.ts";
+import { decodeTabs, encodeTabs } from "./tabStore.ts";
 import { FileSnapshots } from "./snapshots.ts";
 import { TabManager } from "./tab.ts";
 import { Transcript } from "./transcript.ts";
@@ -31,10 +32,30 @@ export type HostBinary = BinaryStatus;
 const LEFT_SCHEME = "loongagent-left";
 const PREVIEW_SCHEME = "loongagent-preview";
 const RECENT_TURNS = 8;
+const TABS_KEY = "loongagent.tabs.v1";
+const ACTIVE_KEY = "loongagent.activeTab.v1";
 
 interface TurnReview {
   token: string;
   snapshots: FileSnapshots;
+}
+
+interface PendingTool {
+  callId: string;
+  tool?: string;
+  path?: string;
+  preview?: Preview;
+}
+
+/** Everything one tab owns; swapping tabs swaps this object, not the agent's identity. */
+interface TabRuntime {
+  transcript: Transcript;
+  agent?: Agent;
+  models?: ModelList;
+  attachments: Attachment[];
+  running: boolean;
+  pendingTool?: PendingTool;
+  unreviewed: Set<string>;
 }
 
 /**
@@ -50,7 +71,6 @@ export class ChatViewProvider {
   private readonly context: vscode.ExtensionContext;
   private readonly output: vscode.OutputChannel;
   private readonly tabs = new TabManager();
-  private readonly transcript = new Transcript();
   private readonly approvals = new ApprovalBook();
   private readonly turns = new Map<string, FileSnapshots>();
   private readonly approvalPreviews = new Map<string, { token: string; path: string; after: string }>();
@@ -59,16 +79,13 @@ export class ChatViewProvider {
   private readonly preview: PreviewProvider<vscode.Uri>;
   private panel: vscode.WebviewPanel | undefined;
   private binary: HostBinary | undefined;
-  private agent: Agent | undefined;
-  private models: ModelList | undefined;
-  private readonly attachments: Attachment[] = [];
+  private readonly runtime = new Map<string, TabRuntime>();
   private selection: Attachment | undefined;
   private nextAttachment = 1;
   private ready = false;
-  private running = false;
+  private restored = false;
   private nextTurn = 1;
-  private pendingTool: { callId: string; tool?: string; path?: string; preview?: Preview } | undefined;
-  private readonly unreviewed = new Set<string>();
+  private nextTab = 1;
 
   constructor(options: {
     context: vscode.ExtensionContext;
@@ -149,6 +166,35 @@ export class ChatViewProvider {
     });
   }
 
+  private runtimeFor(tabId: string): TabRuntime {
+    const existing = this.runtime.get(tabId);
+    if (existing !== undefined) return existing;
+    const created: TabRuntime = {
+      transcript: new Transcript(),
+      attachments: [],
+      running: false,
+      unreviewed: new Set(),
+    };
+    this.runtime.set(tabId, created);
+    return created;
+  }
+
+  private activeRuntime(): TabRuntime {
+    return this.runtimeFor(this.tabs.activeId ?? "tab-1");
+  }
+
+  private get transcript(): Transcript { return this.activeRuntime().transcript; }
+  private get agent(): Agent | undefined { return this.activeRuntime().agent; }
+  private set agent(value: Agent | undefined) { this.activeRuntime().agent = value; }
+  private get models(): ModelList | undefined { return this.activeRuntime().models; }
+  private set models(value: ModelList | undefined) { this.activeRuntime().models = value; }
+  private get attachments(): Attachment[] { return this.activeRuntime().attachments; }
+  private get running(): boolean { return this.activeRuntime().running; }
+  private set running(value: boolean) { this.activeRuntime().running = value; }
+  private get pendingTool(): PendingTool | undefined { return this.activeRuntime().pendingTool; }
+  private set pendingTool(value: PendingTool | undefined) { this.activeRuntime().pendingTool = value; }
+  private get unreviewed(): Set<string> { return this.activeRuntime().unreviewed; }
+
   setBinary(binary: HostBinary): void {
     this.binary = binary;
     this.postBootstrap();
@@ -164,8 +210,8 @@ export class ChatViewProvider {
     this.panel?.dispose();
     this.panel = undefined;
     this.ready = false;
-    this.agent?.dispose();
-    this.agent = undefined;
+    for (const runtime of this.runtime.values()) runtime.agent?.dispose();
+    this.runtime.clear();
   }
 
   private denyPending(reason: string): void {
@@ -174,15 +220,81 @@ export class ChatViewProvider {
 
   private closeTab(tabId: string): void {
     this.approvals.denyTab(tabId, "tab closed");
-    if (this.tabs.activeId === tabId) {
-      this.agent?.dispose();
-      this.agent = undefined;
-      this.transcript.reset();
-      this.attachments.length = 0;
-    }
+    const runtime = this.runtime.get(tabId);
+    runtime?.agent?.dispose();
+    this.runtime.delete(tabId);
     this.tabs.close(tabId);
-    this.postBootstrap();
+    if (this.tabs.tabs.length === 0) {
+      this.tabs.open({ id: this.newTabId(), title: "New session", status: "idle" });
+    }
+    this.persistTabs();
     this.postTabs();
+    this.postBootstrap();
+    this.postAttachments();
+    void this.activateActive();
+  }
+
+  private async selectTab(tabId: string): Promise<void> {
+    if (!this.tabs.tabs.some((tab) => tab.id === tabId)) {
+      this.postError("That tab is no longer open.");
+      return;
+    }
+    this.tabs.activate(tabId);
+    this.persistTabs();
+    this.postBootstrap();
+    this.postAttachments(tabId);
+    this.postTabs();
+    try {
+      await this.ensureAgent(tabId);
+      if (this.tabs.activeId === tabId) this.postBootstrap();
+    } catch (error) {
+      this.dropTab(tabId, error);
+    }
+  }
+
+  private async history(): Promise<void> {
+    const tabId = this.tabs.activeId;
+    if (tabId === undefined) {
+      this.postError("Open a folder and start a chat first.");
+      return;
+    }
+    try {
+      const agent = await this.ensureAgent(tabId);
+      const session = await agent.ensure();
+      this.post({ type: "sessions", sessions: await session.listSessions() });
+    } catch (error) {
+      this.post({ type: "error", tabId,
+        message: `I could not list the sessions: ${explain(error)}` });
+    }
+  }
+
+  private async openSession(sessionId: string): Promise<void> {
+    const existing = this.tabs.find(sessionId);
+    if (existing !== undefined) {
+      await this.selectTab(existing.id);
+      return;
+    }
+    const id = this.newTabId();
+    const opened = this.tabs.open({
+      id,
+      sessionId,
+      title: sessionId,
+      status: "idle",
+    });
+    if (opened === "max") {
+      this.postError("At most 5 tabs can be open at once.");
+      return;
+    }
+    this.runtimeFor(id);
+    this.persistTabs();
+    this.postTabs();
+    this.postBootstrap();
+    try {
+      await this.ensureAgent(id);
+      if (this.tabs.activeId === id) this.postBootstrap();
+    } catch (error) {
+      this.dropTab(id, error);
+    }
   }
 
   /** Open the before/after diff for a turn's changed files; used by the command. */
@@ -211,10 +323,10 @@ export class ChatViewProvider {
         void this.onReady();
         break;
       case "send":
-        void this.send(message.text);
+        void this.send(message.tabId, message.text);
         break;
       case "cancel":
-        this.cancel();
+        this.cancel(message.tabId);
         break;
       case "approval":
         this.answerApproval(message.tabId, message.requestId, message.choice);
@@ -226,28 +338,37 @@ export class ChatViewProvider {
         void this.openApprovalDiff(message.token, message.path);
         break;
       case "selectModel":
-        void this.selectModel(message.name);
+        void this.selectModel(message.tabId, message.name);
         break;
       case "context":
-        void this.showContext();
+        void this.showContext(message.tabId);
         break;
       case "attachFile":
-        this.attachFile(message.path);
+        this.attachFile(message.tabId, message.path);
         break;
       case "removeAttachment":
-        this.removeAttachment(message.id);
+        this.removeAttachment(message.tabId, message.id);
         break;
       case "newTab":
-        void this.newSession();
+        void this.newTab();
+        break;
+      case "selectTab":
+        void this.selectTab(message.tabId);
+        break;
+      case "history":
+        void this.history();
+        break;
+      case "openSession":
+        void this.openSession(message.sessionId);
         break;
       case "yolo":
-        void this.yolo(message.on);
+        void this.yolo(message.tabId, message.on);
         break;
       case "closeTab":
         this.closeTab(message.tabId);
         break;
       default:
-        this.output.appendLine(`webview: ${message.type} arrives with the next task`);
+        this.output.appendLine("webview: unknown message ignored");
     }
   }
 
@@ -265,13 +386,14 @@ export class ChatViewProvider {
     });
   }
 
-  private postAttachments(): void {
-    const tab = this.tabs.active();
+  private postAttachments(tabId = this.tabs.activeId): void {
+    if (tabId === undefined) return;
+    const tab = this.tabs.tabs.find((entry) => entry.id === tabId);
     if (tab === undefined) return;
     this.post({
       type: "attachments",
-      tabId: tab.id,
-      items: this.attachments.map((attachment) => ({ ...attachment })),
+      tabId,
+      items: this.runtimeFor(tabId).attachments.map((attachment) => ({ ...attachment })),
     });
   }
 
@@ -281,41 +403,57 @@ export class ChatViewProvider {
 
   private async onReady(): Promise<void> {
     this.ready = true;
+    if (!this.restored) {
+      this.restored = true;
+      const stored = decodeTabs(this.context.workspaceState.get(TABS_KEY));
+      if (stored.length > 0) {
+        this.tabs.restore(
+          stored.map((tab) => ({
+            id: tab.id,
+            ...(tab.sessionId === undefined ? {} : { sessionId: tab.sessionId }),
+            title: tab.title,
+            status: "idle" as const,
+          })),
+          this.context.workspaceState.get<string>(ACTIVE_KEY),
+        );
+      }
+      if (this.tabs.tabs.length === 0) {
+        this.tabs.open({ id: "tab-1", title: "New session", status: "idle" });
+      }
+      for (const tab of this.tabs.tabs) this.runtimeFor(tab.id);
+      this.persistTabs();
+    }
     this.postBootstrap();
     this.postAttachments();
+    this.postTabs();
     void this.refreshFiles();
     if (this.binary === undefined) return;
-    try {
-      const session = await this.ensureSession();
-      this.models = await session.models();
-      this.postBootstrap();
-      const resume = this.agent?.takeResume();
-      if (resume !== undefined) {
-        for (const part of new Renderer({ cwd: this.workspace() })
-          .resumed(resume.events, resume.sessionId)) {
-          this.transcript.append(part);
-          this.post({ type: "part", tabId: this.tabs.activeId ?? "tab-1", part });
-        }
-      }
-      const exit = this.agent?.takeLastExit();
-      if (exit !== undefined) {
-        const part: UiPart = {
-          kind: "notice",
-          level: "warn",
-          text: `The previous loongagent server exited (${exit.signal ?? `code ${exit.code}`}); a new one starts on the next send.`,
-        };
-        this.transcript.append(part);
-        this.post({ type: "part", tabId: this.tabs.activeId ?? "tab-1", part });
-      }
-    } catch (error) {
-      this.postError(startupAdvice(explain(error)));
-      this.output.appendLine(`failed: ${explain(error)}`);
-    }
+    await this.activateActive();
   }
 
-  private async ensureSession(): Promise<LoongSession> {
-    if (this.binary === undefined) {
-      throw new Error("the loongagent binary was not found; set loongagent.path or run Locate");
+  /** Run the active tab's child and publish its transcript, or drop a dead restored tab. */
+  private async activateActive(): Promise<void> {
+    const tabId = this.tabs.activeId;
+    if (tabId === undefined) return;
+    try {
+      await this.ensureAgent(tabId);
+    } catch (error) {
+      this.dropTab(tabId, error);
+      return;
+    }
+    this.postBootstrap();
+    this.postAttachments(tabId);
+    this.postTabs();
+  }
+
+  /** The child and session for one tab, created lazily on first activation. */
+  private async ensureAgent(tabId: string): Promise<Agent> {
+    const tab = this.tabs.tabs.find((entry) => entry.id === tabId);
+    if (tab === undefined) throw new Error("that tab is no longer open");
+    const runtime = this.runtimeFor(tabId);
+    if (runtime.agent !== undefined) {
+      await runtime.agent.ensure();
+      return runtime.agent;
     }
     const folder = vscode.workspace.workspaceFolders?.[0];
     const refusal = refusalToStart({
@@ -325,55 +463,103 @@ export class ChatViewProvider {
     if (refusal !== undefined || folder === undefined) {
       throw new Error(refusal ?? "open a folder first — the agent works on a workspace");
     }
-    if (this.agent === undefined) {
-      const agent = new SessionAgent({
-        folder,
-        output: this.output,
-        context: this.context,
-        binaryPath: this.binary.path,
-      });
-      agent.setExitObserver((code, signal) => {
-        const reason = signal ?? `code ${code}`;
-        this.denyPending(`server exited (${reason})`);
-        const id = this.tabs.activeId;
-        if (id !== undefined) {
-          this.tabs.update(id, { status: "stopped" });
-          this.postTabs();
-        }
-        this.postError(`The loongagent server exited (${reason}). The next send starts a new one.`);
-      });
-      this.agent = agent;
+    if (this.binary === undefined) {
+      throw new Error("the loongagent binary was not found; set loongagent.path or run Locate");
     }
-    return this.agent.ensure();
+    const agent = new SessionAgent({
+      folder,
+      output: this.output,
+      context: this.context,
+      binaryPath: this.binary.path,
+      ...(tab.sessionId === undefined ? { fresh: true } : { sessionId: tab.sessionId }),
+    });
+    runtime.agent = agent;
+    agent.setExitObserver((code, signal) => {
+      const reason = signal ?? `code ${code}`;
+      this.approvals.denyTab(tabId, `server exited (${reason})`);
+      const current = this.runtimeFor(tabId);
+      if (current.agent !== agent) return;
+      current.agent = undefined;
+      current.running = false;
+      this.tabs.update(tabId, { status: "stopped" });
+      this.postTabs();
+      this.post({ type: "error", tabId,
+        message: `The loongagent server exited (${reason}). The next send starts a new one.` });
+    });
+    try {
+      const session = await agent.ensure();
+      tab.sessionId = agent.sessionId;
+      this.persistTabs();
+      const resume = agent.takeResume();
+      if (resume !== undefined) {
+        const parts = new Renderer({ cwd: folder.uri.fsPath })
+          .resumed(resume.events, resume.sessionId);
+        for (const part of parts) {
+          runtime.transcript.append(part);
+          this.post({ type: "part", tabId, part });
+        }
+      }
+      runtime.models = await session.models();
+      return agent;
+    } catch (error) {
+      if (runtime.agent === agent) runtime.agent = undefined;
+      agent.dispose();
+      throw error;
+    }
+  }
+
+  private dropTab(tabId: string, error: unknown): void {
+    if (this.tabs.tabs.length <= 1) {
+      this.post({ type: "error", tabId,
+        message: `I could not open that session: ${explain(error)}` });
+      return;
+    }
+    this.closeTab(tabId);
+    this.post({ type: "error", tabId,
+      message: `I could not open that session: ${explain(error)}` });
+  }
+
+  private persistTabs(): void {
+    void this.context.workspaceState.update(TABS_KEY, encodeTabs(this.tabs.tabs));
+    void this.context.workspaceState.update(ACTIVE_KEY, this.tabs.activeId);
+  }
+
+  private newTabId(): string {
+    let id = `tab-${this.nextTab++}`;
+    while (this.tabs.tabs.some((tab) => tab.id === id)) id = `tab-${this.nextTab++}`;
+    return id;
   }
 
   private workspace(): string {
     return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "";
   }
 
-  private async selectModel(name: string): Promise<void> {
-    if (this.running) {
-      this.postError("Stop the running turn before changing the model.");
+  private async selectModel(tabId: string, name: string): Promise<void> {
+    const runtime = this.runtimeFor(tabId);
+    if (runtime.running) {
+      this.post({ type: "error", tabId, message: "Stop the running turn before changing the model." });
       return;
     }
     try {
-      const session = await this.ensureSession();
-      this.models = await session.selectModel(name);
-      this.postBootstrap();
+      const agent = await this.ensureAgent(tabId);
+      const session = await agent.ensure();
+      runtime.models = await session.selectModel(name);
+      if (this.tabs.activeId === tabId) this.postBootstrap();
     } catch (error) {
-      this.postError(`I could not change the model: ${explain(error)}`);
+      this.post({ type: "error", tabId, message: `I could not change the model: ${explain(error)}` });
       this.output.appendLine(`failed: ${explain(error)}`);
     }
   }
 
-  private async showContext(): Promise<void> {
+  private async showContext(tabId: string): Promise<void> {
     try {
-      const session = await this.ensureSession();
+      const agent = await this.ensureAgent(tabId);
+      const session = await agent.ensure();
       const [part] = new Renderer({ cwd: this.workspace() }).context(await session.context());
-      this.transcript.append(part);
-      this.post({ type: "part", tabId: this.tabs.activeId ?? "tab-1", part });
+      this.runtimeFor(tabId).transcript.append(part);
+      this.post({ type: "part", tabId, part });
     } catch (error) {
-      this.postError(`I could not read the context: ${explain(error)}`);
+      this.post({ type: "error", tabId, message: `I could not read the context: ${explain(error)}` });
       this.output.appendLine(`failed: ${explain(error)}`);
     }
   }
@@ -395,14 +581,18 @@ export class ChatViewProvider {
     }
   }
 
-  private attachFile(path: string): void {
+  private attachFile(tabId: string, path: string): void {
     const folder = vscode.workspace.workspaceFolders?.[0];
     if (folder === undefined || !isInside(folder.uri.fsPath, path)) {
-      this.postError("That file is outside the workspace.");
+      this.post({ type: "error", tabId, message: "That file is outside the workspace." });
       return;
     }
-    this.attachments.push({ id: `att-${this.nextAttachment++}`, kind: "file", path });
-    this.postAttachments();
+    this.runtimeFor(tabId).attachments.push({
+      id: `att-${this.nextAttachment++}`,
+      kind: "file",
+      path,
+    });
+    this.postAttachments(tabId);
   }
 
   private refreshSelection(): void {
@@ -429,43 +619,35 @@ export class ChatViewProvider {
     });
   }
 
-  private removeAttachment(id: string): void {
-    const index = this.attachments.findIndex((attachment) => attachment.id === id);
+  private removeAttachment(tabId: string, id: string): void {
+    const attachments = this.runtimeFor(tabId).attachments;
+    const index = attachments.findIndex((attachment) => attachment.id === id);
     if (index < 0) return;
-    this.attachments.splice(index, 1);
-    this.postAttachments();
+    attachments.splice(index, 1);
+    this.postAttachments(tabId);
   }
 
-  private async newSession(): Promise<void> {
-    if (this.running) {
-      this.postError("Stop the running turn before starting a new session.");
+  private async newTab(): Promise<void> {
+    const id = this.newTabId();
+    const opened = this.tabs.open({ id, title: "New session", status: "idle" });
+    if (opened === "max") {
+      this.postError("At most 5 tabs can be open at once.");
       return;
     }
+    this.runtimeFor(id);
+    this.persistTabs();
+    this.postTabs();
+    this.postBootstrap();
+    this.postAttachments(id);
     try {
-      await this.ensureSession();
-      await this.agent?.startNew();
-      const session = await this.ensureSession();
-      this.transcript.reset();
-      this.attachments.length = 0;
-      this.models = await session.models();
-      const tab = this.tabs.active();
-      if (tab !== undefined) {
-        this.tabs.update(tab.id, {
-          sessionId: session.sessionId,
-          title: "New session",
-          status: "idle",
-        });
-      }
-      this.postBootstrap();
-      this.postAttachments();
-      this.postTabs();
+      await this.ensureAgent(id);
+      if (this.tabs.activeId === id) this.postBootstrap();
     } catch (error) {
-      this.postError(`I could not start a new session: ${explain(error)}`);
-      this.output.appendLine(`failed: ${explain(error)}`);
+      this.dropTab(id, error);
     }
   }
 
-  private async yolo(on: boolean): Promise<void> {
+  private async yolo(tabId: string, on: boolean): Promise<void> {
     try {
       if (on) {
         const choice = await vscode.window.showWarningMessage(
@@ -476,9 +658,10 @@ export class ChatViewProvider {
         );
         if (choice !== "Turn prompts off") return;
       }
-      const session = await this.ensureSession();
+      const agent = await this.ensureAgent(tabId);
+      const session = await agent.ensure();
       const state = await session.setAutoApprove(on);
-      await this.agent?.rememberAutoApprove(state);
+      await agent.rememberAutoApprove(state);
       const part: UiPart = {
         kind: "notice",
         level: state ? "warn" : "info",
@@ -486,22 +669,25 @@ export class ChatViewProvider {
           ? "Approval prompts are off for this session. The sandbox is unchanged."
           : "Approval prompts are on again for this session. The sandbox was never changed.",
       };
-      this.transcript.append(part);
-      this.post({ type: "part", tabId: this.tabs.activeId ?? "tab-1", part });
+      this.runtimeFor(tabId).transcript.append(part);
+      this.post({ type: "part", tabId, part });
     } catch (error) {
-      this.postError(`I could not change the approval setting: ${explain(error)}`);
+      this.post({ type: "error", tabId,
+        message: `I could not change the approval setting: ${explain(error)}` });
       this.output.appendLine(`failed: ${explain(error)}`);
     }
   }
 
-  private async send(text: string): Promise<void> {
-    if (this.running) {
-      this.postError("A turn is already running. Wait for it to finish, or press Stop.");
+  private async send(tabId: string, text: string): Promise<void> {
+    const tab = this.tabs.tabs.find((entry) => entry.id === tabId);
+    if (tab === undefined) {
+      this.postError("That tab is no longer open.");
       return;
     }
-    const tab = this.tabs.active();
-    if (tab === undefined) {
-      this.postError("Open a folder and start a chat first.");
+    const runtime = this.runtimeFor(tabId);
+    if (runtime.running) {
+      this.post({ type: "error", tabId,
+        message: "A turn is already running. Wait for it to finish, or press Stop." });
       return;
     }
     const folder = vscode.workspace.workspaceFolders?.[0];
@@ -510,48 +696,53 @@ export class ChatViewProvider {
       isTrusted: vscode.workspace.isTrusted,
     });
     if (refusal !== undefined || folder === undefined) {
-      this.postError(refusal ?? "Open a folder first — the agent works on a workspace.");
+      this.post({ type: "error", tabId,
+        message: refusal ?? "Open a folder first — the agent works on a workspace." });
       return;
     }
     if (this.binary === undefined) {
-      this.postError("The loongagent binary was not found. Set loongagent.path or run \"loongagent: Locate the binary\".");
+      this.post({ type: "error", tabId,
+        message: "The loongagent binary was not found. Set loongagent.path or run \"loongagent: Locate the binary\"." });
       return;
     }
 
-    this.agent ??= new SessionAgent({
-      folder,
-      output: this.output,
-      context: this.context,
-      binaryPath: this.binary.path,
-    });
+    let agent: Agent;
+    try {
+      agent = await this.ensureAgent(tabId);
+    } catch (error) {
+      this.post({ type: "error", tabId, message: startupAdvice(explain(error)) });
+      this.output.appendLine(`failed: ${explain(error)}`);
+      return;
+    }
+
     const prompt = promptText(text, this.selection === undefined
-      ? this.attachments
-      : [...this.attachments, this.selection]);
-    this.attachments.length = 0;
-    this.postAttachments();
+      ? runtime.attachments
+      : [...runtime.attachments, this.selection]);
+    runtime.attachments.length = 0;
+    this.postAttachments(tabId);
     const renderer = new Renderer({ cwd: folder.uri.fsPath });
     renderer.beginTurn();
     const review = this.beginReview(folder);
-    this.pendingTool = undefined;
+    runtime.pendingTool = undefined;
     let failed = false;
 
     let controller;
     try {
-      controller = await this.agent.beginTurn({
+      controller = await agent.beginTurn({
         onEvent: (event) => {
           if (event.kind === EVENTS.toolCall) {
             const call = event.data as unknown as ToolCall;
             review.snapshots.see(pathsInArgs(call.args, folder.uri.fsPath));
-            this.recordPendingTool(call, review, folder.uri.fsPath);
+            this.recordPendingTool(tabId, call, review, folder.uri.fsPath);
           }
           if (event.kind === EVENTS.approvalRequested) {
-            this.showApproval(tab.id, event.data as unknown as ApprovalRequested, review);
+            this.showApproval(tabId, event.data as unknown as ApprovalRequested, review);
             return;
           }
           if (event.kind === EVENTS.toolResult) {
             const result = event.data as unknown as ToolResult;
-            if (this.unreviewed.delete(result.call_id) && result.ok) {
-              const auto = this.agent?.autoApprove === true;
+            if (runtime.unreviewed.delete(result.call_id) && result.ok) {
+              const auto = agent.autoApprove === true;
               const notice: UiPart = {
                 kind: "notice",
                 level: "warn",
@@ -559,71 +750,74 @@ export class ChatViewProvider {
                   ? "write applied without review because approval prompts are off for this session"
                   : 'write applied without review — set [permissions] write_workspace = "ask" to review before it lands',
               };
-              this.transcript.append(notice);
-              this.post({ type: "part", tabId: tab.id, part: notice });
+              runtime.transcript.append(notice);
+              this.post({ type: "part", tabId, part: notice });
             }
           }
           for (const part of renderer.event(event)) {
             if (part.kind === "assistant") {
-              this.transcript.append(part);
-              this.post({ type: "assistantFinal", tabId: tab.id, text: part.text, html: part.html });
+              runtime.transcript.append(part);
+              this.post({ type: "assistantFinal", tabId, text: part.text, html: part.html });
               continue;
             }
             if (part.kind === "tool" && part.status !== "running") {
-              const exists = this.transcript.all().some((entry) =>
+              const exists = runtime.transcript.all().some((entry) =>
                 entry.kind === "tool" && entry.callId === part.callId);
-              if (exists) this.transcript.updateTool(part.callId, part);
-              else this.transcript.append(part);
+              if (exists) runtime.transcript.updateTool(part.callId, part);
+              else runtime.transcript.append(part);
             } else {
-              this.transcript.append(part);
+              runtime.transcript.append(part);
             }
-            this.post({ type: "part", tabId: tab.id, part });
+            this.post({ type: "part", tabId, part });
           }
         },
-        onDelta: (delta) => this.post({ type: "delta", tabId: tab.id, text: delta }),
+        onDelta: (delta) => this.post({ type: "delta", tabId, text: delta }),
         decide: async (asked) => {
           this.output.appendLine(`awaiting approval: ${asked.action_class} — ${asked.reason}`);
-          const waiting = this.pendingAnswers.get(asked.request_id)
-            ?? this.approvals.wait(tab.id, asked.request_id);
-          this.pendingAnswers.delete(asked.request_id);
+          const key = `${tabId}:${asked.request_id}`;
+          const waiting = this.pendingAnswers.get(key)
+            ?? this.approvals.wait(tabId, asked.request_id);
+          this.pendingAnswers.delete(key);
           const answer = await waiting;
-          this.transcript.updateApproval(asked.request_id,
+          runtime.transcript.updateApproval(asked.request_id,
             { state: answer.granted ? "allowed" : "denied" });
-          const updated = this.transcript.all().find((entry) =>
+          const updated = runtime.transcript.all().find((entry) =>
             entry.kind === "approval" && entry.requestId === asked.request_id);
-          if (updated !== undefined) this.post({ type: "part", tabId: tab.id, part: updated });
+          if (updated !== undefined) this.post({ type: "part", tabId, part: updated });
           return answer;
         },
       });
     } catch (error) {
       if (error instanceof TurnBusyError) {
-        this.postError("A turn is already running in this session.");
+        this.post({ type: "error", tabId,
+          message: "A turn is already running in this session." });
         return;
       }
-      this.postError(startupAdvice(explain(error)));
+      this.post({ type: "error", tabId, message: startupAdvice(explain(error)) });
       this.output.appendLine(`failed: ${explain(error)}`);
       return;
     }
 
-    const previousExit = this.agent.takeLastExit();
+    const previousExit = agent.takeLastExit();
     if (previousExit !== undefined) {
       const notice: UiPart = {
         kind: "notice",
         level: "warn",
         text: `The previous loongagent server exited (${previousExit.signal ?? `code ${previousExit.code}`}); a new one is running now.`,
       };
-      this.transcript.append(notice);
-      this.post({ type: "part", tabId: tab.id, part: notice });
+      runtime.transcript.append(notice);
+      this.post({ type: "part", tabId, part: notice });
     }
-    this.running = true;
-    this.tabs.update(tab.id, { status: "running" });
+    runtime.running = true;
+    this.tabs.update(tabId, { status: "running" });
     if (tab.title === "New session") {
-      this.tabs.update(tab.id, { title: titleFrom(text) });
+      this.tabs.update(tabId, { title: titleFrom(text) });
     }
     const user: UiPart = { kind: "user", text };
-    this.transcript.append(user);
-    this.post({ type: "part", tabId: tab.id, part: user });
+    runtime.transcript.append(user);
+    this.post({ type: "part", tabId, part: user });
     this.postTabs();
+    this.persistTabs();
 
     try {
       await controller.run(prompt);
@@ -631,23 +825,25 @@ export class ChatViewProvider {
         .filter((path) => isInside(folder.uri.fsPath, path));
       if (changed.length > 0) {
         const part: UiPart = { kind: "review", token: review.token, paths: changed };
-        this.transcript.append(part);
-        this.post({ type: "part", tabId: tab.id, part });
+        runtime.transcript.append(part);
+        this.post({ type: "part", tabId, part });
       }
     } catch (error) {
       failed = true;
       const message = `The turn failed: ${explain(error)} See the **loongagent** output channel.`;
       const notice: UiPart = { kind: "notice", level: "error", text: message };
-      this.transcript.append(notice);
-      this.post({ type: "part", tabId: tab.id, part: notice });
+      runtime.transcript.append(notice);
+      this.post({ type: "part", tabId, part: notice });
       this.output.appendLine(`failed: ${explain(error)}`);
     } finally {
-      this.running = false;
-      this.tabs.update(tab.id, { status: failed ? "stopped" : "idle" });
-      this.agent?.endTurn();
-      this.pendingTool = undefined;
-      this.pendingAnswers.clear();
-      this.unreviewed.clear();
+      runtime.running = false;
+      this.tabs.update(tabId, { status: failed ? "stopped" : "idle" });
+      agent.endTurn();
+      runtime.pendingTool = undefined;
+      for (const key of [...this.pendingAnswers.keys()]) {
+        if (key.startsWith(`${tabId}:`)) this.pendingAnswers.delete(key);
+      }
+      runtime.unreviewed.clear();
       this.postTabs();
     }
   }
@@ -663,25 +859,32 @@ export class ChatViewProvider {
     if (!this.approvals.answer(tabId, requestId, answer)) return;
     this.tabs.update(tabId, { status: "running" });
     this.postTabs();
-    this.transcript.updateApproval(requestId, { state: answer.granted ? "allowed" : "denied" });
-    const updated = this.transcript.all().find((entry) =>
+    const runtime = this.runtimeFor(tabId);
+    runtime.transcript.updateApproval(requestId, { state: answer.granted ? "allowed" : "denied" });
+    const updated = runtime.transcript.all().find((entry) =>
       entry.kind === "approval" && entry.requestId === requestId);
     if (updated !== undefined) this.post({ type: "part", tabId, part: updated });
   }
 
-  private recordPendingTool(call: ToolCall, review: TurnReview, workspace: string): void {
+  private recordPendingTool(
+    tabId: string,
+    call: ToolCall,
+    review: TurnReview,
+    workspace: string,
+  ): void {
+    const runtime = this.runtimeFor(tabId);
     const args = call.args;
-    this.pendingTool = { callId: call.call_id };
+    runtime.pendingTool = { callId: call.call_id };
     if (args === null || typeof args !== "object" || Array.isArray(args)) return;
     const raw = (args as Record<string, unknown>).path;
     if (typeof raw !== "string") return;
     const path = isAbsolute(raw) ? resolve(raw) : resolve(workspace, raw);
     if (!isInside(workspace, path)) return;
-    if (call.tool === "write_file" || call.tool === "edit") this.unreviewed.add(call.call_id);
+    if (call.tool === "write_file" || call.tool === "edit") runtime.unreviewed.add(call.call_id);
     review.snapshots.see([path]);
     const snapshot = review.snapshots.left(path);
     if (snapshot !== undefined && snapshot.source !== "snapshot" && snapshot.note !== "new file") {
-      this.pendingTool = { callId: call.call_id, tool: call.tool, path };
+      runtime.pendingTool = { callId: call.call_id, tool: call.tool, path };
       return;
     }
     // The preview is against the file as it is now; the review's left side
@@ -699,17 +902,18 @@ export class ChatViewProvider {
         preview = previewEdit(before, oldString, newString, replaceAll);
       }
     }
-    this.pendingTool = { callId: call.call_id, tool: call.tool, path, preview };
+    runtime.pendingTool = { callId: call.call_id, tool: call.tool, path, preview };
   }
 
   private showApproval(tabId: string, asked: ApprovalRequested, review: TurnReview): void {
     // Register the waiter before the card is visible: a fast click must resolve
     // the same promise `decide` will await, not be lost between them.
-    this.pendingAnswers.set(asked.request_id, this.approvals.wait(tabId, asked.request_id));
+    this.pendingAnswers.set(`${tabId}:${asked.request_id}`, this.approvals.wait(tabId, asked.request_id));
     this.tabs.update(tabId, { status: "waiting" });
     this.postTabs();
-    const pending = this.pendingTool;
-    if (pending !== undefined) this.unreviewed.delete(pending.callId);
+    const runtime = this.runtimeFor(tabId);
+    const pending = runtime.pendingTool;
+    if (pending !== undefined) runtime.unreviewed.delete(pending.callId);
     const path = pending?.path;
     const preview = pending?.preview;
     if (path !== undefined && preview?.ok === true) {
@@ -721,7 +925,7 @@ export class ChatViewProvider {
         level: "warn",
         text: `preview unavailable: ${preview.reason} — the kernel will refuse this edit`,
       };
-      this.transcript.append(warning);
+      runtime.transcript.append(warning);
       this.post({ type: "part", tabId, part: warning });
     } else if (path !== undefined && pending?.tool !== undefined
       && (pending.tool === "write_file" || pending.tool === "edit")) {
@@ -730,7 +934,7 @@ export class ChatViewProvider {
         level: "warn",
         text: "preview unavailable: the file could not be read; the approval still applies",
       };
-      this.transcript.append(warning);
+      runtime.transcript.append(warning);
       this.post({ type: "part", tabId, part: warning });
     }
     const part: UiPart = {
@@ -743,7 +947,7 @@ export class ChatViewProvider {
       ...(preview?.ok === true ? { diff: preview.diff } : {}),
       state: "pending",
     };
-    this.transcript.append(part);
+    runtime.transcript.append(part);
     this.post({ type: "part", tabId, part });
   }
 
@@ -789,15 +993,18 @@ export class ChatViewProvider {
     }
   }
 
-  private cancel(): void {
-    if (!this.running) return;
+  private cancel(tabId: string): void {
+    const runtime = this.runtimeFor(tabId);
+    if (!runtime.running) return;
     this.output.appendLine("turn running: the person asked to stop");
-    for (const tab of this.tabs.tabs) this.approvals.denyTab(tab.id, "stopped by the person");
-    this.agent?.cancel();
+    this.approvals.denyTab(tabId, "stopped by the person");
+    runtime.agent?.cancel();
   }
 
-  private postError(message: string): void {
-    this.post({ type: "error", message });
+  private postError(message: string, tabId?: string): void {
+    this.post(tabId === undefined
+      ? { type: "error", message }
+      : { type: "error", tabId, message });
   }
 
   private html(webview: vscode.Webview): string {

@@ -105,6 +105,21 @@ test("replay returns the events and live events accumulate", async () => {
   assert.equal(session.events[2].seq, 3);
 });
 
+test("listSessions asks only for a limit and returns the list", async () => {
+  const { child, session } = makeSession();
+  await attachTo(child, session, "s1");
+  const pending = session.listSessions(7);
+  const request = child.sent()[1];
+  assert.equal(request.method, "session.list");
+  assert.deepEqual(request.params, { limit: 7 });
+  answer(child, 1, { sessions: [
+    { id: "a", title: "A", updated_at: 1, events: 2, turns: 1 },
+  ] });
+  assert.deepEqual(await pending, [
+    { id: "a", title: "A", updated_at: 1, events: 2, turns: 1 },
+  ]);
+});
+
 test("respondApproval sends the scope it was given", async () => {
   const { child, session } = makeSession();
   await attachTo(child, session, "s1");

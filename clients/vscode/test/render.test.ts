@@ -120,23 +120,44 @@ test("a path outside the workspace stays absolute so it reads as outside", () =>
   assert.match(textOf(parts), /\/etc\/hostname/);
 });
 
-test("a resumed session is summarised, not replayed in full", () => {
+test("a resumed session replays every message in order", () => {
   const renderer = new Renderer({ cwd: CWD });
   const events: EventEnvelope[] = [];
   for (let i = 0; i < 20; i++) {
     events.push(event("message.appended",
       { role: i % 2 === 0 ? "user" : "assistant", text: `message ${i}` }, i + 1));
   }
-  events.push(event("approval.decided", { request_id: "appr-1", granted: true, scope: "once" }, 21));
   const parts = renderer.resumed(events, "s7");
   assert.equal(parts[0].kind, "notice");
   if (parts[0].kind !== "notice") throw new Error("expected notice");
-  const text = textOf(parts);
-  assert.match(parts[0].text, /21/);
+  assert.match(parts[0].text, /20/);
   assert.match(parts[0].text, /s7/);
-  assert.match(text, /message 18/);
-  assert.match(text, /message 19/);
-  assert.doesNotMatch(text, /message 0\b/);
+  assert.deepEqual(parts.slice(1).map((part) => part.kind),
+    Array.from({ length: 20 }, (_, i) => i % 2 === 0 ? "user" : "assistant"));
+  const text = textOf(parts);
+  for (let i = 0; i < 20; i++) assert.match(text, new RegExp(`message ${i}\\b`));
+  assert.doesNotMatch(text, /You last said/);
+});
+
+test("a resumed session rebuilds tool cards and approval state", () => {
+  const events = [
+    event("message.appended", { role: "user", text: "write it" }, 1),
+    event("tool.call", { call_id: "c1", tool: "write_file", action_class: "write_workspace",
+      args: { path: "a.txt" } }, 2),
+    event("approval.requested", { request_id: "a1", action_class: "write_workspace",
+      reason: "needs review" }, 3),
+    event("approval.decided", { request_id: "a1", granted: true, scope: "once" }, 4),
+    event("tool.result", { call_id: "c1", ok: true, output: "done" }, 5),
+    event("message.appended", { role: "assistant", text: "finished" }, 6),
+  ];
+  const parts = new Renderer({ cwd: CWD }).resumed(events, "s7");
+  const tools = parts.filter((part) => part.kind === "tool");
+  const approvals = parts.filter((part) => part.kind === "approval");
+  assert.equal(tools.length, 1, "the result updates the call card instead of adding another");
+  assert.equal(tools[0].kind === "tool" ? tools[0].status : "", "ok");
+  assert.equal(approvals.length, 1);
+  assert.equal(approvals[0].kind === "approval" ? approvals[0].state : "", "allowed");
+  assert.equal(parts.at(-1)?.kind, "assistant");
 });
 
 test("an empty replay says so instead of rendering nothing", () => {

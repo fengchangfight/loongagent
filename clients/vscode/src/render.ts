@@ -161,27 +161,93 @@ export class Renderer {
       text: rows.map(([what, howMuch]) => `${what}: ${howMuch}`).join("\n") }];
   }
 
-  /** What a reopened session shows: where you were, not every word ever said. */
+  /**
+   * Rebuild a reopened session's transcript from its log.
+   *
+   * This is a replay, not a summary: every user and assistant message, tool
+   * card and approval answer appears in log order. Tool results update the card
+   * their call created; an approval decision updates the card its request
+   * created. A header says which session this is.
+   */
   resumed(events: EventEnvelope[], sessionId: string): UiPart[] {
     if (events.length === 0) {
       return [{ kind: "notice", level: "info",
         text: `Resumed session \`${sessionId}\` — the log has no events yet.` }];
     }
-    const newest = (role: string): string | undefined => {
-      for (let index = events.length - 1; index >= 0; index--) {
-        const envelope = events[index];
-        if (envelope.kind !== EVENTS.messageAppended) continue;
-        const message = envelope.data as unknown as MessageAppended;
-        if (message.role === role) return message.text;
+    this.beginTurn();
+    const parts: UiPart[] = [{
+      kind: "notice",
+      level: "info",
+      text: `Resumed session \`${sessionId}\` — ${events.length} events in the log.`,
+    }];
+    const tools = new Map<string, number>();
+    const approvals = new Map<string, number>();
+
+    for (const envelope of events) {
+      switch (envelope.kind) {
+        case EVENTS.messageAppended: {
+          const message = envelope.data as unknown as MessageAppended;
+          if (message.role === "user") {
+            parts.push({ kind: "user", text: message.text });
+          } else if (message.role === "assistant") {
+            parts.push(...this.message(message));
+          }
+          break;
+        }
+        case EVENTS.toolCall: {
+          const [part] = this.event(envelope);
+          if (part?.kind === "tool") {
+            tools.set(part.callId, parts.length);
+            parts.push(part);
+          }
+          break;
+        }
+        case EVENTS.toolResult: {
+          const result = envelope.data as unknown as ToolResult;
+          const [part] = this.event(envelope);
+          if (part?.kind !== "tool") break;
+          const at = tools.get(result.call_id);
+          if (at !== undefined && parts[at]?.kind === "tool") {
+            parts[at] = part;
+          } else {
+            tools.set(part.callId, parts.length);
+            parts.push(part);
+          }
+          break;
+        }
+        case EVENTS.approvalRequested: {
+          const asked = envelope.data as unknown as ApprovalRequested;
+          const part: UiPart = {
+            kind: "approval",
+            requestId: asked.request_id,
+            actionClass: asked.action_class,
+            reason: asked.reason,
+            paths: [],
+            state: "pending",
+          };
+          approvals.set(asked.request_id, parts.length);
+          parts.push(part);
+          break;
+        }
+        case EVENTS.approvalDecided: {
+          const decided = envelope.data as unknown as ApprovalDecided;
+          const at = approvals.get(decided.request_id);
+          if (at !== undefined && parts[at]?.kind === "approval") {
+            parts[at] = {
+              ...parts[at],
+              state: decided.granted ? "allowed" : "denied",
+            };
+          } else {
+            parts.push(...this.event(envelope));
+          }
+          break;
+        }
+        default:
+          parts.push(...this.event(envelope));
+          break;
       }
-      return undefined;
-    };
-    const lines = [`Resumed session \`${sessionId}\` — ${events.length} events in the log.`];
-    const asked = newest("user");
-    const answered = newest("assistant");
-    if (asked !== undefined) lines.push(`\n**You last said:** ${asked}`);
-    if (answered !== undefined) lines.push(`\n**The agent last said:** ${answered}`);
-    return [{ kind: "notice", level: "info", text: lines.join("\n") }];
+    }
+    return parts;
   }
 
   /** Every path this turn mentioned; the caller filters unchanged files. */

@@ -207,11 +207,12 @@ function renderPart(part: UiPart): HTMLElement | undefined {
     case "approval": {
       const card = element("div", `card approval ${part.state}`);
       card.append(element("div", "card-title",
-        `approval — ${part.actionClass}${part.state === "pending" ? "" : ` (${part.state})`}`));
+        `approval — ${part.tool ?? part.actionClass}${part.state === "pending" ? "" : ` (${part.state})`}`));
+      if (part.paths.length > 0) card.append(element("div", "paths", part.paths.join(" · ")));
       card.append(element("div", "reason", part.reason));
       if (part.diff !== undefined) {
         card.append(element("div", "paths",
-          `${part.diff.added} added · ${part.diff.removed} removed${part.diff.truncated ? " · truncated" : ""}`));
+          `${part.diff.added} added · ${part.diff.removed} removed${part.diff.approximate ? " (approximate)" : ""}${part.diff.truncated ? " · truncated" : ""}`));
         card.append(element("pre", "diff", part.diff.unified));
       }
       const actions = element("div", "actions");
@@ -325,6 +326,7 @@ function submit(): void {
       return;
     }
   }
+  state.live = "";
   api.postMessage({ type: "send", tabId: state.activeTabId, text });
   input.value = "";
   setBusy(true);
@@ -333,7 +335,9 @@ function submit(): void {
 
 stop.addEventListener("click", () => {
   if (state.activeTabId === undefined) return;
+  state.live = "";
   api.postMessage({ type: "cancel", tabId: state.activeTabId });
+  render();
 });
 send.addEventListener("click", submit);
 fileButton.addEventListener("click", () => {
@@ -375,6 +379,7 @@ window.addEventListener("message", (event: MessageEvent<HostMessage>) => {
     case "tabs":
       state.tabs = message.tabs;
       state.busy = activeTab()?.status === "running" || activeTab()?.status === "waiting";
+      if (!state.busy) state.live = "";
       setBusy(state.busy);
       render();
       break;
@@ -397,6 +402,7 @@ window.addEventListener("message", (event: MessageEvent<HostMessage>) => {
     case "error": {
       if (message.tabId !== undefined && message.tabId !== state.activeTabId) break;
       const text = message.detail === undefined ? message.message : `${message.message}\n${message.detail}`;
+      state.live = "";
       state.parts.push({ kind: "notice", level: "error", text });
       setBusy(false);
       render();

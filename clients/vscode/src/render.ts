@@ -21,6 +21,8 @@ export type { UiPart } from "./webviewProtocol.ts";
 /** How much of one tool's output reaches the chat before it is cut. */
 export const MAX_TOOL_OUTPUT_CHARS = 4000;
 
+const CONTENT_KEYS = new Set(["content", "old_string", "new_string", "text", "output", "prompt"]);
+
 function isAbsolutePath(value: string): boolean {
   return value.startsWith("/") || value.startsWith("\\\\") || /^[A-Za-z]:[\\/]/.test(value);
 }
@@ -42,6 +44,7 @@ export function pathsInArgs(args: JsonValue, cwd: string): string[] {
   const found: string[] = [];
   const visit = (value: JsonValue, key: string | undefined): void => {
     if (typeof value === "string") {
+      if (key !== undefined && CONTENT_KEYS.has(key)) return;
       if (value.includes("://")) return;
       if (isAbsolutePath(value)) {
         if (value.length > 1) found.push(value);

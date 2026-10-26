@@ -18,6 +18,8 @@ export interface DiffPreview {
   added: number;
   removed: number;
   truncated: boolean;
+  /** True when the kernel will be shown a coarse diff; the counts are approximate. */
+  approximate?: boolean;
 }
 
 /** One item in a tab's transcript. Plain JSON; no functions or VS Code objects. */
@@ -38,6 +40,7 @@ export type UiPart =
   | {
       kind: "approval";
       requestId: string;
+      tool?: string;
       actionClass: string;
       reason: string;
       paths: string[];

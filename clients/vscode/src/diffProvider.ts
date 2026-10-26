@@ -77,8 +77,13 @@ export class DiffProvider<U extends UriLike> {
     const turn = this.turnOf(token);
     return paths.filter((path) => {
       const left = turn?.left(path);
-      if (left === undefined || left.source !== "snapshot") return true;
-      return read(path) !== left.content;
+      const now = read(path);
+      if (left === undefined) return now !== undefined;
+      if (left.source === "snapshot") return now !== left.content;
+      // A new file exists only if someone actually made it. A denied write, a
+      // guessed read path, or a file outside the workspace is not a change.
+      if (left.note === "new file") return now !== undefined;
+      return false;
     });
   }
 }

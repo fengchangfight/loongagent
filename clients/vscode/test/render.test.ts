@@ -94,6 +94,11 @@ test("pathsInArgs keeps absolute paths and ignores flags and urls", () => {
   );
 });
 
+test("content strings are not harvested as paths", () => {
+  assert.deepEqual(pathsInArgs({ path: "/w/a.txt", content: "/w/not-a-path.txt" }, CWD),
+    ["/w/a.txt"]);
+});
+
 test("pathsInArgs does not repeat a path it saw twice", () => {
   assert.deepEqual(pathsInArgs({ from: "/w/a.txt", to: "/w/a.txt" }, CWD), ["/w/a.txt"]);
 });

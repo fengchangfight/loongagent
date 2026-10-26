@@ -32,6 +32,7 @@ export class SessionAgent {
   private agent: AgentSession | undefined;
   private announced = false;
   private lastExit: { code: number | null; signal: string | null } | undefined;
+  private exitObserver: ((code: number | null, signal: string | null) => void) | undefined;
 
   constructor(options: {
     folder: vscode.WorkspaceFolder;
@@ -120,6 +121,11 @@ export class SessionAgent {
     }
   }
 
+  /** Called once when the live child exits; lets the host cancel a waiting approval. */
+  setExitObserver(observer: (code: number | null, signal: string | null) => void): void {
+    this.exitObserver = observer;
+  }
+
   /** How the previous child died, once, so the next reply can say why it restarted. */
   takeLastExit(): { code: number | null; signal: string | null } | undefined {
     const exit = this.lastExit;
@@ -198,6 +204,7 @@ export class SessionAgent {
           this.agent = undefined;
           this.core.forget();
           this.lastExit = { code, signal };
+          this.exitObserver?.(code, signal);
         }
       },
     });

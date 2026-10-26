@@ -3,6 +3,8 @@ export interface DiffResult {
   added: number;
   removed: number;
   truncated: boolean;
+  /** True when the input was too large for the line-level LCS; counts are coarse. */
+  approximate?: boolean;
 }
 
 export type Preview =
@@ -10,6 +12,8 @@ export type Preview =
   | { ok: false; reason: string };
 
 const DEFAULT_MAX_LINES = 200;
+/** Above this many line pairs the LCS table is too large; use the coarse form. */
+const MAX_LCS_CELLS = 4_000_000;
 
 type Op = { kind: "same" | "add" | "del"; text: string };
 
@@ -43,8 +47,10 @@ function coarse(before: string[], after: string[]): Op[] {
 }
 
 /** A line-level LCS. The matrix is bounded; larger inputs use the coarse form. */
-function operations(before: string[], after: string[]): Op[] {
-  if (before.length * after.length > 1_000_000) return coarse(before, after);
+function operations(before: string[], after: string[]): { ops: Op[]; approximate: boolean } {
+  if (before.length * after.length > MAX_LCS_CELLS) {
+    return { ops: coarse(before, after), approximate: true };
+  }
   const width = after.length + 1;
   const table = Array.from({ length: before.length + 1 }, () => new Uint32Array(width));
   for (let i = before.length - 1; i >= 0; i--) {
@@ -72,7 +78,7 @@ function operations(before: string[], after: string[]): Op[] {
   }
   while (i < before.length) ops.push({ kind: "del", text: before[i++] });
   while (j < after.length) ops.push({ kind: "add", text: after[j++] });
-  return ops;
+  return { ops, approximate: false };
 }
 
 type Entry = { op: Op; oldNo: number; newNo: number };
@@ -90,7 +96,7 @@ function numbered(ops: Op[]): Entry[] {
 
 /** A unified diff with three context lines and the counts a card shows. */
 export function unifiedDiff(before: string, after: string, maxLines = DEFAULT_MAX_LINES): DiffResult {
-  const ops = operations(lines(before), lines(after));
+  const { ops, approximate } = operations(lines(before), lines(after));
   const added = ops.filter((op) => op.kind === "add").length;
   const removed = ops.filter((op) => op.kind === "del").length;
   if (added === 0 && removed === 0) {
@@ -137,7 +143,7 @@ export function unifiedDiff(before: string, after: string, maxLines = DEFAULT_MA
       truncated = true;
     }
   }
-  return { unified, added, removed, truncated };
+  return { unified, added, removed, truncated, ...(approximate ? { approximate: true } : {}) };
 }
 
 /** Preview a whole-file write; `undefined` before means a new file. */
@@ -159,8 +165,9 @@ export function previewEdit(
   const occurrences = before.split(oldString).length - 1;
   if (occurrences === 0) return { ok: false, reason: "old_string was not found" };
   if (occurrences > 1 && !replaceAll) return { ok: false, reason: "old_string is not unique" };
+  const at = before.indexOf(oldString);
   const after = replaceAll
     ? before.split(oldString).join(newString)
-    : before.replace(oldString, newString);
+    : before.slice(0, at) + newString + before.slice(at + oldString.length);
   return { ok: true, after, diff: unifiedDiff(before, after, maxLines) };
 }

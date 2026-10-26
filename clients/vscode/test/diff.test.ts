@@ -37,6 +37,25 @@ test("a large diff is truncated and says so", () => {
   assert.equal(preview.ok, true);
   if (preview.ok) assert.equal(preview.diff.truncated, true);
 });
+test("edit new_string metacharacters are literal, not replacement patterns", () => {
+  for (const replacement of ["$&b", "$`b", "$'b", "$$b"]) {
+    const preview = previewEdit("a", "a", replacement);
+    assert.equal(preview.ok, true, replacement);
+    if (preview.ok) assert.equal(preview.after, replacement);
+  }
+});
+
+test("a 1001-line file with two edits reports real counts", () => {
+  const before = Array.from({ length: 1001 }, (_, index) => `line ${index + 1}`);
+  const after = [...before];
+  after[9] = "changed 10";
+  after[989] = "changed 990";
+  const result = unifiedDiff(before.join("\n"), after.join("\n"));
+  assert.equal(result.added, 2);
+  assert.equal(result.removed, 2);
+  assert.ok(!result.approximate);
+});
+
 test("an unchanged file has no diff and is not truncated", () => {
   const diff = unifiedDiff("a\nb", "a\nb");
   assert.deepEqual(diff, { unified: "", added: 0, removed: 0, truncated: false });

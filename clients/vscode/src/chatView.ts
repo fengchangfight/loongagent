@@ -8,7 +8,7 @@ import { DiffProvider } from "./diffProvider.ts";
 import { refusalToStart } from "./guards.ts";
 import { PreviewProvider } from "./previewProvider.ts";
 import { promptText } from "./prompt.ts";
-import { Renderer } from "./render.ts";
+import { pathsInArgs, Renderer } from "./render.ts";
 import { SessionAgent } from "./sessionAgent.ts";
 import { FileSnapshots } from "./snapshots.ts";
 import { TabManager } from "./tab.ts";
@@ -120,6 +120,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     view.webview.html = this.html(view.webview);
     view.webview.onDidReceiveMessage((raw) => this.handle(raw));
     view.onDidDispose(() => {
+      this.denyPending("webview closed");
       this.view = undefined;
     });
   }
@@ -142,10 +143,27 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   dispose(): void {
-    for (const tab of this.tabs.tabs) this.approvals.denyTab(tab.id, "webview closed");
+    this.denyPending("webview closed");
     this.agent?.dispose();
     this.agent = undefined;
     this.view = undefined;
+  }
+
+  private denyPending(reason: string): void {
+    for (const tab of this.tabs.tabs) this.approvals.denyTab(tab.id, reason);
+  }
+
+  private closeTab(tabId: string): void {
+    this.approvals.denyTab(tabId, "tab closed");
+    if (this.tabs.activeId === tabId) {
+      this.agent?.dispose();
+      this.agent = undefined;
+      this.transcript.reset();
+      this.attachments.length = 0;
+    }
+    this.tabs.close(tabId);
+    this.postBootstrap();
+    this.postTabs();
   }
 
   private whenReady(): Promise<void> {
@@ -213,6 +231,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         break;
       case "yolo":
         void this.yolo(message.on);
+        break;
+      case "closeTab":
+        this.closeTab(message.tabId);
         break;
       default:
         this.output.appendLine(`webview: ${message.type} arrives with the next task`);
@@ -287,13 +308,32 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       throw new Error("the loongagent binary was not found; set loongagent.path or run Locate");
     }
     const folder = vscode.workspace.workspaceFolders?.[0];
-    if (folder === undefined) throw new Error("open a folder first — the agent works on a workspace");
-    this.agent ??= new SessionAgent({
-      folder,
-      output: this.output,
-      context: this.context,
-      binaryPath: this.binary.path,
+    const refusal = refusalToStart({
+      hasFolder: folder !== undefined,
+      isTrusted: vscode.workspace.isTrusted,
     });
+    if (refusal !== undefined || folder === undefined) {
+      throw new Error(refusal ?? "open a folder first — the agent works on a workspace");
+    }
+    if (this.agent === undefined) {
+      const agent = new SessionAgent({
+        folder,
+        output: this.output,
+        context: this.context,
+        binaryPath: this.binary.path,
+      });
+      agent.setExitObserver((code, signal) => {
+        const reason = signal ?? `code ${code}`;
+        this.denyPending(`server exited (${reason})`);
+        const id = this.tabs.activeId;
+        if (id !== undefined) {
+          this.tabs.update(id, { status: "stopped" });
+          this.postTabs();
+        }
+        this.postError(`The loongagent server exited (${reason}). The next send starts a new one.`);
+      });
+      this.agent = agent;
+    }
     return this.agent.ensure();
   }
 
@@ -472,7 +512,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     renderer.beginTurn();
     const review = this.beginReview(folder);
     this.pendingTool = undefined;
-    let lastAssistant: { text: string; html: string } | undefined;
     let failed = false;
 
     let controller;
@@ -480,7 +519,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       controller = await this.agent.beginTurn({
         onEvent: (event) => {
           if (event.kind === EVENTS.toolCall) {
-            this.recordPendingTool(event.data as unknown as ToolCall, review, folder.uri.fsPath);
+            const call = event.data as unknown as ToolCall;
+            review.snapshots.see(pathsInArgs(call.args, folder.uri.fsPath));
+            this.recordPendingTool(call, review, folder.uri.fsPath);
           }
           if (event.kind === EVENTS.approvalRequested) {
             this.showApproval(tab.id, event.data as unknown as ApprovalRequested, review);
@@ -488,11 +529,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           }
           if (event.kind === EVENTS.toolResult) {
             const result = event.data as unknown as ToolResult;
-            if (this.unreviewed.delete(result.call_id)) {
+            if (this.unreviewed.delete(result.call_id) && result.ok) {
+              const auto = this.agent?.autoApprove === true;
               const notice: UiPart = {
                 kind: "notice",
                 level: "warn",
-                text: 'write applied without review — set [permissions] write_workspace = "ask" to review before it lands',
+                text: auto
+                  ? "write applied without review because approval prompts are off for this session"
+                  : 'write applied without review — set [permissions] write_workspace = "ask" to review before it lands',
               };
               this.transcript.append(notice);
               this.post({ type: "part", tabId: tab.id, part: notice });
@@ -500,7 +544,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           }
           for (const part of renderer.event(event)) {
             if (part.kind === "assistant") {
-              lastAssistant = { text: part.text, html: part.html };
+              this.transcript.append(part);
+              this.post({ type: "assistantFinal", tabId: tab.id, text: part.text, html: part.html });
               continue;
             }
             if (part.kind === "tool" && part.status !== "running") {
@@ -561,11 +606,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     try {
       await controller.run(prompt);
-      if (lastAssistant !== undefined) {
-        const assistant: UiPart = { kind: "assistant", ...lastAssistant };
-        this.transcript.append(assistant);
-        this.post({ type: "assistantFinal", tabId: tab.id, ...lastAssistant });
-      }
       const changed = this.left.changedAmong(review.token, renderer.touchedFiles(), readNow)
         .filter((path) => isInside(folder.uri.fsPath, path));
       if (changed.length > 0) {
@@ -675,6 +715,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const part: UiPart = {
       kind: "approval",
       requestId: asked.request_id,
+      ...(pending?.tool === undefined ? {} : { tool: pending.tool }),
       actionClass: asked.action_class,
       reason: asked.reason,
       paths: path === undefined ? [] : [path],

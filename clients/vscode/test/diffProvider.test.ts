@@ -90,6 +90,20 @@ test("a new file's left side is empty and named as new", () => {
   }
 });
 
+test("a denied new-file write is not listed as changed", () => {
+  const dir = tempDir("denied-new");
+  try {
+    const file = join(dir, "new.txt");
+    const snapshots = new FileSnapshots({ workspace: dir });
+    snapshots.see([file]);
+    const provider = new DiffProvider(stores({ t1: snapshots }), () => undefined, stubUris);
+    assert.deepEqual(provider.changedAmong("t1", [file], () => undefined), []);
+    assert.deepEqual(provider.changedAmong("t1", [file], () => "made"), [file]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("the path survives the round trip through the URI", () => {
   const dir = tempDir("spaces");
   try {
@@ -121,13 +135,15 @@ test("changedAmong lists only what actually differs", () => {
   }
 });
 
-test("a path with no left side is listed rather than assumed unchanged", () => {
+test("a path with no left side is listed only when it now exists", () => {
   const dir = tempDir("noleft");
   try {
     const outside = "/somewhere/else.txt";
     const snapshots = new FileSnapshots({ workspace: dir });
     const provider = new DiffProvider(stores({ t1: snapshots }), () => undefined, stubUris);
-    assert.deepEqual(provider.changedAmong("t1", [outside], () => undefined), [outside]);
+    assert.deepEqual(provider.changedAmong("t1", [outside], () => undefined), [],
+      "a guessed missing path is not a change");
+    assert.deepEqual(provider.changedAmong("t1", [outside], () => "now here"), [outside]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

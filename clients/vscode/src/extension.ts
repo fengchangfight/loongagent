@@ -12,6 +12,7 @@ import { SessionAgent } from "./sessionAgent.ts";
 import { EVENTS } from "../../ts/protocol.generated.ts";
 import type { DiffUris } from "./diffProvider.ts";
 import type { UiPart } from "./render.ts";
+import type { Attachment } from "./webviewProtocol.ts";
 import type { JsonValue } from "../../ts/protocol.generated.ts";
 import type { ApprovalAnswer, ApprovalRequest } from "./turn.ts";
 import type { EventEnvelope } from "../../ts/protocol.generated.ts";
@@ -398,7 +399,7 @@ async function runTurn(
   });
 
   try {
-    await controller.run(promptText(request.prompt, request.references));
+    await controller.run(promptText(request.prompt, referenceAttachments(request.references)));
     const changed = provider.changedAmong(turn.token, renderer.touchedFiles(), readNow);
     if (changed.length > 0) {
       stream.button({
@@ -422,6 +423,20 @@ async function runTurn(
     agent.endTurn();
     cancellation.dispose();
   }
+}
+
+/** Temporary: the old participant's `#file` references become path attachments. */
+function referenceAttachments(references: readonly vscode.ChatPromptReference[]): Attachment[] {
+  return references.flatMap((reference, index) => {
+    const value = reference.value as
+      | { fsPath?: unknown; uri?: { fsPath?: unknown } }
+      | undefined;
+    const direct = typeof value?.fsPath === "string" ? value.fsPath : undefined;
+    const nested = value?.uri;
+    const path = direct ?? (nested !== null && typeof nested === "object"
+      && typeof nested.fsPath === "string" ? nested.fsPath : undefined);
+    return path === undefined ? [] : [{ id: `ref-${index}`, kind: "file" as const, path }];
+  });
 }
 
 function emit(stream: vscode.ChatResponseStream, parts: UiPart[]): void {

@@ -2,34 +2,28 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { promptText } from "../src/prompt.ts";
 
-test("a prompt with no references is passed through unchanged", () => {
-  assert.equal(promptText("hello", []), "hello");
-  assert.equal(promptText("hello", undefined), "hello");
+test("a file attachment adds its absolute path", () => {
+  assert.ok(promptText("look", [{ id: "a", kind: "file", path: "/w/a.ts" }]).includes("- /w/a.ts"));
 });
-
-test("a reference with an fsPath becomes one path line", () => {
-  const text = promptText("what is in here?", [{ value: { fsPath: "/w/a.ts" } }]);
-  assert.equal(text, "what is in here?\n\nreferenced files:\n- /w/a.ts");
+test("a selection adds path, line range and text", () => {
+  const text = promptText("explain", [{ id: "s", kind: "selection", path: "/w/a.ts",
+    startLine: 10, endLine: 12, text: "const a = 1;" }]);
+  assert.ok(text.includes("/w/a.ts"));
+  assert.ok(text.includes("lines 10-12"));
+  assert.ok(text.includes("const a = 1;"));
 });
-
-test("a reference that wraps its uri is read too", () => {
-  const text = promptText("look", [{ value: { uri: { fsPath: "/w/b.ts" } } }]);
-  assert.match(text, /- \/w\/b\.ts/);
-});
-
-test("a reference with nothing readable contributes nothing", () => {
-  assert.equal(promptText("hello", [{ value: "just a string" }, { value: 7 }]), "hello");
-});
-
-test("the same path twice appears once", () => {
+test("two file attachments are not repeated", () => {
   const text = promptText("look", [
-    { value: { fsPath: "/w/a.ts" } },
-    { value: { uri: { fsPath: "/w/a.ts" } } },
+    { id: "a", kind: "file", path: "/w/a.ts" },
+    { id: "b", kind: "file", path: "/w/a.ts" },
   ]);
-  assert.equal(text.match(/\/w\/a\.ts/g)?.length, 1);
+  assert.equal(text.split("- /w/a.ts").length - 1, 1);
 });
-
-test("the block is only a path list — no file contents are pasted", () => {
-  const text = promptText("look", [{ value: { fsPath: "/w/a.ts" } }]);
-  assert.equal(text.split("referenced files:\n")[1], "- /w/a.ts");
+test("no attachments leaves the prompt unchanged", () => {
+  assert.equal(promptText("look", []), "look");
+});
+test("a selection containing backticks uses a longer fence", () => {
+  const text = promptText("explain", [{ id: "s", kind: "selection", path: "/w/a.ts",
+    startLine: 1, endLine: 1, text: "```" }]);
+  assert.ok(text.includes("````"));
 });

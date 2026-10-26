@@ -364,11 +364,11 @@ async function runTurn(
         // the pre-turn content even when the tree was already dirty (spec §4.5).
         if (event.kind === EVENTS.toolCall) {
           const args = (event.data as { args?: JsonValue }).args;
-          if (args !== undefined) turn.snapshots.see(pathsInArgs(args));
+          if (args !== undefined) turn.snapshots.see(pathsInArgs(args, folder.uri.fsPath));
         }
         emit(stream, renderer.event(event));
       },
-      onDelta: (text) => emit(stream, renderer.delta(text)),
+      onDelta: (text) => stream.markdown(text),
       // The person answers, in the editor, while the turn waits.
       decide: (asked) => {
         output.appendLine(`awaiting approval: ${asked.action_class} — ${asked.reason}`);
@@ -422,8 +422,25 @@ async function runTurn(
 
 function emit(stream: vscode.ChatResponseStream, parts: UiPart[]): void {
   for (const part of parts) {
-    if (part.kind === "markdown") stream.markdown(part.text);
-    else stream.progress(part.text);
+    switch (part.kind) {
+      case "assistant":
+      case "notice":
+      case "user":
+        stream.markdown(part.text);
+        break;
+      case "progress":
+        stream.progress(part.text);
+        break;
+      case "tool":
+        stream.progress(`${part.tool} (${part.actionClass})`);
+        break;
+      case "approval":
+        stream.markdown(`approval needed: ${part.actionClass} — ${part.reason}`);
+        break;
+      case "review":
+        stream.markdown(`Review ${part.paths.length} changed files`);
+        break;
+    }
   }
 }
 

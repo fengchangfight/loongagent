@@ -1,95 +1,90 @@
 import { EVENTS } from "../../ts/protocol.generated.ts";
+import { renderMarkdown } from "./markdown.ts";
 import type {
   ApprovalDecided,
   ApprovalRequested,
+  ContextExplain,
   EventEnvelope,
   JsonValue,
-  ContextExplain,
   MessageAppended,
   ModelList,
   PermissionsRelaxed,
   PolicyDecided,
   ToolCall,
   ToolResult,
+  TurnInterrupted,
 } from "../../ts/protocol.generated.ts";
+import type { UiPart } from "./webviewProtocol.ts";
 
-/** What a surface can show without knowing the protocol. */
-export type UiPart =
-  | { kind: "markdown"; text: string }
-  | { kind: "progress"; text: string };
+export type { UiPart } from "./webviewProtocol.ts";
 
 /** How much of one tool's output reaches the chat before it is cut. */
 export const MAX_TOOL_OUTPUT_CHARS = 4000;
 
+function isAbsolutePath(value: string): boolean {
+  return value.startsWith("/") || value.startsWith("\\\\") || /^[A-Za-z]:[\\/]/.test(value);
+}
+
+function joinWorkspace(cwd: string, value: string): string {
+  const separator = cwd.includes("\\") && !cwd.includes("/") ? "\\" : "/";
+  return `${cwd.replace(/[\\/]+$/, "")}${separator}${value.replace(/^[.][\\/]/, "")}`;
+}
+
 /**
- * Absolute paths that appear as string values in a tool call's arguments.
+ * Paths in a tool call's arguments.
  *
- * The arguments are opaque JSON, so this is a harvest and not a parse: a tool
- * that names a file in a way this misses simply contributes one less file to
- * the review list. Nothing here touches the filesystem.
+ * An absolute-looking string is kept. A relative string under the `path` key is
+ * resolved against the workspace, because the kernel resolves it that way too;
+ * flags and URLs are ignored. This is still a harvest, not a parse: missing a
+ * path degrades the review list, it never invents one.
  */
-export function pathsInArgs(args: JsonValue): string[] {
+export function pathsInArgs(args: JsonValue, cwd: string): string[] {
   const found: string[] = [];
-  const visit = (value: JsonValue): void => {
+  const visit = (value: JsonValue, key: string | undefined): void => {
     if (typeof value === "string") {
-      if (looksLikeAPath(value)) found.push(value);
+      if (value.includes("://")) return;
+      if (isAbsolutePath(value)) {
+        if (value.length > 1) found.push(value);
+        return;
+      }
+      if (key === "path" && value !== "" && !value.startsWith("-")) {
+        found.push(joinWorkspace(cwd, value));
+      }
       return;
     }
     if (Array.isArray(value)) {
-      for (const item of value) visit(item);
+      for (const item of value) visit(item, key);
       return;
     }
     if (value !== null && typeof value === "object") {
-      for (const item of Object.values(value)) visit(item);
+      for (const [childKey, item] of Object.entries(value)) visit(item, childKey);
     }
   };
-  visit(args);
+  visit(args, undefined);
   return [...new Set(found)];
 }
 
-/** The longest run of `character` in `text`: how long a fence has to be. */
-function longestRunOf(text: string, character: string): number {
-  let longest = 0;
-  let current = 0;
-  for (const letter of text) {
-    current = letter === character ? current + 1 : 0;
-    if (current > longest) longest = current;
-  }
-  return longest;
-}
-
-function looksLikeAPath(value: string): boolean {
-  if (value.includes("://")) return false;
-  if (value.startsWith("/")) return value.length > 1;
-  return /^[A-Za-z]:[\\/]/.test(value);
-}
-
 /**
- * Turns the kernel's events into things a chat can show.
+ * Turns the kernel's events into things the sidebar can show.
  *
- * Two rules hold everywhere in here: a value that came from an event is quoted
- * exactly (a rule name, a scope, a verdict — this layer never has an opinion
- * about any of them), and nothing is shown twice.
+ * Two rules hold everywhere: a value that came from an event is quoted exactly
+ * (a rule, a scope, a verdict — this layer has no opinion about any of them),
+ * and nothing is shown twice. The host adds a diff to an approval card; the
+ * renderer never invents one.
  */
 export class Renderer {
   private readonly cwd: string;
   private readonly files: string[] = [];
-  private streamed = false;
+  private readonly calls = new Map<string, { tool: string; actionClass: string }>();
 
   constructor(options: { cwd: string }) {
     this.cwd = options.cwd;
   }
 
-  /** A new turn: the file list and the "already streamed" flag start over. */
+  /** A new turn: the file list and the known tool calls start over. */
   beginTurn(): void {
     this.files.length = 0;
-    this.streamed = false;
-  }
-
-  /** A fragment of the answer. Verbatim: a chunk can end mid-word. */
-  delta(text: string): UiPart[] {
-    this.streamed = true;
-    return [{ kind: "markdown", text }];
+    this.calls.clear();
   }
 
   event(envelope: EventEnvelope): UiPart[] {
@@ -100,32 +95,39 @@ export class Renderer {
         return this.toolResult(envelope.data as unknown as ToolResult);
       case EVENTS.policyDecided: {
         const decided = envelope.data as unknown as PolicyDecided;
-        return [
-          {
-            kind: "markdown",
-            text: `policy: ${decided.verdict} by ${decided.rule} (${decided.action_class})`,
-          },
-        ];
+        return [{
+          kind: "notice",
+          level: "info",
+          text: `policy: ${decided.verdict} by ${decided.rule} (${decided.action_class})`,
+        }];
       }
       case EVENTS.approvalRequested: {
         const asked = envelope.data as unknown as ApprovalRequested;
-        return [
-          { kind: "markdown", text: `approval needed: ${asked.action_class} — ${asked.reason}` },
-        ];
+        return [{
+          kind: "approval",
+          requestId: asked.request_id,
+          actionClass: asked.action_class,
+          reason: asked.reason,
+          paths: [],
+          state: "pending",
+        }];
       }
       case EVENTS.approvalDecided: {
         const decided = envelope.data as unknown as ApprovalDecided;
         const outcome = decided.granted ? "granted" : "denied";
-        return [{ kind: "markdown", text: `approval ${outcome} (${decided.scope})` }];
+        return [{ kind: "notice", level: "info", text: `approval ${outcome} (${decided.scope})` }];
       }
       case EVENTS.permissionsRelaxed: {
         const relaxed = envelope.data as unknown as PermissionsRelaxed;
-        // ADR-0007 §5: a session that stops asking is a session whose log has to
-        // say why, and a surface that hides it would be hiding the relaxation.
         const state = relaxed.auto_approve
           ? "approval prompts are off for this session (the sandbox is unchanged)"
           : "approval prompts are on again for this session";
-        return [{ kind: "markdown", text: `${state} — ${relaxed.reason}` }];
+        return [{ kind: "notice", level: relaxed.auto_approve ? "warn" : "info",
+          text: `${state} — ${relaxed.reason}` }];
+      }
+      case EVENTS.turnInterrupted: {
+        const interrupted = envelope.data as unknown as TurnInterrupted;
+        return [{ kind: "notice", level: "warn", text: `interrupted — ${interrupted.reason}` }];
       }
       case EVENTS.messageAppended:
         return this.message(envelope.data as unknown as MessageAppended);
@@ -140,7 +142,7 @@ export class Renderer {
       const current = offering.name === list.selected ? " — current" : "";
       return `- \`${offering.name}\` (${offering.model})${current}`;
     });
-    return [{ kind: "markdown", text: `Models for this session:\n${lines.join("\n")}` }];
+    return [{ kind: "notice", level: "info", text: `Models for this session:\n${lines.join("\n")}` }];
   }
 
   /** What the next request will carry, exactly as the kernel reported it. */
@@ -152,23 +154,15 @@ export class Renderer {
       ["tools", explain.tools],
       ["compactions", explain.compactions],
     ];
-    const table = [
-      "| what | how much |",
-      "|---|---|",
-      ...rows.map(([what, howMuch]) => `| ${what} | ${howMuch} |`),
-    ].join("\n");
-    return [{ kind: "markdown", text: table }];
+    return [{ kind: "notice", level: "info",
+      text: rows.map(([what, howMuch]) => `${what}: ${howMuch}`).join("\n") }];
   }
 
-  /**
-   * What a reopened session shows: where you were, not every word ever said.
-   *
-   * The chat's transcript belongs to the window; the session belongs to the log
-   * (spec §4.6). So this is a card, not a replay.
-   */
+  /** What a reopened session shows: where you were, not every word ever said. */
   resumed(events: EventEnvelope[], sessionId: string): UiPart[] {
     if (events.length === 0) {
-      return [{ kind: "markdown", text: `Resumed session \`${sessionId}\` — the log has no events yet.` }];
+      return [{ kind: "notice", level: "info",
+        text: `Resumed session \`${sessionId}\` — the log has no events yet.` }];
     }
     const newest = (role: string): string | undefined => {
       for (let index = events.length - 1; index >= 0; index--) {
@@ -184,58 +178,50 @@ export class Renderer {
     const answered = newest("assistant");
     if (asked !== undefined) lines.push(`\n**You last said:** ${asked}`);
     if (answered !== undefined) lines.push(`\n**The agent last said:** ${answered}`);
-    return [{ kind: "markdown", text: lines.join("\n") }];
+    return [{ kind: "notice", level: "info", text: lines.join("\n") }];
   }
 
-  /**
-   * Every path this turn mentioned.
-   *
-   * "Mentioned", not "modified": a read mentions a path too. The caller that
-   * opens diffs is responsible for showing only the ones that differ.
-   */
+  /** Every path this turn mentioned; the caller filters unchanged files. */
   touchedFiles(): string[] {
     return [...this.files];
   }
 
   private toolCall(call: ToolCall): UiPart[] {
-    const paths = pathsInArgs(call.args);
+    const paths = pathsInArgs(call.args, this.cwd);
     for (const path of paths) {
       if (!this.files.includes(path)) this.files.push(path);
     }
-    const where = paths.length === 0 ? "" : ` — ${paths.map((path) => this.display(path)).join(", ")}`;
-    return [{ kind: "progress", text: `${call.tool} (${call.action_class})${where}` }];
+    this.calls.set(call.call_id, { tool: call.tool, actionClass: call.action_class });
+    return [{
+      kind: "tool",
+      callId: call.call_id,
+      tool: call.tool,
+      actionClass: call.action_class,
+      paths,
+      status: "running",
+    }];
   }
 
   private toolResult(result: ToolResult): UiPart[] {
     const output = result.output ?? "";
-    const outcome = result.ok ? "" : "failed — ";
-    const truncated = output.slice(0, MAX_TOOL_OUTPUT_CHARS);
-    // A fence inside the output would close the block early and spill the rest of
-    // the transcript into it, so the fence is made longer than anything inside.
-    const fence = "~".repeat(Math.max(3, longestRunOf(output, "~") + 1));
-    const body = `\n${fence}\n${outcome}${truncated}\n${fence}\n`;
-    if (output.length <= MAX_TOOL_OUTPUT_CHARS) return [{ kind: "markdown", text: body }];
-    const dropped = output.length - MAX_TOOL_OUTPUT_CHARS;
-    return [
-      {
-        kind: "markdown",
-        text: body + `… truncated ${dropped} of ${output.length} characters\n`,
-      },
-    ];
+    const call = this.calls.get(result.call_id);
+    const dropped = output.length > MAX_TOOL_OUTPUT_CHARS
+      ? output.length - MAX_TOOL_OUTPUT_CHARS
+      : undefined;
+    return [{
+      kind: "tool",
+      callId: result.call_id,
+      tool: call?.tool ?? "tool",
+      actionClass: call?.actionClass ?? "",
+      paths: [],
+      status: result.ok ? "ok" : "failed",
+      output: output.slice(0, MAX_TOOL_OUTPUT_CHARS),
+      ...(dropped === undefined ? {} : { truncated: dropped }),
+    }];
   }
 
   private message(message: MessageAppended): UiPart[] {
-    // The person's own words are already in the chat: repeating them would be
-    // the surface narrating what just happened over itself.
     if (message.role !== "assistant") return [];
-    // The streamed fragments were the same text; the event is the record of it.
-    if (this.streamed) return [];
-    return [{ kind: "markdown", text: message.text }];
-  }
-
-  /** Relative inside the workspace, absolute outside: "outside" has to stay legible. */
-  private display(path: string): string {
-    const root = this.cwd.endsWith("/") ? this.cwd : `${this.cwd}/`;
-    return path.startsWith(root) ? path.slice(root.length) : path;
+    return [{ kind: "assistant", text: message.text, html: renderMarkdown(message.text) }];
   }
 }

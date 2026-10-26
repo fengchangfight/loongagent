@@ -262,13 +262,13 @@ git commit -m "feat(vscode): list sessions and persist the open tabs"
 
 Replace the single `agent`/`transcript` fields with the maps. On `ready`:
 - restore `decodeTabs(workspaceState.get("loongagent.tabs.v1"))` into `TabManager`;
-- restore the active id; if there are no tabs, create one with `newTab()` so the composer always has an active tab;
+- map each `StoredTab` to a `TabState` with `status: "idle"`, restore the active id; if there are no tabs, create one with `newTab()` so the composer always has an active tab;
 - post `bootstrap` with tabs, active id, active transcript, models (if a session is live), binary;
 - a restored or history tab constructs `SessionAgent` with its `sessionId`; if `ensure()` throws, drop the tab with a visible message. It must not fall back to a new session.
 
 - [ ] **Step 2: Implement the tab messages**
 
-- `newTab`: if `TabManager.open` returns `"max"`, post `"At most 5 tabs"`; otherwise create a `SessionAgent`, a `Transcript`, open the tab, activate, persist, post `tabs`, and ensure the agent (spawn `--new`).
+- `newTab`: if `TabManager.open` returns `"max"`, post `"At most 5 tabs"`; otherwise create a `SessionAgent({fresh:true})`, a `Transcript`, open the tab, activate, persist, post `tabs`, and ensure the agent (spawn `--new`).
 - `selectTab`: activate, persist, ensure the agent (`--session` or restored), post `transcript` and models.
 - `closeTab`: `approvals.denyTab(tabId, "tab closed")`, dispose the agent, remove transcript, close, persist, post tabs and the new active transcript.
 - `openSession`: if `tabs.find(sessionId)` exists, focus it; otherwise create a tab with `sessionId` and a `SessionAgent({sessionId})` that spawns `--session <id>`; if it cannot attach, drop the tab with a message; no second writer and no silent new session.

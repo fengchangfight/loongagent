@@ -611,7 +611,8 @@ git commit -m "feat(vscode): render events as structured parts and resolve relat
   }
   export class SessionAgent {
     constructor(options: { folder: vscode.WorkspaceFolder; output: vscode.OutputChannel;
-      context: vscode.ExtensionContext; binaryPath: string; sessionId?: string; });
+      context: vscode.ExtensionContext; binaryPath: string; sessionId?: string;
+      fresh?: boolean; });
     ensure(): Promise<LoongSession>;
     beginTurn(sink: TurnSink): Promise<TurnController>;
     endTurn(): void;
@@ -666,7 +667,7 @@ Expected: FAIL — module missing.
 
 `SessionAgent` keeps the old `WorkspaceAgent` behavior (stored id, resume-once, auto-approve, output lines) but:
 - takes `binaryPath` and spawns that exact path;
-- accepts an optional `sessionId`: when present, `ensure()` attaches exactly that session and **throws** if it cannot (the host drops the tab); when absent, it uses the old stored-id-with-one-fallback path (M1);
+- accepts `sessionId` (attach exactly that session; throw if it cannot, so the host drops the tab), `fresh` (spawn `--new` and do not resume), or neither (the old stored-id-with-one-fallback path, used by M1);
 - holds a `SessionCore`; `onExit` calls `core.forget()`;
 - `beginTurn` uses `core.turnGate` (created by `adopt`), never a stale gate;
 - `startNew` disposes the current child, spawns `--new`, attaches and adopts.
@@ -846,6 +847,7 @@ git commit -m "feat(vscode): never leave an approval pending across a closed tab
   export interface HostBinary { path: string; version: string; schema: string; }
   export async function resolveHostBinary(context: vscode.ExtensionContext,
     output: vscode.OutputChannel): Promise<HostBinary | undefined>;
+  export async function pickBinary(): Promise<string | undefined>;
   export class ChatViewProvider implements vscode.WebviewViewProvider {
     static readonly viewType = "loongagent.chat";
     constructor(options: { context: vscode.ExtensionContext; output: vscode.OutputChannel;
@@ -912,7 +914,9 @@ Expected: FAIL — manifest still contributes `chatParticipants`, no views.
       -frames:v 1 clients/vscode/media/loong-${size}.png
   done
   ```
-  Do not commit `favicon.png`.
+  The source is the owner's untracked `favicon.png` at the repository root; if you
+  are in a fresh worktree without it, copy it from the owner's checkout. Do not commit
+  `favicon.png`.
 - `esbuild.mjs`: keep the extension build; add `webview/main.ts` → `dist/webview.js` (`format:"iife"`, `platform:"browser"`, no `vscode` external). Copy nothing else; `webview/style.css` is loaded directly.
 - `binaryHost.ts`: read `loongagent.path`, the `globalState` key `loongagent.binaryPath`, `process.env.PATH`, `os.homedir()`; call `resolveBinary`; run `--version` with `execFile` and a 5 s timeout; compare `SCHEMA_VERSION`; return `undefined` with an actionable output line when absent.
 - `chatView.ts` shell: `resolveWebviewView` sets `webview.options = { enableScripts: true, localResourceRoots: [extensionUri, dist, webview, media] }`, builds HTML with a CSP, loads `webview.js`, `style.css` and `media/loong-128.png`, registers `onDidReceiveMessage` (ignore until Task 12), and posts a bootstrap with one empty tab. `setBinary` replaces the resolved binary and posts the new status so a Locate click takes effect on the next spawn.
@@ -959,7 +963,7 @@ git commit -m "feat(vscode): open an independent loongagent sidebar"
 - [ ] **Step 1: Implement the host turn path**
 
 - On `ready`: `post({type:"bootstrap", tabs, activeTabId, activeTranscript, models, sessionId, binary})`; call `agent.ensure()` lazily on the first send, not on ready.
-- On `send`: validate the active tab; if no binary is set, post an error card with the Locate action and stop; add a `user` part to the transcript; post it; `agent.beginTurn` with a sink:
+- On `send`: validate the active tab; if no binary is set, post an error card with the Locate action and stop; add a `user` part to the transcript; if the tab title is still `New session`, set it to the prompt with whitespace collapsed and truncated to 60 characters, and post the updated tabs; `agent.beginTurn` with a sink:
   - `onDelta` → `post({type:"delta", tabId, text})`; mark tab `running`.
   - `onEvent` → `renderer.event`; append to `Transcript`; post `part`; for `approval.requested`, use a temporary Deny decision with reason `approvals arrive in the next task` (Task 13 replaces this).
   - on completion → post `assistantFinal` from the latest assistant event; status `idle`; add the review card if files changed (Task 13 computes it; for now omit).

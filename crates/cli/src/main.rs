@@ -84,9 +84,10 @@ USAGE:
   loongagent local semantic on --record                                    deterministic layers only
   loongagent local semantic off                                            turn it off
   loongagent setup          [--profile PATH]                                write a profile
-  loongagent tui            [--session ID|PATH] [--cwd DIR] [--new] [--local]  full-screen
+  loongagent tui            [--session ID|PATH] [--cwd DIR] [--new] [--local|--centered]  full-screen
       with no --session it continues this project's newest session; --new starts another
-      --local runs with no control plane at all: no pack, no sync, no setup form
+      local is the default: no control plane, no pack, no sync, no setup form
+      --centered reads the managed profile/control plane instead
       in a session:  alt+1..9 choose a model (or /1../9); alt+r asks the last
                      prompt again of the model chosen now (or /r)
   loongagent resume [ID]    [--cwd DIR]                                    reopen one (default: latest)
@@ -164,11 +165,17 @@ struct Args {
     model: Option<String>,
     /// A profile file used as the session layer.
     profile: Option<PathBuf>,
-    /// `--local`: run with no control plane at all — no pack, no sync, no setup form.
+    /// Local mode is the default: no pack, no sync, no setup form.
     ///
-    /// A session layer like `--model`: this run's answer to a question the profile
-    /// also answers (`mode = "local"`). Either one turns it on.
+    /// `--local` states it explicitly; `--centered` opts into the managed
+    /// profile/control-plane stack for this run. The two flags conflict.
     local: bool,
+    /// `--centered`: this run reads the managed layers, even if `local.toml`
+    /// carries a stale `mode = "local"`.
+    centered: bool,
+    /// `--local` was typed in this run, not merely the default. Only the
+    /// `config show` source label needs the distinction.
+    local_explicit: bool,
     /// The web surface's bind address and port (loopback by default: a browser on
     /// this machine, not the network).
     bind: String,
@@ -240,7 +247,9 @@ impl Args {
             cwd: cwd.clone(),
             model: None,
             profile: None,
-            local: false,
+            local: true,
+            centered: false,
+            local_explicit: false,
             bind: "127.0.0.1".to_string(),
             control_url: None,
             control_key: None,
@@ -268,6 +277,8 @@ impl Args {
         // what makes that work without an export in every shell.
         load_env_files(&config_dir(), &cwd);
 
+        let mut saw_local = false;
+        let mut saw_centered = false;
         let mut i = 0;
         while i < rest.len() {
             match rest[i].as_str() {
@@ -303,7 +314,26 @@ impl Args {
                             .map_err(|_| "--control-fd needs a number")?,
                     );
                 }
-                "--local" => args.local = true,
+                "--local" => {
+                    if saw_centered {
+                        return Err(
+                            "--local and --centered are different modes; pass only one".to_string()
+                        );
+                    }
+                    saw_local = true;
+                    args.local = true;
+                    args.local_explicit = true;
+                }
+                "--centered" => {
+                    if saw_local {
+                        return Err(
+                            "--local and --centered are different modes; pass only one".to_string()
+                        );
+                    }
+                    saw_centered = true;
+                    args.local = false;
+                    args.centered = true;
+                }
                 // `setup`: the control plane. Flags exist so a machine can be
                 // provisioned without a prompt; without them it asks.
                 "--url" => {
@@ -479,21 +509,13 @@ impl Args {
     /// Up: `settings_with_pack` and `tui.rs`'s `full_screen`; no other caller.
     /// Down: `layers` and `loong_config::resolve`; no network, no pack.
     /// Verify: `cargo test -p loongagent --test local_mode`.
-    /// Whether this run is local: the flag, or `local.toml`'s own answer.
+    /// Whether this run is local: the default, `--local`, or `--centered`.
     ///
-    /// Reads the layer files and nothing else — no pack, no network — so it is safe
-    /// to ask *before* anything control-plane-shaped has happened. That ordering is
-    /// the whole point: a question asked after the sync is a question already
-    /// answered wrongly.
+    /// The flag is a session-layer fact; it does not read a file to be overridden.
+    /// A `mode` in `local.toml` no longer selects the stack (the default already is
+    /// local); `--centered` is the explicit opt-in to the managed path.
     fn is_local(&self) -> Result<bool, String> {
-        if self.local {
-            return Ok(true);
-        }
-        // The *local* layers, because only they can say "local" — asking the managed
-        // profile would be asking a document that is not allowed to answer.
-        let resolved =
-            loong_config::resolve(&self.layers(true), &self.cwd).map_err(|e| e.to_string())?;
-        Ok(resolved.is_local())
+        Ok(self.local)
     }
 
     /// Purpose: Resolve the layered configuration with the verified pack in place, or with no control plane at all in local mode.

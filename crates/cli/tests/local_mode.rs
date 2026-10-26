@@ -83,13 +83,13 @@ fn run(home: &std::path::Path, args: &[&str]) -> (bool, String, String) {
     )
 }
 
-/// Purpose: Without `--local` a dead control plane fails a managed run, which is what gives the flag meaning.
+/// Purpose: `--centered` is the explicit managed run, and a dead control plane fails it.
 #[test]
-fn the_control_plane_is_really_consulted_without_the_flag() {
-    // The control half of the experiment. Without this, the `--local` test below
+fn the_control_plane_is_really_consulted_under_centered() {
+    // The control half of the experiment. Without this, the default-local test below
     // would pass just as well against a build that ignored the control plane always.
     let home = home_with_a_dead_control_plane();
-    let (ok, _stdout, stderr) = run(&home, &["config", "show"]);
+    let (ok, _stdout, stderr) = run(&home, &["config", "show", "--centered"]);
     assert!(
         !ok,
         "a dead control plane must fail a managed run, or the flag means nothing"
@@ -123,11 +123,49 @@ fn local_mode_never_touches_the_control_plane() {
     );
 }
 
-/// Purpose: A local install can record its mode in `local.toml`, so a resume keeps it without the flag.
+/// Purpose: Local is the default even when the local file does not say so.
 #[test]
-fn local_mode_may_be_declared_in_the_local_file_so_a_resume_keeps_it() {
-    // `loongagent resume` re-enters with no memory of the original flag, so the setting
-    // has to be able to live in a file — in `local.toml`, the file a local install owns.
+fn local_is_the_default_even_without_a_mode_line() {
+    let home = home_with_a_dead_control_plane();
+    std::fs::write(
+        home.join("local.toml"),
+        "[[models]]\nname = \"cheap\"\n\
+         provider = \"deepseek/deepseek-flash\"\n[router]\ndefault = \"cheap\"\n",
+    )
+    .unwrap();
+
+    let (ok, stdout, stderr) = run(&home, &["config", "show"]);
+    assert!(
+        ok,
+        "a dead control plane must not matter by default: {stderr}"
+    );
+    assert!(
+        stdout.contains("--local (default)"),
+        "the run says it is local without a flag: {stdout}"
+    );
+    assert!(
+        stdout.contains("local.toml"),
+        "and reads the local stack: {stdout}"
+    );
+}
+
+/// Purpose: Local and centered are different modes; passing both is a usage error.
+#[test]
+fn the_two_mode_flags_conflict() {
+    let home = workspace();
+    for args in [
+        &["config", "show", "--local", "--centered"][..],
+        &["config", "show", "--centered", "--local"][..],
+    ] {
+        let (ok, _stdout, stderr) = run(&home, args);
+        assert!(!ok, "both flags must be refused: {stderr}");
+        assert!(stderr.contains("pass only one"), "and say why: {stderr}");
+    }
+}
+
+/// Purpose: `--centered` ignores a stale `mode = "local"` and reaches the control plane.
+#[test]
+fn centered_ignores_a_local_mode_line() {
     let home = home_with_a_dead_control_plane();
     std::fs::write(
         home.join("local.toml"),
@@ -135,17 +173,12 @@ fn local_mode_may_be_declared_in_the_local_file_so_a_resume_keeps_it() {
          provider = \"deepseek/deepseek-flash\"\n[router]\ndefault = \"cheap\"\n",
     )
     .unwrap();
-
-    let (ok, stdout, stderr) = run(&home, &["config", "show"]);
-    assert!(ok, "the local file alone is enough: {stderr}");
+    let (ok, _stdout, stderr) = run(&home, &["config", "show", "--centered"]);
     assert!(
-        stdout.contains("local"),
-        "and the table attributes it to the file that said so: {stdout}"
+        !ok,
+        "centered must consult the managed control plane: {stderr}"
     );
-    assert!(
-        stdout.contains("local.toml"),
-        "the local file, not the managed one: {stdout}"
-    );
+    assert!(stderr.contains("unreachable"), "and say why: {stderr}");
 }
 
 /// Purpose: A managed profile cannot switch the install out of its firm's policy by declaring itself local.
@@ -158,7 +191,7 @@ fn the_managed_profile_cannot_declare_local_mode() {
     let home = home_with_a_dead_control_plane();
     std::fs::write(home.join("profile.toml"), "mode = \"local\"\n").unwrap();
 
-    let (ok, _stdout, stderr) = run(&home, &["config", "show"]);
+    let (ok, _stdout, stderr) = run(&home, &["config", "show", "--centered"]);
     assert!(
         !ok,
         "a managed profile must not be able to say this: {stderr}"

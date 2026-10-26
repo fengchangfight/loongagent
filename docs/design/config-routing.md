@@ -45,9 +45,9 @@ stale local org file.
 | `User` | `~/.loongagent/profile.toml` | the person |
 | `Session` | `--profile FILE`, plus this run's facts | this invocation |
 
-Local mode resolves a different list, not the managed list with a flag: `local_layer_paths`
-returns project, `local.toml` and session, with **no org file and no pack**. Both paths are in
-`crates/config/src/paths.rs`; `Args::layers` is the one place they diverge.
+Local is the default. `local_layer_paths` returns project, `local.toml` and session — **no
+org file, no pack**. `--centered` selects managed; `--local` states the default and conflicts
+with it. Both lists live in `crates/config/src/paths.rs`; `Args::layers` is where they diverge.
 
 ## 2. Precedence is a property of the key
 
@@ -88,9 +88,9 @@ The project layer is the one a repository controls, so it may not set `model`, `
 `[[models]]` — a repository must not choose where prompts go, where a session is summarised,
 or whether an install is managed. Its `skill_dirs` must resolve inside the workspace.
 
-`mode` is free-override but legitimate only in `local.toml` or a session file
-(`mode_is_legitimate`); from any other file it is an error, because a file that has nothing to
-do with local mode must not be able to switch an install out of its firm's policy.
+`mode` remains accepted only in `local.toml` or a session file (`mode_is_legitimate`) and is
+refused elsewhere. It no longer selects the stack — the flag/default does — so a repository
+still cannot switch an install out of its firm's policy.
 
 ## 4. Profiles and the signed pack
 

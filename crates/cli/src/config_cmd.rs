@@ -255,10 +255,17 @@ pub(crate) fn config_show(args: Args) -> Result<(), String> {
     // `--local` is a session-layer flag that exists in no file, so it has no row to
     // appear in. It still answers "may this run reach a control plane?", which is not
     // a thing to leave somebody to infer from the absence of a line.
-    if settings.is_local() && settings.explain("mode").is_none() {
+    if settings.explain("mode").is_none() {
+        let (mode, source) = if !settings.is_local() {
+            ("centered", "--centered (this run)")
+        } else if args.local_explicit {
+            ("local", "--local (this run)")
+        } else {
+            ("local", "--local (default)")
+        };
         println!(
             "{:<30} {:<16} {:<8} {}",
-            "mode", "local", "free-override", "--local (this run)"
+            "mode", mode, "free-override", source
         );
     }
     // A budget may be declared on a model rather than on the session, and the strictest one

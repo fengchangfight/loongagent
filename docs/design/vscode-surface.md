@@ -76,7 +76,9 @@ transcript, never a file the extension reads.
 
 ## 5. Finding the binary
 
-The extension does not bundle the Rust binary. `BinaryResolver` tries the `loongagent.path`
+The extension does not bundle the Rust binary. The server defaults to local mode; pass
+`--centered` through `loongagent.extraArgs` to read the managed profile/control pack.
+`BinaryResolver` tries the `loongagent.path`
 setting, the path the user picked with **Locate**, PATH and the common install locations, then
 runs `--version`. A schema mismatch is a warning, never a refusal.
 

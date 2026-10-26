@@ -79,7 +79,9 @@ impl ChildTransport {
         // answer on its own — but only for the profile's `mode`, not for the flag. A
         // `--local` on the command line exists in no file, so it has to be carried
         // across, or the interface would be local and its own server would not.
-        if args.local {
+        if args.centered {
+            command.arg("--centered");
+        } else if args.local {
             command.arg("--local");
         }
         if let Some(model) = &args.model {

@@ -36,6 +36,13 @@ code --extensionDevelopmentPath="$PWD" --new-window /tmp/loong-vscode-scratch
 或者命令面板执行 **loongagent: Locate the binary**。输出面板 `loongagent` 会显示实际路径、
 版本和 schema。
 
+server 默认走 local（`~/.loongagent/local.toml` + `~/.loongagent/env`）。如果要读企业下发的
+profile/control pack，在用户设置里加：
+
+```json
+"loongagent.extraArgs": ["--centered"]
+```
+
 ## 写入前审阅
 
 要让 `write_file` / `edit` 在落盘前弹出 diff 卡片，在策略里写：

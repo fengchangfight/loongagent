@@ -167,7 +167,7 @@ fn local_list(args: &Args, path: &Path) -> Result<(), String> {
         );
     }
     println!();
-    println!("  进入会话：loongagent tui --local");
+    println!("  进入会话：loongagent tui");
     println!("  加 / 删 / 改：local add [服务商] · local delete <序号|名字|服务商> · local edit");
     println!("  分层记忆：local semantic [on [模型] | off]");
     Ok(())
@@ -286,7 +286,7 @@ fn semantic_status(args: &Args, path: &Path) -> Result<(), String> {
             println!("  打开：loongagent local semantic on");
         }
     }
-    println!("  生效范围：loongagent tui --local");
+    println!("  生效范围：loongagent tui（默认 local）");
     Ok(())
 }
 
@@ -349,7 +349,7 @@ fn semantic_on(args: &Args, path: &Path, model_arg: Option<&str>) -> Result<(), 
         }
     }
     println!();
-    println!("  生效范围：loongagent tui --local（local.toml 只被 local 模式读取）");
+    println!("  生效范围：loongagent tui（默认 local；--centered 走控制面）");
     Ok(())
 }
 
@@ -1017,7 +1017,7 @@ pub(crate) fn configure_local(
 
     let Some(choice) = loong_tui_app::local_wizard(choices, offered, &mut validate)? else {
         eprintln!(
-            "[local] 跳过配置 — 本次会话没有模型。随时重跑 `loongagent tui --local`，\
+            "[local] 跳过配置 — 本次会话没有模型。随时重跑 `loongagent tui`，\
              或先试 `--model demo-write`。"
         );
         return Ok(());
@@ -1303,7 +1303,7 @@ fn adopt_local_model(
     if !had_models {
         eprintln!(
             "[local] 默认走第一个（最便宜那层）。换模型改 `provider` 那一行，\
-             或用 `loongagent tui --local` 再配一个服务商。"
+             或用 `loongagent tui` 再配一个服务商。"
         );
     }
     Ok(())
@@ -1697,7 +1697,7 @@ fn local_header() -> &'static str {
      # 换模型只改 `provider` 这一行：`<服务商>/<模型 id>`，base_url 由服务商目录提供，\n\
      # 密钥按约定名（如 LOONG_DEEPSEEK_KEY）从 `~/.loongagent/env` 或环境变量读取。\n\
      #\n\
-     # 这个文件只在 `loongagent tui --local` 时被读取。\n\n"
+     # 这个文件是默认 local 模式的配置；`tui --centered` 不读它。\n\n"
 }
 
 /// Purpose: Escape a value for a TOML basic string.
@@ -2003,6 +2003,8 @@ mod tests {
             model: None,
             profile: None,
             local: true,
+            centered: false,
+            local_explicit: false,
             bind: "127.0.0.1".to_string(),
             control_url: None,
             control_key: None,

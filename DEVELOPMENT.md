@@ -185,7 +185,7 @@ day-to-day contracts, and `README.md` has the keys a user needs.
   takes the longest form that fits.
 - **A decision panel sits below the transcript and above the input**, clips every
   detail to display columns (never wraps), and gives up details before answers.
-- **The wire is not the log.** `loongagent tui --local --debug-model` (also
+- **The wire is not the log.** `loongagent tui --debug-model` (also
   `run`/`repl`/`web`) appends each exchange to `<session>.models.jsonl`;
   `finish_reason` (`stop` vs `tool_calls`) is the server's own verdict when a
   model prints a tool call as text. The dump is diagnostic data, never an event,

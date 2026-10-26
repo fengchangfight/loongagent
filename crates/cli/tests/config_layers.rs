@@ -153,7 +153,7 @@ fn a_local_layer_may_not_put_a_literal_secret_in_config() {
     std::fs::write(home.join("profile.toml"), "api_key = \"sk-live-abc\"\n").unwrap();
     let (ok, _, stderr) = run_env(
         &dir,
-        &["run", "hi", "--model", "echo"],
+        &["run", "hi", "--model", "echo", "--centered"],
         &[("LOONGAGENT_HOME", home.to_str().unwrap())],
     );
     assert!(!ok);

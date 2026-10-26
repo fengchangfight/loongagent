@@ -18,7 +18,7 @@ Three names appear in the ADRs, and they are not the same axis.
 
 | Mode | What runs | Where the provider key is | Built? |
 |---|---|---|---|
-| **Local** | no control plane; layers are project, `~/.loongagent/local.toml`, session; no pack and no org file | an `env:` or `file:` reference, resolved on the client; `keychain:` is reserved and has no store | yes (`--local` or `mode = "local"`) |
+| **Local** | no control plane; layers are project, `~/.loongagent/local.toml`, session; no pack and no org file | an `env:` or `file:` reference, resolved on the client; `keychain:` is reserved and has no store | yes (the default; `--centered` selects managed) |
 | **Managed, pre-gateway** | a `control.toml` names a control plane and a pinned key; a verified profile pack becomes the `control` layer; model calls still go directly to the provider | the client resolves the pack's `api_key` reference (`env:…`, `file:…`), so a referenced key never reaches the control plane; a literal in the pack does, and is warned about | yes |
 | **Gateway** | model calls go through a gateway that holds the provider key, meters spend, refuses over budget and chooses the route | the gateway | **no** — decided by ADR-0005, no service or client path |
 

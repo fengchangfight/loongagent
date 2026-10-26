@@ -7,9 +7,9 @@
 一个装在你自己机器上的编码 agent。单个二进制，**会话原文（JSONL 日志）就是唯一真相**，
 每一次权限决定都是一条可审计的事件，模型、记忆、会话全部留在本机 —— 不依赖任何服务器也能用。
 
-- **本地版**：`loongagent tui --local`，模型可以是本机 ollama，也可以是你自己的 API key；
+- **本地版（默认）**：`loongagent tui`，模型可以是本机 ollama，也可以是你自己的 API key；
   配置、密钥、会话都在 `~/.loongagent/` 下，别人碰不到。
-- **控制面**：企业侧用**签名 pack** 下发 profile：包由 Ed25519 签发、本地按固定公钥验签，
+- **控制面**：显式 `--centered` 才走企业侧；用**签名 pack** 下发 profile：包由 Ed25519 签发、本地按固定公钥验签，
   验不过就用不了，模型/端点/密钥不进用户配置。**但本机的 org 层文件
   `/etc/loongagent/profile.toml` 不签名**，它只是管理员拥有的文件，不能叫防篡改。
   两条路共用同一个内核，本地版不需要它。
@@ -53,20 +53,20 @@ Windows 用 `powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1`
 ### 跑起来
 
 ```bash
-loongagent tui --local                 # 在当前目录开一个本地会话
-loongagent tui --local --cwd ~/proj    # 指定工程目录
-loongagent tui --local --new           # 另起一个新会话（默认续最近一个）
-loongagent resume --local              # 重新打开最近一个
-loongagent sessions --all              # 列出所有工程下的会话
+loongagent tui                 # 在当前目录开一个本地会话（默认）
+loongagent tui --cwd ~/proj    # 指定工程目录
+loongagent tui --new           # 另起一个新会话（默认续最近一个）
+loongagent resume              # 重新打开最近一个
+loongagent sessions --all      # 列出所有工程下的会话
+loongagent tui --centered      # 显式走控制面/profile，而不是本地配置
 ```
 
-第一次跑且没有任何模型时，会**先弹配置向导**再进会话。不想每次都打 `--local`，就在
-`~/.loongagent/local.toml` 里写 `mode = "local"`（用 `loongagent local edit` 改）；这一行
-只能写在本地层里，受管的 `profile.toml` 写它会被拒绝，否则一个仓库配置就能把整台机器从公司
-策略里"切出去"。
+第一次跑且没有任何模型时，会**先弹配置向导**再进会话。默认就是 local；要读企业下发的
+profile/control pack，显式加 `--centered`。`local.toml` 里的 `mode = "local"` 仍然可以写，
+但它不再是必需的，也不会把 `--centered` 改回 local。
 
-其他界面（同一个内核、同一份会话）：`loongagent web --local`（浏览器，只监听 loopback）、
-`loongagent repl --local`（行模式，不需要 TTY）、`loongagent run --local "…"`（无界面跑一轮）、
+其他界面（同一个内核、同一份会话）：`loongagent web`（浏览器，只监听 loopback）、
+`loongagent repl`（行模式，不需要 TTY）、`loongagent run "…"`（无界面跑一轮）、
 `loongagent sessions` / `resume [ID]` / `fork [ID]` / `delete ID`，以及 VS Code 侧边栏
 （`clients/vscode`，自带 Webview，不依赖 Copilot）。
 
@@ -122,7 +122,7 @@ loongagent local semantic on --record  # 只要确定性派生（等于显式打
 loongagent local semantic off
 ```
 
-生效范围是 `--local`。**模型拉不下来 = 退回 R 模式**，不是坏掉：那一段回退成确定性 digest，
+生效范围是 local 模式（默认）。**模型拉不下来 = 退回 R 模式**，不是坏掉：那一段回退成确定性 digest，
 并在 F2 面板和 `loongagent context status` 里显示为 degraded。摘要只能补 `rejected` / `why` /
 `open_questions` / `conclusion`，每条摘要必须带引用的 `seq` 区间，`loongagent context verify`
 可以校验；计算字段和引用不可被模型改写。细节、默认模型与被测数据见
@@ -233,8 +233,8 @@ skills/commands、**插件**、六个内置工具（`read_file` / `write_file` /
 可选的**分层记忆**（R 模式 + S 模式、后台增量、`recall`/`expand`、F2 可见性）和**控制面**
 （签名 pack 由固定公钥验签后才进 control 层（高于 org），`loongagent-control` 二进制与 runbook 都在；身份/SSO、
 审计、密钥轮换还没做完）。Linux 与 **Windows** 都能构建运行，命令面一致。
-测试 774 个通过、11 个忽略。
-<!-- test-counts: 774 passed, 11 ignored -->
+测试 776 个通过、11 个忽略。
+<!-- test-counts: 776 passed, 11 ignored -->
 
 **没做完，也不假装**：subagents、插件的索引/搜索与逐插件开关（现在用 `disable_skills`）、
 第三方内容的签名与信任分级（[ADR-0018](docs/decisions/0018-plugin-install-and-bootstrap.md)

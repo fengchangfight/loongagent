@@ -1,5 +1,5 @@
 import type { Attachment, BinaryStatus, FileChoice, HostMessage, SessionInfo, TabState, UiPart } from "../src/webviewProtocol.ts";
-import { matchingFiles, mentionAt } from "../src/mention.ts";
+import { insertMention, matchingFiles, mentionAt } from "../src/mention.ts";
 
 type Models = Extract<HostMessage, { type: "bootstrap" }>["models"];
 
@@ -315,12 +315,9 @@ function closeMention(): void {
 function chooseMention(file: FileChoice): void {
   const mention = state.mention;
   if (mention === undefined) return;
-  const start = mention.start;
-  const end = Math.min(start + 1 + mention.query.length, input.value.length);
-  if (input.value.slice(start, start + 1) === "@") {
-    input.value = input.value.slice(0, start) + input.value.slice(end);
-    input.setSelectionRange(start, start);
-  }
+  const inserted = insertMention(input.value, mention.start, mention.query, file.label);
+  input.value = inserted.value;
+  input.setSelectionRange(inserted.caret, inserted.caret);
   closeMention();
   if (state.activeTabId !== undefined) {
     api.postMessage({ type: "attachFile", tabId: state.activeTabId, path: file.path });

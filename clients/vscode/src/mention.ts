@@ -23,3 +23,19 @@ export function mentionAt(value: string, caret: number): { start: number; query:
   const query = match[2];
   return { start: caret - query.length - 1, query };
 }
+
+
+/** Replace `@query` with `@label ` and put the caret after the inserted mention. */
+export function insertMention(
+  value: string,
+  start: number,
+  query: string,
+  label: string,
+): { value: string; caret: number } {
+  const token = `@${label} `;
+  const end = Math.min(start + 1 + query.length, value.length);
+  return {
+    value: value.slice(0, start) + token + value.slice(end),
+    caret: start + token.length,
+  };
+}

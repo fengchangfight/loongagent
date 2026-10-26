@@ -396,9 +396,11 @@ is set with `textContent`.
   no file browser, no window-level picker, and no separate button. Typing filters the
   labels by prefix, ↑/↓ moves, Enter/Tab attaches, and Esc closes. The list is
   `workspace.findFiles`, capped at 2000, excluding `node_modules` and `.git`, sorted by
-  relative path and sent to the Webview once. The attachment stores an absolute path. The
-  prompt appends `referenced files:\n- <path>`; the kernel's own read tools fetch the
-  content. The extension does not inline file bodies.
+  relative path and sent to the Webview once. Choosing an item replaces the `@query` with
+  `@relative/path ` in the input and adds the attachment; the rest of the typed message is
+  preserved. The attachment stores an absolute path. The prompt appends
+  `referenced files:\n- <path>`; the kernel's own read tools fetch the content. The
+  extension does not inline file bodies.
 - **Selection:** the host listens to `onDidChangeTextEditorSelection` and
   `onDidChangeActiveTextEditor`; a non-empty selection in a workspace file becomes an
   attachment automatically, with no button or context-menu command. The attachment

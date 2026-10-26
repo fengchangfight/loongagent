@@ -444,16 +444,23 @@ function renderPart(part: UiPart): HTMLElement | undefined {
 
 function thinkingVisible(): boolean {
   if (!state.busy || state.live !== "") return false;
+  return activeTab()?.status === "running";
+}
+
+function thinkingLabel(): string {
   const last = state.parts[state.parts.length - 1];
-  return last === undefined || last.kind === "user";
+  if (last?.kind === "tool" && last.status === "running") return `Running ${last.tool}…`;
+  if (last?.kind === "notice") return "Working…";
+  return "Thinking…";
 }
 
 function appendThinking(): void {
+  const label = thinkingLabel();
   const row = element("div", "thinking");
   row.setAttribute("role", "status");
-  row.setAttribute("aria-label", "loongagent is thinking");
+  row.setAttribute("aria-label", `loongagent: ${label}`);
   row.append(element("span", "thinking-spinner"));
-  row.append(element("span", "thinking-label", "Thinking…"));
+  row.append(element("span", "thinking-label", label));
   transcript.append(row);
 }
 

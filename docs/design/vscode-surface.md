@@ -8,7 +8,8 @@
 - **Verify:** `cd clients/vscode && npm run compile && npm test` · `./scripts/check.sh`
 
 The VS Code surface is a client of the same local server as the TUI and the browser. It opens
-an editor `WebviewPanel` from a loongagent icon in the editor title bar (and from
+an editor `WebviewPanel` beside the active editor (a separate editor group, so the file and
+the chat remain visible together) from a loongagent icon in the editor title bar (and from
 `loongagent: Open Chat`), not in VS Code's native Chat view: that view is the Copilot surface,
 requires a VS Code language model, and no longer supports `@` participants in the Copilot
 harness. The panel needs neither Copilot nor a VS Code model. The first click opens the panel;
@@ -83,6 +84,9 @@ transcript, never a file the extension reads.
   `read_file` has no line-range parameter. A passive chip names it; deselecting removes it.
 - The model dropdown comes from `model.list`; a change is `model.select` and is recorded as
   `model.selected`.
+- While a turn is running without a live delta, the bottom of the transcript shows an animated
+  `Thinking…`/`Working…`/`Running <tool>…` row. The protocol streams model output deltas but
+  no hidden reasoning stream, so this is activity, not a fabricated chain of thought.
 - `/new`, `/model`, `/context` and `/yolo` are composer commands. `/yolo` asks for a modal
   confirmation and renders `permissions.relaxed`.
 

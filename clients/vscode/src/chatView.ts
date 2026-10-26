@@ -141,14 +141,14 @@ export class ChatViewProvider {
    */
   openPanel(): void {
     if (this.panel !== undefined) {
-      this.panel.reveal(vscode.ViewColumn.Active);
+      this.panel.reveal();
       void this.newTab();
       return;
     }
     const panel = vscode.window.createWebviewPanel(
       ChatViewProvider.viewType,
       "loongagent",
-      vscode.ViewColumn.Active,
+      vscode.ViewColumn.Beside,
       {
         enableScripts: true,
         retainContextWhenHidden: true,

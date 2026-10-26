@@ -118,3 +118,6 @@ vendor/
 
 # Local git worktrees created by the agent workflow.
 .worktrees/
+
+# Packaged VS Code extension artifacts
+*.vsix

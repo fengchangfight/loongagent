@@ -4,7 +4,15 @@
 `loongagent: Open Chat` 打开；不是 Copilot 的聊天框，也不是 Activity Bar 侧边栏。
 它不需要 Copilot 登录，也不需要选 VS Code 的模型；模型来自 `loongagent server`。
 
-## 运行
+## 安装 VSIX
+
+```bash
+code --install-extension loongagent-vscode-0.1.0.vsix
+```
+
+VSIX 只包含扩展；先按下面说明安装 `loongagent` binary，扩展才能在启动时找到它。
+
+## 开发运行
 
 ```bash
 cd clients/vscode
@@ -83,6 +91,6 @@ write_workspace = "ask"
 
 设计与实现计划：
 
-- [docs/design/vscode-surface.md](../../docs/design/vscode-surface.md)
-- [M1 计划](../../docs/superpowers/plans/2026-10-26-vscode-webview-m1.md)
-- [M2 计划](../../docs/superpowers/plans/2026-10-26-vscode-webview-m2.md)
+- [docs/design/vscode-surface.md](https://github.com/fengchangfight/loongagent/blob/main/docs/design/vscode-surface.md)
+- [M1 计划](https://github.com/fengchangfight/loongagent/blob/main/docs/superpowers/plans/2026-10-26-vscode-webview-m1.md)
+- [M2 计划](https://github.com/fengchangfight/loongagent/blob/main/docs/superpowers/plans/2026-10-26-vscode-webview-m2.md)

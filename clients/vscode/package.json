@@ -1,12 +1,16 @@
 {
   "name": "loongagent-vscode",
   "displayName": "loongagent",
-  "description": "loongagent in the editor: a local agent in its own sidebar.",
-  "private": true,
-  "version": "0.0.1",
+  "description": "loongagent chat panel for VS Code",
+  "version": "0.1.0",
   "publisher": "loongagent",
-  "engines": { "vscode": "^1.138.0" },
-  "categories": ["AI", "Other"],
+  "engines": {
+    "vscode": "^1.138.0"
+  },
+  "categories": [
+    "AI",
+    "Other"
+  ],
   "main": "./dist/extension.js",
   "capabilities": {
     "untrustedWorkspaces": {
@@ -62,7 +66,9 @@
         },
         "loongagent.extraArgs": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "default": [],
           "scope": "machine",
           "description": "Extra arguments for loongagent server."
@@ -74,12 +80,19 @@
     "compile": "node esbuild.mjs && tsc --noEmit",
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc --noEmit",
-    "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test test/*.test.ts"
+    "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test test/*.test.ts",
+    "package:vsix": "npm run compile && npx @vscode/vsce package --skip-license"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
     "@types/vscode": "1.138.0",
     "esbuild": "^0.25.0",
     "typescript": "^5.6.0"
+  },
+  "icon": "media/loong-128.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/fengchangfight/loongagent.git",
+    "directory": "clients/vscode"
   }
 }

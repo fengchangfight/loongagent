@@ -1,0 +1,11 @@
+# The VSIX ships the esbuild bundles, the stylesheet and the icons.
+# Source, tests and build tooling are not needed at runtime.
+src/**
+test/**
+webview/**/*.ts
+node_modules/**
+**/*.map
+tsconfig.json
+esbuild.mjs
+package-lock.json
+.vscodeignore

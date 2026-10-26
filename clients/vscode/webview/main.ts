@@ -482,8 +482,8 @@ window.addEventListener("message", (event: MessageEvent<HostMessage>) => {
       state.models = message.models;
       state.model = message.model;
       state.selection = message.selection;
-      state.files = [];
-      state.filesLoaded = false;
+      // The file list is host state. A second bootstrap (models ready) must
+      // not erase a list the earlier `files` message already delivered.
       state.mention = undefined;
       state.live = "";
       state.busy = activeTab()?.status === "running" || activeTab()?.status === "waiting";

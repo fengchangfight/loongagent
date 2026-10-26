@@ -31,10 +31,8 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       provider.setBinary(binary);
     }),
-    vscode.commands.registerCommand("loongagent.attachSelection", async () => {
-      await vscode.commands.executeCommand("workbench.view.extension.loongagent");
-      output.appendLine("selection: the sidebar's selection entry arrives with the chat task");
-    }),
+    vscode.commands.registerCommand("loongagent.attachSelection", () =>
+      provider.attachSelection()),
     vscode.commands.registerCommand("loongagent.reviewChanges", (token?: string, paths?: string[]) =>
       provider.reviewChanges(token, paths)),
   );

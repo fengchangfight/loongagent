@@ -315,3 +315,57 @@ button:disabled {
   color: var(--vscode-input-foreground);
   border-color: var(--vscode-input-border, var(--vscode-panel-border));
 }
+
+.model {
+  max-width: 9em;
+  font: inherit;
+  font-size: 0.9em;
+  color: var(--vscode-dropdown-foreground);
+  background: var(--vscode-dropdown-background);
+  border: 1px solid var(--vscode-dropdown-border, var(--vscode-panel-border));
+  border-radius: 3px;
+  padding: 2px 4px;
+}
+
+.attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding-bottom: 6px;
+}
+
+.attachments:empty {
+  display: none;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 1px 4px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 3px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.85em;
+}
+
+.chip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chip-remove {
+  background: none;
+  border: none;
+  color: var(--vscode-descriptionForeground);
+  padding: 0 2px;
+  cursor: pointer;
+}
+
+.controls button.secondary {
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border-color: var(--vscode-input-border, var(--vscode-panel-border));
+}

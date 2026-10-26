@@ -83,6 +83,7 @@ export type HostMessage =
       activeTabId?: string;
       activeTranscript: UiPart[];
       models: ModelOffering[];
+      model?: string;
       sessionId?: string;
       binary?: BinaryStatus;
     }

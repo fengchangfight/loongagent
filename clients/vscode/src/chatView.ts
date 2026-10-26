@@ -16,12 +16,13 @@ import { Transcript } from "./transcript.ts";
 import { TurnBusyError } from "./turn.ts";
 import { parseWebviewMessage } from "./webviewProtocol.ts";
 import { EVENTS } from "../../ts/protocol.generated.ts";
-import type { ApprovalRequested, ToolCall, ToolResult } from "../../ts/protocol.generated.ts";
+import type { ApprovalRequested, ModelList, ToolCall, ToolResult } from "../../ts/protocol.generated.ts";
 import type { DiffUris } from "./diffProvider.ts";
 import type { Preview } from "./diff.ts";
-import type { BinaryStatus, HostMessage, UiPart } from "./webviewProtocol.ts";
+import type { Attachment, BinaryStatus, HostMessage, UiPart } from "./webviewProtocol.ts";
 import type { ApprovalAnswer } from "./turn.ts";
 import type { SessionAgent as Agent } from "./sessionAgent.ts";
+import type { LoongSession } from "./session.ts";
 
 export type HostBinary = BinaryStatus;
 
@@ -57,6 +58,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private view: vscode.WebviewView | undefined;
   private binary: HostBinary | undefined;
   private agent: Agent | undefined;
+  private models: ModelList | undefined;
+  private readonly attachments: Attachment[] = [];
+  private nextAttachment = 1;
+  private ready = false;
+  private readonly readyWaiters: Array<() => void> = [];
   private running = false;
   private nextTurn = 1;
   private pendingTool: { callId: string; tool?: string; path?: string; preview?: Preview } | undefined;
@@ -121,6 +127,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   setBinary(binary: HostBinary): void {
     this.binary = binary;
     this.postBootstrap();
+    if (this.ready) void this.onReady();
+  }
+
+  /** The editor context-menu command: reveal, wait for the view, attach the selection. */
+  async attachSelection(): Promise<void> {
+    await vscode.commands.executeCommand("workbench.view.extension.loongagent");
+    await this.whenReady();
+    this.pickSelection();
   }
 
   post(message: HostMessage): void {
@@ -132,6 +146,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.agent?.dispose();
     this.agent = undefined;
     this.view = undefined;
+  }
+
+  private whenReady(): Promise<void> {
+    if (this.ready) return Promise.resolve();
+    return new Promise((resolve) => this.readyWaiters.push(resolve));
   }
 
   /** Open the before/after diff for a turn's changed files; used by the command. */
@@ -157,7 +176,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     if (message === undefined) return;
     switch (message.type) {
       case "ready":
-        this.postBootstrap();
+        void this.onReady();
         break;
       case "send":
         void this.send(message.text);
@@ -174,6 +193,27 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       case "openDiff":
         void this.openApprovalDiff(message.token, message.path);
         break;
+      case "selectModel":
+        void this.selectModel(message.name);
+        break;
+      case "context":
+        void this.showContext();
+        break;
+      case "pickFile":
+        void this.pickFile();
+        break;
+      case "pickSelection":
+        this.pickSelection();
+        break;
+      case "removeAttachment":
+        this.removeAttachment(message.id);
+        break;
+      case "newTab":
+        void this.newSession();
+        break;
+      case "yolo":
+        void this.yolo(message.on);
+        break;
       default:
         this.output.appendLine(`webview: ${message.type} arrives with the next task`);
     }
@@ -185,14 +225,214 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       tabs: [...this.tabs.tabs].map((tab) => ({ ...tab })),
       ...(this.tabs.activeId === undefined ? {} : { activeTabId: this.tabs.activeId }),
       activeTranscript: this.transcript.all(),
-      models: [],
+      models: this.models?.models ?? [],
+      ...(this.models?.selected === undefined ? {} : { model: this.models.selected }),
       ...(this.agent?.sessionId === undefined ? {} : { sessionId: this.agent.sessionId }),
       ...(this.binary === undefined ? {} : { binary: this.binary }),
     });
   }
 
+  private postAttachments(): void {
+    const tab = this.tabs.active();
+    if (tab === undefined) return;
+    this.post({
+      type: "attachments",
+      tabId: tab.id,
+      items: this.attachments.map((attachment) => ({ ...attachment })),
+    });
+  }
+
   private postTabs(): void {
     this.post({ type: "tabs", tabs: [...this.tabs.tabs].map((tab) => ({ ...tab })) });
+  }
+
+  private async onReady(): Promise<void> {
+    if (!this.ready) {
+      this.ready = true;
+      for (const resolve of this.readyWaiters.splice(0)) resolve();
+    }
+    this.postBootstrap();
+    this.postAttachments();
+    if (this.binary === undefined) return;
+    try {
+      const session = await this.ensureSession();
+      this.models = await session.models();
+      this.postBootstrap();
+      const resume = this.agent?.takeResume();
+      if (resume !== undefined) {
+        for (const part of new Renderer({ cwd: this.workspace() })
+          .resumed(resume.events, resume.sessionId)) {
+          this.transcript.append(part);
+          this.post({ type: "part", tabId: this.tabs.activeId ?? "tab-1", part });
+        }
+      }
+      const exit = this.agent?.takeLastExit();
+      if (exit !== undefined) {
+        const part: UiPart = {
+          kind: "notice",
+          level: "warn",
+          text: `The previous loongagent server exited (${exit.signal ?? `code ${exit.code}`}); a new one starts on the next send.`,
+        };
+        this.transcript.append(part);
+        this.post({ type: "part", tabId: this.tabs.activeId ?? "tab-1", part });
+      }
+    } catch (error) {
+      this.postError(startupAdvice(explain(error)));
+      this.output.appendLine(`failed: ${explain(error)}`);
+    }
+  }
+
+  private async ensureSession(): Promise<LoongSession> {
+    if (this.binary === undefined) {
+      throw new Error("the loongagent binary was not found; set loongagent.path or run Locate");
+    }
+    const folder = vscode.workspace.workspaceFolders?.[0];
+    if (folder === undefined) throw new Error("open a folder first — the agent works on a workspace");
+    this.agent ??= new SessionAgent({
+      folder,
+      output: this.output,
+      context: this.context,
+      binaryPath: this.binary.path,
+    });
+    return this.agent.ensure();
+  }
+
+  private workspace(): string {
+    return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "";
+  }
+
+  private async selectModel(name: string): Promise<void> {
+    if (this.running) {
+      this.postError("Stop the running turn before changing the model.");
+      return;
+    }
+    try {
+      const session = await this.ensureSession();
+      this.models = await session.selectModel(name);
+      this.postBootstrap();
+    } catch (error) {
+      this.postError(`I could not change the model: ${explain(error)}`);
+      this.output.appendLine(`failed: ${explain(error)}`);
+    }
+  }
+
+  private async showContext(): Promise<void> {
+    try {
+      const session = await this.ensureSession();
+      const [part] = new Renderer({ cwd: this.workspace() }).context(await session.context());
+      this.transcript.append(part);
+      this.post({ type: "part", tabId: this.tabs.activeId ?? "tab-1", part });
+    } catch (error) {
+      this.postError(`I could not read the context: ${explain(error)}`);
+      this.output.appendLine(`failed: ${explain(error)}`);
+    }
+  }
+
+  private async pickFile(): Promise<void> {
+    const folder = vscode.workspace.workspaceFolders?.[0];
+    if (folder === undefined) {
+      this.postError("Open a folder first — the agent works on a workspace.");
+      return;
+    }
+    const picked = await vscode.window.showOpenDialog({
+      canSelectFiles: true,
+      canSelectFolders: false,
+      canSelectMany: false,
+      defaultUri: folder.uri,
+      openLabel: "Attach file",
+    });
+    const path = picked?.[0]?.fsPath;
+    if (path === undefined) return;
+    this.attachments.push({ id: `att-${this.nextAttachment++}`, kind: "file", path });
+    this.postAttachments();
+  }
+
+  private pickSelection(): void {
+    const editor = vscode.window.activeTextEditor;
+    if (editor === undefined) {
+      this.postError("There is no active editor to take a selection from.");
+      return;
+    }
+    if (editor.selection.isEmpty) {
+      this.postError("Select some code in the editor first.");
+      return;
+    }
+    const path = editor.document.uri.fsPath;
+    const selection = editor.selection;
+    this.attachments.push({
+      id: `att-${this.nextAttachment++}`,
+      kind: "selection",
+      path,
+      startLine: selection.start.line + 1,
+      endLine: selection.end.line + 1,
+      text: editor.document.getText(selection),
+    });
+    this.postAttachments();
+  }
+
+  private removeAttachment(id: string): void {
+    const index = this.attachments.findIndex((attachment) => attachment.id === id);
+    if (index < 0) return;
+    this.attachments.splice(index, 1);
+    this.postAttachments();
+  }
+
+  private async newSession(): Promise<void> {
+    if (this.running) {
+      this.postError("Stop the running turn before starting a new session.");
+      return;
+    }
+    try {
+      await this.ensureSession();
+      await this.agent?.startNew();
+      const session = await this.ensureSession();
+      this.transcript.reset();
+      this.attachments.length = 0;
+      this.models = await session.models();
+      const tab = this.tabs.active();
+      if (tab !== undefined) {
+        this.tabs.update(tab.id, {
+          sessionId: session.sessionId,
+          title: "New session",
+          status: "idle",
+        });
+      }
+      this.postBootstrap();
+      this.postAttachments();
+      this.postTabs();
+    } catch (error) {
+      this.postError(`I could not start a new session: ${explain(error)}`);
+      this.output.appendLine(`failed: ${explain(error)}`);
+    }
+  }
+
+  private async yolo(on: boolean): Promise<void> {
+    try {
+      if (on) {
+        const choice = await vscode.window.showWarningMessage(
+          "Turn approval prompts off for this session? The sandbox stays in force.",
+          { modal: true },
+          "Turn prompts off",
+          "Cancel",
+        );
+        if (choice !== "Turn prompts off") return;
+      }
+      const session = await this.ensureSession();
+      const state = await session.setAutoApprove(on);
+      await this.agent?.rememberAutoApprove(state);
+      const part: UiPart = {
+        kind: "notice",
+        level: state ? "warn" : "info",
+        text: state
+          ? "Approval prompts are off for this session. The sandbox is unchanged."
+          : "Approval prompts are on again for this session. The sandbox was never changed.",
+      };
+      this.transcript.append(part);
+      this.post({ type: "part", tabId: this.tabs.activeId ?? "tab-1", part });
+    } catch (error) {
+      this.postError(`I could not change the approval setting: ${explain(error)}`);
+      this.output.appendLine(`failed: ${explain(error)}`);
+    }
   }
 
   private async send(text: string): Promise<void> {
@@ -225,6 +465,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       context: this.context,
       binaryPath: this.binary.path,
     });
+    const prompt = promptText(text, this.attachments);
+    this.attachments.length = 0;
+    this.postAttachments();
     const renderer = new Renderer({ cwd: folder.uri.fsPath });
     renderer.beginTurn();
     const review = this.beginReview(folder);
@@ -296,6 +539,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
+    const previousExit = this.agent.takeLastExit();
+    if (previousExit !== undefined) {
+      const notice: UiPart = {
+        kind: "notice",
+        level: "warn",
+        text: `The previous loongagent server exited (${previousExit.signal ?? `code ${previousExit.code}`}); a new one is running now.`,
+      };
+      this.transcript.append(notice);
+      this.post({ type: "part", tabId: tab.id, part: notice });
+    }
     this.running = true;
     this.tabs.update(tab.id, { status: "running" });
     if (tab.title === "New session") {
@@ -307,7 +560,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.postTabs();
 
     try {
-      await controller.run(promptText(text, []));
+      await controller.run(prompt);
       if (lastAssistant !== undefined) {
         const assistant: UiPart = { kind: "assistant", ...lastAssistant };
         this.transcript.append(assistant);

@@ -57,7 +57,7 @@ send.textContent = "Send";
 send.setAttribute("aria-label", "Send the message");
 const hint = document.createElement("span");
 hint.className = "hint";
-hint.textContent = "Enter sends · Shift+Enter newline";
+hint.textContent = "Type @ to attach a file · Enter sends · Shift+Enter newline";
 controls.append(fileButton, hint, send);
 composer.append(attachmentsBar, input, controls);
 shell.append(header, transcript, composer);
@@ -353,6 +353,16 @@ modelSelect.addEventListener("change", () => {
   api.postMessage({ type: "selectModel", tabId: state.activeTabId, name: modelSelect.value });
 });
 input.addEventListener("keydown", (event) => {
+  if (event.key === "@" && !event.isComposing) {
+    const before = input.value.slice(0, input.selectionStart ?? 0);
+    if (before === "" || /\s$/.test(before)) {
+      event.preventDefault();
+      if (state.activeTabId !== undefined) {
+        api.postMessage({ type: "pickFile", tabId: state.activeTabId });
+      }
+      return;
+    }
+  }
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
     submit();

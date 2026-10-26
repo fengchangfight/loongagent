@@ -383,10 +383,12 @@ is set with `textContent`.
 
 ## 10. Attachments and selection
 
-- **File:** `@` in the composer opens `showQuickPick`/`showOpenDialog` over the
-  workspace; the attachment stores an absolute path. The prompt appends
-  `referenced files:\n- <path>`; the kernel's own read tools fetch the content. The
-  extension does not inline file bodies.
+- **File:** typing `@` at a word boundary, or clicking the `@ file` button, opens
+  `showQuickPick` over workspace files; typing filters the labels, and there is no file
+  browser. The list is `workspace.findFiles`, capped at 2000, excluding `node_modules`
+  and `.git`, sorted by relative path. The attachment stores an absolute path. The prompt
+  appends `referenced files:\n- <path>`; the kernel's own read tools fetch the content.
+  The extension does not inline file bodies.
 - **Selection:** the host listens to `onDidChangeTextEditorSelection` and
   `onDidChangeActiveTextEditor`; a non-empty selection in a workspace file becomes an
   attachment automatically, with no button or context-menu command. The attachment

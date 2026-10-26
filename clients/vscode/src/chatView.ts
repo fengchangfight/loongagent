@@ -5,6 +5,7 @@ import { basename, isAbsolute, relative, resolve } from "node:path";
 import { ApprovalBook } from "./approval.ts";
 import { previewEdit, previewWrite } from "./diff.ts";
 import { DiffProvider } from "./diffProvider.ts";
+import { fileChoices } from "./filePicker.ts";
 import { refusalToStart } from "./guards.ts";
 import { PreviewProvider } from "./previewProvider.ts";
 import { promptText } from "./prompt.ts";
@@ -364,17 +365,31 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.postError("Open a folder first — the agent works on a workspace.");
       return;
     }
-    const picked = await vscode.window.showOpenDialog({
-      canSelectFiles: true,
-      canSelectFolders: false,
-      canSelectMany: false,
-      defaultUri: folder.uri,
-      openLabel: "Attach file",
-    });
-    const path = picked?.[0]?.fsPath;
-    if (path === undefined) return;
-    this.attachments.push({ id: `att-${this.nextAttachment++}`, kind: "file", path });
-    this.postAttachments();
+    try {
+      const files = await vscode.workspace.findFiles(
+        "**/*",
+        "**/{node_modules,.git}/**",
+        2000,
+      );
+      const choices = fileChoices(files.map((uri) => uri.fsPath), folder.uri.fsPath);
+      if (choices.length === 0) {
+        this.postError("There are no workspace files to attach.");
+        return;
+      }
+      const picked = await vscode.window.showQuickPick(choices, {
+        placeHolder: "Attach a workspace file — type to filter",
+        matchOnDescription: true,
+      });
+      if (picked === undefined) return;
+      this.attachments.push({
+        id: `att-${this.nextAttachment++}`,
+        kind: "file",
+        path: picked.path,
+      });
+      this.postAttachments();
+    } catch (error) {
+      this.postError(`I could not list the workspace files: ${explain(error)}`);
+    }
   }
 
   private refreshSelection(): void {

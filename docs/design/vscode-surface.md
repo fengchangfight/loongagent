@@ -66,7 +66,9 @@ transcript, never a file the extension reads.
 
 ## 4. Attachments and model
 
-- `@ file` attachments are absolute paths; the kernel reads the content.
+- `@ file` attachments are absolute paths; the kernel reads the content. Typing `@` at a
+  word boundary, or clicking the button, opens a filtered QuickPick over workspace files; there
+  is no file browser.
 - The active editor selection is inlined automatically: path, line range and text, because
   `read_file` has no line-range parameter. A passive chip names it; deselecting removes it.
 - The model dropdown comes from `model.list`; a change is `model.select` and is recorded as

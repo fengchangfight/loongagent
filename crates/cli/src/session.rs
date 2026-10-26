@@ -18,18 +18,18 @@ use super::*;
 /// `~/.loongagent/projects/<project>/session.jsonl` (or under `$LOONGAGENT_HOME`).
 ///
 /// Sessions are state, not configuration, so they live under the state dir and are
-/// keyed by the project they belong to: resuming yesterday's work in a directory is
-/// the default, and `--session` is only for choosing differently.
+/// keyed by the project they belong to: `tui` starts a fresh one there, while
+/// `--session` (or `resume`) is how yesterday's conversation is opened.
 /// Which of the three ways this run got its session. The interface says which, because
 /// "did I just continue yesterday's conversation or start a new one?" is not a question
 /// anyone should have to infer from a file listing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SessionSource {
-    /// A fresh id (`--new`, or nothing to continue).
+    /// A fresh id (`--new`, `tui`'s default, or nothing to continue).
     Created,
     /// Someone named it (`--session`, `resume`).
     Named,
-    /// The default: the newest session in this project.
+    /// The newest session in this project, when a command's default is to continue one.
     Continued,
 }
 
@@ -46,15 +46,15 @@ pub(crate) fn session_intro(source: SessionSource, id: &str, events: u64) -> Str
         SessionSource::Created => format!("new session {id}"),
         SessionSource::Named => format!("reopened session {id} ({events} events)"),
         SessionSource::Continued => format!(
-            "continuing session {id} ({events} events) — `loongagent tui --new` starts a fresh one"
+            "continuing session {id} ({events} events) — `loongagent tui` starts a fresh one"
         ),
     }
 }
 
 /// Purpose: Where one project's sessions live, under the client's root.
-/// Serves: `server.rs`'s factory and `session_path_for`.
+/// Serves: `server.rs`'s factory and `session.rs`'s path helpers.
 /// Design: `docs/design/sessions-lineage.md` §1.
-/// Up: `server.rs`'s `serve` (the factory closure) and `session_path_in`.
+/// Up: `server.rs`'s `serve` (the factory closure), `session_path_in`, `newest_session_in` and `resolve_session_in`.
 /// Down: `session_dir_in` and `project_slug`.
 /// Verify: `cargo test -p loongagent`.
 /// Where one project's sessions live. A project is a directory; its slug names the
@@ -91,18 +91,8 @@ pub(crate) fn session_id_of(path: &Path) -> String {
     }
 }
 
-/// Purpose: The file a given id names in this project.
-/// Serves: `Args::finish_session` for `--new` and the default case, and `resume`.
-/// Design: `docs/design/sessions-lineage.md` §1.
-/// Up: `Args::finish_session` and `resume`; the session tests.
-/// Down: `session_path_in`, `session_dir_in` and `config_dir`.
-/// Verify: `cargo test -p loongagent`.
-pub(crate) fn session_path_for(id: &str, cwd: &Path) -> PathBuf {
-    session_path_in(&config_dir(), id, cwd)
-}
-
-/// Purpose: The same mapping under an injected root, with `default` keeping its legacy file name.
-/// Contract: `session.rs` path layout; `session_path_for` and the session tests call it.
+/// Purpose: The mapping from an id to its file under an injected root, with `default` keeping its legacy file name.
+/// Contract: `session.rs` path layout; `choose_session_in` and the session tests call it.
 fn session_path_in(root: &Path, id: &str, cwd: &Path) -> PathBuf {
     if id == "default" {
         session_dir_in(root, cwd).join("session.jsonl")
@@ -367,10 +357,50 @@ fn all_session_summaries_in(root: &Path) -> Vec<SessionSummary> {
     sessions
 }
 
-/// Purpose: The session a bare surface would continue, or `None` when this project has none.
-/// Serves: `Args::finish_session`, the session listing and `fork`.
+/// Purpose: Pick this run's session: a named one, a fresh one, or this project's newest.
+/// Serves: `Args::finish_session`, and so every command.
 /// Design: `docs/design/sessions-lineage.md` §5.
-/// Up: `Args::finish_session`, `list_sessions` and `fork`.
+/// Up: `Args::finish_session`; no other caller.
+/// Down: `choose_session_in`.
+/// Verify: `cargo test -p loongagent`.
+pub(crate) fn choose_session(
+    spec: Option<&str>,
+    cwd: &Path,
+    fresh: bool,
+) -> Result<(PathBuf, SessionSource), String> {
+    choose_session_in(&config_dir(), spec, cwd, fresh)
+}
+
+/// Purpose: The same choice under an injected root, for the session tests.
+/// Serves: `choose_session` and the session tests.
+/// Design: `docs/design/sessions-lineage.md` §5.
+/// Up: `choose_session` and the session tests; no other caller.
+/// Down: `resolve_session_in`, `new_session_id_in`, `newest_session_in` and `session_path_in`.
+/// Verify: `cargo test -p loongagent`.
+fn choose_session_in(
+    root: &Path,
+    spec: Option<&str>,
+    cwd: &Path,
+    fresh: bool,
+) -> Result<(PathBuf, SessionSource), String> {
+    if let Some(spec) = spec {
+        return Ok((resolve_session_in(root, spec, cwd)?, SessionSource::Named));
+    }
+    if fresh {
+        let id = new_session_id_in(root, cwd);
+        return Ok((session_path_in(root, &id, cwd), SessionSource::Created));
+    }
+    if let Some(newest) = newest_session_in(root, cwd) {
+        return Ok((newest, SessionSource::Continued));
+    }
+    let id = new_session_id_in(root, cwd);
+    Ok((session_path_in(root, &id, cwd), SessionSource::Created))
+}
+
+/// Purpose: The newest session in this project, which `resume` reopens, or `None` when there is none.
+/// Serves: `choose_session`, the session listing and `fork`.
+/// Design: `docs/design/sessions-lineage.md` §5.
+/// Up: `choose_session`, `list_sessions` and `fork`.
 /// Down: `newest_session_in`.
 /// Verify: `cargo test -p loongagent`.
 pub(crate) fn newest_session(cwd: &Path) -> Option<PathBuf> {
@@ -378,7 +408,7 @@ pub(crate) fn newest_session(cwd: &Path) -> Option<PathBuf> {
 }
 
 /// Purpose: The newest session in one directory, under an injected root.
-/// Contract: `session.rs` resolution; `newest_session` and `resolve_session_in` call it.
+/// Contract: `session.rs` resolution; `newest_session`, `choose_session_in` and `resolve_session_in` call it.
 fn newest_session_in(root: &Path, cwd: &Path) -> Option<PathBuf> {
     session_summaries_in(&session_dir_in(root, cwd), &project_slug(cwd))
         .first()
@@ -386,9 +416,9 @@ fn newest_session_in(root: &Path, cwd: &Path) -> Option<PathBuf> {
 }
 
 /// Purpose: Turn a path, an id or a prefix into a session file, naming the candidates when the answer is several.
-/// Serves: `Args::finish_session`, `fork` and `delete`.
+/// Serves: `fork` and `delete`.
 /// Design: `docs/design/sessions-lineage.md` §5.
-/// Up: `Args::finish_session`, `fork` and `delete`; the session tests.
+/// Up: `fork`, `delete` and the session tests.
 /// Down: `resolve_session_in`.
 /// Verify: `cargo test -p loongagent`.
 /// Turn what someone typed into a session file. A path stays a path; anything else is an
@@ -399,9 +429,9 @@ pub(crate) fn resolve_session(spec: &str, cwd: &Path) -> Result<PathBuf, String>
 }
 
 /// Purpose: The same resolution under an injected root, including the cross-project fallback.
-/// Serves: `resolve_session` and the session tests.
+/// Serves: `resolve_session`, `choose_session_in` and the session tests.
 /// Design: `docs/design/sessions-lineage.md` §3 and §5.
-/// Up: `resolve_session` and the session tests; no other caller.
+/// Up: `resolve_session`, `choose_session_in` and the session tests; no other caller.
 /// Down: `session_dir_in`, `newest_session_in`, `session_summaries_in`, `match_session`, `all_session_summaries_in` and `match_session_across_projects`.
 /// Verify: `cargo test -p loongagent`.
 fn resolve_session_in(root: &Path, spec: &str, cwd: &Path) -> Result<PathBuf, String> {
@@ -541,7 +571,7 @@ fn clip(text: &str, width: usize) -> String {
     format!("{head}…")
 }
 
-/// Purpose: Print this project's sessions or every project's, newest first, with the one a bare surface would pick.
+/// Purpose: Print this project's sessions or every project's, newest first, with the newest marked.
 /// Serves: `loongagent sessions [--all] [--limit N]`.
 /// Design: `docs/design/sessions-lineage.md` §3 and §5.
 /// Up: `main.rs`'s `sessions` arm; no other caller.
@@ -587,8 +617,8 @@ pub(crate) fn list_sessions(rest: &[String]) -> Result<(), String> {
         );
         return Ok(());
     }
-    // The one a bare `loongagent tui` would pick up. Compared by path, not by id:
-    // every legacy session is called `default`, and marking five rows is not a mark.
+    // The newest session, which `loongagent resume` reopens. Compared by path, not by
+    // id: every legacy session is called `default`, and marking five rows is not a mark.
     let current = newest_session(&cwd);
     println!(
         "{} session{} (newest first){}",
@@ -655,7 +685,7 @@ pub(crate) fn list_sessions(rest: &[String]) -> Result<(), String> {
     }
     println!();
     println!(
-        "  * = what `loongagent tui` picks up here; `loongagent resume <id>` opens any of them"
+        "  * = the newest here, which `loongagent resume` reopens; name another with `resume <id>`"
     );
     Ok(())
 }
@@ -703,7 +733,7 @@ pub(crate) fn fork(rest: &[String]) -> Result<(), String> {
         Some(spec) => resolve_session(spec, &cwd)?,
         None => newest_session(&cwd).ok_or_else(|| {
             format!(
-                "no session to fork here — `loongagent tui --new` starts one, or name one with \
+                "no session to fork here — `loongagent tui` starts one, or name one with \
                  `loongagent fork <id>`"
             )
         })?,
@@ -1073,18 +1103,18 @@ mod session_tests {
         std::fs::write(path, text).unwrap();
     }
 
-    /// Purpose: The intro names the session, and says `--new` when this run continued one.
+    /// Purpose: The intro names the session, and says how to start another when this run continued one.
     #[test]
     fn the_first_line_says_which_session_this_is_and_how_to_start_another() {
-        // The confusion this exists for: `tui` continues the newest session, which is
-        // worth saying rather than leaving to be inferred.
+        // A surface that continues the newest session says so rather than leaving it
+        // to be inferred; `tui` itself starts fresh, so the hint names the bare command.
         let continued = session_intro(SessionSource::Continued, "36bxg8rd", 17);
         assert!(
             continued.starts_with("continuing session 36bxg8rd (17 events)"),
             "{continued}"
         );
         assert!(
-            continued.contains("--new"),
+            continued.contains("`loongagent tui` starts a fresh one"),
             "and how to start a fresh one: {continued}"
         );
 
@@ -1125,14 +1155,15 @@ mod session_tests {
     fn the_first_session_ever_kept_its_name_and_answers_to_default() {
         assert_eq!(session_id_of(Path::new("/x/session.jsonl")), "default");
         assert_eq!(session_id_of(Path::new("/x/k7m2xq3f.jsonl")), "k7m2xq3f");
+        let root = Path::new("/tmp/root");
         assert_eq!(
-            session_path_for("default", Path::new("/tmp/p"))
+            session_path_in(root, "default", Path::new("/tmp/p"))
                 .file_name()
                 .unwrap(),
             "session.jsonl"
         );
         assert_eq!(
-            session_path_for("k7m2xq3f", Path::new("/tmp/p"))
+            session_path_in(root, "k7m2xq3f", Path::new("/tmp/p"))
                 .file_name()
                 .unwrap(),
             "k7m2xq3f.jsonl"
@@ -1240,6 +1271,30 @@ mod session_tests {
             "aaaa1111.jsonl",
             "ids are matched case-insensitively"
         );
+    }
+
+    /// Purpose: A fresh default starts a new log, while a named session (including `latest`) still wins.
+    #[test]
+    fn a_fresh_default_still_lets_a_named_session_win() {
+        let root = temp_root("choose");
+        let cwd = Path::new("/tmp/project");
+        let dir = session_dir_in(&root, cwd);
+        write_session(&dir.join("aaaa1111.jsonl"), &["older"]);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write_session(&dir.join("bbbb2222.jsonl"), &["newer"]);
+
+        let (continued, source) = choose_session_in(&root, None, cwd, false).unwrap();
+        assert_eq!(source, SessionSource::Continued);
+        assert_eq!(continued.file_name().unwrap(), "bbbb2222.jsonl");
+
+        let (fresh, source) = choose_session_in(&root, None, cwd, true).unwrap();
+        assert_eq!(source, SessionSource::Created);
+        assert_ne!(fresh, continued);
+        assert_eq!(fresh.parent().unwrap(), dir);
+
+        let (named, source) = choose_session_in(&root, Some("latest"), cwd, true).unwrap();
+        assert_eq!(source, SessionSource::Named);
+        assert_eq!(named, continued);
     }
 
     /// Purpose: An ambiguous prefix names both candidates instead of choosing one.

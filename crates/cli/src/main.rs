@@ -64,8 +64,8 @@ use crate::repl::repl;
 use crate::sandbox::sandbox_self_test;
 use crate::server::serve;
 use crate::session::{
-    default_session_path, delete, fork, list_sessions, new_session_id, newest_session,
-    resolve_session, resume, session_id_of, session_path_for, SessionSource,
+    choose_session, default_session_path, delete, fork, list_sessions, resume, session_id_of,
+    SessionSource,
 };
 use crate::tui::full_screen;
 use crate::web::web;
@@ -85,7 +85,8 @@ USAGE:
   loongagent local semantic off                                            turn it off
   loongagent setup          [--profile PATH]                                write a profile
   loongagent tui            [--session ID|PATH] [--cwd DIR] [--new] [--local|--centered]  full-screen
-      with no --session it continues this project's newest session; --new starts another
+      with no --session it starts a new session; --session latest or `loongagent resume` continues
+      --new says that explicitly and is otherwise unnecessary
       local is the default: no control plane, no pack, no sync, no setup form
       --centered reads the managed profile/control plane instead
       in a session:  alt+1..9 choose a model (or /1../9); alt+r asks the last
@@ -231,13 +232,33 @@ struct Args {
 }
 
 impl Args {
-    /// Purpose: Parse the flags and positionals, load the env files first, and settle the session once the whole line is known.
-    /// Serves: every command; `run` parses before dispatch.
+    /// Purpose: Parse the flags for a command whose default is to continue the newest session.
+    /// Serves: every command except `tui`; `run` parses before dispatch.
     /// Design: `docs/design/surfaces.md` §2; `docs/design/config-routing.md` §5.
     /// Up: `run` and every command module that takes an `Args`; `resume` re-enters through it.
-    /// Down: `load_env_files`, `config_dir` and `finish_session`.
+    /// Down: `parse_with`.
     /// Verify: `cargo test -p loongagent`.
     fn parse(rest: &[String]) -> Result<Self, String> {
+        Self::parse_with(rest, false)
+    }
+
+    /// Purpose: Parse `tui`'s flags, whose default with no `--session` is a fresh session.
+    /// Serves: `run`'s `tui` arm.
+    /// Design: `docs/design/surfaces.md` §2.
+    /// Up: `run`'s `tui` arm; no other caller.
+    /// Down: `parse_with`.
+    /// Verify: `cargo test -p loongagent`.
+    fn parse_tui(rest: &[String]) -> Result<Self, String> {
+        Self::parse_with(rest, true)
+    }
+
+    /// Purpose: The one parser: read the flags, load the env files, and settle the session once the whole line is known.
+    /// Serves: `parse` and `parse_tui`.
+    /// Design: `docs/design/surfaces.md` §2; `docs/design/config-routing.md` §5.
+    /// Up: `parse` and `parse_tui`; no other caller.
+    /// Down: `load_env_files`, `config_dir` and `finish_session`.
+    /// Verify: `cargo test -p loongagent`.
+    fn parse_with(rest: &[String], fresh_by_default: bool) -> Result<Self, String> {
         let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
         let mut args = Args {
             session: None,
@@ -435,44 +456,36 @@ impl Args {
             }
             i += 1;
         }
-        args.finish_session()?;
+        args.finish_session(fresh_by_default)?;
         Ok(args)
     }
 
     /// Purpose: Work out which session this run is about, once, so every command and the interface agree.
-    /// Serves: `Args::parse`, and so every command.
+    /// Serves: `Args::parse_with`, and so every command.
     /// Design: `docs/design/sessions-lineage.md` §5.
-    /// Up: `Args::parse`; no other caller.
-    /// Down: `new_session_id`, `session_path_for`, `resolve_session` and `newest_session`.
+    /// Up: `Args::parse_with`; no other caller.
+    /// Down: `choose_session`.
     /// Verify: `cargo test -p loongagent`.
     /// Work out which session this run is about — once, here, so every command and the
     /// interface agree. Three ways to say it: a path (`./x.jsonl`), an id (the file's
     /// own name, or an unambiguous prefix of it), or `latest`. Nothing said means the
-    /// newest session in this project, and if there is none, a fresh id is minted now so
-    /// that the answer is stable for the rest of the run.
-    fn finish_session(&mut self) -> Result<(), String> {
+    /// newest session in this project, except for `tui`, whose default is a fresh one.
+    /// If there is none, a fresh id is minted now so that the answer is stable for the
+    /// rest of the run.
+    fn finish_session(&mut self, fresh_by_default: bool) -> Result<(), String> {
         if self.new_session && self.session_spec.is_some() {
             return Err(
                 "--new starts a session and --session picks one; pass only one of them".to_string(),
             );
         }
-        self.session = if self.new_session {
-            let id = new_session_id(&self.cwd);
-            self.session_source = SessionSource::Created;
-            Some(session_path_for(&id, &self.cwd))
-        } else if let Some(spec) = self.session_spec.clone() {
-            self.session_source = SessionSource::Named;
-            Some(resolve_session(&spec, &self.cwd).map_err(|e| format!("--session {spec}: {e}"))?)
-        } else if let Some(newest) = crate::newest_session(&self.cwd) {
-            // The default, and it is worth saying out loud: this continues the project's
-            // most recent session rather than starting one.
-            self.session_source = SessionSource::Continued;
-            Some(newest)
-        } else {
-            let id = new_session_id(&self.cwd);
-            self.session_source = SessionSource::Created;
-            Some(session_path_for(&id, &self.cwd))
-        };
+        let fresh = self.new_session || (fresh_by_default && self.session_spec.is_none());
+        let (session, source) = choose_session(self.session_spec.as_deref(), &self.cwd, fresh)
+            .map_err(|e| match &self.session_spec {
+                Some(spec) => format!("--session {spec}: {e}"),
+                None => e,
+            })?;
+        self.session = Some(session);
+        self.session_source = source;
         Ok(())
     }
 
@@ -736,7 +749,7 @@ fn run() -> Result<(), String> {
         "control" => control(rest),
         "profiles" => profiles(Args::parse(rest)?),
         "use" => use_profile(Args::parse(rest)?, rest),
-        "tui" => full_screen(Args::parse(rest)?),
+        "tui" => full_screen(Args::parse_tui(rest)?),
         "resume" => resume(rest),
         "fork" => fork(rest),
         "delete" => delete(rest),

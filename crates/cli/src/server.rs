@@ -11,7 +11,7 @@ use super::*;
 
 use crate::config_cmd::resolve_reference;
 use crate::plugin::{installed_plugins, load_catalogue};
-use crate::session::{session_dir, session_infos};
+use crate::session::{new_session_id, session_dir, session_infos};
 
 // ---------------------------------------------------------------- the server
 

@@ -38,7 +38,7 @@ arguments and dispatches; the command modules are the only place where the run i
 - **Build** the kernel: models, tools, hooks, MCP clients, skills, plugins, the PDP and the
   sandbox choice (`serve` and `build_kernel` in `crates/cli/src/server.rs`).
 - **Run** the chosen surface: spawn the server child (`tui`, `repl`, `run`, `web`) or run the
-  server itself (`server --stdio`).
+  server itself (`server --stdio`); a bare `tui` starts fresh, `--session` opens an old one.
 
 So the CLI is not "another surface" in the thin-client sense. It is the composition root that
 turns a user's files and flags into one configured server. A surface crate below it receives a

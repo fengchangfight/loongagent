@@ -68,6 +68,10 @@ Linux-only), since unlinking a file a writer is appending to loses the conversat
 | **Retry** | In the TUI, `Alt+R` resends the last prompt to the model selected now. The history is kept: a resend is a new turn, not a rewind. | Same session, no new path. |
 | **Steer** | Not implemented. There is no channel that delivers a message to a running turn; the only mid-turn control is interrupt (`Ctrl-C`), which ends it. | — |
 
+A bare `loongagent tui` starts a fresh session; `loongagent tui --session ID|latest` or
+`loongagent resume [ID]` opens an existing one. The other surfaces (`repl`, `run`, `web`,
+`server`) still continue this project's newest session when nothing is named.
+
 **Resume** is a disk read, not a process resume. A parked approval lives only in
 `Kernel.pending` in memory, so a restarted process does not resume the question; the person
 starts a new turn. `session.replay` is lenient by design, and the kernel's own replay drives

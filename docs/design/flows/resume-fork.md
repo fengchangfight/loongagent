@@ -17,11 +17,12 @@ are [sessions-lineage.md](../sessions-lineage.md).
 - `session_summaries_in` reads each `*.jsonl` with `fs::read_to_string` and parses its
   lines: events, turns, the first user prompt and the first-event `session.forked`
   reference (`parent@seq`), newest first. `--all` uses `all_session_summaries`;
-  `newest_session` marks the one a bare `tui` would continue.
-- `Args::finish_session` settles one path: `--new` uses `new_session_id`;
-  `--session` / `resume` uses `resolve_session` (exact id, unambiguous prefix,
-  `latest`, or a path; `match_session` in this project,
-  `match_session_across_projects` elsewhere); nothing means `newest_session`.
+  `newest_session` marks the newest, which `resume` reopens.
+- `Args::finish_session` calls `choose_session` to settle one path: `--new` (or `tui`'s
+  default) uses `new_session_id`; `--session` / `resume` uses `resolve_session` (exact
+  id, unambiguous prefix, `latest`, or a path; `match_session` in this project,
+  `match_session_across_projects` elsewhere); nothing means `newest_session`, except
+  for `tui`, whose default is a fresh one.
 - `build_kernel` (`crates/cli/src/server.rs`) calls `Kernel::open_with_models` for an
   existing log or `Kernel::create_with_models` for a new one. `Kernel::build` rebuilds
   the derived index (`Index::rebuild_into`) and calls `replay_history`.

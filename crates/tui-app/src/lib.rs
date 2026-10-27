@@ -1765,9 +1765,6 @@ impl App {
     /// Purpose: Insert text at the caret, advance it and refresh the picker.
     /// Contract: called by `handle_key`'s character arm; calls `byte_at` and `refresh_picker`.
     fn insert(&mut self, text: &str) {
-        // Writing brings the page back to the prompt: it scrolls like everything else, and
-        // typing into a box that is off screen is typing blind.
-        self.scroll = 0;
         let at = self.byte_at(self.cursor);
         self.input.insert_str(at, text);
         self.cursor += text.chars().count();
@@ -1952,8 +1949,6 @@ impl App {
         if self.cursor == 0 {
             return;
         }
-        // Deleting is editing too: the prompt comes back into view.
-        self.scroll = 0;
         let from = self.byte_at(self.cursor - 1);
         let to = self.byte_at(self.cursor);
         self.input.replace_range(from..to, "");
@@ -1967,7 +1962,6 @@ impl App {
         if self.cursor >= self.input.chars().count() {
             return;
         }
-        self.scroll = 0;
         let from = self.byte_at(self.cursor);
         let to = self.byte_at(self.cursor + 1);
         self.input.replace_range(from..to, "");
@@ -2957,14 +2951,43 @@ impl App {
         };
         let width = view.width;
         let input_rows = self.input_rows(width.saturating_sub(2)) as usize;
-        // The page, top to bottom: the mark (or the opening picture), the transcript, the
-        // question, the menus, the prompt. Nothing here is pinned — that is the point.
+        // The prompt and the panels that belong to it are fixed to the bottom: what is
+        // being typed must always be visible, and scrolling moves only the page above it.
+        let decision_height = if self.pending.is_some() {
+            Self::decision_rows(view.height)
+        } else {
+            0
+        };
+        let menu_height = if self.command_rows() == 0 {
+            0
+        } else {
+            self.command_rows() + 2
+        };
+        let picker_height = if self.picker_rows() == 0 {
+            0
+        } else {
+            self.picker_rows() + 2
+        };
+        let bottom_height = decision_height + menu_height + picker_height + input_rows as u16 + 2;
+        let split = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(3),
+                Constraint::Length(bottom_height.min(view.height.saturating_sub(3))),
+            ])
+            .split(view);
+        let (view, bottom) = (split[0], split[1]);
+
+        // The page: the mark (or the opening picture) and the transcript. Nothing else —
+        // the question, the menus and the prompt live below it, out of the scroll.
         let splash = if self.lines.is_empty() {
             self.splash_art(frame.area())
         } else {
             None
         };
-        let prefix: Vec<Line> = if !self.logo || !self.show_banner(view) {
+        // Gated on the whole window, not on the page: the question is whether the screen
+        // can afford an eleven-row mark, and the prompt's fixed rows are part of the screen.
+        let prefix: Vec<Line> = if !self.logo || !self.show_banner(conversation) {
             Vec::new()
         } else if let Some((art, columns)) = splash {
             self.splash_lines(width, art, columns)
@@ -2975,26 +2998,24 @@ impl App {
             Some(open) => open.lines.len(),
             None => self.lines.len() + self.live_lines().len(),
         };
-        let decision = if self.pending.is_some() {
-            self.approval_lines(width, Self::decision_rows(view.height))
+        let decision = if decision_height > 0 {
+            self.approval_lines(width, decision_height)
         } else {
             Vec::new()
         };
-        let menu = if self.command_rows() == 0 {
-            Vec::new()
-        } else {
+        let menu = if menu_height > 0 {
             self.command_lines(width)
-        };
-        let picker = if self.picker_rows() == 0 {
-            Vec::new()
         } else {
+            Vec::new()
+        };
+        let picker = if picker_height > 0 {
             self.picker_lines(width)
+        } else {
+            Vec::new()
         };
         let (input, caret_row, caret_column) = self.input_lines(width, input_rows);
-        let input_height = input.len();
 
-        let total =
-            prefix.len() + body_rows + decision.len() + menu.len() + picker.len() + input_height;
+        let total = prefix.len() + body_rows;
         // Sticky scroll: while the reader is away from the bottom, content that arrives
         // must not push the page. Adding the growth to the offset keeps the same rows on
         // screen — which is what makes selecting a long block possible while a turn runs.
@@ -3012,18 +3033,11 @@ impl App {
         let shown = first + 1;
 
         let body_start = prefix.len();
-        let tail_start = body_start + body_rows;
-        let input_top = tail_start + decision.len() + menu.len() + picker.len();
-        let mut tail = decision;
-        tail.extend(menu);
-        tail.extend(picker);
-        tail.extend(input);
-
         let mut page: Vec<Line> = Vec::with_capacity(last - first);
         for at in first..last {
             if at < body_start {
                 page.push(prefix[at].clone());
-            } else if at < tail_start {
+            } else {
                 let index = at - body_start;
                 page.push(match &self.open {
                     Some(open) => styled(&open.lines[index]),
@@ -3033,22 +3047,24 @@ impl App {
                         live_line(live[index - self.lines.len()])
                     }
                 });
-            } else {
-                page.push(tail[at - tail_start].clone());
             }
         }
         frame.render_widget(Paragraph::new(page), view);
 
-        // The caret exists only where the prompt does: scrolled off the page, there is
-        // nothing to point at.
+        // The bottom stack: the question, then the menus, then the prompt — the answer
+        // nearest the line it is typed into.
+        let mut tail = decision;
+        tail.extend(menu);
+        tail.extend(picker);
+        tail.extend(input);
+        frame.render_widget(Paragraph::new(tail), bottom);
+
+        // The prompt does not scroll, so the caret is wherever the prompt is.
         if self.pending.is_none() {
-            let caret_doc = input_top + 1 + caret_row as usize;
-            if caret_doc >= first && caret_doc < last {
-                frame.set_cursor_position((
-                    view.x + 1 + caret_column,
-                    view.y + (caret_doc - first) as u16,
-                ));
-            }
+            frame.set_cursor_position((
+                bottom.x + 1 + caret_column,
+                bottom.y + decision_height + menu_height + picker_height + 1 + caret_row,
+            ));
         }
 
         if let Some(panel) = panel {

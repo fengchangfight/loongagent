@@ -124,14 +124,14 @@ background and unreadable on the other. The same rule is why the quiet lines are
 on a dark theme, so the bookkeeping lines were drawn into the wall (`MARK_QUIET`). The
 answers not chosen in a decision menu are `default` too; the highlighted one is coloured.
 
-The screen is one page, not three boxes. Two bars are fixed — the status line at the top
-(the session, or the models) and the keys at the bottom. Between them, the mark, the
-conversation, the question, the menus and the prompt are one document that scrolls.
+The screen is one page above and one fixed prompt below. The status line and the keys are
+the only bars; between them the mark and the conversation scroll, while the question, the
+menus and the prompt stay put at the bottom, so what is being typed is always visible.
 
     ╔═════════༺ ᛭ ༻═════════╗   ← the mark, scrolled away by the conversation
     ║  ▀█▀▀█▀  ██╗  ██████╗  ║
     ╚═════════༻ ᛭ ༺═════════╝
-    ┌ 输入 ─────────────────┐   ← the prompt is page content too
+    ┌ 输入 ─────────────────┐   ← fixed: the page scrolls above it
     └───────────────────────┘
 
 The mark frames the character 龍 — a 16×16 bitmap in half blocks, not a glyph, which at
@@ -142,7 +142,7 @@ is no mark. The character is ANSI red and the frame ANSI magenta — never an ab
 
 Scrolling is anchored to the page, not its end: away from the bottom, new output is
 appended below the window and changes nothing on screen, so a long block stays selectable
-during a turn. The prompt scrolls too; an editing key returns to the bottom.
+during a turn. The prompt does not scroll, so the caret is always where the typing goes.
 
 ## 4. The web: a bridge, not a second agent
 

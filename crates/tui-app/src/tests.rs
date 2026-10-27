@@ -2376,9 +2376,9 @@ fn new_output_does_not_move_a_pinned_page() {
     );
 }
 
-/// Purpose: Typing brings the prompt back into view, because the prompt scrolls with the page.
+/// Purpose: The prompt is fixed at the bottom; scrolling moves only the page above it.
 #[test]
-fn typing_returns_to_the_prompt() {
+fn the_prompt_stays_while_the_page_scrolls() {
     let mut app = App::new("s", "v");
     app.push_lines((1..=60).map(|n| format!("line {n}")).collect::<Vec<_>>());
     for _ in 0..6 {
@@ -2386,15 +2386,25 @@ fn typing_returns_to_the_prompt() {
     }
     let away = draw(&mut app, 80, 24);
     assert!(
-        !shows(&away, "输入"),
-        "the prompt has scrolled off:\n{away}"
+        shows(&away, "输入"),
+        "the prompt stays put while the page is away:\n{away}"
     );
+    // Typing writes into the visible prompt and leaves the page where it was.
+    let head: Vec<String> = away
+        .lines()
+        .skip(2)
+        .take(4)
+        .map(|l| l.to_string())
+        .collect();
     type_text(&mut app, "hi");
     let back = draw(&mut app, 80, 24);
-    assert!(
-        shows(&back, "输入"),
-        "typing brought the prompt back:\n{back}"
-    );
+    let same: Vec<String> = back
+        .lines()
+        .skip(2)
+        .take(4)
+        .map(|l| l.to_string())
+        .collect();
+    assert_eq!(head, same, "typing did not push the page:\n{back}");
 }
 
 /// Purpose: The favicon is drawn from the terminal's named colours, never an invented RGB.

@@ -286,6 +286,14 @@ const MARK_SUBLINE: [(usize, &str); 3] = [
 ];
 /// Violet, for something that wants an answer rather than something that went wrong.
 const MARK_ACCENT_STYLE: Style = Style::new().fg(MARK_ACCENT);
+/// The colours the model bar's slots cycle through: one per model, so a row of slots is
+/// told apart by colour as well as by name.
+///
+/// Three, because these are the named colours that stay readable as *words* on the owner's
+/// light background: yellow and cyan are unreadable there, light red reads as a failure,
+/// and a fixed RGB would be picked for one background and lost on the other. Four models or
+/// more repeat a colour; the names still tell them apart.
+const MODEL_INKS: [Color; 3] = [Color::Magenta, Color::Green, Color::Blue];
 
 /// Purpose: The classes the transcript paints differently, read from the line's own vocabulary.
 /// Serves: `classify`, `style_for`, `styled` and `transcript_line`.
@@ -955,18 +963,15 @@ impl App {
                 mark.to_string(),
                 Style::default().fg(Color::Red),
             ));
+            // Every slot's key is a colour chip: the model's own colour behind the digit,
+            // the terminal's foreground on top, so it reads on either background.
+            let ink = MODEL_INKS[index % MODEL_INKS.len()];
             spans.push(Span::styled(
                 cap,
-                if current {
-                    // A filled key: the accent behind the digit, the terminal's own
-                    // foreground on top, so it reads on either background.
-                    Style::default()
-                        .fg(Color::Reset)
-                        .bg(MARK_ACCENT)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    MARK_QUIET
-                },
+                Style::default()
+                    .fg(Color::Reset)
+                    .bg(ink)
+                    .add_modifier(Modifier::BOLD),
             ));
             spans.push(Span::raw(" "));
             spans.push(Span::styled(
@@ -975,10 +980,15 @@ impl App {
                     Style::default().fg(Color::Red)
                 } else if current {
                     // Bold and underlined as well as capped: the cap says which key it
-                    // is, the underline says which one is in hand.
-                    MARK_TEXT.add_modifier(Modifier::UNDERLINED)
+                    // is, the underline says which one is in hand. The name is never
+                    // dimmed, so every slot reads at full contrast whatever its colour.
+                    Style::default()
+                        .fg(ink)
+                        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
                 } else {
-                    MARK_QUIET
+                    // The name wears the same colour as its key, so a slot reads as one
+                    // object rather than as a black word beside a coloured chip.
+                    Style::default().fg(ink)
                 },
             ));
             used += label_width;

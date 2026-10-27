@@ -37,6 +37,12 @@ toml.workspace = true
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# The Windows executable's icon is a resource, not a Rust value: the build script
+# compiles `assets/loongagent.rc` with rc.exe (MSVC) or windres (MinGW), and this
+# crate knows where those tools hide. Linux builds compile it but never call it.
+[build-dependencies]
+embed-resource = "3"
+
 [dev-dependencies]
 tungstenite = "0.30"
 loong-schema.workspace = true

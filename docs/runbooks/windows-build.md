@@ -2,7 +2,7 @@
 
 - **Up:** [README.md](README.md)
 - **Authority:** [ADR-0013](../decisions/0013-implementation-language.md)
-- **Code:** `scripts/build-windows.ps1`, `scripts/build-windows.cmd`
+- **Code:** `scripts/build-windows.ps1`, `scripts/build-windows.cmd`, `crates/cli/build.rs`, `crates/cli/assets/loongagent.rc`
 - **Verify:** `powershell -ExecutionPolicy Bypass -File scripts/build-windows.ps1`
 
 One command builds the agent for Windows, and the session you get is deliberately the
@@ -61,6 +61,10 @@ command is the same one Ubuntu uses:
 cargo build --release --locked -p loongagent     # -> target\release\loongagent.exe
 ```
 
+The binary also carries the app icon from `crates/cli/assets/loongagent.ico`, compiled
+from `crates/cli/assets/loongagent.rc`. Explorer and the taskbar show it instead of the
+generic executable icon. A non-Windows target skips the resource entirely.
+
 ## Prerequisites
 
 | Need | Why | How |
@@ -68,6 +72,10 @@ cargo build --release --locked -p loongagent     # -> target\release\loongagent.
 | Rust stable (rustup) | the workspace pins `stable` in `rust-toolchain.toml` | <https://rustup.rs> |
 | A C compiler | not optional: `rusqlite` with the `bundled` feature compiles the SQLite amalgamation, and `ring` (TLS) compiles its own C and assembly | **MSVC:** Visual Studio Build Tools with the *Desktop development with C++* workload. **MinGW:** `x86_64-w64-mingw32-gcc` on PATH |
 | `rust-std` for the target | only when the target is not the host ABI | `rustup target add x86_64-pc-windows-gnu` |
+
+The icon resource needs a resource compiler: `rc.exe` from the Windows SDK for MSVC,
+or `windres` from MinGW-w64 for GNU. Both ship with the C++ toolchain above; setting
+`RC` to a specific compiler overrides the search.
 
 Perl and NASM are **not** needed: the published `ring` crate ships pregenerated
 assembly. The `minimal` rustup profile is enough.
@@ -184,6 +192,9 @@ down too.
 .\dist\windows\loongagent.exe tui --local      # then type /help
 ```
 
+The executable should also show the dragon icon in Explorer, the taskbar and
+Alt-Tab; a generic icon means the resource compiler was skipped.
+
 Inside the session, the smoke test that exercises the real path is: ask for something
 that writes a file (the policy decision, the rule that fired and the tool result land
 in the stream), then press `ctrl-c` during a long turn and watch the turn stop without
@@ -198,6 +209,7 @@ For the cross-check from Linux (what CI would run first), see the header.
 |---|---|---|
 | `linker 'link.exe' not found` | no MSVC C++ toolchain | install Visual Studio Build Tools with *Desktop development with C++*, or build with `-Target gnu` |
 | `failed to run custom build command for libsqlite3-sys` / `ring` | same cause: a C compiler is missing | as above |
+| `the Windows icon resource compiles` in `loongagent`'s build script | no `rc.exe` (MSVC) or `windres` (MinGW) | install the Windows SDK or MinGW-w64, or set `RC` to the compiler |
 | `error[E0463]: can't find crate for 'std'` | the target's std is not installed | `rustup target add x86_64-pc-windows-gnu` |
 | Chinese text or box drawing looks like garbage | the terminal is not UTF-8 | the app sets the code page itself; **Windows Terminal** is the recommended host, legacy conhost has weaker VT and Alt-key support |
 | `alt+1` does nothing | the terminal eats Alt | use `/1` … `/9`, or `ctrl+n`/`ctrl+p` — the same fallbacks Ubuntu documents |

@@ -117,7 +117,7 @@ fn render_event_with(envelope: &Value, full: bool) -> Option<String> {
             let text = data.get("text").and_then(|t| t.as_str()).unwrap_or("");
             match role {
                 "assistant" if !text.is_empty() => Some(text.to_string()),
-                "user" => Some(format!("you: {text}")),
+                "user" => Some(format!("你：{text}")),
                 _ => None,
             }
         }
@@ -132,23 +132,28 @@ fn render_event_with(envelope: &Value, full: bool) -> Option<String> {
             let ok = data.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
             let output = data.get("output").and_then(|o| o.as_str()).unwrap_or("");
             Some(if full {
-                format!("← {} {output}", if ok { "ok" } else { "failed" })
+                format!("← {} {output}", if ok { "成功" } else { "失败" })
             } else {
                 collapse_result(ok, output)
             })
         }
         gen::event::TURN_INTERRUPTED => Some(format!(
-            "⏹ interrupted — stopped by {}",
+            "⏹ {}",
             if data.get("reason").and_then(|r| r.as_str()) == Some("interrupted") {
-                "you"
+                "已被你停止"
             } else {
-                "a limit"
+                "到了限制，停在这里"
             }
         )),
         gen::event::POLICY_DECIDED => Some(format!(
-            "· policy: {} by {}",
-            data.get("verdict").and_then(|v| v.as_str()).unwrap_or("?"),
-            data.get("rule").and_then(|v| v.as_str()).unwrap_or("?")
+            "· 规则：{} {}",
+            data.get("rule").and_then(|v| v.as_str()).unwrap_or("?"),
+            match data.get("verdict").and_then(|v| v.as_str()).unwrap_or("?") {
+                "allow" => "放行",
+                "deny" => "拒绝",
+                "ask" => "待确认",
+                other => other,
+            }
         )),
         gen::event::APPROVAL_REQUESTED => {
             let request_id = data
@@ -156,7 +161,7 @@ fn render_event_with(envelope: &Value, full: bool) -> Option<String> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             Some(format!(
-                "! approval required ({}): {} [{}]",
+                "! 需要确认（{}）：{} [{}]",
                 data.get("action_class")
                     .and_then(|v| v.as_str())
                     .unwrap_or("?"),
@@ -165,31 +170,36 @@ fn render_event_with(envelope: &Value, full: bool) -> Option<String> {
             ))
         }
         gen::event::APPROVAL_DECIDED => Some(format!(
-            "· approval {} ({})",
+            "· 确认：{}（{}）",
             if data
                 .get("granted")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false)
             {
-                "granted"
+                "已批准"
             } else {
-                "denied"
+                "已拒绝"
             },
-            data.get("scope").and_then(|v| v.as_str()).unwrap_or("?")
+            match data.get("scope").and_then(|v| v.as_str()).unwrap_or("?") {
+                "once" => "本次",
+                "action_class" => "此类",
+                "project" => "本项目",
+                other => other,
+            }
         )),
         gen::event::SKILLS_LOADED => Some(format!(
-            "· skills available ({}): {}",
+            "· 可用技能（{}）：{}",
             data.get("count").and_then(|v| v.as_u64()).unwrap_or(0),
             data.get("names").and_then(|v| v.as_str()).unwrap_or("")
         )),
         gen::event::SKILL_INVOKED => {
             let name = data.get("name").and_then(|v| v.as_str()).unwrap_or("?");
             if let Some(error) = data.get("error").and_then(|v| v.as_str()) {
-                Some(format!("! /{name}: {error}"))
+                Some(format!("! /{name}：{error}"))
             } else {
                 let args = data.get("args").and_then(|v| v.as_str()).unwrap_or("");
                 Some(format!(
-                    "· /{name} {args} ({} tokens from {})",
+                    "· /{name} {args}（{} 令牌，来自 {}）",
                     data.get("tokens").and_then(|v| v.as_u64()).unwrap_or(0),
                     data.get("source").and_then(|v| v.as_str()).unwrap_or("?")
                 ))
@@ -208,10 +218,10 @@ fn render_event_with(envelope: &Value, full: bool) -> Option<String> {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             match verdict {
-                "allow" => Some(format!("· hook {id} allowed ({fired})")),
+                "allow" => Some(format!("· 钩子 {id} 放行（{fired}）")),
                 _ => Some(format!(
-                    "! hook {id} {verdict}{} on {fired}: {reason}",
-                    if failed { " (could not answer)" } else { "" }
+                    "! 钩子 {id} {verdict} 于 {fired}：{reason}{}",
+                    if failed { "（无应答）" } else { "" }
                 )),
             }
         }
@@ -224,20 +234,19 @@ fn render_event_with(envelope: &Value, full: bool) -> Option<String> {
             let previous = data.get("previous").and_then(|v| v.as_str()).unwrap_or("");
             let rule = data.get("rule").and_then(|v| v.as_str()).unwrap_or("");
             Some(if previous.is_empty() {
-                format!("⇄ model {model} ({rule})")
+                format!("⇄ 模型 {model}（{rule}）")
             } else {
-                format!("⇄ model {previous} → {model} ({rule})")
+                format!("⇄ 模型 {previous} → {model}（{rule}）")
             })
         }
         gen::event::COST_RECORDED => Some(format!(
-            "· tokens {} in / {} out ({})",
+            "· 令牌 {} 入 / {} 出（{}）",
             data.get("tokens_in").and_then(|v| v.as_u64()).unwrap_or(0),
             data.get("tokens_out").and_then(|v| v.as_u64()).unwrap_or(0),
             data.get("profile").and_then(|v| v.as_str()).unwrap_or("?")
         )),
         gen::event::COMPACTION_APPLIED => Some(format!(
-            "· compacted: {} -> {} tokens (cleared {} tool output(s), dropped {} message(s), \
-             newest {} kept)",
+            "· 已压缩：{} → {} 令牌（清理 {} 条工具输出，丢弃 {} 条消息，保留最新 {}）",
             data.get("tokens_before")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0),
@@ -307,7 +316,7 @@ const RESULT_COLUMNS: usize = 160;
 /// A tool result, bounded. A chatty command must not turn the transcript into a wall of
 /// text, so a long one is summarised with the count and the way to see the rest.
 fn collapse_result(ok: bool, output: &str) -> String {
-    let verdict = if ok { "ok" } else { "failed" };
+    let verdict = if ok { "成功" } else { "失败" };
     let lines: Vec<&str> = output.lines().collect();
     let shown: Vec<String> = lines
         .iter()
@@ -332,13 +341,13 @@ fn collapse_result(ok: bool, output: &str) -> String {
     if hidden > 0 {
         text.push('\n');
         text.push_str(&format!(
-            "{FOLD_PREFIX}{hidden} more line(s), {} {FOLD_POINTER}",
+            "{FOLD_PREFIX}{hidden} 行已折叠，{} {FOLD_POINTER}",
             human_bytes(output.len())
         ));
     } else if clipped {
         text.push('\n');
         text.push_str(&format!(
-            "{FOLD_PREFIX}line(s) clipped to {RESULT_COLUMNS} columns, {} {FOLD_POINTER}",
+            "{FOLD_PREFIX}行已截断到 {RESULT_COLUMNS} 列，{} {FOLD_POINTER}",
             human_bytes(output.len())
         ));
     }
@@ -407,7 +416,7 @@ fn call_text(tool: &str, args: &Value) -> String {
     }
     if hidden > 0 {
         text.push('\n');
-        text.push_str(&format!("  ⋯ {hidden} more line(s) of the call"));
+        text.push_str(&format!("  ⋯ 还有 {hidden} 行调用内容"));
     }
     text
 }
@@ -931,11 +940,24 @@ impl<T: Transport> Client<T> {
             scope,
             reason: reason.map(|r| r.to_string()),
         };
-        let (lines, _) = self.call_with(
+        let answer = self.call_with(
             gen::method::APPROVAL_RESPOND,
             serde_json::to_value(params).unwrap(),
             &mut |_, _| {},
-        )?;
+        );
+        let (lines, _) = match answer {
+            Ok(value) => value,
+            Err(error) => {
+                // The kernel takes the question before it can fail, so whatever the error
+                // says, this approval is no longer answerable. Leaving it armed is what
+                // made the panel unclosable: every answer came back "no approval is
+                // pending" and the question was asked again.
+                if self.pending_approval() == Some(request_id) {
+                    self.pending = None;
+                }
+                return Err(error);
+            }
+        };
         // Only *this* question is answered. A new one can be met while resuming from this
         // one — the turn continues, another tool needs a verdict — and clearing
         // unconditionally threw that question away. Nothing said so: the panel simply never
@@ -1032,6 +1054,29 @@ impl<T: Transport> Client<T> {
                                 .unwrap_or_default(),
                         });
                     }
+                    if notification.params.get("kind").and_then(|k| k.as_str())
+                        == Some(gen::event::APPROVAL_DECIDED)
+                    {
+                        // A question ends when its decision is recorded, not only when the
+                        // answer round trip comes back clean. The resumed turn can fail
+                        // after the kernel has already taken the question — and then the
+                        // screen kept a panel nobody could dismiss: every answer was
+                        // refused with "no approval is pending".
+                        let decided = notification
+                            .params
+                            .get("data")
+                            .and_then(|data| data.get("request_id"))
+                            .and_then(|id| id.as_str())
+                            .unwrap_or("");
+                        let ends = self
+                            .pending
+                            .as_ref()
+                            .map(|pending| pending.request_id == decided)
+                            .unwrap_or(false);
+                        if ends {
+                            self.pending = None;
+                        }
+                    }
                     if let Some(text) = render_event(&notification.params) {
                         rendered.push(text);
                     }
@@ -1126,6 +1171,12 @@ mod tests {
         json!({"jsonrpc": "2.0", "method": "event", "params": {"seq": seq, "id": format!("e{seq}"), "kind": kind, "ignorable": false, "time_ms": 0, "data": data}})
     }
 
+    /// Purpose: A JSON-RPC error line for the fake.
+    /// Contract: test fixture for the refusal paths.
+    fn rpc_error(id: u64, code: i64, message: &str) -> Value {
+        json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
+    }
+
     /// Purpose: A successful response line for the fake.
     /// Contract: test fixture for the client tests.
     fn response(id: u64, result: Value) -> Value {
@@ -1216,8 +1267,8 @@ mod tests {
             RESULT_ROWS + 1,
             "bounded, whatever the command printed: {rows:?}"
         );
-        assert!(rows[0].starts_with("← ok line 1 of output"), "{rows:?}");
-        assert!(rows[RESULT_ROWS].contains("190 more line(s)"), "{rows:?}");
+        assert!(rows[0].starts_with("← 成功 line 1 of output"), "{rows:?}");
+        assert!(rows[RESULT_ROWS].contains("190 行已折叠"), "{rows:?}");
         assert!(
             rows[RESULT_ROWS].contains("/expand"),
             "and says how to see them: {rows:?}"
@@ -1254,9 +1305,9 @@ mod tests {
         });
         let collapsed = render_event(&one).unwrap();
         assert!(collapsed.lines().count() <= 3, "{collapsed}");
-        assert!(collapsed.contains("clipped to"), "{collapsed}");
+        assert!(collapsed.contains("已截断"), "{collapsed}");
         assert!(
-            !collapsed.contains("0 more line(s)"),
+            !collapsed.contains("0 行已折叠"),
             "a clipped line is not a hidden line: {collapsed}"
         );
         assert!(collapsed.contains("/expand"), "{collapsed}");
@@ -1266,7 +1317,7 @@ mod tests {
             "kind": gen::event::TOOL_RESULT,
             "data": {"ok": true, "output": "hello"},
         });
-        assert_eq!(render_event(&short).unwrap(), "← ok hello");
+        assert_eq!(render_event(&short).unwrap(), "← 成功 hello");
     }
 
     /// Purpose: Pin the elapsed time on a tool result and its absence without a preceding call.
@@ -1285,7 +1336,10 @@ mod tests {
             "data": {"ok": true, "output": "all good"},
         });
         assert_eq!(renderer.render(&called).unwrap(), "→ shell cargo test");
-        assert_eq!(renderer.render(&finished).unwrap(), "← ok all good  (2.4s)");
+        assert_eq!(
+            renderer.render(&finished).unwrap(),
+            "← 成功 all good  (2.4s)"
+        );
 
         // Sub-second work reads in milliseconds, and a result with no call before it is
         // left alone rather than given an invented duration.
@@ -1295,7 +1349,7 @@ mod tests {
             "data": {"ok": true, "output": "hi"},
         });
         let mut renderer = Renderer::default();
-        assert_eq!(renderer.render(&quick).unwrap(), "← ok hi");
+        assert_eq!(renderer.render(&quick).unwrap(), "← 成功 hi");
     }
 
     /// Purpose: Pin that a call shows the text it carries, bounded, without looking like a fold.
@@ -1332,10 +1386,7 @@ mod tests {
         assert_eq!(rows.len(), CALL_ROWS + 1, "{rows:?}");
         assert_eq!(rows[0], "→ write_file game.html");
         assert_eq!(rows[1], "  + <p>1</p>", "{rows:?}");
-        assert!(
-            rows[CALL_ROWS].contains("more line(s) of the call"),
-            "{rows:?}"
-        );
+        assert!(rows[CALL_ROWS].contains("行调用内容"), "{rows:?}");
         // And it does not pretend to be a fold. Folds are the log's tool *results*, counted
         // from the oldest, so a marker on a call would put the keyboard on a line the log
         // cannot answer for — it would open somebody else's output.
@@ -1389,11 +1440,11 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                "you: read it".to_string(),
+                "你：read it".to_string(),
                 // The tool's own argument, not the JSON wrapped around it.
                 "→ read_file a.txt".to_string(),
-                "· policy: allow by builtin:write_workspace".to_string(),
-                "← ok hello".to_string(),
+                "· 规则：builtin:write_workspace 放行".to_string(),
+                "← 成功 hello".to_string(),
                 "it says hello".to_string(),
             ]
         );
@@ -1464,8 +1515,70 @@ mod tests {
         ]);
         let mut client = Client::new(fake, "s-1");
         let lines = client.submit("go").unwrap();
-        assert!(lines[0].starts_with("! approval required (out_of_bounds)"));
+        assert!(lines[0].starts_with("! 需要确认（out_of_bounds）"));
         assert_eq!(client.pending_approval(), Some("appr-1"));
+    }
+
+    /// Purpose: Pin that the decision event ends the question, even when the resumed turn then fails.
+    /// Verify: `cargo test -p loong-tui`.
+    #[test]
+    fn a_decision_event_ends_the_question() {
+        let fake = Fake::with(vec![
+            event(
+                1,
+                "approval.requested",
+                json!({"request_id": "appr-1", "action_class": "out_of_bounds", "reason": "shell: out_of_bounds is Ask"}),
+            ),
+            response(2, json!({"turn_id": 1, "accepted": false})),
+            // The answer: the kernel records the decision first, then the resumed turn
+            // dies at the provider.
+            event(
+                3,
+                "approval.decided",
+                json!({"request_id": "appr-1", "granted": true, "scope": "project"}),
+            ),
+            rpc_error(3, -32603, "the provider exploded"),
+        ]);
+        let mut client = Client::new(fake, "s-1");
+        client.submit("go").unwrap();
+        assert_eq!(client.pending_approval(), Some("appr-1"));
+        let error = client
+            .respond("appr-1", true, gen::ApprovalScope::Project, None)
+            .unwrap_err();
+        assert!(error.contains("the provider exploded"), "{error}");
+        assert_eq!(
+            client.pending_approval(),
+            None,
+            "the decision ended the question, so the screen must not ask it again"
+        );
+    }
+
+    /// Purpose: Pin that a refused answer clears the question — the server has none, so it can never be answered.
+    /// Verify: `cargo test -p loong-tui`.
+    #[test]
+    fn a_refused_answer_clears_the_question() {
+        let fake = Fake::with(vec![
+            event(
+                1,
+                "approval.requested",
+                json!({"request_id": "appr-1", "action_class": "out_of_bounds", "reason": "shell: out_of_bounds is Ask"}),
+            ),
+            response(2, json!({"turn_id": 1, "accepted": false})),
+            // Another surface answered it, or the kernel dropped it when the turn stopped.
+            rpc_error(2, -32602, "out of order: no approval is pending"),
+        ]);
+        let mut client = Client::new(fake, "s-1");
+        client.submit("go").unwrap();
+        assert_eq!(client.pending_approval(), Some("appr-1"));
+        let error = client
+            .respond("appr-1", false, gen::ApprovalScope::Once, None)
+            .unwrap_err();
+        assert!(error.contains("-32602"), "{error}");
+        assert_eq!(
+            client.pending_approval(),
+            None,
+            "a question the server does not have cannot be asked again"
+        );
     }
 
     /// Purpose: Pin that a command invocation and an unknown command are both visible.
@@ -1488,7 +1601,7 @@ mod tests {
         let mut client = Client::new(fake, "s-1");
         let lines = client.submit("/review HEAD~1").unwrap();
         assert!(lines[0].contains("/review HEAD~1"), "{}", lines[0]);
-        assert!(lines[0].contains("120 tokens"), "{}", lines[0]);
+        assert!(lines[0].contains("120 令牌"), "{}", lines[0]);
         assert!(lines[1].starts_with("! /reveiw"), "{}", lines[1]);
     }
 
@@ -1508,7 +1621,7 @@ mod tests {
         let lines = client.submit("refactor everything").unwrap();
         assert_eq!(lines.len(), 1);
         assert!(
-            lines[0].starts_with("! hook gate deny on user_prompt_submit"),
+            lines[0].starts_with("! 钩子 gate deny 于 user_prompt_submit"),
             "{}",
             lines[0]
         );
@@ -1530,7 +1643,7 @@ mod tests {
         ]);
         let mut client = Client::new(fake, "s-1");
         let lines = client.submit("go").unwrap();
-        assert!(lines[0].contains("could not answer"), "{}", lines[0]);
+        assert!(lines[0].contains("无应答"), "{}", lines[0]);
     }
 
     /// Purpose: Pin that compaction is rendered with its before and after numbers.
@@ -1547,12 +1660,8 @@ mod tests {
         ]);
         let mut client = Client::new(fake, "s-1");
         let lines = client.submit("go").unwrap();
-        assert!(lines[0].contains("90000 -> 40000 tokens"), "{}", lines[0]);
-        assert!(
-            lines[0].contains("cleared 7 tool output(s)"),
-            "{}",
-            lines[0]
-        );
+        assert!(lines[0].contains("90000 → 40000 令牌"), "{}", lines[0]);
+        assert!(lines[0].contains("清理 7 条工具输出"), "{}", lines[0]);
     }
 
     /// Purpose: Pin that a fold is named by its place from the oldest, not from the end.
@@ -1590,7 +1699,7 @@ mod tests {
         assert!(client.expand_tool_result(2).unwrap().is_empty());
         assert_eq!(
             client.expand_last_tool_result().unwrap(),
-            vec!["← ok short"]
+            vec!["← 成功 short"]
         );
     }
 
@@ -1643,11 +1752,11 @@ mod tests {
     /// Purpose: Pin the marker predicate and the summary line it must end.
     #[test]
     fn a_marker_is_the_line_the_summary_ends_with() {
-        assert!(is_fold_marker("  … 197 more line(s), 5.0 KiB · /expand"));
-        assert!(!is_fold_marker("  … 197 more line(s), 5.0 KiB"));
-        assert!(!is_fold_marker("← ok /expand"));
-        assert!(folded_output("← ok a\n  … 2 more line(s), 8 B · /expand"));
-        assert!(!folded_output("← ok a\nb"));
+        assert!(is_fold_marker("  … 197 行已折叠，5.0 KiB · /expand"));
+        assert!(!is_fold_marker("  … 197 行已折叠，5.0 KiB"));
+        assert!(!is_fold_marker("← 成功 /expand"));
+        assert!(folded_output("← 成功 a\n  … 2 行已折叠，8 B · /expand"));
+        assert!(!folded_output("← 成功 a\nb"));
     }
 
     /// Purpose: Pin that a JSON-RPC error becomes an error rather than silence.

@@ -269,27 +269,16 @@ const MARK_QUIET: Style = Style::new().fg(Color::Reset).add_modifier(Modifier::D
 /// Whatever the terminal uses for ordinary text. Bold, so it stands out without
 /// inventing a colour that may vanish into the background.
 const MARK_TEXT: Style = Style::new().fg(Color::Reset).add_modifier(Modifier::BOLD);
-/// Where the name starts, so the two rows line up.
-const MARK_TEXT_COLUMN: usize = 39;
-/// Interior columns of the frame. The rules are built from it, so the top and bottom lines
-/// line up with the sides whatever the ornaments measure on a given terminal.
-const MARK_INNER: usize = 35;
-
-/// What the mark says about itself, widest first. The dragon of 煮酒论英雄: great enough to
-/// swallow cloud, small enough to hide in a scale — and, being neither, quick and exact.
-/// Each row picks the first line that fits the room it has, so wide terminals get the whole
-/// thought and narrow ones get its shape.
-const MARK_SAYINGS: [&[(usize, &str)]; 3] = [
-    &[(0, "loongagent")],
-    &[],
-    // Nothing on the bottom rule: the inscription beside 龍 already says it, and a mark
-    // that explains itself twice talks too much.
-    &[],
-];
+/// The name, for the frame's right side when the block letters do not fit.
+const MARK_WORD: &str = "loongagent";
+/// Columns of air between a frame's wall and what it holds, so the contents never touch
+/// the rule. It is the same on every side, which is what makes the frame look drawn
+/// rather than grown around its contents.
+const MARK_AIR: usize = 3;
 
 /// The subline, as the owner wrote it, widest first: runes and brackets from the same
-/// alphabet as the frame, a `⋄` between the two halves. It sits beside 龍, where it reads as
-/// the inscription the character is stamped with.
+/// alphabet as the frame, a `⋄` between the two halves. It hangs under the frame now,
+/// where it reads as the inscription the character is stamped with.
 const MARK_SUBLINE: [(usize, &str); 3] = [
     (28, "⟬ ᛭ 兴云吐雾 ⋄ 隐介藏形 ᛭ ⟭"),
     (19, "兴云吐雾 ⋄ 隐介藏形"),
@@ -376,32 +365,32 @@ pub fn style_for(kind: LineKind) -> Style {
 /// Which kind a rendered line is. The prefixes are the client renderer's, so this is a
 /// classifier over a vocabulary this repository owns end to end.
 pub fn classify(line: &str) -> LineKind {
-    if line.starts_with("you: ") {
+    if line.starts_with("你：") || line.starts_with("you: ") {
         return LineKind::User;
     }
     if line.starts_with("→ ") {
         return LineKind::ToolCall;
     }
     if let Some(rest) = line.strip_prefix("← ") {
-        return if rest.starts_with("ok ") || rest == "ok" {
+        return if rest.starts_with("成功") || rest.starts_with("ok ") || rest == "ok" {
             LineKind::ToolOk
         } else {
             LineKind::ToolFailed
         };
     }
-    if line.starts_with("⧉ ") || line.starts_with("· mouse ") {
+    if line.starts_with("⧉ ") || line.starts_with("· mouse ") || line.starts_with("· 鼠标") {
         return LineKind::Notice;
     }
     if line.starts_with("⏹ ") {
         return LineKind::Stopped;
     }
-    if line.starts_with("! approval required") {
+    if line.starts_with("! 需要确认") || line.starts_with("! approval required") {
         return LineKind::Approval;
     }
     if line.starts_with("! ") {
         return LineKind::Problem;
     }
-    if line.starts_with("· policy:") {
+    if line.starts_with("· 规则：") || line.starts_with("· policy:") {
         return LineKind::Policy;
     }
     if line.starts_with("· ") || line == "·" {
@@ -421,18 +410,26 @@ pub fn classify(line: &str) -> LineKind {
 fn styled(line: &str) -> Line<'static> {
     let kind = classify(line);
     if kind == LineKind::User {
-        if let Some((label, text)) = line.split_once(' ') {
-            return Line::from(vec![
-                Span::styled(
-                    label.to_string(),
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(" "),
-                Span::raw(text.to_string()),
-            ]);
-        }
+        // Two vocabularies, two separators: the Chinese label ends at its full-width
+        // colon and takes no space, the old `you: ` one keeps the space it was written
+        // with, so a session written before the change still looks like it did.
+        let (label, gap, text) = if let Some((label, text)) = line.split_once('：') {
+            (format!("{label}："), "", text)
+        } else if let Some((label, text)) = line.split_once(' ') {
+            (label.to_string(), " ", text)
+        } else {
+            (line.to_string(), "", "")
+        };
+        return Line::from(vec![
+            Span::styled(
+                label,
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(gap),
+            Span::raw(text.to_string()),
+        ]);
     }
     Line::from(Span::styled(line.to_string(), style_for(kind)))
 }
@@ -508,8 +505,6 @@ pub struct App {
     pub cursor: usize,
     /// The request awaiting an answer, if the turn stopped for one.
     pub pending: Option<String>,
-    /// Diagnostics from the server process (its stderr): startup notes, warnings.
-    pub notes: Vec<String>,
     /// Whether the mark is drawn at the top (`/logo` turns it off).
     pub logo: bool,
     /// Whether this program tracks the mouse. **Off by default**: tracking it is what
@@ -570,6 +565,10 @@ pub struct App {
     pub streaming: String,
     /// Lines scrolled up from the bottom.
     pub scroll: usize,
+    /// How many rows the page had the last time it was drawn, so content that arrives
+    /// while the reader is scrolled up can grow the offset by the same amount and leave
+    /// the rows on screen where they are.
+    scroll_total: usize,
     /// Which folded tool result the keyboard is on, by the index of its marker line. A
     /// transcript only ever appends, so an index into it stays true; and nothing has to
     /// be re-found when new output arrives.
@@ -619,7 +618,6 @@ impl App {
             input: String::new(),
             cursor: 0,
             pending: None,
-            notes: Vec::new(),
             session: session.into(),
             schema: schema.into(),
             busy: false,
@@ -644,6 +642,7 @@ impl App {
             command_choice: 0,
             commands_dismissed: false,
             scroll: 0,
+            scroll_total: 0,
             fold: None,
             open: None,
             folded: std::collections::BTreeMap::new(),
@@ -665,6 +664,9 @@ impl App {
     /// interface where the resend forgets to mark itself busy would let a second turn
     /// start on top of a running one.
     fn begin_submit(&mut self, text: String) -> Action {
+        // Sending returns the page to the bottom: the prompt is about to be answered, and
+        // the reader wants to see it go.
+        self.scroll = 0;
         // A new task makes the last tick stale, and a tick that outlives its turn is a
         // tick that lies about the work on screen.
         self.finished = None;
@@ -673,7 +675,7 @@ impl App {
         // Sending is a return to the prompt, so the keyboard's place among the folds is
         // given up with it.
         self.fold = None;
-        self.push_lines(vec![format!("you: {text}")]);
+        self.push_lines(vec![format!("你：{text}")]);
         self.busy = true;
         self.busy_since = Some(std::time::Instant::now());
         self.activity = None;
@@ -700,7 +702,7 @@ impl App {
             return Action::None;
         }
         let Some(text) = self.last_prompt.clone() else {
-            self.push_lines(vec!["· 还没有可以重发的 prompt".to_string()]);
+            self.push_lines(vec!["· 还没有可以重发的提问".to_string()]);
             return Action::None;
         };
         // Said out loud, with the model named: a resend that silently used the same
@@ -841,7 +843,7 @@ impl App {
             Some(offering) => {
                 let name = offering.name.clone();
                 if name == self.selected {
-                    self.push_lines(vec![format!("· already on [{slot}] {name}")]);
+                    self.push_lines(vec![format!("· 已经在 [{slot}] {name} 上")]);
                     return Action::None;
                 }
                 Action::Send(ToWorker::SelectModel(name))
@@ -866,91 +868,9 @@ impl App {
     /// Whether there is room for the mark. A logo that squeezes the conversation is a
     /// decoration that costs more than it gives, so a small terminal simply has none.
     fn show_banner(&self, area: ratatui::layout::Rect) -> bool {
-        // Five rows and a gap: only where the conversation still has room.
-        self.logo && area.height >= 22 && area.width >= 52
-    }
-
-    /// Purpose: Draw the pending decision as a menu: clipped one-line details, then the three answers, never wrapped.
-    /// Serves: `App::draw` when a decision is pending.
-    /// Design: `docs/design/surfaces.md` §3 and §6.
-    /// Up: `App::draw`.
-    /// Down: `App::info`, `App::options`, `clip`, `one_line` and the mark styles.
-    /// Verify: `cargo test -p loong-tui-app`.
-    /// The question, its detail, and the three answers — a menu, because a decision worth
-    /// stopping for is worth showing the options for.
-    ///
-    /// Every detail is forced onto **one line**: a shell command with newlines in it used to
-    /// wrap until the answers were pushed out of the box, which left a menu with one item.
-    fn draw_approval(&self, frame: &mut Frame, area: ratatui::layout::Rect) {
-        let room = area.height.saturating_sub(2) as usize;
-        let mut details: Vec<Line> = Vec::new();
-        match &self.info() {
-            Some((class, reason, tool, args)) => {
-                // This line was the one detail nobody clipped, on the assumption that a
-                // class and a tool name are short. A tool name can be anything — an MCP
-                // server's, or the model's own — so it is clipped like the rest.
-                use unicode_width::UnicodeWidthStr;
-                let room = (area.width.saturating_sub(4) as usize)
-                    .saturating_sub(class.width() + 2)
-                    .max(1);
-                details.push(Line::from(vec![
-                    Span::styled(class.to_string(), Style::default().fg(MARK_ACCENT)),
-                    Span::raw("  "),
-                    Span::styled(clip(tool, room), Style::default().fg(MARK_INK)),
-                ]));
-                if !reason.is_empty() {
-                    details.push(Line::from(Span::styled(
-                        one_line(reason, area.width.saturating_sub(4) as usize),
-                        MARK_QUIET,
-                    )));
-                }
-                if !args.is_empty() {
-                    details.push(Line::from(Span::styled(
-                        one_line(args, area.width.saturating_sub(4) as usize),
-                        MARK_QUIET,
-                    )));
-                }
-            }
-            None => details.push(Line::from(Span::styled(
-                "a decision is waiting for the details…",
-                MARK_QUIET,
-            ))),
-        }
-        // The answers are the point: keep them, and drop details first if the box is short.
-        // The `.max(1)` that used to be here kept one detail *even when there was no room for
-        // it*, so a squeezed panel lost an answer instead of a piece of context.
-        let answers = Self::options().len();
-        let keep = room.saturating_sub(answers).min(details.len());
-        let mut lines: Vec<Line> = details.into_iter().take(keep).collect();
-        for (index, (label, granted, _)) in Self::options().into_iter().enumerate() {
-            let chosen = index == self.choice;
-            let style = if chosen {
-                Style::default()
-                    .fg(if granted { Color::Green } else { Color::Red })
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                // Readable, not quiet: these are the choices, and the only thing marking one
-                // out is that it is coloured and bold. They used to be `DarkGray` — the
-                // background itself on a dark theme — which is how a three-answer menu came
-                // to look like a single answer.
-                Style::default()
-            };
-            lines.push(Line::from(vec![
-                Span::styled(if chosen { "  ▸ " } else { "    " }, style),
-                Span::styled(label.to_string(), style),
-            ]));
-        }
-        // Deliberately **not** wrapped. Every line above is one row tall by construction, and
-        // the answers are the point of the panel; letting the widget wrap means any line that
-        // slips past the clip pushes the last answer out of the box, which is exactly the bug.
-        frame.render_widget(
-            Paragraph::new(lines).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" needs your decision "),
-            ),
-            area,
-        );
+        // The framed character is eleven rows and a gap of air; below this the transcript
+        // would be smaller than the mark, which is the trade the rule forbids.
+        self.logo && area.height >= 26 && area.width >= 52
     }
 
     /// Purpose: The four decision facts as borrowed strings, for the panel that draws them.
@@ -1052,54 +972,130 @@ impl App {
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
-    /// Purpose: Draw the owner's five-row mark: the frame, 龍, the fitting inscription and the saying that fits the room.
-    /// Serves: `App::draw` when `show_banner` allows it.
-    /// Design: `docs/design/surfaces.md` §3 ("The TUI's marks and colour").
-    /// Up: `App::draw`.
-    /// Down: no call beyond drawing; it renders the `MARK_*` constants.
+    /// Purpose: Whether the block wordmark fits inside the frame with room to breathe.
+    /// Serves: `draw_banner` and `banner_rows`, so the layout and the paint agree.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `draw_banner`, `banner_rows` and the wordmark test.
+    /// Down: `mark::WORDMARK_WIDTH`, `mark::LONG_COLUMNS` and `MARK_AIR`.
     /// Verify: `cargo test -p loong-tui-app`.
-    /// The mark: the owner's frame and ornaments, given room to be imposing — five rows, a
-    /// double rule, and the character centred with air around it. The words are unchanged.
-    fn draw_banner(&self, frame: &mut Frame, area: ratatui::layout::Rect) {
+    /// The framed name is 86 columns wide and wants two of air beside it, so below 90 the
+    /// frame closes around the plain word instead. The number is the promise the
+    /// documentation makes; the arithmetic lives in `banner_interior`.
+    fn wordmark_fits(width: u16) -> bool {
+        width >= 90
+    }
+
+    /// Purpose: The columns inside the frame: air, the dragon, air, the name, air.
+    /// Serves: `draw_banner` and the threshold `wordmark_fits` states.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `draw_banner`.
+    /// Down: `MARK_AIR`, `MARK_WORD`, `mark::LONG_COLUMNS` and `mark::WORDMARK_WIDTH`.
+    /// Verify: `cargo test -p loong-tui-app`.
+    fn banner_interior(blocks: bool) -> usize {
+        use unicode_width::UnicodeWidthStr;
+        let name = if blocks {
+            mark::WORDMARK_WIDTH
+        } else {
+            UnicodeWidthStr::width(MARK_WORD)
+        };
+        MARK_AIR + mark::LONG_COLUMNS + MARK_AIR + name + MARK_AIR
+    }
+
+    /// Purpose: How many rows the question panel asks for, given the page it sits on.
+    /// Contract: called by `App::draw`; the answers are the floor, the details give way first.
+    fn decision_rows(height: u16) -> u16 {
+        let floor = 2 + Self::options().len() as u16;
+        DECISION_ROWS
+            .min(height.saturating_sub(8))
+            .max(floor.min(height))
+    }
+
+    /// Purpose: Which favicon the empty session opens on, if any: the picture and its column count.
+    /// Serves: `App::draw`, which hides the header and draws the splash instead.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `App::draw`.
+    /// Down: `mark::FAVICON_WIDE` and `mark::FAVICON_NARROW`.
+    /// Verify: `cargo test -p loong-tui-app`.
+    /// A splash needs room the conversation would otherwise take: the picture, a row of
+    /// air, the wordmark, a row of air and the inscription. Nothing is shown on an empty
+    /// session that has already been sent a line, replayed or not — the first line is what
+    /// turns a title screen into a conversation.
+    fn splash_art(&self, area: ratatui::layout::Rect) -> Option<(&'static [&'static str], usize)> {
+        if !self.logo || !self.lines.is_empty() || self.pending.is_some() {
+            return None;
+        }
+        if area.width >= 112 && area.height >= 41 {
+            return Some((&mark::FAVICON_WIDE, mark::FAVICON_WIDE_COLUMNS));
+        }
+        if area.width >= 92 && area.height >= 35 {
+            return Some((&mark::FAVICON_NARROW, mark::FAVICON_NARROW_COLUMNS));
+        }
+        None
+    }
+
+    /// Purpose: Wrap content lines in a one-column border with a title in the top rule.
+    /// Serves: `approval_lines`, `command_lines`, `picker_lines` and `input_lines`.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: those four builders.
+    /// Down: `unicode_width` for the title's measured width and `Line::width` for the padding.
+    /// Verify: `cargo test -p loong-tui-app`.
+    /// The boxes are lines, not widgets, because the page scrolls as one document: a box
+    /// that scrolled half off the top has to lose its top rule, which a widget cannot do.
+    fn framed(
+        content: Vec<Line<'static>>,
+        width: u16,
+        title: Span<'static>,
+        border: Style,
+    ) -> Vec<Line<'static>> {
+        use unicode_width::UnicodeWidthStr;
+        let inner = width.saturating_sub(2) as usize;
+        let used = UnicodeWidthStr::width(title.content.as_ref());
+        let fill = inner.saturating_sub(used);
+        let mut out = Vec::with_capacity(content.len() + 2);
+        out.push(Line::from(vec![
+            Span::styled("┌".to_string(), border),
+            title,
+            Span::styled(format!("{}┐", "─".repeat(fill)), border),
+        ]));
+        for line in content {
+            let drawn = line.width();
+            let mut spans = vec![Span::styled("│".to_string(), border)];
+            spans.extend(line.spans);
+            spans.push(Span::raw(" ".repeat(inner.saturating_sub(drawn))));
+            spans.push(Span::styled("│".to_string(), border));
+            out.push(Line::from(spans));
+        }
+        out.push(Line::from(Span::styled(
+            format!("└{}┘", "─".repeat(inner)),
+            border,
+        )));
+        out
+    }
+
+    /// Purpose: The mark as document lines: the frame around the pixel dragon and the name.
+    /// Serves: `App::draw`, as the top of the page.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `App::draw`.
+    /// Down: `mark::{glyph_lines, LONG, WORDMARK, centered}` and the `MARK_*` constants.
+    /// Verify: `cargo test -p loong-tui-app`.
+    fn banner_lines(&self, width: u16) -> Vec<Line<'static>> {
         use unicode_width::UnicodeWidthStr;
         let frame_ink = Style::default().fg(MARK_ACCENT);
-        let room_for = |drawn: usize| -> usize {
-            (area.width as usize).saturating_sub(MARK_TEXT_COLUMN.max(drawn) + 2)
+        let blocks = Self::wordmark_fits(width);
+        let glyph = mark::glyph_lines(&mark::LONG, mark::LONG_COLUMNS);
+        let name_width = if blocks {
+            mark::WORDMARK_WIDTH
+        } else {
+            UnicodeWidthStr::width(MARK_WORD)
         };
-        let saying = |row: usize, room: usize| -> Vec<Span<'static>> {
-            MARK_SAYINGS[row]
-                .iter()
-                .find(|(needs, _)| room >= *needs)
-                .map(|(_, text)| {
-                    vec![Span::styled(
-                        text.to_string(),
-                        if row == 0 { MARK_TEXT } else { MARK_QUIET },
-                    )]
-                })
-                .unwrap_or_default()
-        };
-        let subline = |room: usize| -> Vec<Span<'static>> {
-            match MARK_SUBLINE.iter().find(|(needs, _)| room >= *needs) {
-                // Ornaments in the frame's colour, words in the text colour: that is what
-                // makes it read as an inscription rather than a caption.
-                Some((_, text)) if *text == MARK_SUBLINE[0].1 => vec![
-                    Span::styled("⟬ ᛭ ".to_string(), frame_ink),
-                    Span::styled("兴云吐雾".to_string(), MARK_TEXT),
-                    Span::styled(" ⋄ ".to_string(), frame_ink),
-                    Span::styled("隐介藏形".to_string(), MARK_TEXT),
-                    Span::styled(" ᛭ ⟭".to_string(), frame_ink),
-                ],
-                Some((_, text)) => vec![Span::styled(text.to_string(), MARK_QUIET)],
-                None => Vec::new(),
-            }
-        };
-
-        // Rules built from the interior width, so every row of the frame is the same length
-        // even when an ornament measures differently than expected.
+        let name_rows = if blocks { MARK_ROWS as usize } else { 1 };
+        let inner = Self::banner_interior(blocks);
+        let left = (width as usize).saturating_sub(inner + 2) / 2;
+        let lead = || Span::raw(" ".repeat(left));
         let rule = |ornament: &str, closer: char| -> String {
             let used = UnicodeWidthStr::width(ornament);
-            let side = MARK_INNER.saturating_sub(used) / 2;
-            let rest = MARK_INNER.saturating_sub(used + side);
+            let side = inner.saturating_sub(used) / 2;
+            let rest = inner.saturating_sub(used + side);
             format!(
                 "{}{}{}{}{}",
                 if closer == '╗' { '╔' } else { '╚' },
@@ -1109,46 +1105,395 @@ impl App {
                 closer
             )
         };
-        let top = rule("༺ ᛭ ༻", '╗');
-        let bottom = rule("༻ ᛭ ༺", '╝');
-        let blank = format!("║{}║", " ".repeat(MARK_INNER));
-        // The character centred in the interior, whatever it measures.
-        let badge = "【 龍 】";
-        let left = (MARK_INNER.saturating_sub(UnicodeWidthStr::width(badge))) / 2;
-        let right = MARK_INNER.saturating_sub(left + UnicodeWidthStr::width(badge));
-
-        let art: [(Vec<Span>, Vec<Span>); 5] = [
-            (
-                vec![Span::styled(top.clone(), frame_ink)],
-                saying(0, room_for(UnicodeWidthStr::width(top.as_str()))),
-            ),
-            (vec![Span::styled(blank.clone(), frame_ink)], Vec::new()),
-            (
-                vec![
-                    Span::styled(format!("║{}", " ".repeat(left)), frame_ink),
-                    Span::styled("【", frame_ink),
-                    Span::raw(" "),
-                    Span::styled("龍", MARK_TEXT),
-                    Span::raw(" "),
-                    Span::styled("】", frame_ink),
-                    Span::styled(format!("{}║", " ".repeat(right)), frame_ink),
-                ],
-                subline(room_for(MARK_INNER + 2)),
-            ),
-            (vec![Span::styled(blank.clone(), frame_ink)], Vec::new()),
-            (vec![Span::styled(bottom.clone(), frame_ink)], Vec::new()),
-        ];
-
         let mut lines: Vec<Line> = Vec::new();
-        for (mut spans, companion) in art {
-            let drawn: usize = spans.iter().map(|span| span.content.as_ref().width()).sum();
-            spans.push(Span::raw(
-                " ".repeat(MARK_TEXT_COLUMN.saturating_sub(drawn)),
-            ));
-            spans.extend(companion);
+        lines.push(Line::from(vec![
+            lead(),
+            Span::styled(rule("༺ ᛭ ༻", '╗'), frame_ink),
+        ]));
+        let first = (glyph.len() - name_rows) / 2;
+        for (row, glyph_row) in glyph.into_iter().enumerate() {
+            let mut spans = vec![
+                lead(),
+                Span::styled("║".to_string(), frame_ink),
+                Span::raw(" ".repeat(MARK_AIR)),
+            ];
+            spans.extend(glyph_row.spans);
+            spans.push(Span::raw(" ".repeat(MARK_AIR)));
+            let name = match row.checked_sub(first).filter(|at| *at < name_rows) {
+                Some(at) if blocks => Span::styled(mark::WORDMARK[at].to_string(), MARK_TEXT),
+                Some(_) => Span::styled(MARK_WORD.to_string(), MARK_TEXT),
+                None => Span::raw(" ".repeat(name_width)),
+            };
+            spans.push(name);
+            spans.push(Span::raw(" ".repeat(MARK_AIR)));
+            spans.push(Span::styled("║".to_string(), frame_ink));
             lines.push(Line::from(spans));
         }
-        frame.render_widget(Paragraph::new(lines), area);
+        lines.push(Line::from(vec![
+            lead(),
+            Span::styled(rule("༻ ᛭ ༺", '╝'), frame_ink),
+        ]));
+        if let Some((_, text)) = MARK_SUBLINE
+            .iter()
+            .find(|(needs, _)| (width as usize) >= *needs)
+        {
+            let spans = if *text == MARK_SUBLINE[0].1 {
+                vec![
+                    Span::styled("⟬ ᛭ ".to_string(), frame_ink),
+                    Span::styled("兴云吐雾".to_string(), MARK_TEXT),
+                    Span::styled(" ⋄ ".to_string(), frame_ink),
+                    Span::styled("隐介藏形".to_string(), MARK_TEXT),
+                    Span::styled(" ᛭ ⟭".to_string(), frame_ink),
+                ]
+            } else {
+                vec![Span::styled(text.to_string(), MARK_QUIET)]
+            };
+            lines.push(mark::centered(Line::from(spans), width));
+        }
+        lines
+    }
+
+    /// Purpose: The opening picture as document lines: the favicon, the wordmark and the inscription.
+    /// Serves: `App::draw`, as the top of the page while the session is empty.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `App::draw`.
+    /// Down: `mark::{favicon_lines, centered}` and `mark::WORDMARK`.
+    /// Verify: `cargo test -p loong-tui-app`.
+    fn splash_lines(
+        &self,
+        width: u16,
+        art: &'static [&'static str],
+        columns: usize,
+    ) -> Vec<Line<'static>> {
+        let favicon = mark::favicon_lines(art, columns);
+        let mut lines: Vec<Line> = Vec::new();
+        for line in favicon {
+            lines.push(mark::centered(line, width));
+        }
+        lines.push(Line::from(""));
+        for row in mark::WORDMARK {
+            lines.push(mark::centered(
+                Line::from(Span::styled(row.to_string(), MARK_TEXT)),
+                width,
+            ));
+        }
+        lines.push(Line::from(""));
+        lines.push(mark::centered(
+            Line::from(Span::styled(
+                "⟬ ᛭ 兴云吐雾 ⋄ 隐介藏形 ᛭ ⟭".to_string(),
+                MARK_QUIET,
+            )),
+            width,
+        ));
+        lines
+    }
+
+    /// Purpose: The question panel as document lines, so it scrolls with the page it is asked about.
+    /// Serves: `App::draw` when a decision is pending.
+    /// Design: `docs/design/surfaces.md` §3 and §6.
+    /// Up: `App::draw`.
+    /// Down: `App::info`, `Self::options`, `one_line` and `clip`.
+    /// Verify: `cargo test -p loong-tui-app`.
+    fn approval_lines(&self, width: u16, height: u16) -> Vec<Line<'static>> {
+        let room = height.saturating_sub(2) as usize;
+        let mut details: Vec<Line> = Vec::new();
+        match &self.info() {
+            Some((class, reason, tool, args)) => {
+                use unicode_width::UnicodeWidthStr;
+                let room = (width.saturating_sub(4) as usize)
+                    .saturating_sub(class.width() + 2)
+                    .max(1);
+                details.push(Line::from(vec![
+                    Span::styled(class.to_string(), Style::default().fg(MARK_ACCENT)),
+                    Span::raw("  "),
+                    Span::styled(clip(tool, room), Style::default().fg(MARK_INK)),
+                ]));
+                if !reason.is_empty() {
+                    details.push(Line::from(Span::styled(
+                        one_line(reason, width.saturating_sub(4) as usize),
+                        MARK_QUIET,
+                    )));
+                }
+                if !args.is_empty() {
+                    details.push(Line::from(Span::styled(
+                        one_line(args, width.saturating_sub(4) as usize),
+                        MARK_QUIET,
+                    )));
+                }
+            }
+            None => details.push(Line::from(Span::styled("正在取详情…", MARK_QUIET))),
+        }
+        let answers = Self::options().len();
+        let keep = room.saturating_sub(answers).min(details.len());
+        let mut lines: Vec<Line> = details.into_iter().take(keep).collect();
+        for (index, (label, granted, _)) in Self::options().into_iter().enumerate() {
+            let chosen = index == self.choice;
+            let style = if chosen {
+                Style::default()
+                    .fg(if granted { Color::Green } else { Color::Red })
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            lines.push(Line::from(vec![
+                Span::styled(if chosen { "  ▸ " } else { "    " }, style),
+                Span::styled(label.to_string(), style),
+            ]));
+        }
+        Self::framed(
+            lines,
+            width,
+            Span::styled(" 需要你决定 ".to_string(), Style::default()),
+            Style::default(),
+        )
+    }
+
+    /// Purpose: The command menu as document lines.
+    /// Serves: `App::draw` while a command is being typed.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `App::draw`.
+    /// Down: `App::command_candidates`, `commands::{is_exact}` and `MARK_ACCENT_STYLE`.
+    /// Verify: `cargo test -p loong-tui-app`.
+    fn command_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let Some(found) = self.command_candidates() else {
+            return Vec::new();
+        };
+        let exact = commands::is_exact(&self.input);
+        let typed = self.input.trim();
+        let title = if exact {
+            "命令 — 回车执行 · esc 关闭".to_string()
+        } else if typed == "/" {
+            "命令 — ↑/↓ 选择 · 回车补全 · esc 关闭".to_string()
+        } else {
+            format!("匹配 {typed} 的命令 — ↑/↓ 选择 · 回车补全 · esc 关闭")
+        };
+        let body = if found.is_empty() {
+            vec![Line::from(
+                "  不是这个界面的命令 — 回车仍然会发出去（/help 这类技能在那边）",
+            )]
+        } else {
+            let chosen = self.command_choice.min(found.len() - 1);
+            found
+                .iter()
+                .enumerate()
+                .map(|(index, candidate)| {
+                    let marker = if index == chosen { "▸ " } else { "  " };
+                    let line = format!("{marker}{} — {}", candidate.insert, candidate.description);
+                    if index == chosen {
+                        Line::from(line).style(MARK_ACCENT_STYLE)
+                    } else {
+                        Line::from(line)
+                    }
+                })
+                .collect()
+        };
+        Self::framed(
+            body,
+            width,
+            Span::styled(title, Style::default()),
+            Style::default(),
+        )
+    }
+
+    /// Purpose: The `@` picker as document lines.
+    /// Serves: `App::draw` while a path is being picked.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `App::draw`.
+    /// Down: `App::picker` and `MARK_ACCENT_STYLE`.
+    /// Verify: `cargo test -p loong-tui-app`.
+    fn picker_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let Some(picker) = &self.picker else {
+            return Vec::new();
+        };
+        let title = if picker.query.is_empty() {
+            "文件 — ↑/↓ 选择 · 回车插入 · esc 取消".to_string()
+        } else {
+            format!(
+                "匹配 {} 的文件 — ↑/↓ 选择 · 回车插入 · esc 取消",
+                picker.query
+            )
+        };
+        let body = if picker.matches.is_empty() {
+            vec![Line::from("  没有匹配的文件 — 继续输入，或按 esc")]
+        } else {
+            picker
+                .matches
+                .iter()
+                .enumerate()
+                .map(|(index, file)| {
+                    let marker = if index == picker.selected {
+                        "▸ "
+                    } else {
+                        "  "
+                    };
+                    let line = format!("{marker}{file}");
+                    if index == picker.selected {
+                        Line::from(line).style(MARK_ACCENT_STYLE)
+                    } else {
+                        Line::from(line)
+                    }
+                })
+                .collect()
+        };
+        Self::framed(
+            body,
+            width,
+            Span::styled(title, Style::default()),
+            Style::default(),
+        )
+    }
+
+    /// Purpose: The input box as document lines, with the caret's place among them.
+    /// Serves: `App::draw`.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `App::draw`.
+    /// Down: `wrapped_input`, `title_style` and the status title's own words.
+    /// Verify: `cargo test -p loong-tui-app`.
+    fn input_lines(&self, width: u16, rows: usize) -> (Vec<Line<'static>>, u16, u16) {
+        let (title, style) = self.status();
+        let inner_width = width.saturating_sub(2);
+        let (lines, (caret_row, caret_column)) = self.wrapped_input(inner_width);
+        let offset = (caret_row as usize + 1).saturating_sub(rows);
+        let visible: Vec<Line> = lines
+            .into_iter()
+            .skip(offset)
+            .take(rows)
+            .map(Line::from)
+            .collect();
+        let boxed = Self::framed(visible, width, Span::styled(title, style), Style::default());
+        (boxed, caret_row - offset as u16, caret_column)
+    }
+
+    /// Purpose: The prompt box's status: the sentence in its top rule and the colour it is drawn in.
+    /// Serves: `App::draw`'s input lines.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `App::input_lines`.
+    /// Down: `yolo_mark`, `title_style`, `commands::matches` and the finished turn.
+    /// Verify: `cargo test -p loong-tui-app`.
+    fn status(&self) -> (String, Style) {
+        match &self.pending {
+            // The question is the state, whatever else is true: a menu that does not
+            // say what it is asking is worse than no menu. Under YOLO the mark goes in
+            // front rather than replacing the sentence.
+            Some(_) => (
+                format!(
+                    "{}等你决定 — ↑/↓ 选择 · 回车确认 · esc 拒绝",
+                    self.yolo_mark()
+                ),
+                self.title_style(MARK_ACCENT_STYLE),
+            ),
+            // Busy: what it is doing and for how long. "working…" for two minutes
+            // tells nobody whether it is thinking or stuck. Under YOLO this used to be
+            // replaced by the warning, so the one state that must never be invisible was
+            // the one nobody could see; the mark rides in front of it instead.
+            None if self.busy => {
+                let secs = self
+                    .busy_since
+                    .map(|since| since.elapsed().as_secs())
+                    .unwrap_or(0);
+                let doing = self
+                    .activity
+                    .as_deref()
+                    .map(|what| format!(" · {what}"))
+                    .unwrap_or_default();
+                (
+                    // The mark turns, so the line proves the process is alive even while
+                    // the words beside it are the same ones it said ten seconds ago.
+                    format!(
+                        "{}{} 运行 {secs}s{doing}",
+                        self.yolo_mark(),
+                        spinner_frame(self.busy_since)
+                    ),
+                    self.title_style(Style::default().fg(Color::Cyan)),
+                )
+            }
+            // The last turn's ending, held on screen until the next prompt starts.
+            //
+            // Placed after the command hint so a half-typed `/new` still completes, and
+            // before the bare "prompt" label, which says nothing anybody needs.
+            //
+            // This is the answer to "did that finish?", and it is the one that gets asked
+            // while the cursor is sitting in the box — a closing line in the transcript
+            // answers it only for somebody who is already scrolling.
+            None if self.finished.is_some() && !self.input.starts_with('/') => {
+                let finished = self.finished.expect("just checked");
+                (
+                    format!("{}{}", self.yolo_mark(), finished.line()),
+                    self.title_style(finished.style()),
+                )
+            }
+            // A leading `/` is a command: say where the list of them is.
+            None if self.input.starts_with('/') => {
+                // Lowercased once, so `/R` and `/EXIT` complete the same way `/r` and
+                // `/exit` do — the command matcher is case-insensitive, and a hint that
+                // disagreed with it would be worse than no hint.
+                let typed = self.input.trim().to_ascii_lowercase();
+                (
+                    format!(
+                        "{}{}",
+                        self.yolo_mark(),
+                        match typed.as_str() {
+                            // Once it is unambiguous, say what will happen rather than where to
+                            // read about it.
+                            "/exit" | "/quit" | "/q" => {
+                                "回车退出 loongagent（ctrl-c 也可以）".to_string()
+                            }
+                            "/logo" => "回车显示或隐藏徽标".to_string(),
+                            "/expand" => {
+                                "回车把上一条工具结果完整展开（tab 在折叠之间走）".to_string()
+                            }
+                            "/yolo" => "回车关闭确认提示（沙箱仍然生效）".to_string(),
+                            "/copy" => "回车复制整段记录".to_string(),
+                            "/new" | "/clear" | "/reset" => {
+                                "回车开始新会话 — 这一条会存盘，上下文不带走".to_string()
+                            }
+                            "/mouse" => "回车把鼠标还给终端".to_string(),
+                            // The model shortcuts, said in full only when they would work: a
+                            // completion that promises a switch in a session with one model
+                            // is a completion that lies.
+                            "/r" if self.last_prompt.is_some() => {
+                                "回车把上一个提问再问一遍，用当前模型".to_string()
+                            }
+                            "/r" => "还没有可重发的提问 — 先问一句".to_string(),
+                            _ => match typed
+                                .strip_prefix('/')
+                                .and_then(|n| n.parse::<usize>().ok())
+                            {
+                                Some(slot) if (1..=9).contains(&slot) => {
+                                    match self.model_in_slot(slot) {
+                                        Some(offering) => {
+                                            format!("回车切到 [{slot}] {}", offering.name)
+                                        }
+                                        None => format!("第 {slot} 个位置没有模型"),
+                                    }
+                                }
+                                // A prefix of exactly one command is worth saying in full: it
+                                // is the name the menu is about to complete, and the sentence
+                                // is what that command will do. Several, or none, are the
+                                // menu's job to explain.
+                                _ => {
+                                    let found = commands::matches(&self.input);
+                                    match found.len() {
+                                        1 => format!("回车 · {}", found[0].description),
+                                        0 => "不是这个界面的命令 — 回车仍然会发出去".to_string(),
+                                        _ => "命令 — ↑/↓ 选择 · 回车补全".to_string(),
+                                    }
+                                }
+                            },
+                        }
+                    ),
+                    self.title_style(Style::default().fg(Color::Green)),
+                )
+            }
+            // Nothing to report but the relaxed session itself. This one keeps the full
+            // sentence, because there is room for it; every other state carries the short
+            // mark in front, so the warning is never the price of the status.
+            None if self.yolo => (
+                "⚠ 免确认 — 确认提示已关，沙箱仍然生效（/yolo 恢复）".to_string(),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            None => ("输入".to_string(), Style::default()),
+        }
     }
 
     /// Purpose: Draw the F2 context panel: token totals, categories, ledger entries and the memory's state.
@@ -1160,17 +1505,17 @@ impl App {
     fn draw_context(&self, frame: &mut Frame, area: ratatui::layout::Rect) {
         let mut lines: Vec<Line> = Vec::new();
         match &self.context {
-            None => lines.push(Line::from(Span::styled("asking the server…", MARK_QUIET))),
+            None => lines.push(Line::from(Span::styled("正在问服务端…", MARK_QUIET))),
             Some(explained) => {
                 let budget = explained.budget_tokens;
                 let used = explained.context_tokens;
                 let percent = if budget > 0 {
                     format!("{:.0}%", (used as f64 / budget as f64) * 100.0)
                 } else {
-                    "no limit".to_string()
+                    "无上限".to_string()
                 };
                 lines.push(Line::from(vec![
-                    Span::styled("tokens ", MARK_QUIET),
+                    Span::styled("令牌 ", MARK_QUIET),
                     Span::styled(
                         format!("{used}"),
                         Style::default().add_modifier(Modifier::BOLD),
@@ -1185,7 +1530,7 @@ impl App {
                 ]));
                 lines.push(
                     Line::from(format!(
-                        "{} messages · {} tools · {} compactions",
+                        "{} 条消息 · {} 个工具 · {} 次压缩",
                         explained.messages, explained.tools, explained.compactions
                     ))
                     .style(MARK_QUIET),
@@ -1194,7 +1539,7 @@ impl App {
                 lines.extend(memory_lines(explained));
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
-                    "category            tokens",
+                    "类别                令牌",
                     MARK_QUIET,
                 )));
                 let widest = explained
@@ -1214,7 +1559,7 @@ impl App {
                 }
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
-                    "entries (newest last)   p=pinned c=cleared",
+                    "记录（新的在下）  p=固定 c=清除",
                     MARK_QUIET,
                 )));
                 // The tail is what the next request is mostly made of.
@@ -1248,7 +1593,7 @@ impl App {
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title(" context (f2) "),
+                        .title(" 上下文 (f2) "),
                 )
                 .wrap(Wrap { trim: false }),
             area,
@@ -1297,13 +1642,13 @@ impl App {
                 self.input.clear();
                 self.cursor = 0;
                 self.mouse = !self.mouse;
-                let state = if self.mouse { "on" } else { "off" };
+                let state = if self.mouse { "已开启" } else { "已关闭" };
                 self.push_lines(vec![format!(
-                    "· mouse {state}{}",
+                    "· 鼠标{state}{}",
                     if self.mouse {
-                        " — the wheel scrolls here; hold shift to select (terminal rule)"
+                        " — 这里用滚轮滚动；按住 shift 交给终端选择"
                     } else {
-                        " — drag to select and copy as usual; page up/down scroll here"
+                        " — 照常拖动选择、复制；这里用 pgup/pgdn 滚动"
                     }
                 )]);
                 Some(Action::Mouse(self.mouse))
@@ -1368,10 +1713,10 @@ impl App {
         match &self.interrupt {
             Some(interrupt) => {
                 interrupt();
-                self.push_lines(vec!["⏹ interrupting…".to_string()]);
+                self.push_lines(vec!["⏹ 正在中断…".to_string()]);
             }
             None => self.push_lines(vec![
-                "⏹ cannot interrupt: this surface has no server process to signal".to_string(),
+                "⏹ 无法中断：这个界面没有可通知的服务端进程".to_string()
             ]),
         }
     }
@@ -1389,6 +1734,9 @@ impl App {
     /// Purpose: Insert text at the caret, advance it and refresh the picker.
     /// Contract: called by `handle_key`'s character arm; calls `byte_at` and `refresh_picker`.
     fn insert(&mut self, text: &str) {
+        // Writing brings the page back to the prompt: it scrolls like everything else, and
+        // typing into a box that is off screen is typing blind.
+        self.scroll = 0;
         let at = self.byte_at(self.cursor);
         self.input.insert_str(at, text);
         self.cursor += text.chars().count();
@@ -1532,50 +1880,6 @@ impl App {
         }
     }
 
-    /// Purpose: Draw the command menu above the input: the matching commands and their one-line meanings, or one honest empty line.
-    /// Serves: `App::draw`.
-    /// Design: `docs/design/surfaces.md` §3.
-    /// Up: `App::draw`.
-    /// Down: `commands::Candidate` and the mark accent style.
-    /// Verify: `cargo test -p loong-tui-app`.
-    fn draw_commands(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
-        let Some(found) = self.command_candidates() else {
-            return;
-        };
-        let exact = commands::is_exact(&self.input);
-        let typed = self.input.trim();
-        let title = if exact {
-            "commands — enter runs this · esc closes".to_string()
-        } else if typed == "/" {
-            "commands — ↑/↓ choose · enter completes · esc closes".to_string()
-        } else {
-            format!("commands matching {typed} — ↑/↓ choose · enter completes · esc closes")
-        };
-        let body = if found.is_empty() {
-            vec![Line::from(
-                "  not one of this screen's commands — enter still sends it (skills like /help live there)",
-            )]
-        } else {
-            let chosen = self.command_choice.min(found.len() - 1);
-            found
-                .iter()
-                .enumerate()
-                .map(|(index, candidate)| {
-                    let marker = if index == chosen { "▸ " } else { "  " };
-                    let line = format!("{marker}{} — {}", candidate.insert, candidate.description);
-                    if index == chosen {
-                        Line::from(line).style(MARK_ACCENT_STYLE)
-                    } else {
-                        Line::from(line)
-                    }
-                })
-                .collect()
-        };
-        let widget =
-            Paragraph::new(body).block(Block::default().borders(Borders::ALL).title(title));
-        frame.render_widget(widget, area);
-    }
-
     /// Purpose: How many rows the picker needs: its matches, or one line saying there are none.
     /// Contract: called by `App::draw` and the picker-height test.
     /// How many rows the picker needs: its matches, or one line saying there are
@@ -1586,53 +1890,6 @@ impl App {
             None => 0,
             Some(picker) => picker.matches.len().max(1) as u16,
         }
-    }
-
-    /// Purpose: Draw the `@` picker above the input: its matches, the highlighted row, or one honest empty line.
-    /// Serves: `App::draw`.
-    /// Design: `docs/design/surfaces.md` §3.
-    /// Up: `App::draw`.
-    /// Down: the stored `mention::Picker` and the mark accent style.
-    /// Verify: `cargo test -p loong-tui-app`.
-    fn draw_picker(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
-        let Some(picker) = &self.picker else {
-            return;
-        };
-        let title = if picker.query.is_empty() {
-            "files — ↑/↓ choose · enter insert · esc cancel".to_string()
-        } else {
-            format!(
-                "files matching {} — ↑/↓ choose · enter insert · esc cancel",
-                picker.query
-            )
-        };
-        let body = if picker.matches.is_empty() {
-            vec![ratatui::text::Line::from(
-                "  no file matches — keep typing, or esc",
-            )]
-        } else {
-            picker
-                .matches
-                .iter()
-                .enumerate()
-                .map(|(index, file)| {
-                    let marker = if index == picker.selected {
-                        "▸ "
-                    } else {
-                        "  "
-                    };
-                    let line = format!("{marker}{file}");
-                    if index == picker.selected {
-                        ratatui::text::Line::from(line).style(MARK_ACCENT_STYLE)
-                    } else {
-                        ratatui::text::Line::from(line)
-                    }
-                })
-                .collect()
-        };
-        let widget = ratatui::widgets::Paragraph::new(body)
-            .block(Block::default().borders(Borders::ALL).title(title));
-        frame.render_widget(widget, area);
     }
 
     /// Purpose: Insert the highlighted path and close the picker, leaving the caret after the token.
@@ -1664,6 +1921,8 @@ impl App {
         if self.cursor == 0 {
             return;
         }
+        // Deleting is editing too: the prompt comes back into view.
+        self.scroll = 0;
         let from = self.byte_at(self.cursor - 1);
         let to = self.byte_at(self.cursor);
         self.input.replace_range(from..to, "");
@@ -1677,6 +1936,7 @@ impl App {
         if self.cursor >= self.input.chars().count() {
             return;
         }
+        self.scroll = 0;
         let from = self.byte_at(self.cursor);
         let to = self.byte_at(self.cursor + 1);
         self.input.replace_range(from..to, "");
@@ -1763,23 +2023,31 @@ impl App {
                 self.lines.push(piece.to_string());
             }
         }
-        // New output pulls the view back to the bottom, where a reader expects to be.
-        self.scroll = 0;
+        // Deliberately **not** snapping back to the bottom: a reader who scrolled away is
+        // reading, and output that yanks the page from under them is output they cannot
+        // select. The draw loop grows the offset by exactly the rows added, so the page
+        // stays where it was; only the bottom of the page follows new lines.
     }
 
-    /// Purpose: Keep one diagnostic line from the server's stderr, collapsing repeats and the oldest beyond a hundred.
-    /// Serves: `surface::run`'s notes loop and the drawn notes strip.
+    /// Purpose: Put one line of the server's stderr in the transcript, collapsing a repeat of the last line.
+    /// Serves: `surface::run`'s notes loop and the notes test.
     /// Design: `docs/design/surfaces.md` §3.
     /// Up: `surface::run` and the notes test.
-    /// Down: no call; it appends to `notes`.
+    /// Down: `App::push_lines`.
     /// Verify: `cargo test -p loong-tui-app`.
+    /// The server's stderr is a trail, not a status: the sandbox line, the hooks it found,
+    /// an error it printed — all of it is history, and history belongs in the transcript,
+    /// where it scrolls with the turn it explains. It used to be a two-row strip above the
+    /// box that showed only the newest line, which read as a caption floating outside the
+    /// conversation rather than as part of it.
     pub fn push_note(&mut self, note: String) {
-        if self.notes.last() != Some(&note) {
-            self.notes.push(note);
+        let line = format!("· {note}");
+        // A repeat is the same fact restated, not a second fact: the screen should not grow
+        // a second copy because the child printed its configuration twice.
+        if self.lines.last() == Some(&line) {
+            return;
         }
-        if self.notes.len() > 100 {
-            self.notes.remove(0);
-        }
+        self.push_lines(vec![line]);
     }
 
     /// Purpose: Fold every message the worker has sent into the screen state, once per pass of the draw loop.
@@ -1834,10 +2102,10 @@ impl App {
                 Ok(FromWorker::Yolo(on)) => {
                     self.yolo = on;
                     self.push_lines(vec![format!(
-                        "⚠ approval prompts {}{}",
-                        if on { "off" } else { "on" },
+                        "⚠ 确认提示已{}{}",
+                        if on { "关闭" } else { "打开" },
                         if on {
-                            " — the sandbox still applies; writes outside the workspace are still refused"
+                            " — 沙箱仍然生效；工作区之外的写入照样被拒"
                         } else {
                             ""
                         }
@@ -1852,7 +2120,7 @@ impl App {
                 Ok(FromWorker::Working(what)) => self.activity = Some(what),
                 Ok(FromWorker::Expanded { at, lines }) => {
                     if lines.is_empty() {
-                        self.push_lines(vec!["· no tool result to expand yet".to_string()]);
+                        self.push_lines(vec!["· 还没有可展开的工具结果".to_string()]);
                     } else {
                         self.opened(at, lines);
                     }
@@ -2368,9 +2636,7 @@ impl App {
     fn opened(&mut self, at: usize, lines: Vec<String>) -> Action {
         let folds = self.folds();
         let Some(marker) = folds.get(at).copied() else {
-            self.push_lines(vec![
-                "· that tool result is no longer in the transcript".to_string()
-            ]);
+            self.push_lines(vec!["· 那条工具结果已经不在记录里了".to_string()]);
             return Action::None;
         };
         self.fold = Some(marker);
@@ -2429,12 +2695,12 @@ impl App {
         };
         self.approval = None;
         let how = if !granted {
-            "denied"
+            "已拒绝"
         } else {
             match scope {
-                loong_schema::generated::ApprovalScope::Once => "approved once",
-                loong_schema::generated::ApprovalScope::ActionClass => "approved for this class",
-                loong_schema::generated::ApprovalScope::Project => "approved for this project",
+                loong_schema::generated::ApprovalScope::Once => "已批准（本次）",
+                loong_schema::generated::ApprovalScope::ActionClass => "已批准（此类）",
+                loong_schema::generated::ApprovalScope::Project => "已批准（本项目）",
             }
         };
         self.push_lines(vec![format!("⧗ {how}: {request_id}")]);
@@ -2457,9 +2723,9 @@ impl App {
     fn options() -> [(&'static str, bool, loong_schema::generated::ApprovalScope); 3] {
         use loong_schema::generated::ApprovalScope;
         [
-            ("Allow once", true, ApprovalScope::Once),
-            ("Allow in this project", true, ApprovalScope::Project),
-            ("Deny", false, ApprovalScope::Once),
+            ("本次允许", true, ApprovalScope::Once),
+            ("本项目允许", true, ApprovalScope::Project),
+            ("拒绝", false, ApprovalScope::Once),
         ]
     }
 
@@ -2567,7 +2833,7 @@ impl App {
     /// Contract: called by `draw`'s title arms; reads `App::yolo`.
     fn yolo_mark(&self) -> &'static str {
         if self.yolo {
-            "⚠ YOLO · "
+            "⚠ 免确认 · "
         } else {
             ""
         }
@@ -2590,8 +2856,8 @@ impl App {
     /// Down: `draw_model_bar`, `draw_banner`, `draw_approval`, `draw_picker`, `draw_context`, `visible_lines`, `wrapped_input` and `spinner_frame`.
     /// Verify: `cargo test -p loong-tui-app`.
     pub fn draw(&mut self, frame: &mut Frame) {
-        // The context panel takes the right third; the conversation keeps the rest, so
-        // turning it on never hides what you were reading.
+        // The context panel takes the right third; the page keeps the rest, so turning it
+        // on never hides what you were reading.
         let (conversation, panel) = if self.debug {
             let split = Layout::default()
                 .direction(Direction::Horizontal)
@@ -2601,278 +2867,149 @@ impl App {
         } else {
             (frame.area(), None)
         };
-        // The input's height comes from what is in it: a long prompt wraps and the box
-        // grows, instead of running off the right edge where it cannot be read.
-        let input_rows = self.input_rows(conversation.width.saturating_sub(2));
+        // Two fixed bars and one page: the status on top, the keys at the bottom, and
+        // everything else — the mark, the conversation, the question, the menus, the
+        // prompt — in between, scrolling as one document.
         let areas = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                // The models, first: which one is about to answer is the thing worth
-                // knowing before reading anything else. One row, and none at all when
-                // there is nothing to choose between.
-                Constraint::Length(if self.models.is_empty() { 0 } else { 1 }),
-                Constraint::Length(if self.show_banner(conversation) {
-                    MARK_ROWS + 1
-                } else {
-                    0
-                }),
-                Constraint::Length(if self.notes.is_empty() { 0 } else { 2 }),
+                Constraint::Length(1),
                 Constraint::Min(3),
-                // A question waiting for an answer gets its own block, and it comes **after**
-                // the work it is about: the flow reads downwards — events, then the question
-                // raised by them, then the box you answer in. It used to sit above the
-                // transcript, which put the decision before the evidence for it.
-                Constraint::Length(if self.pending.is_some() {
-                    // Two borders, one line per detail, three answers. Every detail is
-                    // clipped to the width and never wrapped, so this is the whole height.
-                    //
-                    // `DECISION_ROWS` is what it would like; the floor is the answers
-                    // themselves, because a question you cannot answer is worse than one
-                    // without context. The transcript gives up its rows first.
-                    let floor = 2 + Self::options().len() as u16;
-                    DECISION_ROWS
-                        .min(conversation.height.saturating_sub(8))
-                        .max(floor.min(conversation.height))
-                } else {
-                    0
-                }),
-                // The command menu sits directly above the input too: the list and
-                // the line it fills are one gesture, and a menu drawn in the title
-                // would have to compete with the running turn's status.
-                Constraint::Length(if self.command_rows() == 0 {
-                    0
-                } else {
-                    self.command_rows() + 2
-                }),
-                // The `@` picker sits directly above the input box it is filling in,
-                // so the eye does not travel between the list and the token it will
-                // replace. Nothing is taken from the transcript when it is closed.
-                Constraint::Length(if self.picker_rows() == 0 {
-                    0
-                } else {
-                    self.picker_rows() + 2
-                }),
-                Constraint::Length(input_rows + 2),
                 Constraint::Length(1),
             ])
             .split(conversation);
-        // Named, because five anonymous slices is how the notes strip once ended up
-        // drawn over the mark.
-        let (models, banner, notes, transcript, decision, menu, picker, entry, keys) = (
-            areas[0], areas[1], areas[2], areas[3], areas[4], areas[5], areas[6], areas[7],
-            areas[8],
-        );
+        let (top, view, keys) = (areas[0], areas[1], areas[2]);
 
-        if !self.models.is_empty() {
-            self.draw_model_bar(frame, models);
-        }
-        if self.show_banner(conversation) {
-            self.draw_banner(frame, banner);
-        }
-        if self.pending.is_some() {
-            self.draw_approval(frame, decision);
-        }
-        if self.command_rows() > 0 {
-            self.draw_commands(frame, menu);
-        }
-        if self.picker_rows() > 0 {
-            self.draw_picker(frame, picker);
+        if self.models.is_empty() {
+            frame.render_widget(
+                Paragraph::new(format!(
+                    " loongagent — 会话 {}（协议 {}）",
+                    self.session, self.schema
+                ))
+                .style(MARK_QUIET),
+                top,
+            );
+        } else {
+            self.draw_model_bar(frame, top);
         }
 
-        if !self.notes.is_empty() {
-            let latest = self.notes.last().cloned().unwrap_or_default();
-            // A warning is worth noticing; an ordinary startup note is not.
-            let lower = latest.to_ascii_lowercase();
-            let tone = if lower.contains("error") || lower.contains("refused") {
-                Style::default().fg(Color::Red)
-            } else if lower.contains("warning") || lower.contains("failed") {
-                Style::default().fg(Color::Yellow)
+        // An open fold keeps its title: the output itself scrolls, but what it is and how
+        // to leave it must stay on screen, which is what the transcript's title bar used to
+        // do before there was one page.
+        let view = match &self.open {
+            Some(open) => {
+                let split = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(1), Constraint::Min(1)])
+                    .split(view);
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        format!(
+                            "· 工具结果（{} 行）— esc 关闭，pgup/pgdn 滚动",
+                            open.lines.len()
+                        ),
+                        MARK_QUIET,
+                    )),
+                    split[0],
+                );
+                split[1]
+            }
+            None => view,
+        };
+        let width = view.width;
+        let input_rows = self.input_rows(width.saturating_sub(2)) as usize;
+        // The page, top to bottom: the mark (or the opening picture), the transcript, the
+        // question, the menus, the prompt. Nothing here is pinned — that is the point.
+        let splash = if self.lines.is_empty() {
+            self.splash_art(frame.area())
+        } else {
+            None
+        };
+        let prefix: Vec<Line> = if !self.logo || !self.show_banner(view) {
+            Vec::new()
+        } else if let Some((art, columns)) = splash {
+            self.splash_lines(width, art, columns)
+        } else {
+            self.banner_lines(width)
+        };
+        let body_rows = match &self.open {
+            Some(open) => open.lines.len(),
+            None => self.lines.len() + self.live_lines().len(),
+        };
+        let decision = if self.pending.is_some() {
+            self.approval_lines(width, Self::decision_rows(view.height))
+        } else {
+            Vec::new()
+        };
+        let menu = if self.command_rows() == 0 {
+            Vec::new()
+        } else {
+            self.command_lines(width)
+        };
+        let picker = if self.picker_rows() == 0 {
+            Vec::new()
+        } else {
+            self.picker_lines(width)
+        };
+        let (input, caret_row, caret_column) = self.input_lines(width, input_rows);
+        let input_height = input.len();
+
+        let total =
+            prefix.len() + body_rows + decision.len() + menu.len() + picker.len() + input_height;
+        // Sticky scroll: while the reader is away from the bottom, content that arrives
+        // must not push the page. Adding the growth to the offset keeps the same rows on
+        // screen — which is what makes selecting a long block possible while a turn runs.
+        if self.scroll > 0 && total > self.scroll_total {
+            self.scroll += total - self.scroll_total;
+        }
+        self.scroll_total = total;
+        let rows = view.height as usize;
+        // A page shorter than the window has nothing above it: pressing up must not leave
+        // an offset that lies about what is on screen.
+        self.scroll = self.scroll.min(total.saturating_sub(rows));
+        let scroll = self.scroll;
+        let first = total.saturating_sub(rows).saturating_sub(scroll);
+        let last = (first + rows).min(total);
+        let shown = first + 1;
+
+        let body_start = prefix.len();
+        let tail_start = body_start + body_rows;
+        let input_top = tail_start + decision.len() + menu.len() + picker.len();
+        let mut tail = decision;
+        tail.extend(menu);
+        tail.extend(picker);
+        tail.extend(input);
+
+        let mut page: Vec<Line> = Vec::with_capacity(last - first);
+        for at in first..last {
+            if at < body_start {
+                page.push(prefix[at].clone());
+            } else if at < tail_start {
+                let index = at - body_start;
+                page.push(match &self.open {
+                    Some(open) => styled(&open.lines[index]),
+                    None if index < self.lines.len() => self.transcript_line(index),
+                    None => {
+                        let live = self.live_lines();
+                        live_line(live[index - self.lines.len()])
+                    }
+                });
             } else {
-                MARK_QUIET
-            };
-            let widget = Paragraph::new(latest).style(tone).wrap(Wrap { trim: true });
-            frame.render_widget(widget, notes);
+                page.push(tail[at - tail_start].clone());
+            }
         }
+        frame.render_widget(Paragraph::new(page), view);
 
-        let height = transcript.height.saturating_sub(2) as usize;
-        // Keep the count itself honest, so the `[n/total]` hint and the next key press mean
-        // what the window can actually show rather than what was asked for.
-        self.scroll = self.scroll.min(self.max_scroll(height));
-        let title = match &self.open {
-            // The one thing worth saying while reading: how to get back.
-            Some(open) => format!(
-                "tool result ({} lines) — esc closes, pgup/pgdn scroll",
-                open.lines.len()
-            ),
-            None => format!(
-                "loongagent — session {} (schema {})",
-                self.session, self.schema
-            ),
-        };
-        let body = Paragraph::new(self.visible_lines(height))
-            .block(Block::default().borders(Borders::ALL).title(title))
-            .wrap(Wrap { trim: false });
-        frame.render_widget(body, transcript);
-
-        let (title, style) = match &self.pending {
-            // The question is the state, whatever else is true: a menu that does not
-            // say what it is asking is worse than no menu. Under YOLO the mark goes in
-            // front rather than replacing the sentence.
-            Some(_) => (
-                format!(
-                    "{}waiting for your decision — ↑/↓ choose · enter confirm · esc deny",
-                    self.yolo_mark()
-                ),
-                self.title_style(MARK_ACCENT_STYLE),
-            ),
-            // Busy: what it is doing and for how long. "working…" for two minutes
-            // tells nobody whether it is thinking or stuck. Under YOLO this used to be
-            // replaced by the warning, so the one state that must never be invisible was
-            // the one nobody could see; the mark rides in front of it instead.
-            None if self.busy => {
-                let secs = self
-                    .busy_since
-                    .map(|since| since.elapsed().as_secs())
-                    .unwrap_or(0);
-                let doing = self
-                    .activity
-                    .as_deref()
-                    .map(|what| format!(" · {what}"))
-                    .unwrap_or_default();
-                (
-                    // The mark turns, so the line proves the process is alive even while
-                    // the words beside it are the same ones it said ten seconds ago.
-                    format!(
-                        "{}{} working {secs}s{doing}",
-                        self.yolo_mark(),
-                        spinner_frame(self.busy_since)
-                    ),
-                    self.title_style(Style::default().fg(Color::Cyan)),
-                )
-            }
-            // The last turn's ending, held on screen until the next prompt starts.
-            //
-            // Placed after the command hint so a half-typed `/new` still completes, and
-            // before the bare "prompt" label, which says nothing anybody needs.
-            //
-            // This is the answer to "did that finish?", and it is the one that gets asked
-            // while the cursor is sitting in the box — a closing line in the transcript
-            // answers it only for somebody who is already scrolling.
-            None if self.finished.is_some() && !self.input.starts_with('/') => {
-                let finished = self.finished.expect("just checked");
-                (
-                    format!("{}{}", self.yolo_mark(), finished.line()),
-                    self.title_style(finished.style()),
-                )
-            }
-            // A leading `/` is a command: say where the list of them is.
-            None if self.input.starts_with('/') => {
-                // Lowercased once, so `/R` and `/EXIT` complete the same way `/r` and
-                // `/exit` do — the command matcher is case-insensitive, and a hint that
-                // disagreed with it would be worse than no hint.
-                let typed = self.input.trim().to_ascii_lowercase();
-                (
-                    format!(
-                        "{}{}",
-                        self.yolo_mark(),
-                        match typed.as_str() {
-                            // Once it is unambiguous, say what will happen rather than where to
-                            // read about it.
-                            "/exit" | "/quit" | "/q" => {
-                                "enter leaves loongagent (ctrl-c does too)".to_string()
-                            }
-                            "/logo" => "enter shows or hides the mark".to_string(),
-                            "/expand" => {
-                                "enter shows the last tool result in full (tab walks the folds)"
-                                    .to_string()
-                            }
-                            "/yolo" => {
-                                "enter turns approval prompts off (the sandbox stays)".to_string()
-                            }
-                            "/copy" => "enter copies the whole transcript".to_string(),
-                            "/new" | "/clear" | "/reset" => {
-                                "enter starts a new session — this one is kept, its context is not"
-                                    .to_string()
-                            }
-                            "/mouse" => "enter hands the mouse back to your terminal".to_string(),
-                            // The model shortcuts, said in full only when they would work: a
-                            // completion that promises a switch in a session with one model
-                            // is a completion that lies.
-                            "/r" if self.last_prompt.is_some() => {
-                                "enter asks the last prompt again, of the current model".to_string()
-                            }
-                            "/r" => "nothing to resend yet — ask something first".to_string(),
-                            _ => match typed
-                                .strip_prefix('/')
-                                .and_then(|n| n.parse::<usize>().ok())
-                            {
-                                Some(slot) if (1..=9).contains(&slot) => {
-                                    match self.model_in_slot(slot) {
-                                        Some(offering) => {
-                                            format!("enter switches to [{slot}] {}", offering.name)
-                                        }
-                                        None => format!("no model in slot {slot}"),
-                                    }
-                                }
-                                // A prefix of exactly one command is worth saying in full: it
-                                // is the name the menu is about to complete, and the sentence
-                                // is what that command will do. Several, or none, are the
-                                // menu's job to explain.
-                                _ => {
-                                    let found = commands::matches(&self.input);
-                                    match found.len() {
-                                    1 => format!("enter {}", found[0].description),
-                                    0 => "not one of this screen's commands — enter still sends it"
-                                        .to_string(),
-                                    _ => "command — ↑/↓ choose · enter completes".to_string(),
-                                }
-                                }
-                            },
-                        }
-                    ),
-                    self.title_style(Style::default().fg(Color::Green)),
-                )
-            }
-            // Nothing to report but the relaxed session itself. This one keeps the full
-            // sentence, because there is room for it; every other state carries the short
-            // mark in front, so the warning is never the price of the status.
-            None if self.yolo => (
-                "⚠ YOLO — approvals off, sandbox still on (/yolo to restore)".to_string(),
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ),
-            None => ("prompt".to_string(), Style::default()),
-        };
-        let inner_width = entry.width.saturating_sub(2);
-        let (lines, (caret_row, caret_column)) = self.wrapped_input(inner_width);
-        // Show the end of the text when it is taller than the box, so the line being
-        // typed is always the one on screen.
-        let window = input_rows as usize;
-        let offset = (caret_row as usize + 1).saturating_sub(window);
-        let visible: Vec<Line> = lines
-            .into_iter()
-            .skip(offset)
-            .take(window)
-            .map(Line::from)
-            .collect();
-        let input = Paragraph::new(visible).block(
-            Block::default()
-                .borders(Borders::ALL)
-                // The colour belongs to the *status title*, never to the paragraph.
-                // `Paragraph::style(style)` painted the text the person was typing
-                // too, so the prompt turned green after a successful turn (red under
-                // YOLO, cyan while busy) — status read as a drawing leak, and the
-                // one place that should be the person's own was the one being
-                // recoloured.
-                .title(Span::styled(title, style)),
-        );
-        frame.render_widget(input, entry);
-        // Show where typing goes. Without this the prompt is a guess, and the
-        // terminal's own cursor stays hidden.
+        // The caret exists only where the prompt does: scrolled off the page, there is
+        // nothing to point at.
         if self.pending.is_none() {
-            frame.set_cursor_position((
-                entry.x + 1 + caret_column,
-                entry.y + 1 + (caret_row - offset as u16),
-            ));
+            let caret_doc = input_top + 1 + caret_row as usize;
+            if caret_doc >= first && caret_doc < last {
+                frame.set_cursor_position((
+                    view.x + 1 + caret_column,
+                    view.y + (caret_doc - first) as u16,
+                ));
+            }
         }
 
         if let Some(panel) = panel {
@@ -2882,30 +3019,30 @@ impl App {
         let mut hints = if self.open.is_some() {
             vec![
                 Span::styled("esc", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" close  "),
+                Span::raw(" 关闭  "),
                 Span::styled("pgup/pgdn", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" scroll"),
+                Span::raw(" 滚动"),
             ]
         } else {
             vec![
                 Span::styled("enter", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" send  "),
+                Span::raw(" 发送  "),
                 Span::styled("pgup/pgdn", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" scroll  "),
+                Span::raw(" 滚动  "),
                 Span::styled("f2", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" context  "),
+                Span::raw(" 上下文  "),
                 Span::styled(
                     "ctrl-pgup/pgdn",
                     Style::default().add_modifier(Modifier::BOLD),
                 ),
-                Span::raw(" transcript  "),
+                Span::raw(" 记录  "),
                 Span::styled(
-                    if self.yolo { "⚠ yolo" } else { "" },
+                    if self.yolo { "⚠ 免确认" } else { "" },
                     Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(if self.yolo { "  " } else { "" }),
                 Span::styled("ctrl-c", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(if self.busy { " interrupt" } else { " quit" }),
+                Span::raw(if self.busy { " 中断" } else { " 退出" }),
             ]
         };
         // Where the keyboard is among the folds, and how to move it. Only when there is
@@ -2918,21 +3055,17 @@ impl App {
                 Style::default().add_modifier(Modifier::BOLD),
             ));
             hints.push(Span::raw(format!(
-                " {} fold(s){}",
+                " {} 处折叠{}",
                 folds.len(),
                 if self.fold.is_some() {
-                    " · enter expands · esc lets go"
+                    " · 回车展开 · esc 放开"
                 } else {
                     ""
                 }
             )));
         }
         if self.scroll > 0 {
-            hints.push(Span::raw(format!(
-                "  [{}/{}]",
-                self.lines.len() - self.scroll,
-                self.lines.len()
-            )));
+            hints.push(Span::raw(format!("  [{}/{}]", shown, total)));
         }
         if let Some(error) = &self.error {
             hints.push(Span::styled(
@@ -2948,12 +3081,12 @@ impl App {
                 hints.push(Span::raw("  "));
                 if context.memory_degraded.is_empty() {
                     hints.push(Span::styled(
-                        format!("mem {}", context.memory_mode),
+                        format!("记忆 {}", context.memory_mode),
                         MARK_QUIET,
                     ));
                 } else {
                     hints.push(Span::styled(
-                        "mem ⚠ degraded",
+                        "记忆 ⚠ 降级",
                         Style::default()
                             .fg(Color::Yellow)
                             .add_modifier(Modifier::BOLD),
@@ -2985,35 +3118,32 @@ fn memory_lines(explained: &loong_schema::generated::ContextExplain) -> Vec<Line
     let mut lines: Vec<Line<'static>> = Vec::new();
     if explained.memory_mode.is_empty() {
         lines.push(Line::from(vec![
-            Span::styled("memory  ", MARK_QUIET),
+            Span::styled("记忆  ", MARK_QUIET),
             Span::styled(
-                "off",
+                "关",
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                "  no layered memory; compaction drops old exchanges",
-                MARK_QUIET,
-            ),
+            Span::styled("  没有分层记忆；压缩直接丢弃旧对话", MARK_QUIET),
         ]));
         return lines;
     }
 
     let summarizer = if explained.memory_summarizer.is_empty() {
-        "none (record mode)".to_string()
+        "无（记录模式）".to_string()
     } else {
         explained.memory_summarizer.clone()
     };
     lines.push(Line::from(vec![
-        Span::styled("memory  ", MARK_QUIET),
+        Span::styled("记忆  ", MARK_QUIET),
         Span::styled(
             explained.memory_mode.clone(),
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(format!("  summarizer {summarizer}"), MARK_QUIET),
+        Span::styled(format!("  摘要器 {summarizer}"), MARK_QUIET),
     ]));
 
     // Counts first, because "how much memory is there" is the question; tokens are
@@ -3028,7 +3158,7 @@ fn memory_lines(explained: &loong_schema::generated::ContextExplain) -> Vec<Line
             _ => "L?",
         };
         if layer.tokens > 0 {
-            layers.push(format!("{label} {} ({} tok)", layer.count, layer.tokens));
+            layers.push(format!("{label} {}（{} 令牌）", layer.count, layer.tokens));
         } else {
             layers.push(format!("{label} {}", layer.count));
         }
@@ -3041,14 +3171,14 @@ fn memory_lines(explained: &loong_schema::generated::ContextExplain) -> Vec<Line
     spans.push(Span::raw(layers.join("  ")));
     if map_missing {
         // The distinction the whole field exists for: on, and nothing produced yet.
-        spans.push(Span::styled("  · no L4 map yet", MARK_QUIET));
+        spans.push(Span::styled("  · 还没有 L4 图谱", MARK_QUIET));
     }
     lines.push(Line::from(spans));
 
     let worker = &explained.memory_worker;
     lines.push(
         Line::from(format!(
-            "        worker {} · {} calls · {} enriched · {} pending · {} deferred",
+            "        后台 {} · {} 次调用 · {} 条已整理 · {} 条待处理 · {} 条延后",
             worker.state, worker.model_calls, worker.enriched, worker.pending, worker.deferrals
         ))
         .style(MARK_QUIET),
@@ -3058,7 +3188,7 @@ fn memory_lines(explained: &loong_schema::generated::ContextExplain) -> Vec<Line
     // error are both shown when they are different facts.
     if !explained.memory_degraded.is_empty() {
         lines.push(Line::from(vec![
-            Span::styled("        degraded: ", Style::default().fg(Color::Yellow)),
+            Span::styled("        降级：", Style::default().fg(Color::Yellow)),
             Span::styled(
                 explained.memory_degraded.clone(),
                 Style::default().fg(Color::Yellow),
@@ -3067,7 +3197,7 @@ fn memory_lines(explained: &loong_schema::generated::ContextExplain) -> Vec<Line
     }
     if !worker.last_error.is_empty() && !explained.memory_degraded.contains(&worker.last_error) {
         lines.push(Line::from(vec![
-            Span::styled("        last error: ", Style::default().fg(Color::Yellow)),
+            Span::styled("        上次错误：", Style::default().fg(Color::Yellow)),
             Span::styled(
                 worker.last_error.clone(),
                 Style::default().fg(Color::Yellow),
@@ -3075,13 +3205,14 @@ fn memory_lines(explained: &loong_schema::generated::ContextExplain) -> Vec<Line
         ]));
     } else if worker.failed > 0 && explained.memory_degraded.is_empty() {
         lines.push(Line::from(vec![Span::styled(
-            format!("        {} enrichment failure(s)", worker.failed),
+            format!("        {} 条整理失败", worker.failed),
             Style::default().fg(Color::Yellow),
         )]));
     }
     lines
 }
 
+mod mark;
 mod setup;
 mod surface;
 mod wizard;

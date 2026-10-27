@@ -36,42 +36,42 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "/new",
         aliases: &["/clear", "/reset"],
-        description: "starts a new session — this one is kept, its context is not",
+        description: "开始新会话 — 这一条存盘，上下文不带走",
     },
     Command {
         name: "/exit",
         aliases: &["/quit", "/q"],
-        description: "leaves loongagent (ctrl-c does too)",
+        description: "离开 loongagent（ctrl-c 也行）",
     },
     Command {
         name: "/yolo",
         aliases: &[],
-        description: "turns approval prompts on or off (the sandbox is untouched)",
+        description: "打开或关闭确认提示（沙箱不受影响）",
     },
     Command {
         name: "/expand",
         aliases: &[],
-        description: "shows the last tool result in full",
+        description: "把上一条工具结果完整展开",
     },
     Command {
         name: "/copy",
         aliases: &[],
-        description: "copies the whole transcript",
+        description: "复制整段记录",
     },
     Command {
         name: "/logo",
         aliases: &[],
-        description: "shows or hides the mark",
+        description: "显示或隐藏徽标",
     },
     Command {
         name: "/mouse",
         aliases: &[],
-        description: "turns mouse tracking on or off (shift selects)",
+        description: "打开或关闭鼠标跟踪（shift 交给终端选择）",
     },
     Command {
         name: "/r",
         aliases: &[],
-        description: "asks the last prompt again, of the current model",
+        description: "把上一个提问再问一遍，用当前模型",
     },
 ];
 
@@ -167,7 +167,7 @@ pub fn matches(typed: &str) -> Vec<Candidate> {
     if let Some(slot) = slot(&typed) {
         found.push(Candidate {
             insert: format!("/{slot}"),
-            description: "switch to that model slot",
+            description: "切到那个模型位置",
         });
     }
     found.extend(COMMANDS.iter().filter_map(|command| {

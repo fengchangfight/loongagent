@@ -123,7 +123,7 @@ pub fn spawn_worker<T: Transport + Send + 'static>(
                     match client.expand_last_tool_result() {
                         Ok(lines) if lines.is_empty() => {
                             let _ = events.send(FromWorker::Lines(vec![
-                                "· no tool result to expand yet".to_string(),
+                                "· 还没有可展开的工具结果".to_string(),
                             ]));
                         }
                         Ok(lines) => {

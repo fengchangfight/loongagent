@@ -2,7 +2,7 @@
 
 - **Up:** [design/README.md](README.md) · [04 System overview](../04-system-overview.md)
 - **Authority:** [ADR-0001](../decisions/0001-one-binary-client-server.md) · [ADR-0002](../decisions/0002-json-rpc-wire-protocol.md) · [ADR-0009](../decisions/0009-surfaces.md) · [ADR-0019](../decisions/0019-mid-turn-permissions.md)
-- **Code:** `crates/cli/src/main.rs`, `crates/server/src/lib.rs`, `crates/tui/src/lib.rs`, `crates/tui-app/src/lib.rs`, `crates/tui-app/src/commands.rs`, `crates/web/src/lib.rs`
+- **Code:** `crates/cli/src/main.rs`, `crates/server/src/lib.rs`, `crates/tui/src/lib.rs`, `crates/tui-app/src/lib.rs`, `crates/tui-app/src/mark.rs`, `crates/tui-app/src/commands.rs`, `crates/web/src/lib.rs`
 - **Verify:** `cargo test -p loongagent -p loong-server -p loong-tui -p loong-tui-app -p loong-web` · `./scripts/check.sh`
 
 The architecture is one local agent server and thin clients that render its event stream and
@@ -97,19 +97,24 @@ once (`permissions.relaxed` confirms). Unix: a socketpair; Windows keeps the que
 
 ### The TUI's marks and colour
 
+The interface speaks Chinese. Names stay as they are — commands (`/logo`), keys (`enter`),
+tools (`read_file`), paths, model output — because a translated name no longer matches what
+you type. Everything the screen says in its own voice is Chinese.
+
 The transcript is painted by classification rather than by the sender: `classify` reads the
 line's own vocabulary (the prefixes `loong-tui`'s renderer writes) and `style_for` turns that
-into a style, so there is one palette for the whole surface.
+into a style, so there is one palette for the whole surface. It also accepts the English
+vocabulary older sessions were written with, so scrolling back into one keeps its colour.
 
 | Line | Colour | Why |
 |---|---|---|
-| `you: …` | the label in cyan, the words plain | the label marks where a prompt began when scrolling back; the person's own words stay readable |
+| `你：…` | the label in cyan, the words plain | where a prompt began when scrolling back; the words themselves stay readable |
 | `→ tool …` | teal | the agent is doing something |
-| `← ok …` | green, dim | a result is evidence, not news |
-| `← failed …` | red | it did not work |
-| `! approval required …` | yellow, bold | the person has to answer |
+| `← 成功 …` | green, dim | a result is evidence, not news |
+| `← 失败 …` | red | it did not work |
+| `! 需要确认 …` | yellow, bold | the person has to answer |
 | `! …` | red, bold | something went wrong |
-| `· policy: …` | violet | a decision about permission, which is worth finding later |
+| `· 规则：…` | violet | a decision about permission, worth finding later |
 | `· …` | the terminal's own foreground, dimmed | bookkeeping: skills, tokens, compaction |
 | anything else | default | the model's own answer, left alone |
 
@@ -117,31 +122,27 @@ The palette names colours and never invents RGB, because a fixed tone is picked 
 background and unreadable on the other. The same rule is why the quiet lines are the
 **terminal's own foreground, dimmed**, and not `DarkGray`: bright black *is* the background
 on a dark theme, so the bookkeeping lines were drawn into the wall (`MARK_QUIET`). The
-answers that were not chosen in a decision menu are `default` too; the highlighted one is
-the one that is coloured and bold.
+answers not chosen in a decision menu are `default` too; the highlighted one is coloured.
 
-The mark is the owner's, kept verbatim:
+The screen is one page, not three boxes. Two bars are fixed — the status line at the top
+(the session, or the models) and the keys at the bottom. Between them, the mark, the
+conversation, the question, the menus and the prompt are one document that scrolls.
 
-```
-╭───────༺ ᛭ ༻────────────╮
-╞═══════【 龍 】════════════╡
-╰───────༻ ᛭ ༺────────────╯
-```
+    ╔═════════༺ ᛭ ༻═════════╗   ← the mark, scrolled away by the conversation
+    ║  ▀█▀▀█▀  ██╗  ██████╗  ║
+    ╚═════════༻ ᛭ ༺═════════╝
+    ┌ 输入 ─────────────────┐   ← the prompt is page content too
+    └───────────────────────┘
 
-When the terminal has room (at least 52 columns by 22 rows) the five-row frame is used
-instead, with the owner's ornaments and inscription:
+The mark frames the character 龍 — a 16×16 bitmap in half blocks, not a glyph, which at
+this size is one square of foreground — and the wordmark: five rows of block letters from
+90 columns, the plain word below that. An empty session opens on the favicon instead,
+gone with the first line; `/logo` puts both away, and under 52 columns by 26 rows there
+is no mark. The character is ANSI red and the frame ANSI magenta — never an absolute RGB.
 
-    ╔═══════════════༺ ᛭ ༻═══════════════╗
-    ║                                   ║     loongagent
-    ║               【 龍 】              ║
-    ║                                   ║     ⟬ ᛭ 兴云吐雾 ⋄ 隐介藏形 ᛭ ⟭
-    ╚═══════════════༻ ᛭ ༺═══════════════╝
-
-The rules are **built** from the interior width (`MARK_INNER`), so the sides line up even
-when a rune measures differently; `/logo` puts it away, and under 48 columns by 18 rows
-there is no mark. `龍` and the wordmark are the terminal's own foreground in bold, the frame
-is ANSI magenta, and the transcript's accents are ANSI cyan and magenta — nothing is an
-absolute RGB or a literal white, because the owner runs a light background.
+Scrolling is anchored to the page, not its end: away from the bottom, new output is
+appended below the window and changes nothing on screen, so a long block stays selectable
+during a turn. The prompt scrolls too; an editing key returns to the bottom.
 
 ## 4. The web: a bridge, not a second agent
 

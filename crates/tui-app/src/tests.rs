@@ -172,15 +172,15 @@ fn the_picker_takes_only_the_rows_it_needs() {
 #[test]
 fn the_screen_shows_the_conversation_the_input_and_the_session() {
     let mut app = App::new("s-1", "0.1.0");
-    app.push_lines(vec!["you: hello".to_string(), "hi there".to_string()]);
+    app.push_lines(vec!["你：hello".to_string(), "hi there".to_string()]);
     type_text(&mut app, "next question");
     let screen = draw(&mut app, 60, 16);
-    assert!(screen.contains("session s-1"), "{screen}");
-    assert!(screen.contains("schema 0.1.0"), "{screen}");
-    assert!(screen.contains("you: hello"), "{screen}");
+    assert!(shows(&screen, "会话 s-1"), "{screen}");
+    assert!(shows(&screen, "协议 0.1.0"), "{screen}");
+    assert!(shows(&screen, "你：hello"), "{screen}");
     assert!(screen.contains("hi there"), "{screen}");
     assert!(screen.contains("next question"), "{screen}");
-    assert!(screen.contains("prompt"), "{screen}");
+    assert!(shows(&screen, "输入"), "{screen}");
 }
 
 /// Purpose: Enter sends a non-empty prompt, clears the box and marks the turn busy; an empty one sends nothing.
@@ -195,7 +195,7 @@ fn enter_submits_a_non_empty_prompt_and_clears_the_input() {
     assert!(app.input.is_empty());
     assert!(app.busy);
     assert!(
-        app.lines.iter().any(|l| l == "you: do it"),
+        app.lines.iter().any(|l| l == "你：do it"),
         "{:?}",
         app.lines
     );
@@ -232,11 +232,11 @@ fn an_approval_repurposes_the_input_line_and_answers_it() {
     app.pending = Some("appr-1".to_string());
     let screen = draw(&mut app, 80, 22);
     // A menu, not an orange line: the question, then the answers to pick from.
-    assert!(screen.contains("needs your decision"), "{screen}");
-    assert!(screen.contains("Allow once"), "{screen}");
-    assert!(screen.contains("Allow in this project"), "{screen}");
-    assert!(screen.contains("Deny"), "{screen}");
-    assert!(screen.contains("▸"), "the chosen one is marked: {screen}");
+    assert!(shows(&screen, "需要你决定"), "{screen}");
+    assert!(shows(&screen, "本次允许"), "{screen}");
+    assert!(shows(&screen, "本项目允许"), "{screen}");
+    assert!(shows(&screen, "拒绝"), "{screen}");
+    assert!(shows(&screen, "▸"), "the chosen one is marked: {screen}");
 
     app.handle_key(key(KeyCode::Char('z')));
     assert!(
@@ -256,7 +256,7 @@ fn an_approval_repurposes_the_input_line_and_answers_it() {
     assert!(
         app.lines
             .iter()
-            .any(|l| l.contains("approved once") && l.contains("appr-1")),
+            .any(|l| shows(l, "已批准（本次）") && l.contains("appr-1")),
         "{:?}",
         app.lines
     );
@@ -295,7 +295,7 @@ fn answering_a_question_keeps_the_turn_clock_running() {
     // One second in, both halves of the title have moved with that clock.
     app.busy_since = Some(started - std::time::Duration::from_secs(1));
     let screen = draw(&mut app, 80, 20);
-    assert!(screen.contains("working 1s"), "the clock counts: {screen}");
+    assert!(shows(&screen, "运行 1s"), "the clock counts: {screen}");
     assert!(
         SPINNER
             .iter()
@@ -324,7 +324,7 @@ fn a_turn_paused_for_a_question_is_not_recorded_as_finished() {
         app.finished
     );
     assert!(
-        !app.lines.iter().any(|line| line.contains("完成")),
+        !app.lines.iter().any(|line| shows(line, "完成")),
         "and nothing in the transcript says it finished: {:?}",
         app.lines
     );
@@ -336,7 +336,7 @@ fn typing_a_slash_offers_the_commands_this_screen_answers() {
     let mut app = App::new("s", "v");
     type_text(&mut app, "/");
     let screen = draw(&mut app, 100, 24);
-    assert!(screen.contains("commands"), "the menu is named: {screen}");
+    assert!(shows(&screen, "命令"), "the menu is named: {screen}");
     for command in [
         "/new", "/exit", "/yolo", "/copy", "/mouse", "/logo", "/expand",
     ] {
@@ -354,7 +354,7 @@ fn a_prefix_narrows_the_menu_and_says_what_the_command_will_do() {
     let screen = draw(&mut app, 100, 24);
     assert!(screen.contains("/yolo"), "the match is offered: {screen}");
     assert!(
-        screen.contains("turns approval prompts"),
+        shows(&screen, "打开或关闭确认提示"),
         "and what it does is beside it: {screen}"
     );
     assert!(
@@ -364,7 +364,7 @@ fn a_prefix_narrows_the_menu_and_says_what_the_command_will_do() {
     // The prompt title carries the same sentence, because that is where the person
     // is looking when the menu is not in the way.
     assert!(
-        box_titles(&screen).contains(&despaced("enter turns approval prompts")),
+        box_titles(&screen).contains(&despaced("打开或关闭确认提示")),
         "{screen}"
     );
 }
@@ -378,11 +378,11 @@ fn the_command_menu_is_visible_while_a_turn_runs() {
     type_text(&mut app, "/yol");
     let screen = draw(&mut app, 100, 24);
     assert!(
-        box_titles(&screen).contains("working"),
+        box_titles(&screen).contains("运行"),
         "the turn still says it is working: {screen}"
     );
     assert!(
-        screen.contains("/yolo") && screen.contains("approval prompts"),
+        screen.contains("/yolo") && shows(&screen, "打开或关闭确认提示"),
         "and the command being typed is still offered: {screen}"
     );
 }
@@ -421,17 +421,14 @@ fn arrows_walk_the_command_menu_and_esc_puts_it_away() {
     app.handle_key(key(KeyCode::Esc));
     assert_eq!(app.input, "/yo");
     let screen = draw(&mut app, 100, 24);
-    assert!(
-        !screen.contains("commands matching"),
-        "the menu is gone: {screen}"
-    );
+    assert!(!shows(&screen, "匹配"), "the menu is gone: {screen}");
 
     // A word this screen does not answer is the server's, and the menu says so.
     let mut app = App::new("s", "v");
     type_text(&mut app, "/he");
     let screen = draw(&mut app, 100, 24);
     assert!(screen.contains("/help"), "the skills are named: {screen}");
-    assert!(screen.contains("enter still sends it"), "{screen}");
+    assert!(shows(&screen, "回车仍然会发出去"), "{screen}");
     assert_eq!(
         app.handle_key(key(KeyCode::Enter)),
         Action::Send(ToWorker::Submit("/he".to_string())),
@@ -452,10 +449,7 @@ fn an_alias_prefix_offers_the_command_it_names() {
     // than completing, and the menu still says what it is.
     assert!(commands::is_exact("/7"));
     assert_eq!(commands::slot("/7"), Some(7));
-    assert_eq!(
-        commands::matches("/7")[0].description,
-        "switch to that model slot"
-    );
+    assert_eq!(commands::matches("/7")[0].description, "切到那个模型位置");
 }
 
 /// Purpose: A long shell command is flattened to one row, so all three answers stay in the panel.
@@ -480,7 +474,7 @@ fn a_long_command_does_not_push_the_answers_out_of_the_box() {
     // and every answer is inside those rows, which is the part that matters.
     let panel: Vec<&str> = screen
         .lines()
-        .skip_while(|line| !line.contains("needs your decision"))
+        .skip_while(|line| !shows(line, "需要你决定"))
         .take_while(|line| !line.starts_with('└'))
         .collect();
     assert!(
@@ -488,9 +482,9 @@ fn a_long_command_does_not_push_the_answers_out_of_the_box() {
         "{} rows: {panel:?}",
         panel.len()
     );
-    for answer in ["Allow once", "Allow in this project", "Deny"] {
+    for answer in ["本次允许", "本项目允许", "拒绝"] {
         assert!(
-            panel.iter().any(|line| line.contains(answer)),
+            panel.iter().any(|line| shows(line, answer)),
             "{answer} left the panel: {panel:?}"
         );
     }
@@ -523,7 +517,7 @@ fn a_command_full_of_cjk_does_not_push_the_answers_out_of_the_box() {
     let screen = draw(&mut app, 80, 30);
     let panel: Vec<&str> = screen
         .lines()
-        .skip_while(|line| !line.contains("needs your decision"))
+        .skip_while(|line| !shows(line, "需要你决定"))
         .take_while(|line| !line.starts_with('└'))
         .collect();
     assert!(
@@ -531,9 +525,9 @@ fn a_command_full_of_cjk_does_not_push_the_answers_out_of_the_box() {
         "{} rows: {panel:?}",
         panel.len()
     );
-    for answer in ["Allow once", "Allow in this project", "Deny"] {
+    for answer in ["本次允许", "本项目允许", "拒绝"] {
         assert!(
-            panel.iter().any(|line| line.contains(answer)),
+            panel.iter().any(|line| shows(line, answer)),
             "{answer} left the panel: {panel:?}"
         );
     }
@@ -568,9 +562,9 @@ fn a_squeezed_panel_gives_up_its_details_before_its_answers() {
             args: "{\"command\":\"ls\"}".to_string(),
         }));
         let screen = draw(&mut app, 80, height);
-        for answer in ["Allow once", "Allow in this project", "Deny"] {
+        for answer in ["本次允许", "本项目允许", "拒绝"] {
             assert!(
-                screen.contains(answer),
+                shows(&screen, answer),
                 "at {height} rows, {answer} is missing:\n{screen}"
             );
         }
@@ -587,11 +581,12 @@ fn the_decision_comes_after_the_work_it_is_about() {
     app.push_lines(vec!["→ shell ls".to_string()]);
     app.pending = Some("appr-1".to_string());
     let screen = draw(&mut app, 80, 30);
-    let transcript = screen.find("loongagent — session").expect("the transcript");
-    let decision = screen.find("needs your decision").expect("the decision");
-    let prompt = screen
-        .find("waiting for your decision")
-        .expect("the prompt title");
+    // Ordering is read from the space-free copy: the cell buffer pads every wide glyph,
+    // so raw columns would measure the padding as well as the words.
+    let flat = despaced(&screen);
+    let transcript = flat.find("loongagent—会话").expect("the transcript");
+    let decision = flat.find("需要你决定").expect("the decision");
+    let prompt = flat.find("等你决定").expect("the prompt title");
     assert!(
         transcript < decision && decision < prompt,
         "transcript {transcript}, decision {decision}, prompt {prompt}:\n{screen}"
@@ -667,12 +662,12 @@ fn a_denial_is_an_answer_too() {
     assert!(app
         .lines
         .iter()
-        .any(|l| l.contains("denied") && l.contains("appr-2")));
+        .any(|l| shows(l, "已拒绝") && l.contains("appr-2")));
 }
 
-/// Purpose: Paging moves the transcript window, Ctrl-End returns to the end, and new output follows.
+/// Purpose: Paging moves the page, Ctrl-End returns to the end, and new output leaves a reading page alone.
 #[test]
-fn scrolling_moves_the_window_and_new_output_returns_to_the_bottom() {
+fn scrolling_moves_the_window_and_new_output_leaves_a_reading_page_alone() {
     let mut app = App::new("s", "v");
     app.push_lines((1..=50).map(|i| format!("line {i}")));
     let bottom = draw(&mut app, 40, 20);
@@ -686,17 +681,26 @@ fn scrolling_moves_the_window_and_new_output_returns_to_the_bottom() {
     app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL));
     assert_eq!(app.scroll, 0, "ctrl-End returns to the newest output");
 
+    // Output that arrives while the reader is away does not pull the page back: that
+    // yank is what made selecting a long block impossible.
     app.handle_key(key(KeyCode::PageUp));
+    let offset = app.scroll;
     app.push_lines(vec!["a new answer".to_string()]);
-    assert_eq!(app.scroll, 0, "new output pulls the view back");
-    assert!(draw(&mut app, 40, 20).contains("a new answer"));
+    let _ = draw(&mut app, 40, 20);
+    assert!(
+        app.scroll > offset,
+        "the offset grew with the page, so the same rows stayed on screen"
+    );
+    // Sending returns to the bottom: the prompt is about to be answered.
+    app.begin_submit("go".to_string());
+    assert_eq!(app.scroll, 0, "sending returns to the newest output");
 }
 
 /// Purpose: Scrolling up in a short transcript never pushes the newest lines off the end.
 #[test]
 fn scrolling_back_cannot_push_the_newest_lines_off_the_end() {
     let startup = [
-        "· skills available (1): help",
+        "· 可用技能（1）：help",
         "· control.synced",
         "· profile.selected",
         "· new session 66mn884m",
@@ -714,7 +718,7 @@ fn scrolling_back_cannot_push_the_newest_lines_off_the_end() {
     let screen = draw(&mut app, 60, 24);
     for line in startup {
         assert!(
-            screen.contains(line),
+            shows(&screen, line),
             "{line:?} was pushed off the end:\n{screen}"
         );
     }
@@ -738,9 +742,9 @@ fn the_bookkeeping_lines_are_not_drawn_into_the_wall() {
         assert!(style.add_modifier.contains(Modifier::DIM), "{kind:?}");
     }
     let mut app = App::new("s", "v");
-    app.push_lines(vec!["· skills available (1): help".to_string()]);
+    app.push_lines(vec!["· 可用技能（1）：help".to_string()]);
     assert_eq!(
-        color_of(&mut app, 60, 24, "· skills available"),
+        color_of(&mut app, 60, 24, "· 可用技能"),
         Some(ratatui::style::Color::Reset),
         "and that is what reaches the screen"
     );
@@ -755,12 +759,12 @@ fn the_answers_that_are_not_chosen_are_still_readable() {
     let mut app = App::new("s", "v");
     app.pending = Some("appr-9".to_string());
     assert_eq!(
-        color_of(&mut app, 80, 24, "Allow in this project"),
+        color_of(&mut app, 80, 24, "本项目允许"),
         Some(ratatui::style::Color::Reset),
         "an unchosen answer is dimmed, not drawn into the background"
     );
     assert_eq!(
-        color_of(&mut app, 80, 24, "Deny"),
+        color_of(&mut app, 80, 24, "拒绝"),
         Some(ratatui::style::Color::Reset)
     );
 }
@@ -771,7 +775,7 @@ fn the_answers_that_are_not_chosen_are_still_readable() {
 /// lines, then the marker that stands for the rest.
 fn two_folds(app: &mut App) {
     app.push_lines(vec![
-        "you: run it".to_string(),
+        "你：run it".to_string(),
         "→ shell cargo test".to_string(),
         "← ok older 1".to_string(),
         "  older 2".to_string(),
@@ -789,7 +793,7 @@ fn tab_walks_the_folds_and_enter_shows_what_they_hide() {
     two_folds(&mut app);
     let screen = draw(&mut app, 72, 24);
     assert!(
-        screen.contains("▸ … 47 more line(s), 900 B · /expand"),
+        shows(&screen, "▸ … 47 more line(s), 900 B · /expand"),
         "a summary says what is hidden and how to get it: {screen}"
     );
 
@@ -832,7 +836,7 @@ fn tab_walks_the_folds_and_enter_shows_what_they_hide() {
     .unwrap();
     app.drain(&worker);
     let screen = draw(&mut app, 72, 24);
-    assert!(screen.contains("tool result (50 lines)"), "{screen}");
+    assert!(shows(&screen, "工具结果（50 行）"), "{screen}");
     assert!(
         screen.contains("newest 50"),
         "the end is what is read: {screen}"
@@ -849,7 +853,7 @@ fn tab_walks_the_folds_and_enter_shows_what_they_hide() {
     app.handle_key(key(KeyCode::Esc));
     assert_eq!(app.fold, None);
     assert!(
-        draw(&mut app, 72, 24).contains("session s"),
+        shows(&draw(&mut app, 72, 24), "会话 s"),
         "and does not leave"
     );
 }
@@ -890,7 +894,7 @@ fn enter_opens_a_fold_the_turn_sent_without_asking_the_log() {
     // the turn is still running, when the connection is not free to ask on.
     assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::None);
     let screen = draw(&mut app, 72, 24);
-    assert!(screen.contains("tool result (50 lines)"), "{screen}");
+    assert!(shows(&screen, "工具结果（50 行）"), "{screen}");
     assert!(screen.contains("newest 50"), "{screen}");
     // A fold the view does not hold is still fetched from the log, in full.
     app.handle_key(key(KeyCode::Esc));
@@ -903,16 +907,39 @@ fn enter_opens_a_fold_the_turn_sent_without_asking_the_log() {
     );
 }
 
-/// Purpose: Server stderr notes are drawn in the interface, with repeats collapsed.
+/// Purpose: Server stderr becomes a note inside the transcript, with repeats collapsed.
 #[test]
 fn server_notes_are_drawn_instead_of_corrupting_the_screen() {
     let mut app = App::new("s", "v");
     app.push_note("[sandbox] filesystem boundary enforced by landlock".to_string());
     app.push_note("[sandbox] filesystem boundary enforced by landlock".to_string());
-    assert_eq!(app.notes.len(), 1, "repeats are collapsed");
+    assert_eq!(
+        app.lines
+            .iter()
+            .filter(|line| line.contains("[sandbox]"))
+            .count(),
+        1,
+        "repeats are collapsed"
+    );
     app.push_note("[hooks] no hooks".to_string());
     let screen = draw(&mut app, 70, 16);
     assert!(screen.contains("[hooks] no hooks"), "{screen}");
+    // On the page, above the prompt: the server's stderr is history, and history scrolls
+    // with the turn it explains — it is not a caption floating outside a box.
+    let rows: Vec<&str> = screen.lines().collect();
+    let note = rows
+        .iter()
+        .position(|line| line.contains("[hooks]"))
+        .expect("the note's row");
+    let prompt = rows
+        .iter()
+        .position(|line| shows(line, "输入"))
+        .expect("the prompt's row");
+    assert!(note < prompt, "the note is above the prompt:\n{screen}");
+    assert!(
+        rows[note].trim_start().starts_with('·'),
+        "and it is a page line:\n{screen}"
+    );
 }
 
 /// Purpose: A turn failure clears busy and is visible on screen, and a following state message still lands.
@@ -983,7 +1010,7 @@ fn the_working_title_turns_so_a_wait_does_not_look_like_a_hang() {
     app.activity = Some("shell: cargo test".to_string());
     let screen = draw(&mut app, 60, 20);
     assert!(
-        screen.contains("working 0s · shell: cargo test"),
+        shows(&screen, "运行 0s · shell: cargo test"),
         "the words still say what it is doing: {screen}"
     );
     assert!(
@@ -1004,7 +1031,7 @@ fn the_answer_appears_while_it_is_written_and_then_settles() {
     assert_eq!(app.streaming, "Writing…");
     let screen = draw(&mut app, 40, 12);
     assert!(
-        screen.contains("Writing…"),
+        shows(&screen, "Writing…"),
         "the fragment is on screen: {screen}"
     );
 
@@ -1158,7 +1185,7 @@ fn explained() -> Box<loong_schema::generated::ContextExplain> {
 /// Down: `explained`.
 /// Verify: `cargo test -p loong-tui-app`.
 /// A semantic engine that has not produced a map yet — the state that must not
-/// be drawn as "off".
+/// be drawn as "关".
 fn explained_fresh() -> Box<loong_schema::generated::ContextExplain> {
     let mut explained = explained();
     explained.memory_layers.iter_mut().for_each(|layer| {
@@ -1186,7 +1213,7 @@ fn explained_off() -> Box<loong_schema::generated::ContextExplain> {
     explained.memory_summarizer = String::new();
     explained.memory_layers.clear();
     explained.memory_worker = loong_schema::generated::ContextWorker {
-        state: "off".to_string(),
+        state: "关".to_string(),
         windows: 0,
         model_calls: 0,
         enriched: 0,
@@ -1211,7 +1238,7 @@ fn exit_and_quit_leave_the_interface_without_asking_the_agent() {
         );
         assert!(app.input.is_empty(), "{command:?} clears the line");
         assert!(
-            !app.lines.iter().any(|line| line.starts_with("you:")),
+            !app.lines.iter().any(|line| line.starts_with("你：")),
             "{command:?} is not part of the conversation"
         );
     }
@@ -1238,7 +1265,7 @@ fn the_hint_says_what_exit_will_do() {
     let mut app = App::new("s", "v");
     type_text(&mut app, "/exit");
     let screen = draw(&mut app, 100, 16);
-    assert!(screen.contains("enter leaves loongagent"), "{screen}");
+    assert!(shows(&screen, "回车退出 loongagent"), "{screen}");
 
     // And a word this screen does not answer says where it will go — the server's
     // commands (`/help`, the workspace's skills) are still reachable from here.
@@ -1246,7 +1273,7 @@ fn the_hint_says_what_exit_will_do() {
     type_text(&mut app, "/he");
     let screen = draw(&mut app, 100, 16);
     assert!(screen.contains("/help"), "the skills are named: {screen}");
-    assert!(screen.contains("enter still sends it"), "{screen}");
+    assert!(shows(&screen, "回车仍然会发出去"), "{screen}");
 }
 
 /// Purpose: F2 opens the context panel by asking for its data, and closing asks for nothing.
@@ -1276,18 +1303,18 @@ fn the_context_panel_shows_where_the_tokens_went() {
     to_app.send(FromWorker::Context(explained())).unwrap();
     app.drain(&from_worker);
     let screen = draw(&mut app, 130, 24);
-    assert!(screen.contains("context (f2)"), "{screen}");
+    assert!(shows(&screen, "上下文 (f2)"), "{screen}");
     assert!(screen.contains("1700 / 128000"), "the totals: {screen}");
-    assert!(screen.contains("12 messages"), "{screen}");
-    assert!(screen.contains("compactions"), "{screen}");
+    assert!(shows(&screen, "12 条消息"), "{screen}");
+    assert!(shows(&screen, "次压缩"), "{screen}");
     assert!(
         screen.contains("history") && screen.contains("system_prompt"),
         "{screen}"
     );
     assert!(screen.contains("#1"), "the entries: {screen}");
-    assert!(screen.contains("pinned"), "and the legend: {screen}");
+    assert!(shows(&screen, "固定"), "and the legend: {screen}");
     // The conversation did not disappear.
-    assert!(screen.contains("loongagent — session"), "{screen}");
+    assert!(shows(&screen, "loongagent — 会话"), "{screen}");
 }
 
 /// Purpose: The context panel is absent until F2, whose hint is always advertised.
@@ -1295,7 +1322,7 @@ fn the_context_panel_shows_where_the_tokens_went() {
 fn the_panel_stays_closed_until_it_is_asked_for() {
     let mut app = App::new("s", "v");
     let screen = draw(&mut app, 110, 20);
-    assert!(!screen.contains("context (f2)"), "{screen}");
+    assert!(!shows(&screen, "上下文 (f2)"), "{screen}");
     assert!(screen.contains("f2"), "the hint advertises it: {screen}");
 }
 
@@ -1315,10 +1342,10 @@ fn panel(context: Box<loong_schema::generated::ContextExplain>) -> String {
 #[test]
 fn the_panel_shows_the_layers_the_worker_and_the_mode() {
     let screen = panel(explained());
-    assert!(screen.contains("memory"), "{screen}");
+    assert!(shows(&screen, "记忆"), "{screen}");
     assert!(screen.contains("semantic"), "the mode: {screen}");
     assert!(
-        screen.contains("summarizer ollama:qwen2.5:7b-instruct"),
+        shows(&screen, "摘要器 ollama:qwen2.5:7b-instruct"),
         "which model: {screen}"
     );
     // Layer counts, which is what the design asks the panel to expose.
@@ -1327,10 +1354,10 @@ fn the_panel_shows_the_layers_the_worker_and_the_mode() {
     assert!(screen.contains("L3 2"), "{screen}");
     assert!(screen.contains("L4 1"), "{screen}");
     // And what the background has cost.
-    assert!(screen.contains("worker idle"), "{screen}");
-    assert!(screen.contains("9 calls"), "{screen}");
-    assert!(screen.contains("8 enriched"), "{screen}");
-    assert!(screen.contains("3 deferred"), "{screen}");
+    assert!(shows(&screen, "后台 idle"), "{screen}");
+    assert!(shows(&screen, "9 次调用"), "{screen}");
+    assert!(shows(&screen, "8 条已整理"), "{screen}");
+    assert!(shows(&screen, "3 条延后"), "{screen}");
 }
 
 /// Purpose: A degraded memory states its reason in the panel and marks the bar with `mem degraded`.
@@ -1342,7 +1369,7 @@ fn a_degraded_memory_says_why_in_the_panel_and_on_the_bar() {
     context.memory_worker.failed = 3;
     context.memory_worker.last_error = "connection refused".to_string();
     let screen = panel(context);
-    assert!(screen.contains("degraded:"), "{screen}");
+    assert!(shows(&screen, "降级："), "{screen}");
     assert!(
         screen.contains("fell back to the digest"),
         "the reason, not just the fact: {screen}"
@@ -1358,7 +1385,7 @@ fn a_degraded_memory_says_why_in_the_panel_and_on_the_bar() {
     to_app.send(FromWorker::Context(context)).unwrap();
     app.drain(&from_worker);
     let screen = draw(&mut app, 200, 24);
-    assert!(screen.contains("mem ⚠ degraded"), "{screen}");
+    assert!(shows(&screen, "记忆 ⚠ 降级"), "{screen}");
 }
 
 /// Purpose: An engine that is off and one that has produced nothing yet are drawn differently.
@@ -1369,15 +1396,15 @@ fn an_engine_that_is_off_is_not_shown_as_a_memory_that_has_produced_nothing() {
     // must not render the same.
     let off = panel(explained_off());
     let fresh = panel(explained_fresh());
-    assert!(off.contains("memory"), "{off}");
-    assert!(off.contains("off"), "{off}");
+    assert!(shows(&off, "记忆"), "{off}");
+    assert!(shows(&off, "关"), "{off}");
     assert!(
-        !off.contains("semantic") && !off.contains("no L4 map yet"),
+        !off.contains("semantic") && !shows(&off, "还没有 L4 图谱"),
         "an engine that is off must not claim a mode or a pending map: {off}"
     );
     assert!(fresh.contains("semantic"), "{fresh}");
     assert!(
-        fresh.contains("no L4 map yet"),
+        shows(&fresh, "还没有 L4 图谱"),
         "an engine that is on and has produced nothing says exactly that: {fresh}"
     );
     assert_ne!(
@@ -1394,7 +1421,7 @@ fn record_mode_says_it_has_no_model() {
     context.memory_summarizer = String::new();
     let screen = panel(context);
     assert!(screen.contains("record"), "{screen}");
-    assert!(screen.contains("none (record mode)"), "{screen}");
+    assert!(shows(&screen, "无（记录模式）"), "{screen}");
 }
 
 /// Purpose: The bar names the memory mode with the panel closed and stays silent when the engine is off.
@@ -1405,7 +1432,7 @@ fn the_bar_names_the_mode_while_the_panel_is_closed() {
     to_app.send(FromWorker::Context(explained())).unwrap();
     app.drain(&from_worker);
     let screen = draw(&mut app, 200, 24);
-    assert!(screen.contains("mem semantic"), "{screen}");
+    assert!(shows(&screen, "记忆 semantic"), "{screen}");
     // With the engine off there is nothing to say, and saying it anyway would be
     // noise on every screen.
     let (to_app, from_worker) = channel::<FromWorker>();
@@ -1413,7 +1440,7 @@ fn the_bar_names_the_mode_while_the_panel_is_closed() {
     to_app.send(FromWorker::Context(explained_off())).unwrap();
     app.drain(&from_worker);
     let screen = draw(&mut app, 200, 24);
-    assert!(!screen.contains("mem "), "{screen}");
+    assert!(!shows(&screen, "记忆 "), "{screen}");
 }
 
 /// Purpose: The setup form draws three labelled boxes, the typed values and a hint below them.
@@ -1438,18 +1465,18 @@ fn the_first_run_form_shows_three_labelled_fields_and_a_hint() {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(screen.contains("first run"), "{screen}");
-    assert!(screen.contains("control-plane address"), "{screen}");
-    assert!(screen.contains("public key"), "{screen}");
-    assert!(screen.contains("token reference"), "{screen}");
+    assert!(shows(&screen, "首次运行"), "{screen}");
+    assert!(shows(&screen, "控制面地址"), "{screen}");
+    assert!(shows(&screen, "公钥"), "{screen}");
+    assert!(shows(&screen, "令牌引用"), "{screen}");
     assert!(
-        screen.contains("esc skip"),
+        shows(&screen, "esc 跳过"),
         "the way out is visible: {screen}"
     );
     // Three *closed* boxes before the hint line: a four-row layout once put the
     // hint on the third field's top border, which this catches.
     let rows: Vec<&str> = screen.lines().collect();
-    let hint_row = rows.iter().position(|r| r.contains("esc skip")).unwrap();
+    let hint_row = rows.iter().position(|r| shows(&r, "esc 跳过")).unwrap();
     let closed = rows[..hint_row].iter().filter(|r| r.contains('└')).count();
     assert!(
         closed >= 4,
@@ -1460,7 +1487,7 @@ fn the_first_run_form_shows_three_labelled_fields_and_a_hint() {
         "what was typed is shown: {screen}"
     );
     // A finished form is not shouting an error.
-    assert!(!screen.contains("required"), "{screen}");
+    assert!(!shows(&screen, "必须填"), "{screen}");
 }
 
 /// Purpose: The setup form is leavable with Esc or Ctrl-C, while a plain `c` is still text.
@@ -1632,20 +1659,32 @@ fn color_of(app: &mut App, width: u16, height: u16, needle: &str) -> Option<rata
     terminal.draw(|frame| app.draw(frame)).unwrap();
     let buffer = terminal.backend().buffer();
     let area = buffer.area();
+    // The cells are compared without their spaces, so a needle may read as a phrase even
+    // when the cells it lands on are separated by the buffers padding.
+    let needle: String = needle.chars().filter(|ch| !ch.is_whitespace()).collect();
+    let needle = needle.as_str();
     for y in 0..area.height {
-        let row: String = (0..area.width)
-            .map(|x| buffer[(x, y)].symbol().to_string())
-            .collect();
-        if let Some(column) = row.find(needle) {
-            let x = column as u16;
-            if x < area.width {
-                return Some(
-                    buffer[(x, y)]
-                        .style()
-                        .fg
-                        .unwrap_or(ratatui::style::Color::Reset),
-                );
+        // The cell buffer pads every wide glyph with a blank, so a phrase search has to
+        // skip the padding to find the words — and keep each kept character's column, so
+        // the colour is read from the cell the phrase started in.
+        let mut kept: Vec<(char, u16)> = Vec::new();
+        for x in 0..area.width {
+            if let Some(ch) = buffer[(x, y)].symbol().chars().next() {
+                if !ch.is_whitespace() {
+                    kept.push((ch, x));
+                }
             }
+        }
+        let text: String = kept.iter().map(|(ch, _)| *ch).collect();
+        if let Some(byte) = text.find(needle) {
+            let at = text[..byte].chars().count();
+            let (_, x) = kept[at];
+            return Some(
+                buffer[(x, y)]
+                    .style()
+                    .fg
+                    .unwrap_or(ratatui::style::Color::Reset),
+            );
         }
     }
     None
@@ -1655,25 +1694,38 @@ fn color_of(app: &mut App, width: u16, height: u16, needle: &str) -> Option<rata
 #[test]
 fn every_kind_of_line_has_its_own_colour() {
     for (line, expected) in [
-        ("you: fix the bug", LineKind::User),
+        ("你：fix the bug", LineKind::User),
         ("→ read_file a.txt", LineKind::ToolCall),
-        ("← ok hello", LineKind::ToolOk),
+        ("← 成功 hello", LineKind::ToolOk),
+        ("← 失败 no such file", LineKind::ToolFailed),
+        (
+            "! 需要确认（out_of_bounds）：写文件 [cwd]",
+            LineKind::Approval,
+        ),
+        ("! /deploy：缺参数", LineKind::Problem),
+        ("! the turn failed", LineKind::Problem),
+        ("· 规则：builtin:write_workspace 放行", LineKind::Policy),
+        ("· 令牌 1053 入 / 5 出（default）", LineKind::Note),
+        ("· 已压缩：100 → 40 令牌", LineKind::Note),
+        ("here is the answer", LineKind::Answer),
+    ] {
+        assert_eq!(classify(line), expected, "{line:?}");
+    }
+    // A session written before the interface spoke Chinese still keeps its colours: the
+    // classifier reads both vocabularies, and the old one is not going to disappear from
+    // the log.
+    for (line, expected) in [
+        ("你：fix the bug", LineKind::User),
+        ("← 成功 hello", LineKind::ToolOk),
         ("← failed no such file", LineKind::ToolFailed),
         (
             "! approval required (out_of_bounds): write [cwd]",
             LineKind::Approval,
         ),
-        ("! /deploy: missing argument", LineKind::Problem),
-        ("! the turn failed", LineKind::Problem),
-        (
-            "· policy: allow by builtin:write_workspace",
-            LineKind::Policy,
-        ),
+        ("· 规则：builtin:write_workspace 放行", LineKind::Policy),
         ("· tokens 1053 in / 5 out (default)", LineKind::Note),
-        ("· compacted: 100 -> 40 tokens", LineKind::Note),
-        ("here is the answer", LineKind::Answer),
     ] {
-        assert_eq!(classify(line), expected, "{line:?}");
+        assert_eq!(classify(line), expected, "the old vocabulary: {line:?}");
     }
     // And the palette actually differs between the kinds that matter.
     assert_ne!(
@@ -1707,15 +1759,25 @@ fn the_renderer_and_the_classifier_agree() {
     ];
     for case in cases {
         let line = loong_tui::render_event(&case).unwrap_or_else(|| panic!("no line for {case}"));
-        if line.starts_with(&["you: ", "→ ", "← ", "! ", "· "][0])
-            || ["→ ", "← ", "! ", "· "].iter().any(|p| line.starts_with(p))
-        {
-            assert_ne!(
-                classify(&line),
-                LineKind::Answer,
-                "{line:?} is marked, so it must be classified"
-            );
+        // The model's own prose is the one line the renderer leaves bare; it is also the
+        // one line `classify` is allowed to call an answer.
+        if line == "hello" {
+            assert_eq!(classify(&line), LineKind::Answer, "{line:?}");
+            continue;
         }
+        // The vocabulary the interface speaks, not the one it used to: a line start that
+        // no longer exists would make this test pass by skipping, which is worse than red.
+        assert!(
+            ["你：", "→ ", "← ", "! ", "· "]
+                .iter()
+                .any(|prefix| line.starts_with(prefix)),
+            "{case} rendered to an unmarked line: {line:?}"
+        );
+        assert_ne!(
+            classify(&line),
+            LineKind::Answer,
+            "{line:?} is marked, so it must be classified"
+        );
     }
 }
 
@@ -1724,11 +1786,11 @@ fn the_renderer_and_the_classifier_agree() {
 fn errors_are_red_and_work_is_blue_in_the_drawn_screen() {
     let mut app = App::new("s", "v");
     app.push_lines(vec![
-        "you: do it".to_string(),
+        "你：do it".to_string(),
         "→ write_file game.html".to_string(),
-        "← ok wrote it".to_string(),
+        "← 成功 wrote it".to_string(),
         "! the turn failed".to_string(),
-        "· policy: allow by builtin".to_string(),
+        "· 规则：builtin 放行".to_string(),
         "all done".to_string(),
     ]);
     assert_eq!(
@@ -1744,11 +1806,11 @@ fn errors_are_red_and_work_is_blue_in_the_drawn_screen() {
         Some(ratatui::style::Color::Green)
     );
     assert_eq!(
-        color_of(&mut app, 80, 20, "by builtin"),
+        color_of(&mut app, 80, 20, "放行"),
         Some(ratatui::style::Color::Magenta)
     );
     assert_eq!(
-        color_of(&mut app, 80, 20, "you:"),
+        color_of(&mut app, 80, 20, "你："),
         Some(ratatui::style::Color::Cyan),
         "the label marks where a prompt began"
     );
@@ -1791,9 +1853,7 @@ fn control_c_stops_a_running_turn_and_otherwise_leaves() {
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert!(
-        app.lines
-            .iter()
-            .any(|line| line.starts_with("⏹ interrupting")),
+        app.lines.iter().any(|line| line.starts_with("⏹ 正在中断")),
         "{:?}",
         app.lines
     );
@@ -1806,9 +1866,7 @@ fn control_c_stops_a_running_turn_and_otherwise_leaves() {
     app.busy = true;
     assert_eq!(app.handle_key(key(KeyCode::Esc)), Action::None);
     assert!(
-        app.lines
-            .iter()
-            .any(|line| line.contains("cannot interrupt")),
+        app.lines.iter().any(|line| shows(line, "无法中断")),
         "{:?}",
         app.lines
     );
@@ -1823,7 +1881,7 @@ fn the_interrupted_event_renders_as_a_stop_the_person_caused() {
         "data": {"reason": "interrupted"},
     }))
     .expect("an interrupted turn is shown");
-    assert!(line.contains("stopped by you"), "{line}");
+    assert!(shows(&line, "已被你停止"), "{line}");
     assert_eq!(classify(&line), LineKind::Stopped);
 }
 
@@ -1839,9 +1897,9 @@ fn a_stopped_turn_is_its_own_colour() {
         Some(ratatui::style::Color::Yellow)
     );
     let mut app = App::new("s", "v");
-    app.push_lines(vec!["⏹ interrupted — stopped by you".to_string()]);
+    app.push_lines(vec!["⏹ 已被你停止".to_string()]);
     assert_eq!(
-        color_of(&mut app, 80, 20, "stopped by you"),
+        color_of(&mut app, 80, 20, "已被你停止"),
         Some(ratatui::style::Color::Yellow)
     );
 }
@@ -1894,15 +1952,15 @@ fn yolo_is_a_command_and_is_never_invisible() {
     assert!(
         app.lines
             .iter()
-            .any(|line| line.contains("approval prompts off") && line.contains("sandbox")),
+            .any(|line| shows(line, "确认提示已关闭") && shows(line, "沙箱")),
         "it says what changed and what did not: {:?}",
         app.lines
     );
 
     // Visible in the input box, always.
     let screen = draw(&mut app, 100, 24);
-    assert!(screen.contains("YOLO"), "the state is on screen: {screen}");
-    assert!(screen.contains("sandbox still on"), "{screen}");
+    assert!(shows(&screen, "免确认"), "the state is on screen: {screen}");
+    assert!(shows(&screen, "沙箱仍然生效"), "{screen}");
 
     // And it can be turned back on, from the command or the state.
     let screen = draw(&mut app, 100, 24);
@@ -1936,9 +1994,7 @@ fn yolo_during_a_turn_flips_at_once_and_tells_the_server() {
     // The event is the confirmation, and it is still recorded in the transcript.
     fed(&mut app, FromWorker::Yolo(true));
     assert!(
-        app.lines
-            .iter()
-            .any(|line| line.contains("approval prompts off")),
+        app.lines.iter().any(|line| shows(line, "确认提示已关闭")),
         "the log line still arrives: {:?}",
         app.lines
     );
@@ -1969,7 +2025,7 @@ fn a_running_turn_under_yolo_still_shows_that_it_is_working() {
     let screen = draw(&mut app, 110, 24);
     let titles = box_titles(&screen);
     assert!(
-        titles.contains("working"),
+        shows(&titles, "运行"),
         "the turn says it is working: {screen}"
     );
     assert!(
@@ -1977,7 +2033,7 @@ fn a_running_turn_under_yolo_still_shows_that_it_is_working() {
         "and names the step: {screen}"
     );
     assert!(
-        titles.contains("YOLO"),
+        titles.contains("免确认"),
         "and the warning is still there: {screen}"
     );
 }
@@ -1996,7 +2052,7 @@ fn a_finished_turn_under_yolo_still_says_it_finished() {
         titles.contains(&despaced("✓ 完成")),
         "the finish is on the prompt box: {screen}"
     );
-    assert!(titles.contains("YOLO"), "{screen}");
+    assert!(titles.contains("免确认"), "{screen}");
 }
 
 /// Purpose: A question under YOLO is still described as a question, never as "not asking".
@@ -2008,11 +2064,14 @@ fn a_question_under_yolo_still_says_it_is_a_question() {
     let screen = draw(&mut app, 110, 24);
     let titles = box_titles(&screen);
     assert!(
-        titles.contains(&despaced("waiting for your decision")),
+        titles.contains(&despaced("等你决定")),
         "the question is still a question: {screen}"
     );
     assert!(!titles.contains(&despaced("NOT ASKING")), "{screen}");
-    assert!(titles.contains("YOLO"), "and the state is named: {screen}");
+    assert!(
+        titles.contains("免确认"),
+        "and the state is named: {screen}"
+    );
 }
 
 /// Purpose: Under YOLO a typed command keeps its hint; the warning goes in front rather than in place of it.
@@ -2024,17 +2083,17 @@ fn a_command_under_yolo_keeps_its_hint() {
     let screen = draw(&mut app, 110, 24);
     let titles = box_titles(&screen);
     assert!(
-        titles.contains(&despaced("turns approval prompts")),
+        titles.contains(&despaced("打开或关闭确认提示")),
         "the hint is on the box: {screen}"
     );
-    assert!(titles.contains("YOLO"), "{screen}");
+    assert!(titles.contains("免确认"), "{screen}");
 }
 
 /// Purpose: `/copy` writes the transcript to a session-named file and returns the copy action.
 #[test]
 fn copy_puts_the_transcript_on_the_clipboard_and_in_a_file() {
     let mut app = App::new("s", "v");
-    app.push_lines(vec!["you: hello".to_string(), "hi".to_string()]);
+    app.push_lines(vec!["你：hello".to_string(), "hi".to_string()]);
     type_text(&mut app, "/copy");
     assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::Copy);
     assert!(app.input.is_empty());
@@ -2042,7 +2101,7 @@ fn copy_puts_the_transcript_on_the_clipboard_and_in_a_file() {
     // important, in the temporary directory, and named for the session.
     let path = copy_everywhere(&app.transcript(), "testcopy");
     let written = std::fs::read_to_string(&path).unwrap();
-    assert!(written.contains("you: hello"), "{written}");
+    assert!(shows(&written, "你：hello"), "{written}");
     assert!(written.contains("hi"), "{written}");
     let _ = std::fs::remove_file(&path);
 }
@@ -2070,9 +2129,7 @@ fn the_mouse_can_be_handed_back_to_the_terminal() {
     assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::Mouse(true));
     assert!(app.mouse);
     assert!(
-        app.lines
-            .iter()
-            .any(|line| line.contains("wheel scrolls here")),
+        app.lines.iter().any(|line| shows(line, "这里用滚轮滚动")),
         "and says what it costs: {:?}",
         app.lines
     );
@@ -2081,25 +2138,59 @@ fn the_mouse_can_be_handed_back_to_the_terminal() {
     assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::Mouse(false));
     assert!(!app.mouse);
     assert!(
-        app.lines.iter().any(|line| line.contains("drag to select")),
+        app.lines.iter().any(|line| shows(line, "拖动选择")),
         "and says what came back: {:?}",
         app.lines
     );
 }
 
-/// Purpose: The mark draws its frame, the character and the fitting inscription, shortens in narrow terminals, and `/logo` puts it away.
+/// Purpose: The character is drawn as red pixels, not as a font glyph on a coloured block.
+#[test]
+fn the_character_is_drawn_as_pixels() {
+    let mut app = App::new("s", "v");
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let area = *buffer.area();
+    let mut red_pixels = 0;
+    let mut drawn_glyph = false;
+    for y in 0..area.height {
+        for x in 0..area.width {
+            let cell = &buffer[(x, y)];
+            if cell.symbol() == "龍" {
+                drawn_glyph = true;
+            }
+            // Half blocks carry the bitmap: the upper pixel is the glyph's colour.
+            if matches!(cell.symbol(), "▀" | "▄" | "█") && cell.fg == Color::Red {
+                red_pixels += 1;
+            }
+        }
+    }
+    assert!(!drawn_glyph, "the font glyph is gone, replaced by pixels");
+    assert!(
+        red_pixels > 40,
+        "the dragon is drawn as a block of red pixels, found {red_pixels}"
+    );
+}
+
+/// Purpose: The mark is one frame holding the pixel dragon and the name, the inscription below the frame, and `/logo` puts it all away.
 #[test]
 fn the_mark_is_drawn_and_can_be_put_away() {
     let mut app = App::new("s", "v");
-    // Wide: the frame, the character, the inscription beside it, the philosophy below.
+    // Wide: the frame, the character, the block wordmark, the inscription under it.
     let screen = draw(&mut app, 150, 30);
     assert!(
-        screen.contains("༺ ᛭ ༻") && screen.contains("༻ ᛭ ༺"),
+        shows(&screen, "༺ ᛭ ༻") && shows(&screen, "༻ ᛭ ༺"),
         "{screen}"
     );
-    assert!(screen.contains('【') && screen.contains('】'), "{screen}");
-    assert!(screen.contains('龍'), "{screen}");
-    assert!(screen.contains("loongagent"), "{screen}");
+    // The character is pixels now, and the frame that used to bracket it is gone.
+    assert!(
+        screen.contains('▀') || screen.contains('▄'),
+        "the dragon's pixels:\n{screen}"
+    );
+    assert!(!screen.contains('龍'), "the font glyph is gone:\n{screen}");
+    // The name is block letters at this width; the plain word is the narrow fallback.
+    assert!(shows(&screen, "█████"), "the block wordmark:\n{screen}");
     assert!(
         screen.contains('⟬') && screen.contains('⟭'),
         "the inscription's brackets:\n{screen}"
@@ -2110,21 +2201,62 @@ fn the_mark_is_drawn_and_can_be_put_away() {
     for glyph in ['兴', '云', '吐', '雾', '隐', '介', '藏', '形'] {
         assert!(screen.contains(glyph), "missing {glyph}:\n{screen}");
     }
-    // Nothing below the frame: the inscription is the whole saying.
-    for glyph in ['滞', '动', '必', '中'] {
-        assert!(
-            !screen.contains(glyph),
-            "the lower line is gone, but {glyph} is still here:\n{screen}"
-        );
-    }
 
-    // Narrower: the ornaments go, then the halves shorten; the mark stays.
+    // Placed, not scattered: the name is between the frame's walls, and the inscription
+    // is below the frame and outside it.
+    let rows: Vec<&str> = screen.lines().skip(1).take(11).collect();
+    let name = rows
+        .iter()
+        .find(|row| row.contains("█     █████"))
+        .expect("the wordmark's row");
+    assert!(
+        name.trim_start().starts_with('║') && name.trim_end().ends_with('║'),
+        "the name is inside the frame:\n{screen}"
+    );
+    let bottom = rows
+        .iter()
+        .position(|row| row.contains("༻ ᛭ ༺"))
+        .expect("the bottom rule");
+    let inscription = rows
+        .iter()
+        .position(|row| row.contains('⟬'))
+        .expect("the inscription");
+    assert!(inscription > bottom, "below the frame:\n{screen}");
+    assert!(
+        !rows[inscription].trim_start().starts_with('║'),
+        "and outside it:\n{screen}"
+    );
+
+    // Narrower: the plain word, still inside the frame, and the inscription still fits
+    // under it — it is a line of its own now, so it no longer competes with the frame.
     let plain = draw(&mut app, 62, 30);
-    assert!(plain.contains('兴'), "{plain}");
-    assert!(!plain.contains('⟬'), "the brackets need room:\n{plain}");
+    let rows: Vec<&str> = plain.lines().skip(1).take(11).collect();
+    let name = rows
+        .iter()
+        .find(|row| row.contains("loongagent"))
+        .expect("the plain word");
+    assert!(
+        name.trim_start().starts_with('║') && name.trim_end().ends_with('║'),
+        "the word is framed too:\n{plain}"
+    );
+    assert!(
+        plain.contains('▀') || plain.contains('▄'),
+        "the dragon stays:\n{plain}"
+    );
+    assert!(
+        plain.contains('⟬') && plain.contains('藏'),
+        "the whole inscription:\n{plain}"
+    );
+
     let shortest = draw(&mut app, 52, 30);
-    assert!(shortest.contains('龍'), "the mark itself:\n{shortest}");
-    assert!(!shortest.contains('藏'), "and only what fits:\n{shortest}");
+    assert!(
+        shortest.contains('▀') || shortest.contains('▄'),
+        "the mark itself:\n{shortest}"
+    );
+    assert!(
+        shortest.contains('⟬'),
+        "and the inscription fits under it:\n{shortest}"
+    );
 
     // `/logo` puts it away, and nothing else moves.
     type_text(&mut app, "/logo");
@@ -2133,7 +2265,7 @@ fn the_mark_is_drawn_and_can_be_put_away() {
     let screen = draw(&mut app, 150, 30);
     assert!(!screen.contains('龍'), "{screen}");
     assert!(
-        screen.contains("enter send"),
+        shows(&screen, "enter 发送"),
         "the box and keys remain:\n{screen}"
     );
 }
@@ -2144,8 +2276,154 @@ fn a_small_terminal_gets_no_mark() {
     // A logo that squeezes the conversation costs more than it gives.
     let mut app = App::new("s", "v");
     let screen = draw(&mut app, 36, 12);
-    assert!(!screen.contains("龍"), "{screen}");
-    assert!(screen.contains("enter send"), "{screen}");
+    assert!(!shows(&screen, "龍"), "{screen}");
+    assert!(!screen.contains('▀'), "and no favicon either:\n{screen}");
+    assert!(shows(&screen, "enter 发送"), "{screen}");
+}
+
+/// Purpose: The wordmark is block letters only where they fit beside the dragon, and the plain word below that.
+#[test]
+fn the_wordmark_is_blocks_only_where_they_fit() {
+    let mut app = App::new("s", "v");
+    // 86 columns of frame: 90 is the boundary, so 150 has room.
+    let wide = draw(&mut app, 150, 30);
+    let header: String = wide.lines().skip(1).take(11).collect::<Vec<_>>().join("\n");
+    // The gap between the L's stem and the O's first block is the font's own shape; the
+    // dragon never draws it, so it tells the two apart.
+    assert!(header.contains("█     █████"), "block letters:\n{wide}");
+    assert!(
+        !header.contains("loongagent"),
+        "the plain word is replaced, not repeated:\n{wide}"
+    );
+    // 62 columns: the frame stays, the word goes back to being a word.
+    let narrow = draw(&mut app, 62, 30);
+    let header: String = narrow
+        .lines()
+        .skip(1)
+        .take(11)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(header.contains("loongagent"), "{narrow}");
+    assert!(
+        !header.contains("█     █████"),
+        "no blocks when they would crowd the frame:\n{narrow}"
+    );
+}
+
+/// Purpose: An empty session opens on the favicon, and the first line gives the screen back.
+#[test]
+fn an_empty_session_opens_on_the_favicon() {
+    let mut app = App::new("s", "v");
+    let splash = draw(&mut app, 120, 44);
+    assert!(splash.contains('▀'), "the dragon's pixels:\n{splash}");
+    // The opening picture is not the framed mark: no frame, and the wide bare wordmark.
+    assert!(
+        !splash.contains('╔'),
+        "the splash is not the header:\n{splash}"
+    );
+    app.push_lines(vec!["你：你好".to_string()]);
+    let after = draw(&mut app, 120, 44);
+    assert!(
+        after.contains('╔'),
+        "the first line leaves the mark:\n{after}"
+    );
+}
+
+/// Purpose: The mark is the page's first content, so enough conversation scrolls it away and Home brings it back.
+#[test]
+fn the_mark_scrolls_away_with_the_page() {
+    let mut app = App::new("s", "v");
+    app.push_lines((1..=40).map(|n| format!("line {n}")).collect::<Vec<_>>());
+    let bottom = draw(&mut app, 80, 30);
+    assert!(
+        !bottom.contains('╔'),
+        "the mark has scrolled off the page:\n{bottom}"
+    );
+    assert!(bottom.contains("line 40"), "the newest line is in view");
+    // ctrl-Home goes to the top of the page, where the mark still is.
+    app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::CONTROL));
+    let top = draw(&mut app, 80, 30);
+    assert!(
+        top.contains('╔'),
+        "the mark is the page's first row:\n{top}"
+    );
+}
+
+/// Purpose: Content that arrives while the reader is scrolled up must not push the page.
+#[test]
+fn new_output_does_not_move_a_pinned_page() {
+    let mut app = App::new("s", "v");
+    app.push_lines((1..=30).map(|n| format!("line {n}")).collect::<Vec<_>>());
+    for _ in 0..5 {
+        app.handle_key(key(KeyCode::PageUp));
+    }
+    let before = draw(&mut app, 80, 24);
+    let head: Vec<String> = before
+        .lines()
+        .take(6)
+        .map(|line| line.to_string())
+        .collect();
+    app.push_lines((31..=40).map(|n| format!("line {n}")).collect::<Vec<_>>());
+    let after = draw(&mut app, 80, 24);
+    let same: Vec<String> = after.lines().take(6).map(|line| line.to_string()).collect();
+    assert_eq!(
+        head, same,
+        "the rows under the reader's eyes moved:\n{after}"
+    );
+    assert!(
+        !after.contains("line 40"),
+        "and the new lines arrived below the window:\n{after}"
+    );
+}
+
+/// Purpose: Typing brings the prompt back into view, because the prompt scrolls with the page.
+#[test]
+fn typing_returns_to_the_prompt() {
+    let mut app = App::new("s", "v");
+    app.push_lines((1..=60).map(|n| format!("line {n}")).collect::<Vec<_>>());
+    for _ in 0..6 {
+        app.handle_key(key(KeyCode::PageUp));
+    }
+    let away = draw(&mut app, 80, 24);
+    assert!(
+        !shows(&away, "输入"),
+        "the prompt has scrolled off:\n{away}"
+    );
+    type_text(&mut app, "hi");
+    let back = draw(&mut app, 80, 24);
+    assert!(
+        shows(&back, "输入"),
+        "typing brought the prompt back:\n{back}"
+    );
+}
+
+/// Purpose: The favicon is drawn from the terminal's named colours, never an invented RGB.
+#[test]
+fn the_favicon_uses_named_colours_only() {
+    let mut app = App::new("s", "v");
+    let mut terminal = Terminal::new(TestBackend::new(120, 44)).unwrap();
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    let buffer = terminal.backend().buffer();
+    for cell in buffer.content() {
+        assert!(
+            !matches!(cell.fg, Color::Rgb(..)),
+            "a fixed foreground: {:?}",
+            cell.fg
+        );
+        assert!(!matches!(cell.bg, Color::Rgb(..)), "a fixed background");
+    }
+}
+
+/// Purpose: `/logo` puts the favicon away with the mark, and the screen keeps working.
+#[test]
+fn logo_hides_the_favicon_too() {
+    let mut app = App::new("s", "v");
+    type_text(&mut app, "/logo");
+    assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::None);
+    assert!(!app.logo);
+    let screen = draw(&mut app, 120, 44);
+    assert!(!screen.contains('▀'), "{screen}");
+    assert!(shows(&screen, "enter 发送"), "{screen}");
 }
 
 /// Purpose: The input box grows for a long prompt and stays one row for a short one.
@@ -2165,7 +2443,7 @@ fn the_drawn_box_grows_with_a_long_prompt() {
     // The box's bottom border is still above the hint line, so the layout held.
     let hint = screen
         .lines()
-        .position(|line| line.contains("enter send"))
+        .position(|line| shows(line, "enter 发送"))
         .expect("the hint line is drawn");
     let last_text = screen
         .lines()
@@ -2316,7 +2594,7 @@ fn alt_digit_reaches_the_server_and_comes_back_to_the_bar() {
         despaced(&said).contains(&despaced("模型已切到 [2] b")),
         "and the change is said out loud, named by slot so it matches the bar: {said:?}"
     );
-    assert!(said.contains("此前 a"), "and names what it was: {said:?}");
+    assert!(shows(&said, "此前 a"), "and names what it was: {said:?}");
 }
 
 /// Purpose: A worker command produces a state update the screen drains.
@@ -2462,7 +2740,7 @@ fn the_second_question_of_a_session_reaches_the_screen() {
     let context_result = || {
         line(serde_json::json!({"jsonrpc": "2.0", "id": 9, "result": {
             "context_tokens": 10, "budget_tokens": 0, "messages": 1, "tools": 1,
-            "compactions": 0, "categories": [], "entries": []}}))
+            "次压缩": 0, "categories": [], "entries": []}}))
     };
     let queue = vec![
         line(
@@ -2535,10 +2813,10 @@ fn the_second_question_of_a_session_reaches_the_screen() {
     assert!(second.args.contains("game.html"), "{second:?}");
 
     let screen = draw(&mut app, 100, 30);
-    assert!(screen.contains("needs your decision"), "{screen}");
+    assert!(shows(&screen, "需要你决定"), "{screen}");
     assert!(screen.contains("write_file"), "{screen}");
-    for answer in ["Allow once", "Allow in this project", "Deny"] {
-        assert!(screen.contains(answer), "{answer} is on screen: {screen}");
+    for answer in ["本次允许", "本项目允许", "拒绝"] {
+        assert!(shows(&screen, answer), "{answer} is on screen: {screen}");
     }
 }
 
@@ -2578,7 +2856,7 @@ fn a_permissions_event_during_a_turn_confirms_the_immediate_yolo() {
         // The worker asks for the context view after every command.
         line(serde_json::json!({"jsonrpc": "2.0", "id": 9, "result": {
             "context_tokens": 10, "budget_tokens": 0, "messages": 1, "tools": 1,
-            "compactions": 0, "categories": [], "entries": []}})),
+            "次压缩": 0, "categories": [], "entries": []}})),
     ];
     let client = Client::new(Queue(std::cell::RefCell::new(queue.into())), "s-e");
     let (to_worker, from_worker) = spawn_worker(client, 0);
@@ -2590,10 +2868,7 @@ fn a_permissions_event_during_a_turn_confirms_the_immediate_yolo() {
     to_worker.send(ToWorker::Submit("go".to_string())).unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while std::time::Instant::now() < deadline
-        && !app
-            .lines
-            .iter()
-            .any(|line| line.contains("approval prompts off"))
+        && !app.lines.iter().any(|line| shows(line, "确认提示已关闭"))
     {
         app.drain(&from_worker);
         std::thread::sleep(std::time::Duration::from_millis(5));
@@ -2601,7 +2876,7 @@ fn a_permissions_event_during_a_turn_confirms_the_immediate_yolo() {
     assert!(
         app.lines
             .iter()
-            .any(|line| line.contains("approval prompts off") && line.contains("sandbox")),
+            .any(|line| shows(line, "确认提示已关闭") && shows(line, "沙箱")),
         "the confirmation and its record reach the screen: {:?}",
         app.lines
     );
@@ -2699,7 +2974,7 @@ fn a_fold_the_turn_wrote_is_readable_while_the_turn_is_still_running() {
     assert!(app.fold.is_some(), "the fold is on screen to walk to");
     assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::None);
     let screen = draw(&mut app, 60, 20);
-    assert!(screen.contains("tool result (50 lines)"), "{screen}");
+    assert!(shows(&screen, "工具结果（50 行）"), "{screen}");
     assert!(
         screen.contains("mid-turn 50"),
         "what was hidden is readable while the turn still works: {screen}"
@@ -2774,6 +3049,12 @@ fn drawn_wizard(wizard: &LocalWizard, width: u16, height: u16) -> String {
 /// de-spaced strings sidesteps that without pretending the padding is not there.
 fn despaced(text: &str) -> String {
     text.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+/// Purpose: Whether the drawn screen says a phrase, ignoring the padding space the cell buffer puts after each wide glyph.
+/// Contract: called by the drawing tests that assert on Chinese, which is every screen that speaks the interface's language.
+fn shows(screen: &str, phrase: &str) -> bool {
+    despaced(screen).contains(&despaced(phrase))
 }
 
 /// Purpose: A refusal reorders providers by the hint, invents nothing and keeps an empty hint inert.
@@ -3318,7 +3599,7 @@ fn the_local_wizard_refuses_a_key_too_short_to_be_one() {
     }
     assert_eq!(wizard.handle_key(key(KeyCode::Enter)), WizardAction::None);
     match &wizard.state {
-        WizardState::Refused(why) => assert!(why.contains("太短"), "{why}"),
+        WizardState::Refused(why) => assert!(shows(&why, "太短"), "{why}"),
         other => panic!("expected a refusal, got {other:?}"),
     }
 
@@ -3405,11 +3686,11 @@ fn the_local_wizard_draws_the_providers_and_says_what_to_press() {
         "a CJK label is offered as itself, not transliterated:\n{screen}"
     );
     assert!(
-        screen.contains("▸ Moonshot / Kimi"),
+        shows(&screen, "▸ Moonshot / Kimi"),
         "the current choice is marked:\n{screen}"
     );
     assert!(
-        !screen.contains("▸ DeepSeek"),
+        !shows(&screen, "▸ DeepSeek"),
         "and only the current one is:\n{screen}"
     );
     assert!(
@@ -3529,9 +3810,9 @@ fn the_model_bar_marks_the_current_model_and_only_that_one() {
     let mut app = app_with_models(&["cheap", "strong"]);
     let screen = draw(&mut app, 90, 20);
     let bar = screen.lines().next().unwrap_or_default().to_string();
-    assert!(bar.contains("▸[1] cheap"), "{bar:?}");
+    assert!(shows(&bar, "▸[1] cheap"), "{bar:?}");
     assert!(
-        !bar.contains("▸[2]"),
+        !shows(&bar, "▸[2]"),
         "the model that is not running is not marked: {bar:?}"
     );
 
@@ -3539,8 +3820,8 @@ fn the_model_bar_marks_the_current_model_and_only_that_one() {
     app.selected = "strong".to_string();
     let screen = draw(&mut app, 90, 20);
     let bar = screen.lines().next().unwrap_or_default().to_string();
-    assert!(bar.contains("▸[2] strong"), "{bar:?}");
-    assert!(!bar.contains("▸[1]"), "{bar:?}");
+    assert!(shows(&bar, "▸[2] strong"), "{bar:?}");
+    assert!(!shows(&bar, "▸[1]"), "{bar:?}");
 }
 
 /// Purpose: Done, stopped and failed have different words, colours and marks.
@@ -3623,7 +3904,7 @@ fn the_prompt_title_shows_the_tick_until_the_next_task_starts() {
         "a tick that outlives its turn lies about the work on screen:\n{screen}"
     );
     assert!(
-        box_titles(&screen).contains("working"),
+        box_titles(&screen).contains("运行"),
         "and the box says what is happening instead:\n{screen}"
     );
 
@@ -3638,7 +3919,7 @@ fn the_prompt_title_shows_the_tick_until_the_next_task_starts() {
     app.input = "/exi".to_string();
     let screen = draw(&mut app, 110, 20);
     assert!(
-        box_titles(&screen).contains(&despaced("leaves loongagent")),
+        box_titles(&screen).contains(&despaced("离开 loongagent")),
         "{screen}"
     );
 
@@ -3775,7 +4056,7 @@ fn a_working_prompt_box_does_not_tint_what_is_typed_either() {
         typed.iter().all(|colour| *colour != Color::Cyan),
         "busy is a state of the *turn*, not a colour for the person's text: {typed:?}"
     );
-    let title = title_colours_of(&mut app, "working");
+    let title = title_colours_of(&mut app, "运行");
     assert!(title.contains(&Color::Cyan), "{title:?}");
 }
 
@@ -3878,7 +4159,7 @@ fn a_new_session_clears_the_screen_because_that_log_is_no_longer_the_live_one() 
     assert!(
         app.lines
             .iter()
-            .any(|line| line.contains("s-new1") && line.contains("存盘")),
+            .any(|line| line.contains("s-new1") && shows(line, "存盘")),
         "and it says where the old session went: {:?}",
         app.lines
     );
@@ -4050,7 +4331,7 @@ fn a_slot_with_no_model_says_so_instead_of_doing_nothing() {
     assert_eq!(action, Action::None, "there is no seventh model");
     let said = app.lines.join("\n");
     assert!(
-        said.contains("没有第 7 个模型"),
+        shows(&said, "没有第 7 个模型"),
         "a key that appears to do nothing is worse than one that explains: {said:?}"
     );
 }
@@ -4063,7 +4344,7 @@ fn switching_to_the_model_already_running_does_not_ask_the_server() {
     let mut app = app_with_models(&["cheap", "strong"]);
     assert_eq!(app.handle_key(alt('1')), Action::None);
     let said = app.lines.join("\n");
-    assert!(said.contains("already on [1] cheap"), "{said:?}");
+    assert!(shows(&said, "已经在 [1] cheap 上"), "{said:?}");
 }
 
 /// Purpose: Ctrl+digit never switches models.
@@ -4222,7 +4503,7 @@ fn resending_before_anything_was_asked_says_there_is_nothing_to_resend() {
     let mut app = app_with_models(&["cheap"]);
     assert_eq!(app.handle_key(alt('r')), Action::None);
     let said = app.lines.join("\n");
-    assert!(said.contains("还没有可以重发"), "{said:?}");
+    assert!(shows(&said, "还没有可以重发"), "{said:?}");
 }
 
 /// Purpose: Alt-R while busy is refused and says the turn is still running.
@@ -4235,7 +4516,7 @@ fn resending_while_a_turn_is_running_is_refused_rather_than_queued() {
     assert!(app.busy, "the turn is running");
     assert_eq!(app.handle_key(alt('r')), Action::None);
     let said = app.lines.join("\n");
-    assert!(said.contains("还在跑"), "{said:?}");
+    assert!(shows(&said, "还在跑"), "{said:?}");
 }
 
 /// Purpose: `/r` resends like Alt-R and does not reach the agent.
@@ -4308,7 +4589,7 @@ fn a_model_that_failed_its_check_is_marked_and_keeps_its_slot() {
     });
     let screen = draw(&mut app, 100, 20);
     let bar = screen.lines().next().unwrap_or_default().to_string();
-    assert!(bar.contains("✗[2] strong"), "{bar:?}");
+    assert!(shows(&bar, "✗[2] strong"), "{bar:?}");
     assert!(
         bar.contains("[3] third"),
         "and the slots either side did not move: {bar:?}"
@@ -4326,9 +4607,9 @@ fn a_model_that_failed_its_check_is_marked_and_keeps_its_slot() {
     });
     let screen = draw(&mut app, 100, 20);
     let bar = screen.lines().next().unwrap_or_default().to_string();
-    assert!(!bar.contains("✗[3]"), "{bar:?}");
+    assert!(!shows(&bar, "✗[3]"), "{bar:?}");
     assert!(
-        bar.contains("✓") == false,
+        shows(&bar, "✓") == false,
         "no tick for the good news: {bar:?}"
     );
 }
@@ -4369,7 +4650,7 @@ fn the_status_line_says_what_a_model_command_will_do_before_it_is_pressed() {
     app.cursor = 2;
     let screen = draw(&mut app, 100, 20);
     assert!(
-        despaced(&screen).contains(&despaced("no model in slot 7")),
+        despaced(&screen).contains(&despaced("第 7 个位置没有模型")),
         "{screen}"
     );
 
@@ -4378,7 +4659,7 @@ fn the_status_line_says_what_a_model_command_will_do_before_it_is_pressed() {
     app.cursor = 2;
     let screen = draw(&mut app, 100, 20);
     assert!(
-        !despaced(&screen).contains(&despaced("asks the last prompt again")),
+        !despaced(&screen).contains(&despaced("把上一个提问再问一遍")),
         "nothing has been asked yet:\n{screen}"
     );
     asked_and_finished(&mut app, "fix it");
@@ -4386,7 +4667,7 @@ fn the_status_line_says_what_a_model_command_will_do_before_it_is_pressed() {
     app.cursor = 2;
     let screen = draw(&mut app, 100, 20);
     assert!(
-        despaced(&screen).contains(&despaced("asks the last prompt again")),
+        despaced(&screen).contains(&despaced("把上一个提问再问一遍")),
         "{screen}"
     );
 }

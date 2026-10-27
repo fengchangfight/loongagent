@@ -632,7 +632,7 @@ pub(super) fn draw_local_wizard(frame: &mut ratatui::Frame, wizard: &LocalWizard
             "本地模式 — 粘贴一个 API key 就能开始。\n\
              不需要填 base_url，也不需要挑模型：它们由服务商自己回答。",
         )
-        .block(Block::bordered().title(" first run ")),
+        .block(Block::bordered().title(" 首次运行 ")),
         chunks[0],
     );
     let wants_key = wizard.selected().map(|p| p.needs_key).unwrap_or(true);
@@ -652,7 +652,7 @@ pub(super) fn draw_local_wizard(frame: &mut ratatui::Frame, wizard: &LocalWizard
         wizard.masked_key()
     };
     frame.render_widget(
-        Paragraph::new(field.clone()).block(Block::bordered().title(" API key ").border_style(
+        Paragraph::new(field.clone()).block(Block::bordered().title(" 密钥 ").border_style(
             if wants_key {
                 Style::default().fg(Color::Cyan)
             } else {
@@ -802,7 +802,7 @@ fn draw_model_picker(frame: &mut ratatui::Frame, wizard: &LocalWizard) {
             "{} {:<34} {}",
             if on { "[x]" } else { "[ ]" },
             name,
-            window.map(|w| format!("ctx {w}")).unwrap_or_default()
+            window.map(|w| format!("上下文 {w}")).unwrap_or_default()
         );
         lines.push(Line::from(Span::styled(
             text,

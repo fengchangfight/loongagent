@@ -137,7 +137,7 @@ pub fn run<T: Transport + Send + 'static>(
                                 let text = app.transcript();
                                 let path = copy_everywhere(&text, &app.session);
                                 app.push_lines(vec![format!(
-                                    "⧉ copied {} line(s) → {path}",
+                                    "⧉ 已复制 {} 行 → {path}",
                                     text.lines().count()
                                 )]);
                             }

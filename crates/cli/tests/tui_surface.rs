@@ -67,7 +67,7 @@ fn the_full_screen_surface_refuses_a_pipe_and_points_at_the_line_mode() {
         "a full-screen UI must not pretend to run in a pipe"
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("no terminal on stdout"), "stderr: {stderr}");
+    assert!(stderr.contains("stdout 不是终端"), "stderr: {stderr}");
     assert!(
         stderr.contains("loongagent repl"),
         "the way out is named: {stderr}"

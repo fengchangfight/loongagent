@@ -244,7 +244,7 @@ fn a_local_first_run_with_no_key_refuses_cleanly_and_writes_nothing() {
     let (ok, _stdout, stderr) = run(&home, &["tui", "--local"]);
     assert!(!ok, "a pipe is not a terminal to ask on");
     assert!(
-        stderr.contains("terminal"),
+        stderr.contains("终端"),
         "and the reason is the terminal: {stderr}"
     );
     assert!(

@@ -82,9 +82,9 @@ impl SetupForm {
     /// Verify: `cargo test -p loong-tui-app`.
     pub fn label(&self, index: usize) -> &'static str {
         match index {
-            0 => "control-plane address",
-            1 => "public key (the value your administrator pinned)",
-            _ => "token reference (optional: file:… or env:…)",
+            0 => "控制面地址",
+            1 => "公钥（管理员给你的那个值）",
+            _ => "令牌引用（可选：file:… 或 env:…）",
         }
     }
 
@@ -128,8 +128,7 @@ impl SetupForm {
                 return match self.answer() {
                     Some(_) => SetupAction::Submit,
                     None => {
-                        self.error =
-                            Some("the address and the public key are both required".to_string());
+                        self.error = Some("地址和公钥都必须填".to_string());
                         SetupAction::None
                     }
                 }
@@ -162,10 +161,7 @@ pub fn full_screen_needs_a_terminal() -> Result<(), String> {
     if std::io::stdout().is_terminal() {
         return Ok(());
     }
-    Err(
-        "no terminal on stdout: use `loongagent repl` for a line-mode session, or run in a TTY"
-            .to_string(),
-    )
+    Err("stdout 不是终端：用 `loongagent repl` 走行模式，或者在真正的终端里运行".to_string())
 }
 
 /// Purpose: Draw the three labelled fields and the hint line, so the layout can be asserted without a terminal.
@@ -188,10 +184,10 @@ pub(super) fn draw_setup_form(frame: &mut ratatui::Frame, form: &SetupForm) {
     .split(area);
     frame.render_widget(
         ratatui::widgets::Paragraph::new(
-            "loongagent — connect to your firm's control plane\n\
-             Profiles come from there; you do not configure models yourself.",
+            "loongagent — 连接你所在公司的控制面\n\
+             配置从这里下发，模型不用你自己配。",
         )
-        .block(ratatui::widgets::Block::bordered().title(" first run ")),
+        .block(ratatui::widgets::Block::bordered().title(" 首次运行 ")),
         chunks[0],
     );
     for (index, chunk) in chunks[1..4].iter().enumerate() {
@@ -223,7 +219,7 @@ pub(super) fn draw_setup_form(frame: &mut ratatui::Frame, form: &SetupForm) {
         Some(error) => {
             format!("{error}\n\ntab next field · enter connect · esc skip (no control plane)")
         }
-        None => "tab next field · enter connect · esc skip (no control plane)".to_string(),
+        None => "tab 下一个字段 · 回车连接 · esc 跳过（不用控制面）".to_string(),
     };
     frame.render_widget(
         ratatui::widgets::Paragraph::new(help).style(if form.error.is_some() {

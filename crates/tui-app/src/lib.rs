@@ -925,36 +925,58 @@ impl App {
         let mut shown = 0usize;
         for (index, model) in self.models.iter().enumerate().take(slots) {
             let current = model.name == self.selected;
-            // A model whose check failed is marked, not hidden: the digits stay where
-            // they were, so a network blip does not renumber somebody's keyboard.
-            let mark = if self.health.get(&model.name) == Some(&false) {
-                "✗"
-            } else if current {
-                "▸"
-            } else {
-                " "
-            };
-            let label = format!("{mark}[{}] {}", index + 1, model.name);
-            let label_width = UnicodeWidthStr::width(label.as_str());
-            let gap = usize::from(shown > 0);
+            let failed = self.health.get(&model.name) == Some(&false);
+            // A failed check is marked, not hidden: the digits stay where they were, so a
+            // network blip does not renumber somebody's keyboard.
+            let mark = if failed { "✗" } else { " " };
+            // The slot number is drawn as a keycap — the key that selects this model. The
+            // current one is a filled cap, the rest are outlined, so the bar reads as a
+            // row of keys rather than as a sentence with numbers in it.
+            // `[n]` for every slot, so the number a person types keeps the same shape
+            // whether or not that model is the one running.
+            let cap = format!("[{}]", index + 1);
+            let label_width = 1
+                + UnicodeWidthStr::width(cap.as_str())
+                + 1
+                + UnicodeWidthStr::width(model.name.as_str());
+            let gap = usize::from(shown > 0) * 3;
             // The first slot is always drawn even if it does not fit — a clipped name
             // still says which model is answering, and nothing says it if we stop here.
-            if shown > 0 && used + gap + label_width + hint_width > limit {
+            // Slots first, hint second: a bar that dropped a model to keep its own
+            // instructions has the priority backwards.
+            if shown > 0 && used + gap + label_width > limit {
                 break;
             }
             if shown > 0 {
-                spans.push(Span::raw(" "));
-                used += 1;
+                spans.push(Span::raw(" ".repeat(gap)));
+                used += gap;
             }
             spans.push(Span::styled(
-                label,
-                if self.health.get(&model.name) == Some(&false) {
+                mark.to_string(),
+                Style::default().fg(Color::Red),
+            ));
+            spans.push(Span::styled(
+                cap,
+                if current {
+                    // A filled key: the accent behind the digit, the terminal's own
+                    // foreground on top, so it reads on either background.
+                    Style::default()
+                        .fg(Color::Reset)
+                        .bg(MARK_ACCENT)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    MARK_QUIET
+                },
+            ));
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                model.name.clone(),
+                if failed {
                     Style::default().fg(Color::Red)
                 } else if current {
-                    // Reversed as well as bold. `▸` alone was too quiet to answer "did
-                    // that switch?", which is the one question the bar exists to answer
-                    // — and a whole inverted cell is hard to miss in a row of dim text.
-                    MARK_TEXT.add_modifier(Modifier::REVERSED)
+                    // Bold and underlined as well as capped: the cap says which key it
+                    // is, the underline says which one is in hand.
+                    MARK_TEXT.add_modifier(Modifier::UNDERLINED)
                 } else {
                     MARK_QUIET
                 },
@@ -970,6 +992,15 @@ impl App {
             spans.push(Span::styled(hint, MARK_QUIET));
         }
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    }
+
+    /// Purpose: The rule under the status bar, so the fixed chrome is not mistaken for the page's first line.
+    /// Contract: called by `App::draw`; one dim line across the whole width.
+    fn draw_status_rule(&self, frame: &mut Frame, area: ratatui::layout::Rect) {
+        frame.render_widget(
+            Paragraph::new("─".repeat(area.width as usize)).style(MARK_QUIET),
+            area,
+        );
     }
 
     /// Purpose: Whether the block wordmark fits inside the frame with room to breathe.
@@ -2873,12 +2904,20 @@ impl App {
         let areas = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1),
+                // The status bar and the rule under it: the chrome says where it ends, so
+                // the first line of the page is not read as part of the status.
+                Constraint::Length(2),
                 Constraint::Min(3),
                 Constraint::Length(1),
             ])
             .split(conversation);
         let (top, view, keys) = (areas[0], areas[1], areas[2]);
+        let bar = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Length(1)])
+            .split(top);
+        let (status, rule) = (bar[0], bar[1]);
+        self.draw_status_rule(frame, rule);
 
         if self.models.is_empty() {
             frame.render_widget(
@@ -2887,10 +2926,10 @@ impl App {
                     self.session, self.schema
                 ))
                 .style(MARK_QUIET),
-                top,
+                status,
             );
         } else {
-            self.draw_model_bar(frame, top);
+            self.draw_model_bar(frame, status);
         }
 
         // An open fold keeps its title: the output itself scrolls, but what it is and how

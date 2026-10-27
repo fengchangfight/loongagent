@@ -2204,7 +2204,7 @@ fn the_mark_is_drawn_and_can_be_put_away() {
 
     // Placed, not scattered: the name is between the frame's walls, and the inscription
     // is below the frame and outside it.
-    let rows: Vec<&str> = screen.lines().skip(1).take(11).collect();
+    let rows: Vec<&str> = screen.lines().skip(2).take(11).collect();
     let name = rows
         .iter()
         .find(|row| row.contains("█     █████"))
@@ -2230,7 +2230,7 @@ fn the_mark_is_drawn_and_can_be_put_away() {
     // Narrower: the plain word, still inside the frame, and the inscription still fits
     // under it — it is a line of its own now, so it no longer competes with the frame.
     let plain = draw(&mut app, 62, 30);
-    let rows: Vec<&str> = plain.lines().skip(1).take(11).collect();
+    let rows: Vec<&str> = plain.lines().skip(2).take(11).collect();
     let name = rows
         .iter()
         .find(|row| row.contains("loongagent"))
@@ -2287,7 +2287,7 @@ fn the_wordmark_is_blocks_only_where_they_fit() {
     let mut app = App::new("s", "v");
     // 86 columns of frame: 90 is the boundary, so 150 has room.
     let wide = draw(&mut app, 150, 30);
-    let header: String = wide.lines().skip(1).take(11).collect::<Vec<_>>().join("\n");
+    let header: String = wide.lines().skip(2).take(11).collect::<Vec<_>>().join("\n");
     // The gap between the L's stem and the O's first block is the font's own shape; the
     // dragon never draws it, so it tells the two apart.
     assert!(header.contains("█     █████"), "block letters:\n{wide}");
@@ -3807,21 +3807,28 @@ fn the_model_bar_numbers_the_models_in_the_order_the_profile_declared_them() {
 /// Purpose: Only the current model is marked, and the mark follows a switch.
 #[test]
 fn the_model_bar_marks_the_current_model_and_only_that_one() {
+    use ratatui::style::Modifier;
     let mut app = app_with_models(&["cheap", "strong"]);
-    let screen = draw(&mut app, 90, 20);
-    let bar = screen.lines().next().unwrap_or_default().to_string();
-    assert!(shows(&bar, "▸[1] cheap"), "{bar:?}");
+    let marked = |app: &mut App, name: &str| -> bool {
+        let mut terminal = Terminal::new(TestBackend::new(90, 20)).expect("a test terminal");
+        terminal.draw(|frame| app.draw(frame)).expect("draws");
+        let buffer = terminal.backend().buffer().clone();
+        let row: String = (0..buffer.area().width)
+            .map(|x| buffer[(x, 0)].symbol().to_string())
+            .collect();
+        let at = row.find(name).expect("the model is on the bar") as u16;
+        buffer[(at, 0)].modifier.contains(Modifier::UNDERLINED)
+    };
+    assert!(marked(&mut app, "cheap"), "the running model is marked");
     assert!(
-        !shows(&bar, "▸[2]"),
-        "the model that is not running is not marked: {bar:?}"
+        !marked(&mut app, "strong"),
+        "the model that is not running is not marked"
     );
 
     // And the mark follows a switch, so the bar never lies about what is answering.
     app.selected = "strong".to_string();
-    let screen = draw(&mut app, 90, 20);
-    let bar = screen.lines().next().unwrap_or_default().to_string();
-    assert!(shows(&bar, "▸[2] strong"), "{bar:?}");
-    assert!(!shows(&bar, "▸[1]"), "{bar:?}");
+    assert!(marked(&mut app, "strong"), "the mark followed the switch");
+    assert!(!marked(&mut app, "cheap"), "and left the old model alone");
 }
 
 /// Purpose: Done, stopped and failed have different words, colours and marks.
@@ -4225,7 +4232,7 @@ fn the_bar_hint_leads_with_the_keys_that_always_arrive() {
 
 /// Purpose: The current model is reversed as a block and the others are not.
 #[test]
-fn the_current_model_is_drawn_as_a_block_and_not_only_a_marker() {
+fn the_current_model_is_drawn_as_a_filled_key_and_underlined_name() {
     // "Did that switch?" is the one question the bar exists to answer, and a `▸` in a
     // row of dim text was too quiet to answer it.
     use ratatui::style::Modifier;
@@ -4234,19 +4241,26 @@ fn the_current_model_is_drawn_as_a_block_and_not_only_a_marker() {
     terminal.draw(|frame| app.draw(frame)).expect("draws");
     let buffer = terminal.backend().buffer().clone();
 
-    // Row 0 is the bar; find the cell where the current model's name starts.
+    // Row 0 is the bar: the current slot's key is filled with the accent and its name is
+    // underlined; a key that is not in hand is neither.
     let row: String = (0..buffer.area().width)
         .map(|x| buffer[(x, 0)].symbol().to_string())
         .collect();
+    let key = row.find("[1]").expect("the current slot's key") as u16;
+    assert_eq!(
+        buffer[(key, 0)].bg,
+        ratatui::style::Color::Magenta,
+        "the current slot's key is filled: {row:?}"
+    );
     let at = row.find("cheap").expect("the current model is on the bar") as u16;
     assert!(
-        buffer[(at, 0)].modifier.contains(Modifier::REVERSED),
-        "the current model is drawn as a block: {row:?}"
+        buffer[(at, 0)].modifier.contains(Modifier::UNDERLINED),
+        "the current model is underlined: {row:?}"
     );
 
     let other = row.find("strong").expect("the other model is on the bar") as u16;
     assert!(
-        !buffer[(other, 0)].modifier.contains(Modifier::REVERSED),
+        !buffer[(other, 0)].modifier.contains(Modifier::UNDERLINED),
         "and the one that is not running is not: {row:?}"
     );
 }
@@ -4411,7 +4425,7 @@ fn the_bar_follows_a_switch_a_rule_made_mid_turn() {
             .lines()
             .next()
             .unwrap_or_default()
-            .contains("▸[2] strong"),
+            .contains("[2] strong"),
         "{screen}"
     );
 

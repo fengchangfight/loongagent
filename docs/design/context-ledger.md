@@ -107,8 +107,11 @@ Two ceilings bound one request, and the stricter wins (`Kernel::input_ceiling`):
   left for the answer drops below `reserved_context_size` (default 16 Ki, and a
   reserve larger than half a window is capped at half).
 
-With both absent, nothing bounds the context and compaction never runs; the CLI
-says so rather than leaving a silent `None`. What is measured is
+With no explicit budget, `Kernel::effective_budget` derives one from the selected
+model's window: a quarter of it, floored at 32,000 and capped at 100,000. A window
+with no budget therefore still has a reachable ceiling; only a model that declares
+no window, with no profile budget, leaves the context unbounded, and the CLI says
+so rather than leaving a silent `None`. An explicit `budget_tokens` always wins. What is measured is
 `ledger.total_tokens()` — the ledger's share of the prompt about to be sent,
 not the whole request (§6 names what it does not count). It is not a cumulative
 spend: twenty calls in one turn are twenty measurements, not twenty terms in a
@@ -121,8 +124,16 @@ exchanges.
 
 ## 4. Compaction: clear first, drop only without the engine
 
-`Kernel::compact_if_needed` runs at every step boundary, after `refresh_map`,
-and does nothing when `ledger.total_tokens()` is at or under the ceiling. When
+`Kernel::compact_if_needed` runs at every step boundary, after `refresh_memory`
+and `age_tool_outputs`, and does nothing when `ledger.total_tokens()` is at or under
+the ceiling.
+
+**Aging, before either phase.** `Kernel::age_tool_outputs` does not wait for the
+ceiling. Whenever `Ledger::tool_output_tokens()` — the uncleared `History` entries
+whose source starts `tool:` — passes `keep_newest_tokens`, it clears the older ones
+with the same marker and writes the same `compaction.applied` event
+(`cleared_tool_outputs > 0`, `dropped_messages 0`). The ceiling is the backstop;
+aging keeps the steady state flat. When
 it does run it takes `keep = keep_newest_tokens.min(ceiling / 2)` (default
 20,000 tokens) and works in a fixed order.
 

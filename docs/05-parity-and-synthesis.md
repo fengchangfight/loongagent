@@ -45,7 +45,7 @@ rows below are what "not losing" means concretely.
 | Auto-compaction: **clear old tool outputs first, then summarize**; keep newest ~20k verbatim | ⚠️ | ADR-0006 §4 + ADR-0017. R 模式 = 清工具输出后丢最老交换（2026-10-08 实现）；S 模式（分层引擎开启）= **不丢任何交换**，只清工具输出，摘要由 L2/L3 承担 | 还需真实长会话上验证 `recall` 能否一次收敛（ADR-0017 验证 ⑤） |
 | `/compact <focus>`, partial summarization, `/rewind` (summarize from/up to here) | ⚠️ | ADR-0015 + T-12 give the substrate | define the command surface |
 | `/context` — what occupies the window | ✅ | ADR-0006 (ledger)；TUI **F2 面板**已渲染账本分类 + 记忆状态（2026-10-14） | CLI 只有 `loong context status`；`/context` 与 `context explain` 仍未定义 |
-| **Prompt-cache hit rate** in usage | ❌ | T-02 | new **T-25** |
+| **Prompt-cache hit rate** in usage | ⚠️ | the request prefix is append-only inside a turn (`Kernel::seat_map`, 2026-10-28; test `the_request_prefix_is_append_only_within_a_turn`); provider-side cache accounting is not measured live yet | measure `cache_hit_tokens / tokens_in` on a real k3 session |
 | **`/btw`** — side question that never enters history | ❌ | — | new **T-25** |
 | MCP tool deferral: names eagerly, schemas on demand | ✅ | T-15 | design intent kept; the implementation is eager for now (see A7) |
 | System-prompt discipline ("delete scaffolding every model generation") | ✅ | ADR-0004/vision | keep the deletion pass as a ritual |

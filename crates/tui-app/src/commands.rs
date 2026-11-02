@@ -73,6 +73,11 @@ pub const COMMANDS: &[Command] = &[
         aliases: &[],
         description: "把上一个提问再问一遍，用当前模型",
     },
+    Command {
+        name: "/cost",
+        aliases: &["/usage", "/spend"],
+        description: "本会话的令牌、缓存命中与估算消费",
+    },
 ];
 
 /// Purpose: The command this exact text runs, if the screen answers it itself.

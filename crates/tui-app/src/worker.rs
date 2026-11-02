@@ -77,8 +77,18 @@ pub fn spawn_worker<T: Transport + Send + 'static>(
                                 let _ = events.send(FromWorker::Yolo(on));
                             }
                         }
+                        let kind = params.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+                        // The session total is accumulated from the event, not from the
+                        // rendered line: the line is for reading, the data is for
+                        // summing, and parsing text back would be a second truth. A cost
+                        // event has no line — the screen's usage row is where it shows —
+                        // so this must run before the renderer decides there is nothing.
+                        if kind == loong_schema::generated::event::COST_RECORDED {
+                            if let Some(entry) = CostEntry::from_event(params) {
+                                let _ = events.send(FromWorker::Cost(entry));
+                            }
+                        }
                         if let Some(line) = renderer.render(params) {
-                            let kind = params.get("kind").and_then(|k| k.as_str()).unwrap_or("");
                             // The summary is what the transcript keeps and what this line
                             // is; the whole of it is what the keyboard may ask for while
                             // the turn is still running, and it is on this very message.

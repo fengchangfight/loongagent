@@ -1204,12 +1204,15 @@ mod session_tests {
         .unwrap();
         let infos = session_infos_from(session_summaries_in(&dir, "project"), 10);
         assert_eq!(infos.len(), 2);
-        assert_eq!(infos[0].id, "aaaa1111");
-        assert_eq!(infos[0].title, "first question");
-        assert_eq!(infos[0].turns, 2);
-        assert_eq!(infos[0].events, 5);
-        assert!(infos[0].updated_at > 0);
-        assert_eq!(infos[1].title, "New session");
+        // Read by id, not by position: which file is newer depends on the clock the
+        // filesystem stamped, and this test is about the mapping, not the sort order.
+        let first = infos.iter().find(|info| info.id == "aaaa1111").unwrap();
+        assert_eq!(first.title, "first question");
+        assert_eq!(first.turns, 2);
+        assert_eq!(first.events, 5);
+        assert!(first.updated_at > 0);
+        let second = infos.iter().find(|info| info.id == "bbbb2222").unwrap();
+        assert_eq!(second.title, "New session");
         assert_eq!(
             session_infos_from(session_summaries_in(&dir, "project"), 1).len(),
             1

@@ -64,7 +64,7 @@ fn roundtrip_policy_decided() {
 #[test]
 fn roundtrip_cost_recorded() {
     roundtrip::<g::CostRecorded>(
-        r#"{"profile": "<string>","tokens_in": 1,"tokens_out": 1,"usd_micros": 1}"#,
+        r#"{"profile": "<string>","model": "<string>","tokens_in": 1,"tokens_out": 1,"cache_hit_tokens": 1,"cache_miss_tokens": 1,"cache_reported": true,"usd_micros": 1,"price_basis": "<string>"}"#,
     );
 }
 
@@ -311,7 +311,7 @@ fn every_event_payload_roundtrips() {
         r#"{"action_class": "investigate","verdict": "allow","rule": "<string>"}"#,
     );
     roundtrip::<g::CostRecorded>(
-        r#"{"profile": "<string>","tokens_in": 1,"tokens_out": 1,"usd_micros": 1}"#,
+        r#"{"profile": "<string>","model": "<string>","tokens_in": 1,"tokens_out": 1,"cache_hit_tokens": 1,"cache_miss_tokens": 1,"cache_reported": true,"usd_micros": 1,"price_basis": "<string>"}"#,
     );
     roundtrip::<g::CompactionApplied>(
         r#"{"tokens_before": 1,"tokens_after": 1,"kept_tokens": 1,"cleared_tool_outputs": 1,"dropped_messages": 1,"summary": "<string>"}"#,

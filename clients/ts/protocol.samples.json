@@ -1,5 +1,5 @@
 {
-  "schema_version": "0.1.0",
+  "schema_version": "0.2.0",
   "types": {
     "EventEnvelope": {
       "seq": 1,
@@ -43,9 +43,14 @@
     },
     "CostRecorded": {
       "profile": "<string>",
+      "model": "<string>",
       "tokens_in": 1,
       "tokens_out": 1,
-      "usd_micros": 1
+      "cache_hit_tokens": 1,
+      "cache_miss_tokens": 1,
+      "cache_reported": true,
+      "usd_micros": 1,
+      "price_basis": "<string>"
     },
     "HookFired": {
       "event": "<string>",

@@ -6,7 +6,7 @@
 //! # Contract
 //! - **Design:** `docs/design/context-ledger.md` §3–§7;
 //!   `docs/context/pipeline.md` §6.6 owns the kernel-side worker rationale.
-//! - **Upstream:** `Kernel::build` opens it, `Kernel::refresh_map` refreshes it, and
+//! - **Upstream:** `Kernel::build` opens it, `Kernel::refresh_memory` refreshes it, and
 //!   `Kernel::run` sets the foreground-busy flag.
 //! - **Downstream:** `loong_context::Store`, `Summarizer` and the enrichment worker
 //!   thread; `Kernel::recall_tool` reads the same store.
@@ -349,7 +349,7 @@ impl EngineShared {
 ///
 /// Serves: a session whose memory is either genuinely on or deliberately absent.
 /// Design: `docs/context/pipeline.md` §6.6; `docs/design/context-ledger.md` §3.
-/// Up: `Kernel::build` opens it; `Kernel::refresh_map`, `run` and `recall_tool` use it.
+/// Up: `Kernel::build` opens it; `Kernel::refresh_memory`, `run` and `recall_tool` use it.
 /// Down: `Store`, `EngineShared`, `Foreground` and the worker thread.
 /// Verify: `cargo test -p loong-kernel context_engine::`.
 /// The engine, once it has a store. A store that cannot be opened is **not**
@@ -572,7 +572,7 @@ impl ContextEngine {
     ///
     /// Serves: a deterministic map for the current turn with no model call inside a step.
     /// Design: `docs/context/pipeline.md` §6.6; `docs/design/context-ledger.md` §3.
-    /// Up: `Kernel::refresh_map` at every step boundary.
+    /// Up: `Kernel::refresh_memory` at every step boundary.
     /// Down: `Store::sync`, `digest_pending`, `digest_domains` and `EngineShared::wake`.
     /// Verify: `cargo test -p loong-kernel context_engine::tests::refresh_never_calls_the_model`.
     /// Keep the derived state current with the log. Called at a step boundary; a
@@ -765,7 +765,7 @@ impl ContextEngine {
     ///
     /// Serves: not spending tokens on an empty map in a session's first turns.
     /// Design: `docs/design/context-ledger.md` §6.
-    /// Up: `Kernel::refresh_map`.
+    /// Up: `Kernel::refresh_memory`.
     /// Down: `Store::global_map`; a failure degrades the engine rather than failing the turn.
     /// Verify: `cargo test -p loong-kernel turn::tests::the_layered_engine_puts_a_map_in_front_of_the_model`.
     /// The L4 map to put in front of the model, or `None` when there is nothing

@@ -4,7 +4,7 @@
 
 **Goal:** Give every session a reachable context ceiling, age stale tool output on every step, and keep the request prefix byte-stable inside a turn, so a long session stops re-billing the whole history.
 
-**Architecture:** Three changes inside the kernel's context path — a budget derived from the model window (`turn/compaction.rs`), a proactive `age_tool_outputs` that reuses `compaction.applied`, and a split of `refresh_map` into per-step memory refresh plus once-per-turn `seat_map` — plus one surface change (`tui-app`'s spend suffix). The probe in Task 1 decides whether the map split is the cache fix or only a guard.
+**Architecture:** Three changes inside the kernel's context path — a budget derived from the model window (`turn/compaction.rs`), a proactive `age_tool_outputs` that reuses `compaction.applied`, and a split of `refresh_map` into per-step memory refresh plus once-per-turn `seat_map` — plus one surface change (`tui-app`'s fixed usage row). The probe in Task 1 decides whether the map split is the cache fix or only a guard.
 
 **Tech Stack:** Rust 2021, `cargo test -p loong-kernel`, `loong-eventlog` replay, the kernel's `RecordingModel` fixture, `loong-tui-app` tests.
 
@@ -37,8 +37,8 @@
 | `crates/kernel/src/ledger.rs` | `tool_output_tokens()` |
 | `crates/kernel/src/turn.rs` | `context_explain` reports the effective budget |
 | `crates/kernel/src/turn/tests.rs` | every kernel-level test below |
-| `crates/tui-app/src/spend.rs` | `status_suffix()` |
-| `crates/tui-app/src/lib.rs` | append the suffix to the idle status line |
+| `crates/tui-app/src/spend.rs` | `usage_line()` |
+| `crates/tui-app/src/lib.rs` | draw the fixed usage row under the prompt |
 | `docs/design/context-ledger.md` | §3–§4 gain the derived default and the aging rule |
 | `docs/05-parity-and-synthesis.md` | §A2 T-25 row updated from the probe result |
 
@@ -362,19 +362,19 @@ git commit -m "fix(kernel): keep the request prefix stable inside a turn"
 ### Task 5: Show the session's usage while it runs
 
 **Files:**
-- Modify: `crates/tui-app/src/spend.rs` (new `status_suffix`)
-- Modify: `crates/tui-app/src/lib.rs` (append it to the idle status line, near `fn status` at ~1421)
+- Modify: `crates/tui-app/src/spend.rs` (new `usage_line`)
+- Modify: `crates/tui-app/src/lib.rs` (draw a fixed row under the prompt, in `fn draw` near the bottom stack at ~3030)
 - Test: `crates/tui-app/src/tests.rs`
 
 **Interfaces:**
-- Produces: `Spend::status_suffix(&self) -> Option<String>` — `None` when `calls == 0`; otherwise `Some("· 入 {tokens} · 出 {tokens} · 缓存 {rate:.0}%")`, omitting the cache part when `cache_rate()` is `None`.
+- Produces: `Spend::usage_line(&self) -> Option<String>` — `None` when `calls == 0`; otherwise `Some("入 {tokens} · 出 {tokens} · 缓存 {rate:.0}%")`, omitting the cache part when `cache_rate()` is `None`.
 - Consumes: the existing `Spend::{tokens_in, tokens_out, cache_rate}` and `loong_tui::format_tokens`.
 
 - [ ] **Step 1: Write the failing test**
 
 ```rust
 #[test]
-fn the_status_suffix_reports_tokens_and_the_cache_rate() {
+fn the_usage_line_reports_tokens_and_the_cache_rate() {
     let mut spend = Spend::default();
     spend.add(CostEntry::from_event(&serde_json::json!({
         "kind": "cost.recorded",
@@ -382,32 +382,32 @@ fn the_status_suffix_reports_tokens_and_the_cache_rate() {
                  "cache_hit_tokens": 700, "cache_reported": true,
                  "usd_micros": 0, "price_basis": "unknown"}
     })).unwrap());
-    let line = spend.status_suffix().expect("a suffix after one call");
+    let line = spend.usage_line().expect("a line after one call");
     assert!(line.contains("入"), "{line}");
     assert!(line.contains("70"), "{line}");
-    assert!(Spend::default().status_suffix().is_none());
+    assert!(Spend::default().usage_line().is_none());
 }
 ```
 
 - [ ] **Step 2: Run it to verify it fails**
 
-Run: `cargo test -p loong-tui-app the_status_suffix_reports_tokens_and_the_cache_rate`
+Run: `cargo test -p loong-tui-app the_usage_line_reports_tokens_and_the_cache_rate`
 Expected: FAIL — method not found.
 
-- [ ] **Step 3: Implement `status_suffix` and call it**
+- [ ] **Step 3: Implement `usage_line` and draw the row**
 
-Return the string described in Interfaces, with the standard doc block. In `App::status`'s idle "prompt" arm, append `self.spend.status_suffix()` when present (one `format!` with an empty string fallback), leaving the pending, busy and finished arms untouched.
+Return the string described in Interfaces, with the standard doc block. In `App::draw`, reserve one extra row in the bottom stack when `self.spend.usage_line()` is `Some`, and render `用量  {line}` after the prompt and before the keys. The row is fixed: `App::status` no longer carries a spend suffix, and `loong_tui` no longer draws one `· 令牌 …` line per `cost.recorded` event.
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cargo test -p loong-tui-app`
+Run: `cargo test -p loong-tui-app -p loong-tui`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/tui-app/src/spend.rs crates/tui-app/src/lib.rs crates/tui-app/src/tests.rs
-git commit -m "feat(tui): show the session's tokens and cache rate while it runs"
+git add crates/tui-app/src/spend.rs crates/tui-app/src/lib.rs crates/tui-app/src/tests.rs crates/tui/src/lib.rs
+git commit -m "feat(tui): keep the session's usage in a fixed row under the prompt"
 ```
 
 ---
@@ -455,5 +455,5 @@ git commit -m "docs: record the derived budget, aging and the cache probe"
 ## Self-review
 
 - **Spec coverage:** §4.1 → Task 2; §4.2 → Task 3; §4.3 → Tasks 1 and 4; §4.4 → Task 5; §4.6 replay → Task 3's event reuse plus Task 6's replay; §5 probe → Task 1; §5 owner docs → Task 6. Non-goals have no tasks, by design.
-- **Type consistency:** `default_budget(u64) -> u64`, `tool_output_tokens(&self) -> u64`, `age_tool_outputs(&mut self, &mut Vec<u64>) -> Result<(), KernelError>`, `refresh_memory(&mut self)`, `seat_map(&mut self)`, `status_suffix(&self) -> Option<String>` — each name is used once, in the task that owns it.
+- **Type consistency:** `default_budget(u64) -> u64`, `tool_output_tokens(&self) -> u64`, `age_tool_outputs(&mut self, &mut Vec<u64>) -> Result<(), KernelError>`, `refresh_memory(&mut self)`, `seat_map(&mut self)`, `usage_line(&self) -> Option<String>` — each name is used once, in the task that owns it.
 - **Review Focus coverage:** huge window → Task 2 Step 5; oversized single output → Task 3 Step 4; short session → Task 3 Step 8; pinned map → Task 3's `tool_output_tokens` test plus Task 4's prefix test; replay → Task 3 Step 4's event and Task 6 Step 3.

@@ -124,15 +124,16 @@ background and unreadable on the other. The same rule is why the quiet lines are
 on a dark theme, so the bookkeeping lines were drawn into the wall (`MARK_QUIET`). The
 answers not chosen in a decision menu are `default` too; the highlighted one is coloured.
 
-The screen is one page above and one fixed prompt below. The status line and the keys are
-the only bars; between them the mark and the conversation scroll, while the question, the
-menus and the prompt stay put at the bottom, so what is being typed is always visible.
+The screen is one page above one fixed prompt. The status line, the keys and the usage row
+are the only bars; between them the mark and conversation scroll, while the question, menus,
+prompt and usage row stay put, so what is typed and what the session spent stay visible.
 
     ╔═════════༺ ᛭ ༻═════════╗   ← the mark, scrolled away by the conversation
     ║  ▀█▀▀█▀  ██╗  ██████╗  ║
     ╚═════════༻ ᛭ ༺═════════╝
     ┌ 输入 ─────────────────┐   ← fixed: the page scrolls above it
     └───────────────────────┘
+     用量  入 1,053 · 出 5 · 缓存 80%
 
 The mark frames the character 龍 — a 16×16 bitmap in half blocks, not a glyph, which at
 this size is one square of foreground — and the wordmark: five rows of block letters from
@@ -141,8 +142,7 @@ gone with the first line; `/logo` puts both away, and under 52 columns by 26 row
 is no mark. The character is ANSI red and the frame ANSI magenta — never an absolute RGB.
 
 Scrolling is anchored to the page, not its end: away from the bottom, new output is
-appended below the window and changes nothing on screen, so a long block stays selectable
-during a turn. The prompt does not scroll, so the caret is always where the typing goes.
+appended below the window, so a long block stays selectable and the prompt's caret stays put.
 
 ## 4. The web: a bridge, not a second agent
 

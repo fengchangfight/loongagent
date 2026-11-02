@@ -990,6 +990,7 @@ mod tests {
                 usage: Usage {
                     tokens_in: 11,
                     tokens_out: 4,
+                    ..Usage::default()
                 },
             },
             CompletionResponse {
@@ -998,6 +999,7 @@ mod tests {
                 usage: Usage {
                     tokens_in: 5,
                     tokens_out: 2,
+                    ..Usage::default()
                 },
             },
         ])
@@ -1403,6 +1405,7 @@ mod tests {
                 usage: Usage {
                     tokens_in: 5,
                     tokens_out: 4,
+                    ..Usage::default()
                 },
             })
         }

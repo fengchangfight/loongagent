@@ -12,7 +12,7 @@ and the layered store by `crates/context/src/`.
 
 ## 1. Trigger
 
-At every step boundary, after `refresh_map`, `compact_if_needed` compares
+At every step boundary, after `refresh_memory` and `age_tool_outputs`, `compact_if_needed` compares
 `ledger.total_tokens()` with `Kernel::input_ceiling()`: the stricter of the budget ×
 `compact_at_percent` / 100 (default 80%) and the selected model's window minus
 `reserved_context_size` (a reserve larger than half a window is capped at half).

@@ -749,18 +749,45 @@ impl Kernel {
         )
     }
 
-    /// Purpose: Record the model call's token usage as a cost event, with USD left at zero until pricing lands.
+    /// Purpose: Record one model call's provider-reported tokens, cache split and estimated cost.
     ///
-    /// Contract: `turn.rs` cost accounting.
+    /// Serves: the session's bill, which `/cost` and the log both read.
+    /// Design: `docs/design/cost-accounting.md` §2–§3.
+    /// Up: `Kernel::run_inner` after every successful completion.
+    /// Down: `loong_config::pricing::estimate` and `Kernel::append`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_cost_event_keeps_the_provider_counts_and_the_estimate`.
     fn record_cost(&mut self, usage: &Usage) -> Result<u64, KernelError> {
-        // usd_micros stays 0 until pricing/profiles land; tokens are real.
+        let estimate = self
+            .config
+            .settings
+            .models
+            .iter()
+            .find(|spec| spec.name == self.selected_model)
+            .map(|spec| {
+                loong_config::pricing::estimate(
+                    &spec.model,
+                    spec.provider.as_deref(),
+                    &spec.base_url,
+                    usage.tokens_in,
+                    usage.cache_hit_tokens,
+                    usage.cache_miss_tokens,
+                    usage.tokens_out,
+                    std::time::SystemTime::now(),
+                )
+            })
+            .unwrap_or_else(loong_config::pricing::Estimate::unknown);
         self.append(
             gen::event::COST_RECORDED,
             &gen::CostRecorded {
                 profile: self.config.profile.clone(),
+                model: self.selected_model.clone(),
                 tokens_in: usage.tokens_in,
                 tokens_out: usage.tokens_out,
-                usd_micros: 0,
+                cache_hit_tokens: usage.cache_hit(),
+                cache_miss_tokens: usage.cache_miss(),
+                cache_reported: usage.cache_reported(),
+                usd_micros: estimate.usd_micros,
+                price_basis: estimate.basis.as_str().to_string(),
             },
         )
     }

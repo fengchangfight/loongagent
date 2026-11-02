@@ -136,6 +136,13 @@ impl Kernel {
                         // writer, or a hand-edited log — so it gets the turn it needs
                         // rather than making the session unopenable.
                         let slot = pending.get_or_insert_with(|| (None, Vec::new(), Vec::new()));
+                        // One call, one id. A `/yolo` turn used to write the relaxed call
+                        // twice; keeping both would hand the provider a duplicated tool-call
+                        // id, which it rejects, so a session written then could never be
+                        // resumed. The repeats are the same call, so the first one stands.
+                        if slot.1.iter().any(|known| known.call_id == call.call_id) {
+                            continue;
+                        }
                         slot.1.push(loong_providers::ToolCallRequest {
                             call_id: call.call_id.clone(),
                             tool: call.tool.clone(),

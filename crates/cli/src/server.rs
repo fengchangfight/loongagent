@@ -502,6 +502,7 @@ fn build_model(
                 usage: Usage {
                     tokens_in: 20,
                     tokens_out: 8,
+                    ..Usage::default()
                 },
             },
             CompletionResponse {
@@ -510,6 +511,7 @@ fn build_model(
                 usage: Usage {
                     tokens_in: 30,
                     tokens_out: 4,
+                    ..Usage::default()
                 },
             },
         ]))),
@@ -530,6 +532,7 @@ fn build_model(
                     usage: Usage {
                         tokens_in: 20,
                         tokens_out: 8,
+                        ..Usage::default()
                     },
                 },
                 CompletionResponse {
@@ -538,6 +541,7 @@ fn build_model(
                     usage: Usage {
                         tokens_in: 10,
                         tokens_out: 2,
+                        ..Usage::default()
                     },
                 },
             ])))
@@ -603,6 +607,7 @@ impl Model for EchoModel {
             usage: Usage {
                 tokens_in: 3,
                 tokens_out: 3,
+                ..Usage::default()
             },
         })
     }

@@ -6,7 +6,7 @@
 //! # Contract
 //! - **Design:** `docs/design/context-ledger.md` §1–§4.
 //! - **Upstream:** `Kernel::record_user`, `record_assistant`, `record_tool_result`,
-//!   `seat_system_prompt` and `refresh_map` add entries; `compact_if_needed` clears
+//!   `seat_system_prompt` and `seat_map` add entries; `compact_if_needed` clears
 //!   and forgets.
 //! - **Downstream:** `Kernel::context_explain`, `Kernel::compact_if_needed`,
 //!   `Kernel::input_ceiling` and `Kernel::run_inner`'s routing facts.
@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 ///
 /// Serves: the eviction order that drops stale tool output before prose (ADR-0006 §4).
 /// Design: `docs/design/context-ledger.md` §2.
-/// Up: `Kernel::record_user`, `record_assistant` and `record_tool_result` tag history; `Kernel::seat_system_prompt` and `refresh_map` tag the pinned blocks.
+/// Up: `Kernel::record_user`, `record_assistant` and `record_tool_result` tag history; `Kernel::seat_system_prompt` and `seat_map` tag the pinned blocks.
 /// Down: `Category::as_str`, `Category::eviction_priority` and `Entry.category`; no other callee.
 /// Verify: `cargo test -p loong-kernel ledger::tests::retrieval_is_evicted_before_rules`.
 /// Where a block came from. The eviction order is a property of the category.
@@ -87,7 +87,7 @@ impl Category {
 ///
 /// Serves: the stated intent behind clearing: tool results are turn-scoped (ADR-0006 §4).
 /// Design: `docs/design/context-ledger.md` §2.
-/// Up: `Kernel::record_tool_result` (Turn), `Kernel::record_user` and `record_assistant` (Session), `Kernel::seat_system_prompt` (Persistent), and `Kernel::refresh_map` (Session).
+/// Up: `Kernel::record_tool_result` (Turn), `Kernel::record_user` and `record_assistant` (Session), `Kernel::seat_system_prompt` (Persistent), and `Kernel::seat_map` (Session).
 /// Down: `Entry.lifetime` and `Kernel::context_explain`'s string view.
 /// Verify: `cargo test -p loong-kernel turn::tests::the_ledger_and_the_conversation_stay_in_step`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -220,7 +220,7 @@ impl Ledger {
     ///
     /// Serves: the only append door, so an entry's provenance is decided once.
     /// Design: `docs/design/context-ledger.md` §1.
-    /// Up: `Kernel::record_user`, `record_assistant`, `record_tool_result`, `seat_system_prompt` and `refresh_map`; session replay.
+    /// Up: `Kernel::record_user`, `record_assistant`, `record_tool_result`, `seat_system_prompt` and `seat_map`; session replay.
     /// Down: `estimate_tokens`; the `entries` vector.
     /// Verify: `cargo test -p loong-kernel ledger::tests::tokens_are_counted_and_attributed`.
     pub fn add(
@@ -260,7 +260,7 @@ impl Ledger {
     ///
     /// Serves: refreshing the L4 map in place instead of appending a copy each step (ADR-0017).
     /// Design: `docs/design/context-ledger.md` §7.
-    /// Up: `Kernel::refresh_map`.
+    /// Up: `Kernel::seat_map`.
     /// Down: `estimate_tokens`; it also clears the `cleared` marker.
     /// Verify: `cargo test -p loong-kernel turn::tests::the_layered_engine_puts_a_map_in_front_of_the_model`.
     /// Rewrite the text behind one entry, keeping its id, category, lifetime and
@@ -315,6 +315,23 @@ impl Ledger {
     /// Verify: `cargo test -p loong-kernel turn::tests::the_ledger_and_the_conversation_stay_in_step`.
     pub fn total_tokens(&self) -> u64 {
         self.entries.iter().map(|e| e.tokens).sum()
+    }
+
+    /// Purpose: How many tokens of uncleared tool output the prompt is carrying right now.
+    ///
+    /// Serves: `Kernel::age_tool_outputs`, which clears it before the ceiling is reached.
+    /// Design: `docs/superpowers/specs/2026-10-28-token-efficiency-design.md` §4.2.
+    /// Up: `Kernel::age_tool_outputs`.
+    /// Down: no callee; it sums `Entry::tokens`.
+    /// Verify: `cargo test -p loong-kernel ledger::tests::tool_output_tokens_counts_only_uncleared_tool_output`.
+    pub fn tool_output_tokens(&self) -> u64 {
+        self.entries
+            .iter()
+            .filter(|e| {
+                e.category == Category::History && e.source.starts_with("tool:") && !e.cleared
+            })
+            .map(|e| e.tokens)
+            .sum()
     }
 
     /// Purpose: Token totals grouped by category name.
@@ -480,6 +497,36 @@ mod tests {
             true,
         );
         l
+    }
+
+    /// Purpose: Only uncleared tool output under History counts toward the aging threshold.
+    #[test]
+    fn tool_output_tokens_counts_only_uncleared_tool_output() {
+        let mut l = Ledger::new(None);
+        l.add(
+            Category::History,
+            "tool:call_1",
+            &"a".repeat(4000),
+            Lifetime::Turn,
+            false,
+        );
+        l.add(
+            Category::SystemPrompt,
+            "system",
+            &"b".repeat(4000),
+            Lifetime::Persistent,
+            true,
+        );
+        l.add(
+            Category::History,
+            "user",
+            &"c".repeat(4000),
+            Lifetime::Session,
+            false,
+        );
+        assert_eq!(l.tool_output_tokens(), 1000);
+        l.clear_tool_outputs(0, |e| format!("[cleared {}]", e.source));
+        assert_eq!(l.tool_output_tokens(), 0);
     }
 
     /// Purpose: Character counts become token totals and per-category attribution.

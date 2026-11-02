@@ -330,6 +330,104 @@ fn a_turn_paused_for_a_question_is_not_recorded_as_finished() {
     );
 }
 
+/// Purpose: `/cost` prints the session total accumulated from `cost.recorded`, including cache and estimate.
+#[test]
+fn cost_prints_the_total_the_provider_reported() {
+    let mut app = App::new("s", "v");
+    let event = serde_json::json!({
+        "kind": loong_schema::generated::event::COST_RECORDED,
+        "data": {
+            "profile": "local",
+            "model": "deepseek-flash",
+            "tokens_in": 1_000,
+            "tokens_out": 100,
+            "cache_hit_tokens": 800,
+            "cache_miss_tokens": 200,
+            "cache_reported": true,
+            "usd_micros": 185,
+            "price_basis": "list-peak",
+        },
+    });
+    fed(
+        &mut app,
+        FromWorker::Cost(CostEntry::from_event(&event).expect("a cost event")),
+    );
+    type_text(&mut app, "/cost");
+    assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::None);
+    let transcript = app.lines.join("\n");
+    assert!(transcript.contains("1 次模型调用"), "{transcript}");
+    assert!(transcript.contains("缓存命中 800（80.0%）"), "{transcript}");
+    assert!(transcript.contains("$0.000185"), "{transcript}");
+    assert!(transcript.contains("deepseek-flash"), "{transcript}");
+    assert!(transcript.contains("峰时"), "{transcript}");
+}
+
+/// Purpose: The session's usage sits in a fixed row under the prompt, and a running turn does not hide it.
+#[test]
+fn the_usage_row_sits_under_the_prompt_while_a_turn_runs() {
+    let mut app = App::new("s", "v");
+    let event = serde_json::json!({
+        "kind": loong_schema::generated::event::COST_RECORDED,
+        "data": {
+            "profile": "local",
+            "model": "deepseek-flash",
+            "tokens_in": 1_000,
+            "tokens_out": 100,
+            "cache_hit_tokens": 800,
+            "cache_miss_tokens": 200,
+            "cache_reported": true,
+            "usd_micros": 185,
+            "price_basis": "list-peak",
+        },
+    });
+    fed(
+        &mut app,
+        FromWorker::Cost(CostEntry::from_event(&event).expect("a cost event")),
+    );
+    // The turn's own status wins the prompt title, which is exactly when the usage
+    // row has to stay readable: the row is not part of that title.
+    app.busy = true;
+    app.busy_since = Some(std::time::Instant::now());
+    let screen = draw(&mut app, 100, 24);
+    let rows: Vec<&str> = screen.lines().collect();
+    let prompt_bottom = rows
+        .iter()
+        .position(|row| row.trim_start().starts_with('└'))
+        .expect("the prompt box is drawn");
+    let usage = rows
+        .iter()
+        .position(|row| shows(row, "用量"))
+        .expect("the usage row is drawn");
+    assert_eq!(
+        usage,
+        prompt_bottom + 1,
+        "the row sits directly under the prompt: {screen}"
+    );
+    assert!(shows(rows[usage], "入 1,000"), "{screen}");
+    assert!(shows(rows[usage], "出 100"), "{screen}");
+    assert!(shows(rows[usage], "缓存 80%"), "{screen}");
+    assert!(
+        !box_titles(&screen).contains("入 1,000"),
+        "the prompt title stays a status: {screen}"
+    );
+    // Scrolling the page moves only the page: the row keeps its place.
+    app.scroll = 2;
+    let scrolled = draw(&mut app, 100, 24);
+    let again = scrolled
+        .lines()
+        .position(|row| shows(row, "用量"))
+        .expect("the row is still there");
+    assert_eq!(usage, again, "the row does not scroll: {scrolled}");
+}
+
+/// Purpose: Before the first model call the usage row takes no room and says nothing.
+#[test]
+fn an_empty_session_has_no_usage_row() {
+    let mut app = App::new("s", "v");
+    let screen = draw(&mut app, 100, 24);
+    assert!(!screen.contains("用量"), "{screen}");
+}
+
 /// Purpose: Typing `/` lists the commands this screen answers, including the ones a prefix used to hide.
 #[test]
 fn typing_a_slash_offers_the_commands_this_screen_answers() {
@@ -338,7 +436,7 @@ fn typing_a_slash_offers_the_commands_this_screen_answers() {
     let screen = draw(&mut app, 100, 24);
     assert!(shows(&screen, "命令"), "the menu is named: {screen}");
     for command in [
-        "/new", "/exit", "/yolo", "/copy", "/mouse", "/logo", "/expand",
+        "/new", "/exit", "/yolo", "/copy", "/mouse", "/logo", "/expand", "/cost",
     ] {
         assert!(screen.contains(command), "{command} is offered: {screen}");
     }
@@ -1753,7 +1851,6 @@ fn the_renderer_and_the_classifier_agree() {
         serde_json::json!({"kind": event::TOOL_RESULT, "data": {"ok": false, "output": "nope"}}),
         serde_json::json!({"kind": event::POLICY_DECIDED, "data": {"verdict": "allow", "rule": "builtin"}}),
         serde_json::json!({"kind": event::APPROVAL_REQUESTED, "data": {"request_id": "r1", "action_class": "out_of_bounds"}}),
-        serde_json::json!({"kind": event::COST_RECORDED, "data": {"tokens_in": 1, "tokens_out": 2, "profile": "p"}}),
         serde_json::json!({"kind": event::SKILLS_LOADED, "data": {"count": 1, "names": ["help"], "disabled": [], "tokens": 3}}),
         serde_json::json!({"kind": event::COMPACTION_APPLIED, "data": {"tokens_before": 9, "tokens_after": 4, "kept_tokens": 2, "cleared_tool_outputs": 1, "dropped_messages": 1, "summary": "s"}}),
     ];
@@ -2651,6 +2748,66 @@ fn the_worker_turns_commands_into_screen_lines() {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     assert!(!app.busy, "the worker reported a state change");
+}
+
+/// Purpose: A cost event reaches the usage total even though it draws no transcript line.
+#[test]
+fn the_worker_counts_a_cost_event_with_no_transcript_line() {
+    /// Purpose: A transport that answers from a queue of canned JSON-RPC lines.
+    /// Serves: `the_worker_counts_a_cost_event_with_no_transcript_line`.
+    /// Design: `docs/design/cost-accounting.md` §4.
+    /// Up: this test builds it and the client calls it.
+    /// Down: no call; the `loong_tui::Transport` impl below answers.
+    /// Verify: `cargo test -p loong-tui-app`.
+    struct Queue(std::cell::RefCell<std::collections::VecDeque<String>>);
+    impl loong_tui::Transport for Queue {
+        /// Purpose: Accept the request line; the answer comes from the queue.
+        /// Contract: called by `loong_tui::Client`.
+        fn send(&mut self, _line: &str) -> Result<(), String> {
+            Ok(())
+        }
+        /// Purpose: Pop the next canned line, or `None` when the queue is empty.
+        /// Contract: called by `loong_tui::Client`.
+        fn recv_line(&mut self) -> Result<Option<String>, String> {
+            Ok(self.0.borrow_mut().pop_front())
+        }
+    }
+    let queue = std::collections::VecDeque::from(vec![
+        serde_json::json!({
+            "jsonrpc": "2.0", "method": "event",
+            "params": {
+                "seq": 1, "kind": "cost.recorded",
+                "data": {"profile": "local", "model": "deepseek-flash",
+                         "tokens_in": 1_000, "tokens_out": 100,
+                         "cache_hit_tokens": 800, "cache_miss_tokens": 200,
+                         "cache_reported": true, "usd_micros": 185,
+                         "price_basis": "list-peak"},
+            }
+        })
+        .to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 1,
+            "result": {"turn_id": 1, "accepted": true}
+        })
+        .to_string(),
+    ]);
+    let client = Client::new(Queue(std::cell::RefCell::new(queue)), "s-worker");
+    let (to_worker, from_worker) = spawn_worker(client, 0);
+    to_worker
+        .send(ToWorker::Submit("hello".to_string()))
+        .unwrap();
+    let mut app = App::new("s-worker", "v");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline && app.spend.calls == 0 {
+        app.drain(&from_worker);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(app.spend.calls, 1, "the event is counted");
+    assert!(
+        !app.lines.iter().any(|line| shows(line, "令牌")),
+        "no per-call bill is drawn: {:?}",
+        app.lines
+    );
 }
 
 /// Purpose: The worker fetches the selected fold from the log and the screen shows the hidden text.

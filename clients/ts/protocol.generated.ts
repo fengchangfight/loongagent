@@ -3,7 +3,7 @@
 export type JsonValue =
   | null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
-export const SCHEMA_VERSION = "0.1.0";
+export const SCHEMA_VERSION = "0.2.0";
 
 /** Monotonic event sequence within a session. */
 export type Seq = number;
@@ -79,11 +79,25 @@ export interface PolicyDecided {
   rule: string;
 }
 
+/** What one model call cost: the provider's own token counts, its prompt-cache split, and the estimated bill at the price then in force (ADR-0003). */
 export interface CostRecorded {
   profile: string;
+  /** the profile slot that answered, as the model bar names it */
+  model: string;
+  /** all prompt tokens the provider reported */
   tokens_in: number;
+  /** generated tokens, reasoning included */
   tokens_out: number;
+  /** prompt tokens billed as cache hits; 0 when the provider reports no cache */
+  cache_hit_tokens: number;
+  /** prompt tokens billed as cache misses */
+  cache_miss_tokens: number;
+  /** whether the provider reported cache use at all, so 0 hits is not mistaken for no cache */
+  cache_reported: boolean;
+  /** estimated cost in micro-USD; 0 for a local or unpriced model */
   usd_micros: number;
+  /** local-free | list-peak | list-off-peak | unknown */
+  price_basis: string;
 }
 
 /** One hook answered at one lifecycle moment (ADR-0007 §7). Recorded whether or not it changed the outcome, so the guard's behaviour is auditable. */

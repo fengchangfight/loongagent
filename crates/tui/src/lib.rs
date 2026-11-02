@@ -49,6 +49,12 @@ pub struct Client<T: Transport> {
     last_tool_call: Option<Value>,
     /// Whether the last submitted prompt was accepted (a hook can refuse one).
     last_accepted: bool,
+    /// The `cost.recorded` events the last `replay` read, in log order.
+    ///
+    /// Kept so a surface can seed its session total from the same read that filled
+    /// the transcript, instead of asking the log a second time. The events stay
+    /// unparsed: an older log lacks the newer fields, and the reader defaults them.
+    last_costs: Vec<Value>,
 }
 
 /// Purpose: A question the session is waiting on, with the detail needed to answer it.
@@ -74,6 +80,49 @@ pub struct PendingDecision {
     /// The tool the call is on, and its arguments: what is about to happen.
     pub tool: String,
     pub args: String,
+}
+
+/// Purpose: Group a token count with commas, so a six-figure context stays readable.
+/// Serves: `crates/tui-app`'s usage row and `/cost` summary.
+/// Design: `docs/design/cost-accounting.md` §4.
+/// Up: `crates/tui-app`'s `Spend` summary and usage row.
+/// Down: no callee; it formats an integer.
+/// Verify: `cargo test -p loong-tui`.
+pub fn format_tokens(tokens: u64) -> String {
+    let digits = tokens.to_string();
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (place, digit) in digits.chars().rev().enumerate() {
+        if place > 0 && place % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    grouped.chars().rev().collect()
+}
+
+/// Purpose: Render a micro-USD estimate as dollars with six decimals, the unit the event stores.
+/// Serves: `crates/tui-app`'s `/cost` summary.
+/// Design: `docs/design/cost-accounting.md` §4.
+/// Up: `crates/tui-app`'s `Spend` summary.
+/// Down: no callee; it formats an integer.
+/// Verify: `cargo test -p loong-tui`.
+pub fn format_usd(micros: u64) -> String {
+    format!("${}.{:06}", micros / 1_000_000, micros % 1_000_000)
+}
+
+/// Purpose: The short Chinese label for a `cost.recorded.price_basis`.
+/// Serves: `crates/tui-app`'s `/cost` summary.
+/// Design: `docs/design/cost-accounting.md` §2–§4.
+/// Up: `crates/tui-app`'s `ModelSpend::price`.
+/// Down: no callee; it maps four wire strings.
+/// Verify: `cargo test -p loong-tui`.
+pub fn price_basis_label(basis: &str) -> &'static str {
+    match basis {
+        "local-free" => "免费",
+        "list-peak" => "峰时",
+        "list-off-peak" => "谷时",
+        _ => "价格未知",
+    }
 }
 
 /// Purpose: One event as a human line, with long tool output summarised.
@@ -239,12 +288,10 @@ fn render_event_with(envelope: &Value, full: bool) -> Option<String> {
                 format!("⇄ 模型 {previous} → {model}（{rule}）")
             })
         }
-        gen::event::COST_RECORDED => Some(format!(
-            "· 令牌 {} 入 / {} 出（{}）",
-            data.get("tokens_in").and_then(|v| v.as_u64()).unwrap_or(0),
-            data.get("tokens_out").and_then(|v| v.as_u64()).unwrap_or(0),
-            data.get("profile").and_then(|v| v.as_str()).unwrap_or("?")
-        )),
+        // A cost event is not a line: the screen's usage row reads it, and the transcript
+        // keeps the conversation rather than one bill per model call. The event is still
+        // in the log and `Client::costs` still returns it for the spend total.
+        gen::event::COST_RECORDED => None,
         gen::event::COMPACTION_APPLIED => Some(format!(
             "· 已压缩：{} → {} 令牌（清理 {} 条工具输出，丢弃 {} 条消息，保留最新 {}）",
             data.get("tokens_before")
@@ -573,6 +620,7 @@ impl<T: Transport> Client<T> {
             pending: None,
             last_tool_call: None,
             last_accepted: true,
+            last_costs: Vec::new(),
         }
     }
 
@@ -781,11 +829,29 @@ impl<T: Transport> Client<T> {
         )?;
         let replay: gen::SessionReplayResult =
             serde_json::from_value(result).map_err(|e| format!("session.replay: {e}"))?;
+        self.last_costs = replay
+            .events
+            .iter()
+            .filter(|event| {
+                event.get("kind").and_then(|kind| kind.as_str()) == Some(gen::event::COST_RECORDED)
+            })
+            .cloned()
+            .collect();
         Ok(replay
             .events
             .iter()
             .filter_map(|event| render_event(event))
             .collect())
+    }
+
+    /// Purpose: The `cost.recorded` events the last `replay` read.
+    /// Serves: `crates/tui-app`'s surface, which seeds `/cost` from a resumed log.
+    /// Design: `docs/design/cost-accounting.md` §4.
+    /// Up: `crates/tui-app/src/surface.rs`.
+    /// Down: `Client::last_costs`, filled by `Client::replay`.
+    /// Verify: `cargo test -p loong-tui`.
+    pub fn costs(&self) -> Vec<Value> {
+        self.last_costs.clone()
     }
 
     /// Purpose: What the model is about to be sent and why; a read that records nothing.
@@ -1206,6 +1272,64 @@ mod tests {
         let sent: Value = serde_json::from_str(&client.transport.outbound[0]).unwrap();
         assert_eq!(sent["method"], "session.attach");
         assert_eq!(sent["params"]["cwd"], "/work");
+    }
+
+    /// Purpose: Pin that a cost event stays out of the transcript while its data is still available to the spend total.
+    /// Verify: `cargo test -p loong-tui`.
+    #[test]
+    fn a_cost_event_is_not_drawn_in_the_transcript() {
+        let priced = json!({
+            "kind": gen::event::COST_RECORDED,
+            "data": {
+                "profile": "local",
+                "model": "deepseek-flash",
+                "tokens_in": 1_053,
+                "tokens_out": 5,
+                "cache_hit_tokens": 800,
+                "cache_miss_tokens": 253,
+                "cache_reported": true,
+                "usd_micros": 123,
+                "price_basis": "list-off-peak",
+            },
+        });
+        assert_eq!(
+            render_event(&priced),
+            None,
+            "the usage row reads the event; the transcript does not repeat it"
+        );
+
+        // An event written before the pricing fields existed is not drawn either: the
+        // rule is about the event kind, not about which fields it happens to carry.
+        let old = json!({
+            "kind": gen::event::COST_RECORDED,
+            "data": {"profile": "default", "tokens_in": 1053, "tokens_out": 5},
+        });
+        assert_eq!(render_event(&old), None);
+    }
+
+    /// Purpose: Pin that a replay keeps the cost events, so a resumed session's total starts from its past.
+    /// Verify: `cargo test -p loong-tui`.
+    #[test]
+    fn replay_keeps_the_cost_events_for_the_session_total() {
+        let fake = Fake::with(vec![response(
+            1,
+            json!({"events": [
+                bare(1, gen::event::COST_RECORDED,
+                    json!({"profile": "local", "model": "deepseek-flash", "tokens_in": 10,
+                           "tokens_out": 2, "cache_hit_tokens": 8, "cache_miss_tokens": 2,
+                           "cache_reported": true, "usd_micros": 5, "price_basis": "list-peak"})),
+                bare(2, gen::event::MESSAGE_APPENDED,
+                    json!({"role": "assistant", "text": "done"})),
+            ]}),
+        )]);
+        let mut client = Client::new(fake, "s");
+        let lines = client.replay().unwrap();
+        assert_eq!(lines.len(), 1, "the answer is drawn; the bill is not");
+        assert_eq!(lines[0], "done");
+        let costs = client.costs();
+        assert_eq!(costs.len(), 1, "the cost event is kept, the prose is not");
+        assert_eq!(costs[0]["data"]["usd_micros"], 5);
+        assert_eq!(costs[0]["data"]["cache_hit_tokens"], 8);
     }
 
     /// Purpose: Pin that a model switch is drawn with both models and the rule that caused it.

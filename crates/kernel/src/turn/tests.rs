@@ -103,6 +103,7 @@ fn response(calls: Vec<ToolCallRequest>, text: Option<&str>) -> CompletionRespon
         usage: Usage {
             tokens_in: 7,
             tokens_out: 3,
+            ..Usage::default()
         },
     }
 }
@@ -168,6 +169,59 @@ fn a_tool_runs_and_the_turn_finishes() {
         .as_str()
         .unwrap()
         .contains("hi from the workspace"));
+}
+
+/// Purpose: Pin that a cost event carries the provider's token counts, cache split, model slot and list-price estimate.
+#[test]
+fn a_cost_event_keeps_the_provider_counts_and_the_estimate() {
+    let t = Temp::new();
+    let mut config = KernelConfig::new(&t.dir);
+    config.settings.models.push(loong_config::ModelSpec {
+        name: "flash".into(),
+        kind: "openai-compat".into(),
+        base_url: "https://api.deepseek.com".into(),
+        model: "deepseek-flash".into(),
+        api_key: None,
+        budget_tokens: None,
+        max_context_size: None,
+        provider: Some("deepseek".into()),
+    });
+    let model = ScriptedModel::new(vec![CompletionResponse {
+        text: Some("done".into()),
+        tool_calls: Vec::new(),
+        usage: Usage {
+            tokens_in: 1_000,
+            tokens_out: 100,
+            cache_hit_tokens: Some(800),
+            cache_miss_tokens: Some(200),
+        },
+    }]);
+    let mut k =
+        Kernel::create_with_models(&t.log, config, vec![("flash".to_string(), Box::new(model))])
+            .unwrap();
+    k.submit("hi").unwrap();
+
+    let events = loong_eventlog::replay(&t.log).unwrap().events;
+    let cost = events
+        .iter()
+        .find(|event| event.kind == ev::COST_RECORDED)
+        .expect("the model call is priced");
+    assert_eq!(cost.data["model"], "flash");
+    assert_eq!(cost.data["tokens_in"], 1_000);
+    assert_eq!(cost.data["tokens_out"], 100);
+    assert_eq!(cost.data["cache_hit_tokens"], 800);
+    assert_eq!(cost.data["cache_miss_tokens"], 200);
+    assert_eq!(cost.data["cache_reported"], true);
+    let basis = cost.data["price_basis"].as_str().unwrap();
+    assert!(
+        basis == "list-peak" || basis == "list-off-peak",
+        "the public list price was used: {basis}"
+    );
+    assert!(
+        cost.data["usd_micros"].as_u64().unwrap() > 0,
+        "a priced remote call is not free: {}",
+        cost.data
+    );
 }
 
 /// Purpose: `/yolo` turns an out-of-bounds ask into an allow and records `permissions.relaxed` plus a `yolo:` ruling, so the log says why nothing asked.
@@ -268,6 +322,40 @@ fn a_permissions_request_is_applied_at_the_next_decision() {
         })
         .expect("the override is recorded, so the log says why nothing asked");
     assert_eq!(ruling.data["verdict"], "allow");
+    let _ = std::fs::remove_file(&escape);
+}
+
+/// Purpose: A `/yolo`-relaxed call is recorded once, so replay cannot hand a provider a duplicated id.
+#[test]
+fn a_yolo_relaxed_call_is_recorded_once() {
+    let t = Temp::new();
+    let escape = t.dir.parent().unwrap().join("loong-kernel-yolo-once.txt");
+    let _ = std::fs::remove_file(&escape);
+    let model = ScriptedModel::new(vec![
+        response(
+            vec![call(
+                "c1",
+                "write_file",
+                json!({"path": escape.to_string_lossy(), "content": "x"}),
+            )],
+            None,
+        ),
+        response(vec![], Some("done")),
+    ]);
+    let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+    k.set_auto_approve(true).unwrap();
+    k.submit("write outside").unwrap();
+
+    let calls = loong_eventlog::replay(&t.log)
+        .unwrap()
+        .events
+        .into_iter()
+        .filter(|event| event.kind == ev::TOOL_CALL && event.data["call_id"] == "c1")
+        .count();
+    assert_eq!(
+        calls, 1,
+        "relaxing the verdict is a second policy.decided, not a second call"
+    );
     let _ = std::fs::remove_file(&escape);
 }
 
@@ -1692,6 +1780,7 @@ impl Model for StreamingModel {
             usage: Usage {
                 tokens_in: 3,
                 tokens_out: 9,
+                ..Usage::default()
             },
         })
     }
@@ -1772,6 +1861,7 @@ impl Model for StoppingModel {
                 usage: Usage {
                     tokens_in: 1,
                     tokens_out: 1,
+                    ..Usage::default()
                 },
             });
         }
@@ -1786,6 +1876,7 @@ impl Model for StoppingModel {
             usage: Usage {
                 tokens_in: 1,
                 tokens_out: 1,
+                ..Usage::default()
             },
         })
     }
@@ -1936,6 +2027,67 @@ fn a_turn_with_several_tool_calls_replays_every_one_of_them() {
         roles,
         vec!["system", "user", "assistant", "tool", "tool", "assistant"],
         "{roles:?}"
+    );
+}
+
+/// Purpose: A log that names one call twice still replays it once, because a provider rejects a duplicated tool-call id.
+#[test]
+fn a_call_the_log_names_twice_replays_once() {
+    // `/yolo` used to write a second `tool.call` for a relaxed call. Live turns sent
+    // the assistant message once and noticed nothing; a resumed session rebuilt the
+    // message from both events and handed the provider two calls with one id, which
+    // Kimi rejects with `tool call id … is duplicated`. Sessions already written that
+    // way must open, so replay collapses the repeat.
+    let t = Temp::new();
+    let mut log = loong_eventlog::SessionLog::create(&t.log).unwrap();
+    let append = |log: &mut loong_eventlog::SessionLog, kind: &str, data: serde_json::Value| {
+        log.append(kind, data).unwrap();
+    };
+    append(
+        &mut log,
+        gen::event::MESSAGE_APPENDED,
+        serde_json::json!({"role": "user", "text": "build"}),
+    );
+    append(
+        &mut log,
+        gen::event::MESSAGE_APPENDED,
+        serde_json::json!({"role": "assistant", "text": ""}),
+    );
+    for _ in 0..2 {
+        append(
+            &mut log,
+            gen::event::TOOL_CALL,
+            serde_json::json!({"call_id": "c1", "tool": "shell", "args": {"command": "ls"}, "action_class": "out_of_bounds"}),
+        );
+    }
+    append(
+        &mut log,
+        gen::event::TOOL_RESULT,
+        serde_json::json!({"call_id": "c1", "ok": true, "output": "here"}),
+    );
+    drop(log);
+
+    let (model, _seen) = RecordingModel::new(vec![response(vec![], Some("ok"))]);
+    let k = Kernel::open(&t.log, KernelConfig::new(&t.dir), Box::new(model))
+        .expect("a log that repeats a call still opens");
+    let calls: Vec<String> = k
+        .messages()
+        .iter()
+        .filter_map(|message| match message {
+            ChatMessage::Assistant { tool_calls, .. } => Some(
+                tool_calls
+                    .iter()
+                    .map(|c| c.call_id.clone())
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert_eq!(
+        calls,
+        vec!["c1"],
+        "one call, one id, however often the log repeats it"
     );
 }
 
@@ -2720,6 +2872,172 @@ fn a_broken_skill_file_is_fatal() {
     };
     assert!(matches!(err, KernelError::Skills(_)), "{err}");
     assert!(err.to_string().contains("frontmatter"));
+}
+
+/// Purpose: Two model calls in one turn differ only by the exchange appended between them.
+#[test]
+fn the_request_prefix_is_append_only_within_a_turn() {
+    let t = Temp::new();
+    big_file(&t.dir, "readme.txt", 40);
+    let (model, seen) = RecordingModel::new(vec![
+        response(
+            vec![call("c1", "read_file", json!({"path": "readme.txt"}))],
+            None,
+        ),
+        response(vec![], Some("read it")),
+    ]);
+    let mut config = KernelConfig::new(&t.dir);
+    config.context_engine = Some(crate::context_engine::ContextEngineConfig::new(
+        t.dir.join("session.context.db"),
+        t.log.clone(),
+    ));
+    let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+    k.submit("read readme.txt").unwrap();
+
+    let seen = seen.lock().unwrap();
+    assert!(seen.len() >= 2, "the script calls the model twice");
+    let first = &seen[0];
+    let second = &seen[1];
+    assert_eq!(
+        &second[..first.len()],
+        &first[..],
+        "the prefix moved between two steps of one turn"
+    );
+    assert_eq!(
+        second.len(),
+        first.len() + 2,
+        "one assistant call and one tool result are the only additions"
+    );
+}
+
+/// Purpose: The derived budget floors, caps and scales with the model's window.
+#[test]
+fn a_default_budget_is_derived_from_the_window() {
+    assert_eq!(super::compaction::default_budget(1_048_576), 100_000);
+    assert_eq!(super::compaction::default_budget(200_000), 50_000);
+    assert_eq!(super::compaction::default_budget(131_072), 32_768);
+    assert_eq!(super::compaction::default_budget(32_768), 32_000);
+}
+
+/// Purpose: A configured budget is reported and used even when the window would derive another.
+#[test]
+fn an_explicit_budget_wins_over_the_derived_one() {
+    let t = Temp::new();
+    let (model, _seen) =
+        RecordingModel::with_window(vec![response(vec![], Some("ok"))], Some(1_048_576));
+    let mut config = KernelConfig::new(&t.dir);
+    config.budget_tokens = Some(5_000);
+    let k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+    assert_eq!(k.context_explain().budget_tokens, 5_000);
+}
+
+/// Purpose: A window far larger than the derived budget still compacts before the request grows past it.
+#[test]
+fn a_huge_window_still_compacts_at_its_derived_budget() {
+    let t = Temp::new();
+    big_file(&t.dir, "huge.txt", 4_000); // ≈ 40k chars ≈ 10k tokens per read
+    let (model, _seen) = RecordingModel::with_window(
+        vec![
+            response(
+                vec![call("c1", "read_file", json!({"path": "huge.txt"}))],
+                None,
+            ),
+            response(
+                vec![call("c2", "read_file", json!({"path": "huge.txt"}))],
+                None,
+            ),
+            response(
+                vec![call("c3", "read_file", json!({"path": "huge.txt"}))],
+                None,
+            ),
+            response(
+                vec![call("c4", "read_file", json!({"path": "huge.txt"}))],
+                None,
+            ),
+            response(vec![], Some("done")),
+        ],
+        Some(200_000), // derived budget 50k, ceiling 40k
+    );
+    let mut config = KernelConfig::new(&t.dir);
+    config.keep_newest_tokens = 500;
+    let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+    k.submit("read it four times").unwrap();
+    let events = loong_eventlog::replay(&t.log).unwrap().events;
+    assert!(
+        events.iter().any(|e| e.kind == ev::COMPACTION_APPLIED),
+        "a 200k window must still have a reachable ceiling"
+    );
+}
+
+/// Purpose: Tool output older than the keep window is cleared even while the request stays under its ceiling.
+#[test]
+fn tool_output_ages_before_any_ceiling_is_crossed() {
+    let t = Temp::new();
+    big_file(&t.dir, "big.txt", 4_000); // ≈ 40k chars ≈ 10k tokens per read
+    let (model, _seen) = RecordingModel::with_window(
+        vec![
+            response(
+                vec![call("c1", "read_file", json!({"path": "big.txt"}))],
+                None,
+            ),
+            response(
+                vec![call("c2", "read_file", json!({"path": "big.txt"}))],
+                None,
+            ),
+            response(
+                vec![call("c3", "read_file", json!({"path": "big.txt"}))],
+                None,
+            ),
+            response(vec![], Some("done")),
+        ],
+        Some(200_000), // ceiling 40k; 30k of reads stays below it
+    );
+    let mut config = KernelConfig::new(&t.dir);
+    config.keep_newest_tokens = 800;
+    let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+    k.submit("read it three times").unwrap();
+
+    let events = loong_eventlog::replay(&t.log).unwrap().events;
+    let aging: Vec<_> = events
+        .iter()
+        .filter(|e| e.kind == ev::COMPACTION_APPLIED)
+        .collect();
+    assert!(!aging.is_empty(), "an aging event");
+    // Aging runs at every step, so each pass clears at most the output that is
+    // already stale; the total is what matters.
+    let cleared: u64 = aging
+        .iter()
+        .map(|e| e.data["cleared_tool_outputs"].as_u64().unwrap())
+        .sum();
+    assert!(
+        cleared >= 2,
+        "the first two reads are cleared, got {cleared}"
+    );
+    for event in &aging {
+        assert_eq!(event.data["dropped_messages"], 0);
+        assert!(
+            event.data["tokens_after"].as_u64().unwrap()
+                < event.data["tokens_before"].as_u64().unwrap()
+        );
+    }
+}
+
+/// Purpose: A short session under the keep window emits no compaction event.
+#[test]
+fn a_short_session_ages_nothing() {
+    let t = Temp::new();
+    big_file(&t.dir, "small.txt", 40); // ≈ 400 characters
+    let (model, _seen) = RecordingModel::new(vec![
+        response(
+            vec![call("c1", "read_file", json!({"path": "small.txt"}))],
+            None,
+        ),
+        response(vec![], Some("done")),
+    ]);
+    let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+    k.submit("read it once").unwrap();
+    let events = loong_eventlog::replay(&t.log).unwrap().events;
+    assert!(!events.iter().any(|e| e.kind == ev::COMPACTION_APPLIED));
 }
 
 /// Purpose: Compaction clears old tool bodies first and drops no messages when clearing is enough, leaving a marker and the newest output verbatim.

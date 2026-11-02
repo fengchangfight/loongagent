@@ -5,13 +5,37 @@
 //!
 //! # Contract
 //! - **Design:** `docs/design/context-ledger.md` §3–§4, §6.
-//! - **Upstream:** `Kernel::run_inner` calls `refresh_map` and `compact_if_needed`
-//!   every step; `crates/server` reads `context_explain`.
+//! - **Upstream:** `Kernel::run_inner` calls `refresh_memory`、`age_tool_outputs`、`compact_if_needed` and, once per turn, `seat_map`; `crates/server` reads `context_explain`.
 //! - **Downstream:** `Ledger::clear_tool_outputs`, `Ledger::forget`,
 //!   `ContextEngine::refresh` and `ContextEngine::map_text`.
 //! - **Verify:** `cargo test -p loong-kernel turn::tests::compaction_clears_stale_tool_output_before_dropping_anything` · `./scripts/check.sh`.
 
 use super::*;
+
+/// Purpose: The budget a model gets when nobody set one: a quarter of its window, floored at 32k and capped at 100k.
+///
+/// Serves: `Kernel::effective_budget`, so a million-token window is not a licence to grow to a million.
+/// Design: `docs/superpowers/specs/2026-10-28-token-efficiency-design.md` §4.1.
+/// Up: `Kernel::effective_budget` and the turn tests.
+/// Down: no callee; it returns a number.
+/// Verify: `cargo test -p loong-kernel turn::tests::a_default_budget_is_derived_from_the_window`.
+pub(super) fn default_budget(window: u64) -> u64 {
+    (window / 4).clamp(32_000, 100_000)
+}
+
+/// Purpose: The one marker text both clearing paths write into a cleared tool message.
+///
+/// Serves: `Kernel::age_tool_outputs` and `Kernel::splice_cleared`, so message and ledger never disagree.
+/// Design: `docs/design/context-ledger.md` §4.
+/// Up: `Kernel::age_tool_outputs`, `Kernel::splice_cleared` and `Kernel::compact_if_needed`.
+/// Down: no callee; it returns the text.
+/// Verify: `cargo test -p loong-kernel turn::tests::compaction_clears_stale_tool_output_before_dropping_anything`.
+fn marker_for_cleared_output(entry: &crate::ledger::Entry) -> String {
+    format!(
+        "[output of {} cleared to save context — re-run the command if you need it again]",
+        entry.source
+    )
+}
 
 impl Kernel {
     /// Purpose: The wire view of what the next request will carry, and why.
@@ -86,7 +110,7 @@ impl Kernel {
             };
         gen::ContextExplain {
             context_tokens: self.ledger.total_tokens(),
-            budget_tokens: self.ledger.budget().unwrap_or(0),
+            budget_tokens: self.effective_budget().unwrap_or(0),
             messages: self.messages.len() as u64,
             tools: self.tool_specs().len() as u64,
             // Read from the derived index rather than a counter, so a resumed session
@@ -129,28 +153,90 @@ impl Kernel {
         }
     }
 
-    /// Purpose: Put the current L4 map in front of the model, refreshing it in place.
+    /// Purpose: Clear tool output older than the keep window before the request grows, not only at the ceiling.
     ///
-    /// Serves: a map that is always present, always current, and costs one ledger entry.
-    /// Design: `docs/design/context-ledger.md` §6–§7.
-    /// Up: `Kernel::run_inner`, after the stop check and before compaction, at every step.
-    /// Down: `ContextEngine::refresh`, `ContextEngine::map_text`, `Ledger::add`/`replace`.
-    /// Verify: `cargo test -p loong-kernel turn::tests::the_layered_engine_puts_a_map_in_front_of_the_model`.
-    /// Put the current L4 map in front of the model, refreshing it in place.
+    /// Serves: a steady-state context instead of one that climbs until compaction fires.
+    /// Design: `docs/superpowers/specs/2026-10-28-token-efficiency-design.md` §4.2.
+    /// Up: `Kernel::run_inner`, once per step before `compact_if_needed`.
+    /// Down: `Ledger::tool_output_tokens`, `Ledger::clear_tool_outputs` and `Kernel::append`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::tool_output_ages_before_any_ceiling_is_crossed`.
+    pub(super) fn age_tool_outputs(&mut self, events: &mut Vec<u64>) -> Result<(), KernelError> {
+        let keep = self.config.keep_newest_tokens;
+        if self.ledger.tool_output_tokens() <= keep {
+            return Ok(());
+        }
+        let before = self.ledger.total_tokens();
+        let cleared = self
+            .ledger
+            .clear_tool_outputs(keep, marker_for_cleared_output);
+        if cleared.cleared.is_empty() {
+            return Ok(());
+        }
+        self.splice_cleared(&cleared);
+        let after = self.ledger.total_tokens();
+        events.push(self.append(
+            gen::event::COMPACTION_APPLIED,
+            &gen::CompactionApplied {
+                tokens_before: before,
+                tokens_after: after,
+                kept_tokens: keep,
+                cleared_tool_outputs: cleared.cleared.len() as u64,
+                dropped_messages: 0,
+                summary: format!(
+                    "aged {} tool output(s) older than the newest {keep} tokens: {before} -> {after} tokens",
+                    cleared.cleared.len()
+                ),
+            },
+        )?);
+        Ok(())
+    }
+
+    /// Purpose: Put the cleared markers into the live conversation, matching the ledger's entries by id.
     ///
-    /// Placed as its own message rather than folded into the system prompt: the
-    /// system prompt is the operator's text and should not be rewritten on every
-    /// step, while the map is expected to change. The ledger entry is created once
-    /// and then refreshed with [`Ledger::replace`], so a long session has exactly
-    /// one map entry rather than one per step — "why is this in my context?" has one
-    /// answer, not a growing pile of them.
+    /// Serves: both clearing paths, which must leave the same text in the message and the ledger.
+    /// Design: `docs/design/context-ledger.md` §4.
+    /// Up: `Kernel::compact_if_needed` and `Kernel::age_tool_outputs`.
+    /// Down: `Kernel::entry_of` and `ChatMessage::Tool`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::compaction_clears_stale_tool_output_before_dropping_anything`.
+    fn splice_cleared(&mut self, cleared: &crate::ledger::ClearReport) {
+        for entry in &cleared.cleared {
+            if let Some(index) = self.entry_of.iter().position(|id| *id == Some(entry.id)) {
+                let call_id = match &self.messages[index] {
+                    ChatMessage::Tool { call_id, .. } => call_id.clone(),
+                    _ => continue,
+                };
+                self.messages[index] = ChatMessage::Tool {
+                    call_id,
+                    output: marker_for_cleared_output(entry),
+                };
+            }
+        }
+    }
+
+    /// Purpose: Refresh the layered memory's deterministic layers; seating the map is `seat_map`'s job.
     ///
-    /// Does nothing when the engine is off, which is the rollback path.
-    pub(super) fn refresh_map(&mut self) {
+    /// Serves: `Kernel::run_inner`, which keeps the memory current without moving the prompt prefix.
+    /// Design: `docs/superpowers/specs/2026-10-28-token-efficiency-design.md` §4.3.
+    /// Up: `Kernel::run_inner`, once per step and once before the loop.
+    /// Down: `ContextEngine::refresh`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::the_request_prefix_is_append_only_within_a_turn`.
+    pub(super) fn refresh_memory(&mut self) {
+        if let Some(engine) = self.context_engine.as_mut() {
+            engine.refresh();
+        }
+    }
+
+    /// Purpose: Seat the pinned L4 map once per turn and after a clearing pass, so the request prefix does not move between steps.
+    ///
+    /// Serves: a stable prefix for the provider's cache without giving up the map.
+    /// Design: `docs/superpowers/specs/2026-10-28-token-efficiency-design.md` §4.3.
+    /// Up: `Kernel::run_inner`, before the first request and after a clearing pass.
+    /// Down: `ContextEngine::map_text`, `Ledger::replace` and `Ledger::add`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::the_request_prefix_is_append_only_within_a_turn`.
+    pub(super) fn seat_map(&mut self) {
         let Some(engine) = self.context_engine.as_mut() else {
             return;
         };
-        engine.refresh();
         let Some(text) = engine.map_text() else {
             return;
         };
@@ -186,6 +272,19 @@ impl Kernel {
         }
     }
 
+    /// Purpose: The budget the next request is measured against: the person's, or the window's quarter.
+    ///
+    /// Serves: `input_ceiling` and `context_explain`, which must agree on one number.
+    /// Design: `docs/superpowers/specs/2026-10-28-token-efficiency-design.md` §4.1.
+    /// Up: `Kernel::input_ceiling` and `Kernel::context_explain`.
+    /// Down: `Ledger::budget`, `Kernel::current_window` and `default_budget`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::an_explicit_budget_wins_over_the_derived_one`.
+    fn effective_budget(&self) -> Option<u64> {
+        self.ledger
+            .budget()
+            .or_else(|| self.current_window().map(default_budget))
+    }
+
     /// Purpose: How much input one request may carry now: the stricter of the budget and the model window.
     ///
     /// Serves: compaction firing before a provider refuses the prompt.
@@ -208,8 +307,7 @@ impl Kernel {
     /// spend far more than the ceiling in total, and nothing meters that.
     fn input_ceiling(&self) -> Option<u64> {
         let from_budget = self
-            .ledger
-            .budget()
+            .effective_budget()
             .map(|budget| budget.saturating_mul(self.config.compact_at_percent) / 100);
         let from_window = self.current_window().map(|window| {
             // A reserve larger than the window would hold back everything; half the window
@@ -261,27 +359,10 @@ impl Kernel {
         let keep = self.config.keep_newest_tokens.min(ceiling / 2);
 
         // Phase 1: clear stale tool output, oldest first, outside the new window.
-        let cleared = self.ledger.clear_tool_outputs(keep, |entry| {
-            format!(
-                "[output of {} cleared to save context — re-run the command if you need it again]",
-                entry.source
-            )
-        });
-        for entry in &cleared.cleared {
-            if let Some(index) = self.entry_of.iter().position(|id| *id == Some(entry.id)) {
-                let call_id = match &self.messages[index] {
-                    ChatMessage::Tool { call_id, .. } => call_id.clone(),
-                    _ => continue,
-                };
-                self.messages[index] = ChatMessage::Tool {
-                    call_id,
-                    output: format!(
-                        "[output of {} cleared to save context — re-run the command if you need it again]",
-                        entry.source
-                    ),
-                };
-            }
-        }
+        let cleared = self
+            .ledger
+            .clear_tool_outputs(keep, marker_for_cleared_output);
+        self.splice_cleared(&cleared);
 
         // Phase 2: only if still over, drop the oldest whole exchanges — unless the
         // layered engine is on, in which case the exchange must survive: the whole

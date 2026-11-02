@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Protocol schema version (ADR-0002).
-pub const SCHEMA_VERSION: &str = "0.1.0";
+pub const SCHEMA_VERSION: &str = "0.2.0";
 
 /// Monotonic event sequence within a session.
 pub type Seq = u64;
@@ -123,12 +123,26 @@ pub struct PolicyDecided {
     pub rule: String,
 }
 
+/// What one model call cost: the provider's own token counts, its prompt-cache split, and the estimated bill at the price then in force (ADR-0003).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CostRecorded {
     pub profile: String,
+    /// the profile slot that answered, as the model bar names it
+    pub model: String,
+    /// all prompt tokens the provider reported
     pub tokens_in: u64,
+    /// generated tokens, reasoning included
     pub tokens_out: u64,
+    /// prompt tokens billed as cache hits; 0 when the provider reports no cache
+    pub cache_hit_tokens: u64,
+    /// prompt tokens billed as cache misses
+    pub cache_miss_tokens: u64,
+    /// whether the provider reported cache use at all, so 0 hits is not mistaken for no cache
+    pub cache_reported: bool,
+    /// estimated cost in micro-USD; 0 for a local or unpriced model
     pub usd_micros: u64,
+    /// local-free | list-peak | list-off-peak | unknown
+    pub price_basis: String,
 }
 
 /// One hook answered at one lifecycle moment (ADR-0007 §7). Recorded whether or not it changed the outcome, so the guard's behaviour is auditable.

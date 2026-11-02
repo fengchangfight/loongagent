@@ -23,6 +23,7 @@
 
 pub mod commands;
 pub mod mention;
+pub mod spend;
 use loong_tui::{Client, Transport};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout};
@@ -30,6 +31,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
+use spend::{CostEntry, Spend};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 
 /// Purpose: The intents the screen sends to the worker: a prompt, a decision answer, and the read-only refreshes.
@@ -73,7 +75,7 @@ pub enum ToWorker {
 /// Serves: `App::drain`, the only reader, and `worker::spawn_worker` and the tests' `fed` helper, which write them.
 /// Design: `docs/design/surfaces.md` §3; `docs/design/sessions-lineage.md` §1 for the replayed past.
 /// Up: `worker::spawn_worker` sends every variant; the tests in this crate send them directly through a channel.
-/// Down: `App::drain` folds them into `lines`, `pending`, `context`, `models`, `folded` and `finished`.
+/// Down: `App::drain` folds them into `lines`, `pending`, `context`, `models`, `spend`, `folded` and `finished`.
 /// Verify: `cargo test -p loong-tui-app`.
 /// What the worker reports back.
 #[derive(Debug, Clone, PartialEq)]
@@ -111,6 +113,8 @@ pub enum FromWorker {
         at: usize,
         lines: Vec<String>,
     },
+    /// One `cost.recorded` event, so the session total grows as the turn runs.
+    Cost(CostEntry),
     Failed(String),
 }
 
@@ -606,6 +610,8 @@ pub struct App {
     /// Which models a background check has confirmed, by name. Absent means nobody has
     /// checked yet, which is not the same as failed.
     pub health: std::collections::BTreeMap<String, bool>,
+    /// What this session has spent so far, summed from its `cost.recorded` events.
+    pub spend: Spend,
     pub quit: bool,
 }
 
@@ -658,6 +664,7 @@ impl App {
             selected: String::new(),
             last_prompt: None,
             health: std::collections::BTreeMap::new(),
+            spend: Spend::default(),
             quit: false,
         }
     }
@@ -1740,6 +1747,13 @@ impl App {
                 self.cursor = 0;
                 Some(self.resend_last_prompt())
             }
+            // `/cost`: the session's own bill, summed from what the providers reported.
+            "/cost" => {
+                self.input.clear();
+                self.cursor = 0;
+                self.push_lines(self.spend.summary());
+                Some(Action::None)
+            }
             _ => None,
         }
     }
@@ -2125,6 +2139,7 @@ impl App {
                     self.approval = None;
                     self.context = None;
                     self.error = None;
+                    self.spend = Spend::default();
                     self.streaming.clear();
                     self.scroll = 0;
                     self.finished = None;
@@ -2161,6 +2176,9 @@ impl App {
                     }
                 }
                 Ok(FromWorker::Fold { at, lines }) => self.remember_fold(at, lines),
+                // The bill comes from the event, not from a transcript line: a model
+                // switch mid-turn is already priced by the time `/cost` is asked.
+                Ok(FromWorker::Cost(entry)) => self.spend.add(entry),
                 Ok(FromWorker::Lines(lines)) => {
                     // The finished message supersedes the fragments on screen, and it
                     // is the only one of the two that exists in the log.
@@ -2902,9 +2920,9 @@ impl App {
         } else {
             (frame.area(), None)
         };
-        // Two fixed bars and one page: the status on top, the keys at the bottom, and
-        // everything else — the mark, the conversation, the question, the menus, the
-        // prompt — in between, scrolling as one document.
+        // Two fixed bars and one page: the status on top, the keys at the bottom. The
+        // page scrolls between them; the question, menus, prompt and usage row are
+        // pinned just above the keys.
         let areas = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -2978,7 +2996,18 @@ impl App {
         } else {
             self.picker_rows() + 2
         };
-        let bottom_height = decision_height + menu_height + picker_height + input_rows as u16 + 2;
+        // The session's usage is one fixed row under the prompt, drawn only once there is
+        // a call to report. It is part of the bottom stack, so the page's scroll never
+        // moves it, and it does not take the prompt title's room from a turn's status.
+        let usage = self.spend.usage_line().map(|text| {
+            Line::from(vec![
+                Span::styled(" 用量  ", MARK_QUIET),
+                Span::styled(text, Style::default().fg(MARK_INK)),
+            ])
+        });
+        let usage_height = usage.is_some() as u16;
+        let bottom_height =
+            decision_height + menu_height + picker_height + input_rows as u16 + 2 + usage_height;
         let split = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -3061,12 +3090,15 @@ impl App {
         }
         frame.render_widget(Paragraph::new(page), view);
 
-        // The bottom stack: the question, then the menus, then the prompt — the answer
-        // nearest the line it is typed into.
+        // The bottom stack: the question, then the menus, then the prompt, then the usage
+        // row — the answer nearest the line it is typed into, the session's bill below it.
         let mut tail = decision;
         tail.extend(menu);
         tail.extend(picker);
         tail.extend(input);
+        if let Some(usage) = usage {
+            tail.push(usage);
+        }
         frame.render_widget(Paragraph::new(tail), bottom);
 
         // The prompt does not scroll, so the caret is wherever the prompt is.

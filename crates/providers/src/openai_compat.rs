@@ -265,18 +265,7 @@ impl OpenAiCompat {
             }
         }
 
-        let usage = Usage {
-            tokens_in: value
-                .get("usage")
-                .and_then(|u| u.get("prompt_tokens"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0),
-            tokens_out: value
-                .get("usage")
-                .and_then(|u| u.get("completion_tokens"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0),
-        };
+        let usage = usage_from(&value, Usage::default());
 
         Ok(CompletionResponse {
             text,
@@ -403,10 +392,7 @@ impl Model for OpenAiCompat {
         // between "the provider said this was a tool call" and "the model printed JSON
         // and the provider passed it through as prose".
         let mut finish_reason: Option<String> = None;
-        let mut usage = Usage {
-            tokens_in: 0,
-            tokens_out: 0,
-        };
+        let mut usage = Usage::default();
 
         http::post_sse(
             &endpoint,
@@ -417,18 +403,8 @@ impl Model for OpenAiCompat {
                 let Ok(chunk) = serde_json::from_str::<Value>(data) else {
                     return; // a keep-alive or an event we do not understand
                 };
-                if let Some(u) = chunk.get("usage") {
-                    usage = Usage {
-                        tokens_in: u
-                            .get("prompt_tokens")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(usage.tokens_in),
-                        tokens_out: u
-                            .get("completion_tokens")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(usage.tokens_out),
-                    };
-                }
+                // A chunk without `usage` leaves the last reported counts alone.
+                usage = usage_from(&chunk, usage);
                 let Some(choice) = chunk.get("choices").and_then(|c| c.get(0)) else {
                     return;
                 };
@@ -578,6 +554,55 @@ impl Model for OpenAiCompat {
     }
 }
 
+/// Read one reply's `usage` object, keeping whatever it does not restate.
+///
+/// Two cache shapes are in the wild: DeepSeek reports `prompt_cache_hit_tokens`
+/// and `prompt_cache_miss_tokens`, while OpenAI-style servers report only
+/// `prompt_tokens_details.cached_tokens`. A provider that reports neither leaves
+/// both cache fields `None`, and the caller prices the prompt as all-miss.
+///
+/// Purpose: Turn one reply's `usage` object into `Usage`, preserving unreported fields.
+/// Serves: `OpenAiCompat::parse_response` and the streaming assembler.
+/// Design: `docs/design/cost-accounting.md` §1.
+/// Up: `parse_response` and `complete_streaming` call it for every reply or final chunk.
+/// Down: `Usage` and `Value`; no other callee.
+/// Verify: `cargo test -p loong-providers`.
+fn usage_from(value: &Value, fallback: Usage) -> Usage {
+    let Some(usage) = value.get("usage") else {
+        return fallback;
+    };
+    let hit = usage
+        .get("prompt_cache_hit_tokens")
+        .or_else(|| {
+            usage
+                .get("prompt_tokens_details")
+                .and_then(|details| details.get("cached_tokens"))
+        })
+        .and_then(Value::as_u64);
+    let miss = usage
+        .get("prompt_cache_miss_tokens")
+        .and_then(Value::as_u64);
+    // A provider may report the cache split without `prompt_tokens`; the split is
+    // still the whole prompt, so it can stand in for it.
+    let tokens_in = usage
+        .get("prompt_tokens")
+        .and_then(Value::as_u64)
+        .or_else(|| match (hit, miss) {
+            (Some(hit), Some(miss)) => Some(hit + miss),
+            _ => None,
+        })
+        .unwrap_or(fallback.tokens_in);
+    Usage {
+        tokens_in,
+        tokens_out: usage
+            .get("completion_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(fallback.tokens_out),
+        cache_hit_tokens: hit.or(fallback.cache_hit_tokens),
+        cache_miss_tokens: miss.or(fallback.cache_miss_tokens),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -631,7 +656,8 @@ mod tests {
             response.usage,
             Usage {
                 tokens_in: 31,
-                tokens_out: 7
+                tokens_out: 7,
+                ..Usage::default()
             }
         );
 
@@ -761,7 +787,8 @@ mod tests {
             response.usage,
             Usage {
                 tokens_in: 7,
-                tokens_out: 3
+                tokens_out: 3,
+                ..Usage::default()
             }
         );
 
@@ -771,6 +798,55 @@ mod tests {
         let body: Value = serde_json::from_str(body).unwrap();
         assert_eq!(body["stream"], true);
         assert_eq!(body["stream_options"]["include_usage"], true);
+    }
+
+    /// Purpose: Pin both prompt-cache shapes: DeepSeek's hit/miss pair and OpenAI's `cached_tokens`.
+    #[test]
+    fn a_reply_can_report_its_prompt_cache_split() {
+        let (base, server) = fake_server(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n\
+             {\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"ok\"}}],\
+             \"usage\":{\"prompt_tokens\":100,\"completion_tokens\":10,\
+             \"prompt_cache_hit_tokens\":80,\"prompt_cache_miss_tokens\":20}}",
+        );
+        let mut model = OpenAiCompat::new(&base, "deepseek-flash", None);
+        let response = model
+            .complete(&CompletionRequest {
+                messages: vec![],
+                tools: vec![],
+            })
+            .unwrap();
+        assert_eq!(response.usage.cache_hit_tokens, Some(80));
+        assert_eq!(response.usage.cache_miss_tokens, Some(20));
+        assert_eq!(response.usage.cache_hit(), 80);
+        assert_eq!(response.usage.cache_miss(), 20);
+        assert!(response.usage.cache_reported());
+        server.join().unwrap();
+
+        // OpenAI-style servers report one number and leave the miss to arithmetic.
+        let (base, server) = loong_http::testing::fake_sse_server(vec![
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n".to_string(),
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\
+             \"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3,\
+             \"prompt_tokens_details\":{\"cached_tokens\":5}}}\n\n"
+                .to_string(),
+            "data: [DONE]\n\n".to_string(),
+        ]);
+        let mut model = OpenAiCompat::new(&base, "m", None);
+        let response = model
+            .complete_streaming(
+                &CompletionRequest {
+                    messages: vec![],
+                    tools: vec![],
+                },
+                &mut |_| {},
+            )
+            .unwrap();
+        assert_eq!(response.usage.cache_hit_tokens, Some(5));
+        assert_eq!(response.usage.cache_miss_tokens, None);
+        assert_eq!(response.usage.cache_hit(), 5);
+        assert_eq!(response.usage.cache_miss(), 2, "7 prompt tokens, 5 cached");
+        server.join().unwrap();
     }
 
     /// Purpose: Pin that tool arguments split across chunks are rejoined before parsing.

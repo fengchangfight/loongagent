@@ -44,6 +44,7 @@ pub mod catalog;
 mod layer;
 mod merge;
 mod paths;
+pub mod pricing;
 mod profile;
 mod secret;
 #[cfg(test)]

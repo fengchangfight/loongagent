@@ -183,8 +183,10 @@ Consequences, stated so they are not discovered later:
 
 ### 4.4 What the person sees
 
-- **Status line:** cumulative session `in / out` and cache-hit ratio, from the
-  same `cost.recorded` stream the spend summary already consumes.
+- **Usage row:** a fixed row under the prompt shows cumulative session
+  `in / out` and the cache-hit ratio, from the same `cost.recorded` stream the
+  spend summary consumes. It does not scroll, and it stays while a turn runs.
+  The per-call `cost.recorded` line is no longer drawn in the transcript.
 - **`/cost`:** unchanged sections plus one line for the cache ratio; unpriced
   models keep "价格未知" and show tokens first.
 - **F2 context panel:** `budget_tokens` is the effective budget from §4.1, and

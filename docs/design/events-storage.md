@@ -31,7 +31,7 @@ structs; a notification that is not `transient = true`; and a wire name containi
 Generated files are never edited by hand. `scripts/gen-schema.py --check` fails the gate when
 they are stale, and `./scripts/check.sh` runs it.
 
-`SCHEMA_VERSION` is `"0.1.0"`. The file declares 17 event kinds, 9 methods and one
+`SCHEMA_VERSION` is `"0.2.0"`. The file declares 17 event kinds, 9 methods and one
 notification (`model.delta`). Adding a type, a method or an event is one entry here; the Rust
 and TypeScript sides are regenerated, not hand-maintained.
 
@@ -152,7 +152,10 @@ the whole chain named; a cycle is refused with the session that repeated, though
 Either way a child without its prefix is not merely unexplained, it is inoperable.
 `Kernel::replay_history` replays the ancestor prefix up to `parent_seq`, then the session's own
 events. Only inherited user messages keep a label (`user from <ancestor>`); replayed assistant
-and tool entries are ordinary history. `loongagent delete` removes the whole branch for the same
+and tool entries are ordinary history. One assistant turn absorbs the `tool.call` events that
+follow it, and a call id that the turn names more than once is kept once: a log written by an
+older `/yolo` recorded the relaxed call twice, and replaying both would send a provider two
+calls with one id. `loongagent delete` removes the whole branch for the same
 reason: a surviving child would refuse to open.
 
 ## 6. The envelope and `ignorable`

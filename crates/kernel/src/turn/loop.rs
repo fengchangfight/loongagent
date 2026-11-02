@@ -311,7 +311,7 @@ impl Kernel {
     /// approval leaves no half-executed state.
     /// Design: `docs/design/kernel-loop.md` §2, §4 and §6.
     /// Up: `Kernel::run`.
-    /// Down: `Kernel::interrupted`, `Kernel::refresh_map`,
+    /// Down: `Kernel::interrupted`, `Kernel::refresh_memory`, `Kernel::seat_map`,
     /// `Kernel::compact_if_needed`, `Kernel::tool_specs`, `Router::select`,
     /// `Model::complete_streaming`, `Kernel::record_model_selected`,
     /// `Kernel::record_cost`, `Kernel::record_assistant`, `Kernel::dispatch`,
@@ -331,6 +331,11 @@ impl Kernel {
         // then quoted the call in its summary must not be asked to write it again.
         let mut ran: Vec<String> = Vec::new();
         let mut nudged = false;
+        // The L4 map is seated once, before the first request of the turn. Seating it
+        // inside the loop rewrites a block that sits before the conversation, which
+        // invalidates every provider cache entry after it (spec §4.3).
+        self.refresh_memory();
+        self.seat_map();
         for step in 1..=self.config.max_steps {
             // A permissions change asked for from outside is applied here, before the
             // step's model call and its tool decisions: the question this step would
@@ -354,8 +359,13 @@ impl Kernel {
                     interrupted: true,
                 });
             }
-            self.refresh_map();
+            self.refresh_memory();
+            let before_clear = events.len();
+            self.age_tool_outputs(&mut events)?;
             self.compact_if_needed(&mut events)?;
+            if events.len() > before_clear {
+                self.seat_map();
+            }
             let request = CompletionRequest {
                 messages: self.messages.clone(),
                 tools: self.tool_specs(),
@@ -612,15 +622,9 @@ impl Kernel {
                         "tool": tool_name,
                     }),
                 )?);
-                events.push(self.append(
-                    gen::event::TOOL_CALL,
-                    &gen::ToolCall {
-                        call_id: call.call_id.clone(),
-                        tool: tool_name.clone(),
-                        args: call.args.clone(),
-                        action_class: class,
-                    },
-                )?);
+                // No second `tool.call`: the call was recorded above, and a repeat
+                // would hand a resumed session two calls with one id, which strict
+                // providers reject as duplicated.
                 let (ok, output) = self.execute(&call.tool, &call.args);
                 events.push(self.record_tool_result(&call.call_id, ok, &output)?);
                 self.fire_hooks(

@@ -11,7 +11,7 @@
 # Field `type` accepts: string | bool | i64 | u64 | json | <TypeName>
 # (`list = true` wraps it in an array, `optional = true` makes it optional.)
 
-schema_version = "0.1.0"
+schema_version = "0.2.0"
 
 # ---------------------------------------------------------------- primitives
 
@@ -154,11 +154,17 @@ fields = [
 [[types]]
 name = "CostRecorded"
 kind = "struct"
+doc = "What one model call cost: the provider's own token counts, its prompt-cache split, and the estimated bill at the price then in force (ADR-0003)."
 fields = [
   { name = "profile", type = "string" },
-  { name = "tokens_in", type = "u64" },
-  { name = "tokens_out", type = "u64" },
-  { name = "usd_micros", type = "u64" },
+  { name = "model", type = "string", doc = "the profile slot that answered, as the model bar names it" },
+  { name = "tokens_in", type = "u64", doc = "all prompt tokens the provider reported" },
+  { name = "tokens_out", type = "u64", doc = "generated tokens, reasoning included" },
+  { name = "cache_hit_tokens", type = "u64", doc = "prompt tokens billed as cache hits; 0 when the provider reports no cache" },
+  { name = "cache_miss_tokens", type = "u64", doc = "prompt tokens billed as cache misses" },
+  { name = "cache_reported", type = "bool", doc = "whether the provider reported cache use at all, so 0 hits is not mistaken for no cache" },
+  { name = "usd_micros", type = "u64", doc = "estimated cost in micro-USD; 0 for a local or unpriced model" },
+  { name = "price_basis", type = "string", doc = "local-free | list-peak | list-off-peak | unknown" },
 ]
 
 [[types]]

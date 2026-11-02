@@ -37,6 +37,9 @@ pub fn run<T: Transport + Send + 'static>(
     // nothing (ADR-0009: the log is the record, and this is a read of it).
     let mut client = client;
     let history = client.replay().unwrap_or_else(|_| Vec::new());
+    // The bill the session already ran up. It came with the same replay read, so a
+    // resumed session does not start at zero and then pretend its past was free.
+    let costs = client.costs();
     // The full text of the folds that history shows, so opening one is a local act from the
     // first key press: a turn that is already running owns the connection, and the view
     // should not have to wait for it to read its own transcript.
@@ -51,6 +54,7 @@ pub fn run<T: Transport + Send + 'static>(
         .count();
     let (to_worker, from_worker) = spawn_worker(client, shown);
     let mut app = App::new(session, schema);
+    app.spend = Spend::from_events(&costs);
     app.interrupt = interrupt;
     app.set_permissions = permissions;
     if let Some(list) = models {

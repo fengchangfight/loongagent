@@ -62,7 +62,8 @@ One iteration is **one model completion**, counted by
    `model.selected` through `Kernel::record_model_selected`.
 5. **Model call.** `Model::complete_streaming(&request, on_delta)`. A provider
    error becomes `KernelError::Model` and ends the turn. On success,
-   `Kernel::record_cost` appends `cost.recorded`.
+   `Kernel::record_cost` appends `cost.recorded`; the provider's cache counts and
+   the price fields are owned by [cost-accounting.md](cost-accounting.md).
 6. **No tool calls.** If the reply is text only, the loop first offers one nudge
    (§4). Otherwise `Kernel::record_assistant` appends `message.appended` and the
    turn returns the text.
@@ -90,10 +91,12 @@ Inside one registry tool call the events normally run: `tool.call`, any
 `post_tool` `hook.fired`. The PDP decides before `tool.call`; the hooks may tighten
 the verdict, so `policy.decided` records the stricter one. An ask fires the
 `permission_requested` hooks and then writes `approval.requested` in place of the
-result. A `/yolo` ask records the relaxation as a second `policy.decided` and a
-second `tool.call` before it executes. A `recall` call is the exception: it is
-answered from the session's own record and skips both the registry and the PDP, so
-it writes `tool.call` then `tool.result`.
+result. A `/yolo` ask records the relaxation as a second `policy.decided` before
+it executes; it does not write a second `tool.call`, because one call is one event
+and a repeat would hand a resumed session two calls with one id, which strict
+providers reject. A `recall` call is the exception: it is answered from the
+session's own record and skips both the registry and the PDP, so it writes
+`tool.call` then `tool.result`.
 
 Hooks can tighten a ruling but never widen one (`tighten` in `turn/hooks.rs`), so
 the verdict in `policy.decided` is the stricter of the PDP's and the hooks'.

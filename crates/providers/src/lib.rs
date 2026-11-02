@@ -92,13 +92,57 @@ pub struct ToolCallRequest {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 /// Purpose: Token counts a provider reported for one exchange.
 /// Serves: `CompletionResponse` and the ledger's accounting.
-/// Design: `docs/design/config-routing.md` §8.
+/// Design: `docs/design/cost-accounting.md` §1; `docs/design/config-routing.md` §8.
 /// Up: `OpenAiCompat` parses it from the reply's `usage`; tests construct it.
-/// Down: the kernel's token totals.
+/// Down: the kernel's `cost.recorded` event and the TUI's session totals.
 /// Verify: `cargo test -p loong-providers`.
 pub struct Usage {
+    /// All prompt tokens the provider reported, cached or not.
     pub tokens_in: u64,
+    /// Generated tokens, reasoning tokens included.
     pub tokens_out: u64,
+    /// Prompt tokens the provider billed as cache hits. `None` means it did not
+    /// report cache use, which is not the same as reporting zero.
+    pub cache_hit_tokens: Option<u64>,
+    /// Prompt tokens the provider billed as cache misses.
+    pub cache_miss_tokens: Option<u64>,
+}
+
+impl Usage {
+    /// Purpose: Whether the provider said anything about prompt-cache use.
+    /// Serves: `Usage::cache_hit`, `Usage::cache_miss` and the cost event's `cache_reported`.
+    /// Design: `docs/design/cost-accounting.md` §1.
+    /// Up: `OpenAiCompat` builds `Usage`; the kernel reads the answer.
+    /// Down: the two optional cache fields.
+    /// Verify: `cargo test -p loong-providers`.
+    pub fn cache_reported(&self) -> bool {
+        self.cache_hit_tokens.is_some() || self.cache_miss_tokens.is_some()
+    }
+
+    /// Purpose: The prompt tokens that were cache hits, as a number that never exceeds `tokens_in`.
+    /// Serves: the cost event and the TUI's cache-hit rate.
+    /// Design: `docs/design/cost-accounting.md` §1.
+    /// Up: `Kernel::record_cost` and the TUI's `CostEntry`.
+    /// Down: the optional cache fields and `tokens_in`.
+    /// Verify: `cargo test -p loong-providers`.
+    pub fn cache_hit(&self) -> u64 {
+        match (self.cache_hit_tokens, self.cache_miss_tokens) {
+            (Some(hit), _) => hit.min(self.tokens_in),
+            // A provider that reports only misses still tells us the hit half.
+            (None, Some(miss)) => self.tokens_in.saturating_sub(miss),
+            (None, None) => 0,
+        }
+    }
+
+    /// Purpose: The prompt tokens that were cache misses; hit and miss always add up to `tokens_in`.
+    /// Serves: the cost event and the price estimate.
+    /// Design: `docs/design/cost-accounting.md` §1.
+    /// Up: `Kernel::record_cost` and `loong_config::pricing::estimate`.
+    /// Down: `Usage::cache_hit` and `tokens_in`.
+    /// Verify: `cargo test -p loong-providers`.
+    pub fn cache_miss(&self) -> u64 {
+        self.tokens_in.saturating_sub(self.cache_hit())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -268,6 +312,7 @@ impl ScriptedModel {
             usage: Usage {
                 tokens_in: 1,
                 tokens_out: 1,
+                ..Usage::default()
             },
         }])
     }
@@ -345,6 +390,7 @@ mod tests {
             usage: Usage {
                 tokens_in: 10,
                 tokens_out: 2,
+                ..Usage::default()
             },
         }]);
         let req = CompletionRequest {

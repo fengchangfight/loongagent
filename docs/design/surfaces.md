@@ -70,8 +70,8 @@ because the client already saw the `tool.call` and `approval.requested`.
 lives on a worker thread and the screen talks to it over channels; the key handler and the
 drawing are driven from ratatui's `TestBackend` in the tests. The full-screen surface adds only
 presentation and intents: the model picker, the context panel, fold/expand of long tool output,
-`/yolo`, `/new`, and interrupt. The interruption is a signal to the server process, not a
-protocol method.
+`/yolo`, `/new`, and interrupt (a signal to the server process, not a protocol method).
+A paste arrives as one block; enter during a turn refuses a new prompt; `/yolo` still reaches the control channel.
 
 The slash commands that belong to the screen are offered while they are typed: a `/` opens a
 menu above the input, narrowed by the prefix, one line saying what each command does. ↑/↓ walks

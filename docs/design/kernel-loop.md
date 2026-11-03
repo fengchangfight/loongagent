@@ -179,7 +179,10 @@ appends `approval.requested` with an id (`appr-N`) and returns `Dispatch::Pendin
 (plus the `post_tool` hooks) or records a failed result saying the user denied it.
 It then calls `Kernel::run` again, so the model sees the decision as ordinary
 history. An id mismatch, or an answer with nothing pending, is
-`KernelError::OutOfOrder`. The resume keeps the turn's `steps_taken` and stall
+`KernelError::OutOfOrder`. An id is unique in the **log**, not just in the
+process: `Kernel::build` seeds `Kernel.approvals` from the index's count of
+`approval.requested`, so a resumed session continues at `appr-10` instead of
+issuing a second `appr-1`. The resume keeps the turn's `steps_taken` and stall
 state, and it does not reseat the L4 map: `Kernel.map_seated` is already true, so
 the request starts from the bytes the parked one ended with and the provider's
 cache still matches.

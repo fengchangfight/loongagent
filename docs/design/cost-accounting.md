@@ -100,10 +100,13 @@ runs, not a discount: no vendor bill exists to estimate.
 Two surfaces read the same events:
 
 - **The usage row.** A fixed row under the prompt shows the session so far as
-  `用量  入 1,053 · 出 5 · 缓存 80%`. The cache part disappears when no call
-  reported it, and the row is absent until the first call. It does not scroll
-  with the page and it stays while a turn runs, so the running total is always
-  in the same place. The per-call `cost.recorded` event is not drawn in the
+  `用量  入 1,053 · 出 5 · 缓存 80% · 上下文 62%`. The cache part disappears when
+  no call reported it, and the row is absent until the first call. The context
+  share is the last call's `tokens_in` over the effective budget from the most
+  recent `ContextExplain`; when no budget is known the row shows tokens
+  (`上下文 62,000`) rather than a percentage with no denominator. It does not
+  scroll with the page and it stays while a turn runs, so the running total is
+  always in the same place. The per-call `cost.recorded` event is not drawn in the
   transcript: one line per model call crowded the conversation, and the event
   is still in the log for `/cost` and a resumed session to read.
 - **`/cost`.** The command sums every `cost.recorded` event the session has:
@@ -113,9 +116,10 @@ Two surfaces read the same events:
   past bill rather than zero; a new session resets them.
 
 The sum is accumulated in `loong-tui-app/src/spend.rs` from the events, never
-from rendered text or from the ledger's estimate. The ledger's
-`context_tokens` remains a separate number: it estimates what the next request
-will carry, not what the last one cost.
+from rendered text or from the ledger's estimate. The context share in the row is
+the last call's `tokens_in`, not the ledger's `context_tokens`: the provider's
+count is what the window actually carried, while the ledger estimates the next
+request before it is sent.
 
 ## 5. Limits worth stating
 

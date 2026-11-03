@@ -46,6 +46,10 @@ dropped. It carries `tokens_before`, `tokens_after`, `kept_tokens`,
 `cleared_tool_outputs`, `dropped_messages` and `summary`. A single long turn with
 nothing stale can stay over budget without an event.
 
+Three passes inside five steps end the turn with a compaction-thrash note: the keep
+window is smaller than one step's output, and repeating the pass only re-bills the
+provider. The note names `budget_tokens` and `keep_newest_tokens`.
+
 ## 5. What is reversible
 
 Clearing is recoverable from the log's `tool.result` (re-run, or `recall` with the

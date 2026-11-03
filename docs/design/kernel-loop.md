@@ -129,6 +129,13 @@ after N steps without progress (stall guard): …") and end the turn. The trigge
 are constants in `turn.rs`; none of them is a configuration key, because each is a
 symptom with no legitimate use at volume.
 
+A clearing pass can loop without repeating a call: it frees a little, the next
+step refills it, and the pass fires again. `Kernel.compaction_steps` records the
+steps on which `age_tool_outputs` or `compact_if_needed` appended an event; three
+passes inside a five-step window end the turn with a *compaction thrash* note
+instead of paying for the same clear-then-refill again. The note names the two
+keys to raise, `budget_tokens` and `keep_newest_tokens`.
+
 The leading `System` messages — the operator's prompt, the instruction files and
 the L4 map — are not exchanges. `Kernel::drop_oldest_exchange` skips every one of
 them before it looks for a user turn, so compaction removes history and never the
@@ -203,6 +210,7 @@ turn. The end-to-end flow is [turn-lifecycle.md](flows/turn-lifecycle.md)
 | **Asked** | `approval.requested`, plus `tool.result` "not run" for the rest of that assistant message | `pending_approval`, no `final_text` |
 | **Stopped** | `turn.interrupted` | `interrupted: true`, no `final_text`, `steps` = calls already finished |
 | **Stalled** | An assistant `message.appended` with the stall-guard note | `final_text` = the note, `steps` = the calls already taken |
+| **Compaction thrash** | An assistant `message.appended` with the thrash note, after three `compaction.applied` events inside five steps | `final_text` = the note, `steps` = the calls already taken |
 | **Step limit** | An assistant `message.appended` with the limit note | `final_text` = the note, `steps` = `max_steps` |
 | **Refused before the loop** | `skill.invoked` with an `error`, or a tightening `hook.fired` from `user_prompt_submit` | `refused`, `steps` = 0 |
 | **Error** | The events written before the failure are still in the log | `Err(KernelError)`: `Model`, `Log`, `Encode`, or `OutOfOrder` |

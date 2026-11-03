@@ -133,7 +133,7 @@ prompt and usage row stay put, so what is typed and what the session spent stay 
     ╚═════════༻ ᛭ ༺═════════╝
     ┌ 输入 ─────────────────┐   ← fixed: the page scrolls above it
     └───────────────────────┘
-     用量  入 1,053 · 出 5 · 缓存 80%
+     用量  入 1,053 · 出 5 · 缓存 80% · 上下文 62%
 
 The mark frames the character 龍 — a 16×16 bitmap in half blocks, not a glyph, which at
 this size is one square of foreground — and the wordmark: five rows of block letters from

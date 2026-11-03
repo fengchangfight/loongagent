@@ -131,10 +131,11 @@ symptom with no legitimate use at volume.
 
 A clearing pass can loop without repeating a call: it frees a little, the next
 step refills it, and the pass fires again. `Kernel.compaction_steps` records the
-steps on which `age_tool_outputs` or `compact_if_needed` appended an event; three
-passes inside a five-step window end the turn with a *compaction thrash* note
-instead of paying for the same clear-then-refill again. The note names the two
-keys to raise, `budget_tokens` and `keep_newest_tokens`.
+step and the tokens each pass freed; three passes inside a five-step window **that
+each freed under 5% or left the context over its ceiling** end the turn with a
+*compaction thrash* note instead of paying for the same clear-then-refill again.
+A pass that frees real room is ordinary aging, even three times in a row. The note
+names the two keys to raise, `budget_tokens` and `keep_newest_tokens`.
 
 The leading `System` messages — the operator's prompt, the instruction files and
 the L4 map — are not exchanges. `Kernel::drop_oldest_exchange` skips every one of

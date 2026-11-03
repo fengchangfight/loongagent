@@ -238,6 +238,15 @@ pub(super) const COMPACTION_THRASH_PASSES: usize = 3;
 /// keep up.
 pub(super) const COMPACTION_THRASH_STEPS: usize = 4;
 
+/// How much a pass must free, as a percentage of the context before it, to count as
+/// keeping up even when the context stays over its ceiling.
+///
+/// A pass that frees five percent or more is real work: the next request may still be
+/// large, but the pass is not the problem. A pass that frees less than this (or leaves
+/// the context over the ceiling) is the shape of a loop, and three of those inside five
+/// steps end the turn.
+pub(super) const COMPACTION_THRASH_FREE_PERCENT: u64 = 5;
+
 /// How much room to leave in the model's window for its own answer, by default.
 ///
 /// A request carries the prompt **and** the completion, and both fit in one window. Fill it
@@ -552,10 +561,11 @@ pub struct Kernel {
     /// Distinct throwaway paths written this turn (`write_file` under a temp directory).
     /// New paths defeat the equal-arguments rule, so this counts the churn directly.
     scratch_writes: std::collections::HashSet<String>,
-    /// The steps in this turn whose clearing pass appended a `compaction.applied`.
-    /// Three inside a five-step window mean the pass cannot keep up; the last three are
-    /// all the guard needs.
-    compaction_steps: std::collections::VecDeque<usize>,
+    /// The steps in this turn whose clearing pass appended a `compaction.applied`, with
+    /// the tokens before and after. Three passes inside a five-step window that each free
+    /// little (or leave the context over its ceiling) mean the pass cannot keep up; the
+    /// last three are all the guard needs.
+    compaction_steps: std::collections::VecDeque<(usize, u64, u64)>,
 }
 impl Kernel {
     /// Purpose: Fire the hooks registered for an event, record every answer, and report the aggregate verdict.

@@ -425,14 +425,20 @@ impl Kernel {
                 });
             }
             self.refresh_memory();
-            let before_clear = events.len();
-            self.age_tool_outputs(&mut events)?;
-            self.compact_if_needed(&mut events)?;
-            if events.len() > before_clear {
-                // A pass that fires three times inside five steps is not keeping up: the
-                // keep window is smaller than one step's output. Stop before the next
-                // model call rather than paying for the same clear-then-refill loop.
-                self.note_compaction(step);
+            // Both passes report what they freed. If both fired in one step they are one
+            // pass for the thrash window: the earlier `before` and the later `after`.
+            let aged = self.age_tool_outputs(&mut events)?;
+            let compacted = self.compact_if_needed(&mut events)?;
+            let pass = match (aged, compacted) {
+                (Some((before, _)), Some((_, after))) => Some((before, after)),
+                (Some(pass), None) | (None, Some(pass)) => Some(pass),
+                (None, None) => None,
+            };
+            if let Some((before, after)) = pass {
+                // Three passes inside five steps are only thrash when they are not keeping
+                // up: each freed under five percent, or left the context over its ceiling.
+                // Legitimate aging at a busy step must not stop the turn.
+                self.note_compaction(step, before, after);
                 if let Some(reason) = self.compaction_thrash() {
                     let note = format!(
                         "stopped after {} steps without progress (compaction thrash): {reason} — \
@@ -686,36 +692,50 @@ impl Kernel {
     /// Serves: the compaction-thrash check, which asks whether three passes fell inside a
     /// five-step window.
     /// Contract: `turn/loop.rs` compaction guard.
-    fn note_compaction(&mut self, step: usize) {
+    fn note_compaction(&mut self, step: usize, before: u64, after: u64) {
         if self.compaction_steps.len() == COMPACTION_THRASH_PASSES {
             self.compaction_steps.pop_front();
         }
-        self.compaction_steps.push_back(step);
+        self.compaction_steps.push_back((step, before, after));
     }
 
     /// Purpose: Why compaction is thrashing, if it is.
     ///
     /// Serves: the stop that keeps a clear-then-refill loop from spending the rest of the
-    /// budget; three passes inside five steps means the keep window is below one step's
-    /// output.
+    /// budget. Three passes inside five steps are only thrash when each freed under five
+    /// percent of the context or left it over its ceiling; passes that free real room are
+    /// ordinary aging at a busy step.
     /// Design: `docs/superpowers/specs/2026-11-03-context-visibility-and-compaction-thrash-design.md` §4.2.
     /// Up: `Kernel::run_inner`, after a clearing pass appended an event.
-    /// Down: `Kernel.compaction_steps`, `COMPACTION_THRASH_PASSES` and
-    /// `COMPACTION_THRASH_STEPS`.
+    /// Down: `Kernel.compaction_steps`, `COMPACTION_THRASH_PASSES`,
+    /// `COMPACTION_THRASH_STEPS`, `COMPACTION_THRASH_FREE_PERCENT` and
+    /// `Kernel::input_ceiling`.
     /// Verify: `cargo test -p loong-kernel turn::tests::compaction_thrash_stops_the_turn`.
     fn compaction_thrash(&self) -> Option<String> {
         if self.compaction_steps.len() < COMPACTION_THRASH_PASSES {
             return None;
         }
-        let first = *self.compaction_steps.front()?;
-        let last = *self.compaction_steps.back()?;
+        let first = self.compaction_steps.front()?.0;
+        let last = self.compaction_steps.back()?.0;
         if last.saturating_sub(first) > COMPACTION_THRASH_STEPS {
             return None;
         }
+        let ceiling = self.input_ceiling();
+        let ineffective = |(_, before, after): &(usize, u64, u64)| {
+            let freed = before.saturating_sub(*after);
+            let little =
+                freed.saturating_mul(100) < before.saturating_mul(COMPACTION_THRASH_FREE_PERCENT);
+            let still_over = ceiling.map(|ceiling| *after >= ceiling).unwrap_or(false);
+            little || still_over
+        };
+        if !self.compaction_steps.iter().all(ineffective) {
+            return None;
+        }
         Some(format!(
-            "clearing fired {} times within {} steps",
+            "clearing fired {} times within {} steps, and each freed less than {}% or left the context over its ceiling",
             self.compaction_steps.len(),
-            last - first + 1
+            last - first + 1,
+            COMPACTION_THRASH_FREE_PERCENT
         ))
     }
 

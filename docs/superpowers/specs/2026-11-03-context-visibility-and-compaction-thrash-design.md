@@ -25,7 +25,7 @@ After the budget, aging and turn-budget work, two gaps remain visible in a real 
 | 1 | The usage row shows the last request's context share when a budget is known | `Spend::usage_line` test: `上下文 62%` for 62k of a 100k budget |
 | 2 | Without a useful budget it shows tokens instead of a made-up percentage | `Spend::usage_line` test: `上下文 62,000`, no `%` |
 | 3 | The number is live during a turn, not only after it | The worker sends `RefreshContext` at startup; each `cost.recorded` updates `last_request_tokens` |
-| 4 | Three clearing passes within five steps stop the turn with a note | Kernel test: a turn reading a big file each step with a tiny keep window stops at the third pass |
+| 4 | Three ineffective clearing passes within five steps stop the turn with a note | Kernel test: passes that leave the context over its ceiling stop; passes that free real room do not |
 | 5 | The guard resets with the turn, like the other stall state | `Kernel::begin_turn` clears `compaction_steps`; the next turn starts with an empty window |
 | 6 | Ordinary sessions are unchanged | Existing suites pass; no event kind or config key changes |
 
@@ -66,33 +66,37 @@ row is still readable.
 
 ### 4.2 Compaction thrash
 
-`Kernel` gains `compaction_steps: VecDeque<usize>` (at most three entries),
-reset by `Kernel::begin_turn`. After `age_tool_outputs` and `compact_if_needed`
-append anything, `run_inner` records the current step. When the window holds
-three passes and the newest minus the oldest is at most four steps (three
-passes within five steps), the turn ends before the next model call with:
+`Kernel` gains `compaction_steps: VecDeque<(step, before, after)>` (at most
+three entries), reset by `Kernel::begin_turn`. After `age_tool_outputs` and
+`compact_if_needed` append anything, `run_inner` records the step and what the
+pass freed. A pass is **ineffective** when it freed less than `COMPACTION_THRASH_FREE_PERCENT`
+(5%) of the context before it, or when the context is still at or over its
+ceiling after it. When the window holds three passes, they all fall inside five
+steps, and every one of them is ineffective, the turn ends before the next model
+call with:
 
 ```
 stopped after N steps without progress (compaction thrash): clearing fired 3 times
-within 5 steps — raise budget_tokens or keep_newest_tokens, or split the task
+within 4 steps, and each freed less than 5% or left the context over its ceiling —
+raise `budget_tokens` or `keep_newest_tokens`, or split the task
 ```
 
 The note goes through `record_assistant`, exactly like the step-limit note, so
 every surface already renders it. The compaction events that preceded it are
 already in the log, which is what justifies the stop.
 
-Why three-in-five and not a freed-bytes ratio: aging clears whatever is outside
-the keep window, so a legitimate pass can free almost nothing when the newest
-output is itself large. The frequency is the symptom: three passes in five steps
-means the keep window is smaller than one step's output, and no amount of
-repeating will catch up.
+Frequency alone would be wrong: a busy step can age three times and free real
+room each time, which is ordinary housekeeping. The freed ratio is what separates
+"the pass is working" from "the pass is chasing its tail", and the ceiling check
+covers the case where even a large clear cannot get under the budget because the
+newest output alone is larger than it.
 
 ## 5. Verification
 
 | Check | Where |
 |---|---|
 | Percentage with a budget, tokens without | `cargo test -p loong-tui-app spend::tests::the_usage_line_reports_the_context_share` |
-| Three passes in five steps stop the turn | `cargo test -p loong-kernel turn::tests::compaction_thrash_stops_the_turn` |
+| Three ineffective passes in five steps stop; effective passes do not | `cargo test -p loong-kernel turn::tests::compaction_thrash_stops_the_turn` · `turn::tests::a_compaction_that_frees_room_is_not_thrash` |
 | The whole gate | `./scripts/check.sh` |
 
 ## 6. Risks

@@ -799,12 +799,12 @@ fn scratch_script_churn_stops_as_stalled() {
     assert!(note.contains("throwaway files"), "{note}");
 }
 
-/// Purpose: Three clearing passes within five steps stop the turn, because the keep window is smaller than one step's output.
+/// Purpose: Three passing clears that each leave the context over its ceiling stop the turn, because the newest output alone exceeds the budget.
 #[test]
 fn compaction_thrash_stops_the_turn() {
     let t = Temp::new();
     for round in 1..=6 {
-        big_file(&t.dir, &format!("big{round}.txt"), 4_000); // ≈ 10k tokens each
+        big_file(&t.dir, &format!("big{round}.txt"), 4_000); // ≈ 23k tokens each
     }
     let model = ScriptedModel::new(
         (0..6)
@@ -821,13 +821,49 @@ fn compaction_thrash_stops_the_turn() {
             .collect(),
     );
     let mut config = KernelConfig::new(&t.dir);
-    config.keep_newest_tokens = 100; // every step's output is far larger
+    // Ceiling = 30k * 80% = 24k, below one read: every pass keeps the newest output and
+    // still leaves the request over the ceiling. That is the thrash the guard names.
+    config.budget_tokens = Some(30_000);
+    config.keep_newest_tokens = 20_000;
     config.max_steps = 20;
     let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
     let out = k.submit("read them").unwrap();
     assert_eq!(out.steps, 4, "the fifth request was never sent: {out:?}");
     let note = out.final_text.expect("the guard says why");
     assert!(note.contains("compaction thrash"), "{note}");
+    assert!(note.contains("over its ceiling"), "{note}");
+}
+
+/// Purpose: Three clears that free real room are ordinary aging, even when they land inside five steps.
+#[test]
+fn a_compaction_that_frees_room_is_not_thrash() {
+    let t = Temp::new();
+    for round in 1..=6 {
+        big_file(&t.dir, &format!("big{round}.txt"), 4_000); // ≈ 23k tokens each
+    }
+    let model = ScriptedModel::new(
+        (0..6)
+            .map(|round| {
+                response(
+                    vec![call(
+                        &format!("c{round}"),
+                        "read_file",
+                        json!({"path": format!("big{}.txt", round + 1)}),
+                    )],
+                    None,
+                )
+            })
+            .collect(),
+    );
+    let mut config = KernelConfig::new(&t.dir);
+    // No ceiling: each pass keeps the newest read and clears the previous one, freeing
+    // roughly half the context. Three in a row is healthy aging, not a stall.
+    config.keep_newest_tokens = 100;
+    config.max_steps = 20;
+    let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+    let out = k.submit("read them").unwrap();
+    assert_eq!(out.final_text.as_deref(), Some("done"), "{out:?}");
+    assert_eq!(out.steps, 7, "every read ran: {out:?}");
 }
 
 /// Purpose: When one call in a batched message asks, the rest still get `tool.result` saying they did not run, because a provider rejects two calls with one result.

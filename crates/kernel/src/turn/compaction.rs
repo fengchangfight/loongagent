@@ -160,17 +160,20 @@ impl Kernel {
     /// Up: `Kernel::run_inner`, once per step before `compact_if_needed`.
     /// Down: `Ledger::tool_output_tokens`, `Ledger::clear_tool_outputs` and `Kernel::append`.
     /// Verify: `cargo test -p loong-kernel turn::tests::tool_output_ages_before_any_ceiling_is_crossed`.
-    pub(super) fn age_tool_outputs(&mut self, events: &mut Vec<u64>) -> Result<(), KernelError> {
+    pub(super) fn age_tool_outputs(
+        &mut self,
+        events: &mut Vec<u64>,
+    ) -> Result<Option<(u64, u64)>, KernelError> {
         let keep = self.config.keep_newest_tokens;
         if self.ledger.tool_output_tokens() <= keep {
-            return Ok(());
+            return Ok(None);
         }
         let before = self.ledger.total_tokens();
         let cleared = self
             .ledger
             .clear_tool_outputs(keep, marker_for_cleared_output);
         if cleared.cleared.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         self.splice_cleared(&cleared);
         let after = self.ledger.total_tokens();
@@ -188,7 +191,7 @@ impl Kernel {
                 ),
             },
         )?);
-        Ok(())
+        Ok(Some((before, after)))
     }
 
     /// Purpose: Put the cleared markers into the live conversation, matching the ledger's entries by id.
@@ -313,7 +316,7 @@ impl Kernel {
     /// of the prompt about to be sent, kept history included. Twenty calls in one turn are
     /// twenty measurements of a context, not twenty terms in a sum — a session is free to
     /// spend far more than the ceiling in total, and nothing meters that.
-    fn input_ceiling(&self) -> Option<u64> {
+    pub(super) fn input_ceiling(&self) -> Option<u64> {
         let from_budget = self
             .effective_budget()
             .map(|budget| budget.saturating_mul(self.config.compact_at_percent) / 100);
@@ -356,13 +359,16 @@ impl Kernel {
     /// exchanges dropped, and never across a tool pair: an assistant's tool call
     /// keeps its answer, because a conversation that splits them is invalid to
     /// every provider.
-    pub(super) fn compact_if_needed(&mut self, events: &mut Vec<u64>) -> Result<(), KernelError> {
+    pub(super) fn compact_if_needed(
+        &mut self,
+        events: &mut Vec<u64>,
+    ) -> Result<Option<(u64, u64)>, KernelError> {
         let Some(ceiling) = self.input_ceiling() else {
-            return Ok(());
+            return Ok(None);
         };
         let before = self.ledger.total_tokens();
         if before <= ceiling {
-            return Ok(());
+            return Ok(None);
         }
         let keep = self.config.keep_newest_tokens.min(ceiling / 2);
 
@@ -390,7 +396,7 @@ impl Kernel {
         // A compaction that could not free anything (a single long turn, nothing
         // stale) is not an event: `compaction.applied` means the context changed.
         if cleared.cleared.is_empty() && dropped_messages == 0 {
-            return Ok(());
+            return Ok(None);
         }
 
         let after = self.ledger.total_tokens();
@@ -408,7 +414,7 @@ impl Kernel {
                 ),
             },
         )?);
-        Ok(())
+        Ok(Some((before, after)))
     }
 
     /// Purpose: Drop the oldest exchange and forget its ledger entries, returning how many messages went.

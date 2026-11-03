@@ -53,6 +53,10 @@ pub fn run<T: Transport + Send + 'static>(
         .filter(|line| loong_tui::is_fold_marker(line))
         .count();
     let (to_worker, from_worker) = spawn_worker(client, shown);
+    // The usage row needs the effective budget before the first turn ends. The worker
+    // refreshes the context after every command, but a fresh session has not run one
+    // yet; asking once here is what makes the first turn's percentage appear at all.
+    let _ = to_worker.send(ToWorker::RefreshContext);
     let mut app = App::new(session, schema);
     app.spend = Spend::from_events(&costs);
     app.interrupt = interrupt;

@@ -2999,12 +2999,20 @@ impl App {
         // The session's usage is one fixed row under the prompt, drawn only once there is
         // a call to report. It is part of the bottom stack, so the page's scroll never
         // moves it, and it does not take the prompt title's room from a turn's status.
-        let usage = self.spend.usage_line().map(|text| {
-            Line::from(vec![
-                Span::styled(" 用量  ", MARK_QUIET),
-                Span::styled(text, Style::default().fg(MARK_INK)),
-            ])
-        });
+        let usage = self
+            .spend
+            .usage_line(
+                self.context
+                    .as_ref()
+                    .map(|context| context.budget_tokens)
+                    .filter(|budget| *budget > 0),
+            )
+            .map(|text| {
+                Line::from(vec![
+                    Span::styled(" 用量  ", MARK_QUIET),
+                    Span::styled(text, Style::default().fg(MARK_INK)),
+                ])
+            });
         let usage_height = usage.is_some() as u16;
         let bottom_height =
             decision_height + menu_height + picker_height + input_rows as u16 + 2 + usage_height;

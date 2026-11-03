@@ -162,6 +162,9 @@ pub struct Spend {
     pub cache_hit: u64,
     pub cache_checked_in: u64,
     pub usd_micros: u64,
+    /// The input size of the most recent call: the provider's own count of the prompt it
+    /// was just sent, and therefore how full the context was on that call.
+    pub last_request_tokens: u64,
     /// Calls whose model had no published price; the total is a lower bound.
     pub unpriced_calls: u64,
     pub models: BTreeMap<String, ModelSpend>,
@@ -181,6 +184,7 @@ impl Spend {
         self.cache_hit += entry.cache_hit_tokens;
         self.cache_checked_in += entry.cache_checked_tokens;
         self.usd_micros += entry.usd_micros;
+        self.last_request_tokens = entry.tokens_in;
         if entry.price_basis == "unknown" {
             self.unpriced_calls += 1;
         }
@@ -215,14 +219,14 @@ impl Spend {
             .then(|| self.cache_hit as f64 * 100.0 / self.cache_checked_in as f64)
     }
 
-    /// Purpose: The fixed usage row's text: tokens in/out and the cache rate, or nothing before the first call.
+    /// Purpose: The fixed usage row's text: tokens in/out, the cache rate and the context share, or nothing before the first call.
     ///
     /// Serves: `App::draw`, so the session's usage is visible without typing `/cost`.
-    /// Design: `docs/design/cost-accounting.md` §4; `docs/superpowers/specs/2026-10-28-token-efficiency-design.md` §4.4.
-    /// Up: `crates/tui-app/src/lib.rs`'s `App::draw`.
-    /// Down: `Spend::cache_rate` and `format_tokens`.
-    /// Verify: `cargo test -p loong-tui-app spend::tests::the_usage_line_reports_tokens_and_the_cache_rate`.
-    pub fn usage_line(&self) -> Option<String> {
+    /// Design: `docs/design/cost-accounting.md` §4; `docs/superpowers/specs/2026-10-28-token-efficiency-design.md` §4.4; `docs/superpowers/specs/2026-11-03-context-visibility-and-compaction-thrash-design.md` §4.1.
+    /// Up: `crates/tui-app/src/lib.rs`'s `App::draw`, with the effective budget from the last `ContextExplain`.
+    /// Down: `Spend::cache_rate`, `format_tokens` and `last_request_tokens`.
+    /// Verify: `cargo test -p loong-tui-app spend::tests::the_usage_line_reports_the_context_share`.
+    pub fn usage_line(&self, budget: Option<u64>) -> Option<String> {
         if self.calls == 0 {
             return None;
         }
@@ -233,6 +237,21 @@ impl Spend {
         );
         if let Some(rate) = self.cache_rate() {
             line.push_str(&format!(" · 缓存 {rate:.0}%"));
+        }
+        // The last request's input is the provider's own measure of how full the window
+        // was. Without a budget there is no honest denominator, so show tokens rather
+        // than invent a percentage.
+        if self.last_request_tokens > 0 {
+            match budget.filter(|budget| *budget > 0) {
+                Some(budget) => {
+                    let percent = self.last_request_tokens as f64 * 100.0 / budget as f64;
+                    line.push_str(&format!(" · 上下文 {percent:.0}%"));
+                }
+                None => line.push_str(&format!(
+                    " · 上下文 {}",
+                    format_tokens(self.last_request_tokens)
+                )),
+            }
         }
         Some(line)
     }
@@ -321,11 +340,29 @@ mod tests {
     #[test]
     fn the_usage_line_reports_tokens_and_the_cache_rate() {
         let mut spend = Spend::default();
-        assert!(spend.usage_line().is_none(), "no call, no row");
+        assert!(spend.usage_line(None).is_none(), "no call, no row");
         spend.add(CostEntry::from_event(&cost_event("k3", "unknown", Some(700), 0)).unwrap());
-        let line = spend.usage_line().expect("a row after one call");
+        let line = spend.usage_line(None).expect("a row after one call");
         assert!(line.contains("入"), "{line}");
         assert!(line.contains("缓存 70%"), "{line}");
+    }
+
+    /// Purpose: The usage row reports the last request's share of the budget, and plain tokens without one.
+    #[test]
+    fn the_usage_line_reports_the_context_share() {
+        let mut spend = Spend::default();
+        spend.add(CostEntry::from_event(&cost_event("k3", "unknown", Some(700), 0)).unwrap());
+        let line = spend
+            .usage_line(Some(100_000))
+            .expect("a row after one call");
+        assert!(line.contains("上下文 1%"), "{line}");
+
+        let line = spend.usage_line(None).expect("a row after one call");
+        assert!(line.ends_with("上下文 1,000"), "{line}");
+        assert!(!line.contains("上下文 1%"), "no made-up percentage: {line}");
+
+        let line = spend.usage_line(Some(0)).expect("a row after one call");
+        assert!(line.contains("上下文 1,000"), "{line}");
     }
 
     /// Purpose: Pin that a total sums calls, counts cache only where it was reported, and keeps models apart.

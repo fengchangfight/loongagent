@@ -123,7 +123,7 @@ step limit is a guard against a model that spins; it is not the cost limit —
 compaction and the token budget are.
 
 Spinning is also caught earlier, by `Kernel::stall_reason`: three identical calls
-in a row, five consecutive failed results, or five distinct throwaway files
+in a row, four consecutive failed results, or five distinct throwaway files
 written under a temp directory record one assistant `message.appended` ("stopped
 after N steps without progress (stall guard): …") and end the turn. The triggers
 are constants in `turn.rs`; none of them is a configuration key, because each is a

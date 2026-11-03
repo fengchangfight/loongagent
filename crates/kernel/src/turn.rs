@@ -209,9 +209,11 @@ pub(super) const STALL_REPEAT_CALLS: usize = 3;
 
 /// How many consecutive failed tool results mean the model is not making progress.
 ///
-/// A single failure is information: the model reads the error and changes approach. Five
-/// in a row is a loop that costs a step each time without changing the facts.
-pub(super) const STALL_FAILURES: usize = 5;
+/// A single failure is information: the model reads the error and changes approach. Four
+/// in a row is a loop that costs a step each time without changing the facts; the real
+/// session this guard was written from reached exactly four while fighting an unavailable
+/// browser, and every further call repeated the same failure.
+pub(super) const STALL_FAILURES: usize = 4;
 
 /// How many distinct throwaway files a turn may write under a temp directory.
 ///

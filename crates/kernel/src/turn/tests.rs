@@ -701,7 +701,7 @@ fn a_repeated_call_stops_as_stalled() {
     assert!(note.contains("same read_file call"), "{note}");
 }
 
-/// Purpose: Five consecutive failed tool results stop the turn, without needing identical calls.
+/// Purpose: Four consecutive failed tool results stop the turn, without needing identical calls.
 #[test]
 fn a_run_of_failed_calls_stops_as_stalled() {
     let t = Temp::new();

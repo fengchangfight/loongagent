@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- **Exact values:** `STALL_REPEAT_CALLS = 3`, `STALL_FAILURES = 5`, `STALL_SCRATCH_WRITES = 5`, `DEFAULT_MAX_STEPS = 50`.
+- **Exact values:** `STALL_REPEAT_CALLS = 3`, `STALL_FAILURES = 4`, `STALL_SCRATCH_WRITES = 5`, `DEFAULT_MAX_STEPS = 50`.
 - **No schema change, no new config key.** The stall note is an assistant `message.appended`; the step-limit note keeps its shape.
 - **Contracts:** every new `fn`/`struct` carries `Purpose:` plus `Serves`, `Design`, `Up`, `Down`, `Verify`; every touched file updates its module contract if a new caller or callee appears.
 - **Gates:** `cargo test -p loong-kernel` green per task; `./scripts/check.sh` green before the final commit.

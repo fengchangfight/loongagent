@@ -28,9 +28,10 @@ Four mechanisms produced the number:
    per *turn*. Nine approvals plus `/yolo` split one user turn into ten runs: the
    turn took 159 model calls while the person was told “100 steps”.
 2. **Nothing notices a model that repeats itself.** The Chrome phase ran 13
-   near-identical launch/`cdp.js` commands and ten of them failed; the repro phase
-   wrote 17 throwaway scripts under `.tmp/`. Neither pattern is a protocol error,
-   so the loop treated every call as new work.
+   near-identical launch/`cdp.js` commands, ten of them failed, and four failed in
+   a row with no successful call between; the repro phase wrote 17 throwaway
+   scripts under `.tmp/`. Neither pattern is a protocol error, so the loop treated
+   every call as new work.
 3. **An approval resume rewrites the L4 map before the conversation.** `run_inner`
    calls `refresh_memory` + `seat_map` at the start of every run. The map sits
    before the conversation, so its new text invalidates every provider cache entry
@@ -90,7 +91,7 @@ boundary, before the next model call, so a tool that started finishes:
 | Constant | Value | Trigger |
 |---|---|---|
 | `STALL_REPEAT_CALLS` | 3 | the last three dispatched calls have the same tool and the same canonical JSON arguments |
-| `STALL_FAILURES` | 5 | the last five recorded tool results are `ok: false` |
+| `STALL_FAILURES` | 4 | the last four recorded tool results are `ok: false` |
 | `STALL_SCRATCH_WRITES` | 5 | five distinct files were written in this turn under a `.tmp` component or the system temp directory |
 
 The third exists because the repro phase wrote new paths (`repro1.js`,

@@ -18,7 +18,7 @@ proposed by rules, memory, MCP servers, skills and retrieval, and the kernel
 appends them. In the code that is not an API the proposer calls. Every function
 that pushes a `ChatMessage` into a live conversation — `record_user`,
 `record_assistant`, `record_tool_result`, `seat_system_prompt`,
-`seat_instructions`, `refresh_map` — adds its entry in the same call, and the
+`seat_instructions`, `seat_map` — adds its entry in the same call, and the
 replay path rebuilds the same pairs from the log. §6 names the two blocks still
 outside that lockstep; the proposal door ADR-0006 describes for out-of-kernel
 contributors does not exist yet.
@@ -30,7 +30,7 @@ flowchart LR
     subgraph who["Who proposes the block — kernel code today"]
         P1["user / assistant / tool result<br/>record_user · record_assistant · record_tool_result"]
         P2["system prompt + skill catalogue<br/>seat_system_prompt"]
-        P3["L4 global map<br/>refresh_map"]
+        P3["L4 global map<br/>seat_map"]
         P4["AGENTS.md instruction blocks<br/>seat_instructions"]
     end
     subgraph led["Ledger — the account (crates/kernel/src/ledger.rs)"]
@@ -74,7 +74,7 @@ a type that forbids a seventh writer.
 | `SystemPrompt` | 0 — last to go | `seat_system_prompt` | `system` |
 | `Tools` | 30 | nothing yet | — |
 | `Rules` | 40 | `seat_instructions`, pinned | `AGENTS.md`, `AGENTS.local.md` |
-| `CognitiveMap` | 45 | `refresh_map`, after the first `Ledger::add` and then `Ledger::replace` | `context-engine:L4` |
+| `CognitiveMap` | 45 | `seat_map`, after the first `Ledger::add` and then `Ledger::replace` | `context-engine:L4` |
 | `Memory` | 50 | nothing yet | — |
 | `McpTools` | 70 | nothing yet | — |
 | `Retrieval` | 80 | nothing yet — `Kernel::recall_tool` deliberately does not add one (§5) | — |

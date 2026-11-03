@@ -43,31 +43,41 @@ callback.
 engine (`ContextEngine::set_foreground_busy`), calls `Kernel::run_inner`, and
 clears the flag on every return path. `Kernel::run_inner` is the loop itself.
 
-One iteration is **one model completion**, counted by
-`for step in 1..=self.config.max_steps`:
+One iteration is **one model completion**. The budget is the turn's, not the
+run's: `Kernel.steps_taken` is reset by `Kernel::begin_turn` (a new `submit`) and
+preserved by `respond_to_approval` (the same turn), so the loop counts
+`steps_taken + 1 ..= max_steps`:
 
 1. **Stop check.** If `Kernel::interrupted` is set, append `turn.interrupted` and
    return at once. The check is at the step boundary, not inside a tool, so a tool
    that has begun finishes.
-2. **Context preparation.** `Kernel::refresh_map` refreshes the layered L4 map in
-   place when that feature is on. `Kernel::compact_if_needed` clears stale tool
-   output; when the layered engine is off it also drops the oldest exchanges. It
-   appends `compaction.applied` only when something changed.
-3. **Request.** `CompletionRequest { messages: self.messages.clone(), tools:
+2. **Stall check.** `Kernel::stall_reason` reports three patterns — the same call
+   three times in a row, five failed tool results in a row, or five distinct
+   throwaway files written under a temp directory. When it fires the loop appends
+   one assistant note and returns; §4 owns the rule.
+3. **Context preparation.** `Kernel::refresh_memory` refreshes the layered
+   memory's deterministic layers when the engine is on; `Kernel::age_tool_outputs`
+   clears stale tool output and `Kernel::compact_if_needed` drops exchanges (only
+   with the engine off). Either clearing path appends `compaction.applied` when it
+   changed something, and then `Kernel::seat_map` puts the L4 map back. Without a
+   clearing pass the map is seated once per turn, before the first request: the
+   block sits before the conversation, so moving it would invalidate the
+   provider's whole cache.
+4. **Request.** `CompletionRequest { messages: self.messages.clone(), tools:
    self.tool_specs() }`. `Kernel::tool_specs` adds `recall` only when there is a
    memory behind it.
-4. **Route.** `Router::select` receives `Facts { context_tokens:
+5. **Route.** `Router::select` receives `Facts { context_tokens:
    self.ledger.total_tokens(), step }`. A rule may choose a model; a name this
    session does not have falls back to `selected_model`. A change appends
    `model.selected` through `Kernel::record_model_selected`.
-5. **Model call.** `Model::complete_streaming(&request, on_delta)`. A provider
+6. **Model call.** `Model::complete_streaming(&request, on_delta)`. A provider
    error becomes `KernelError::Model` and ends the turn. On success,
    `Kernel::record_cost` appends `cost.recorded`; the provider's cache counts and
    the price fields are owned by [cost-accounting.md](cost-accounting.md).
-6. **No tool calls.** If the reply is text only, the loop first offers one nudge
+7. **No tool calls.** If the reply is text only, the loop first offers one nudge
    (§4). Otherwise `Kernel::record_assistant` appends `message.appended` and the
    turn returns the text.
-7. **Tool calls.** The loop records the assistant message once, then calls
+8. **Tool calls.** The loop records the assistant message once, then calls
    `Kernel::dispatch` for each call in order. A dispatch that parks the turn returns
    `Dispatch::Pending`; the remaining calls in the same message are answered with
    `tool.result` events saying they did not run, because a provider requires one
@@ -83,7 +93,7 @@ If the loop completes every step without an answer, it appends one assistant
 |---|---|---|
 | **Model call** | `Kernel::run_inner` → `Model::complete_streaming` | Sends `Kernel.messages` plus the tool specs. Streaming deltas are a preview: they are not logged, not ledgered, and do not change the outcome. |
 | **Tool call** | `Kernel::dispatch` → `Pdp::decide` → `Kernel::execute` | The PDP returns allow / ask / deny plus the rule. `Kernel::execute` is the PEP: it builds an `ExecContext` from `Kernel.config.cwd` and `Kernel.confinement`, then calls the `Tool` in `Kernel.tools`. |
-| **Ledger append** | `Kernel::record_user`, `Kernel::record_assistant`, `Kernel::record_tool_result` | Each adds a `Ledger` entry *and* pushes the matching `ChatMessage`. That lockstep is what makes `Kernel.messages` the ledger's view — with the one exception in §4. The system prompt, the instruction files and the L4 map are seated the same way by `Kernel::seat_system_prompt`, `Kernel::seat_instructions` and `Kernel::refresh_map`. `Kernel::compact_if_needed` is the only code that drops messages or clears tool output; the leading system blocks are pinned, and the map is refreshed in place. |
+| **Ledger append** | `Kernel::record_user`, `Kernel::record_assistant`, `Kernel::record_tool_result` | Each adds a `Ledger` entry *and* pushes the matching `ChatMessage`. That lockstep is what makes `Kernel.messages` the ledger's view — with the one exception in §4. The system prompt, the instruction files and the L4 map are seated the same way by `Kernel::seat_system_prompt`, `Kernel::seat_instructions` and `Kernel::seat_map`. `Kernel::compact_if_needed` is the only code that drops messages or clears tool output; the leading system blocks are pinned, and the map is replaced in place. |
 | **Event append** | `Kernel::append` | Writes to `SessionLog`, mirrors the event into the derived `Index` (a failure marks `index_stale` rather than failing the turn), and calls the live `event_sink`. Every event the loop emits goes through it. |
 
 Inside one registry tool call the events normally run: `tool.call`, any
@@ -104,11 +114,20 @@ the verdict in `policy.decided` is the stricter of the PDP's and the hooks'.
 ## 4. The step budget and the nudge
 
 A step is a model completion, not a tool call: read, edit, run, fix is four steps.
-`DEFAULT_MAX_STEPS` is 100. `KernelConfig.max_steps` is capped by the
+`DEFAULT_MAX_STEPS` is 50. `KernelConfig.max_steps` is capped by the
 configuration's `max_steps` with a plain `min` when the kernel is built, and
 `steps_or_unlimited` maps a configured `0` to `usize::MAX`, meaning no limit. The
+budget belongs to the **turn**: `Kernel.steps_taken` is reset by a new `submit`,
+not by an approval resume, so a turn that asks twice still spends one budget. The
 step limit is a guard against a model that spins; it is not the cost limit —
 compaction and the token budget are.
+
+Spinning is also caught earlier, by `Kernel::stall_reason`: three identical calls
+in a row, five consecutive failed results, or five distinct throwaway files
+written under a temp directory record one assistant `message.appended` ("stopped
+after N steps without progress (stall guard): …") and end the turn. The triggers
+are constants in `turn.rs`; none of them is a configuration key, because each is a
+symptom with no legitimate use at volume.
 
 The leading `System` messages — the operator's prompt, the instruction files and
 the L4 map — are not exchanges. `Kernel::drop_oldest_exchange` skips every one of
@@ -153,7 +172,10 @@ appends `approval.requested` with an id (`appr-N`) and returns `Dispatch::Pendin
 (plus the `post_tool` hooks) or records a failed result saying the user denied it.
 It then calls `Kernel::run` again, so the model sees the decision as ordinary
 history. An id mismatch, or an answer with nothing pending, is
-`KernelError::OutOfOrder`.
+`KernelError::OutOfOrder`. The resume keeps the turn's `steps_taken` and stall
+state, and it does not reseat the L4 map: `Kernel.map_seated` is already true, so
+the request starts from the bytes the parked one ended with and the provider's
+cache still matches.
 
 **`/yolo`.** `Kernel::set_auto_approve` records `permissions.relaxed` and flips
 `Kernel.auto_approve`. The ask arm then executes instead of parking and records
@@ -180,6 +202,7 @@ turn. The end-to-end flow is [turn-lifecycle.md](flows/turn-lifecycle.md)
 | **Answered** | The final assistant `message.appended` | `final_text`, `steps` = the step that answered |
 | **Asked** | `approval.requested`, plus `tool.result` "not run" for the rest of that assistant message | `pending_approval`, no `final_text` |
 | **Stopped** | `turn.interrupted` | `interrupted: true`, no `final_text`, `steps` = calls already finished |
+| **Stalled** | An assistant `message.appended` with the stall-guard note | `final_text` = the note, `steps` = the calls already taken |
 | **Step limit** | An assistant `message.appended` with the limit note | `final_text` = the note, `steps` = `max_steps` |
 | **Refused before the loop** | `skill.invoked` with an `error`, or a tightening `hook.fired` from `user_prompt_submit` | `refused`, `steps` = 0 |
 | **Error** | The events written before the failure are still in the log | `Err(KernelError)`: `Model`, `Log`, `Encode`, or `OutOfOrder` |

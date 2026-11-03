@@ -32,9 +32,9 @@ returns 0 and stops.
 
 ## 3. The engine's digests and map
 
-`refresh_map` does the deterministic `Store::sync`, `Store::digest_pending` and
-`Store::digest_domains`, then replaces the L4 map in place (`Ledger::replace`, no
-event). The model half, `Store::synthesize_window`, runs on the worker in idle windows,
+`refresh_memory` does the deterministic `Store::sync`, `Store::digest_pending` and
+`Store::digest_domains`; `seat_map` replaces the L4 map in place (`Ledger::replace`,
+no event) once per turn and after a clearing pass. The model half, `Store::synthesize_window`, runs on the worker in idle windows,
 never on the turn's path. With the engine on the original stays reachable through the
 derived store and `recall`. The store methods are `crates/context/src/`; the
 engine-on rule is [context-ledger.md](../context-ledger.md) §4; the L4 map is §6.
@@ -57,7 +57,7 @@ The full reversibility table is context-ledger §7.
 
 ```mermaid
 flowchart TD
-    A["step boundary: refresh_map, then compact_if_needed"] --> B{"total_tokens > input_ceiling()?"}
+    A["step boundary: refresh_memory, then compact_if_needed"] --> B{"total_tokens > input_ceiling()?"}
     B -- no --> Z["nothing happens"]
     B -- yes --> K["keep = keep_newest_tokens.min(ceiling / 2)"]
     K --> C["clear_tool_outputs: History + tool: only, outside the newest keep tokens"]

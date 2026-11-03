@@ -18,9 +18,11 @@ are owned by [kernel-loop.md](../kernel-loop.md); the tool gate by
    the user `message.appended` through `Kernel::record_user`, and runs the
    `user_prompt_submit` hooks (`hook.fired`). A tightening hook refuses the turn
    before any model call.
-2. **Context.** At each step `run_inner` checks the stop flag (`turn.interrupted`),
-   calls `refresh_map` when the engine is on (no event), then `compact_if_needed`
-   (`compaction.applied` only when it changed something).
+2. **Context.** At each step `run_inner` checks the stop flag (`turn.interrupted`)
+   and the stall guard (a note, then the turn ends), calls `refresh_memory` when
+   the engine is on (no event), ages tool output and calls `compact_if_needed`
+   (`compaction.applied` only when it changed something). The L4 map is seated once
+   per turn, not on a resume: moving it would invalidate the provider's cache.
 3. **Model.** `Router::select(Facts { context_tokens, step })` may write
    `model.selected`; `Model::complete_streaming` answers; `record_cost` writes
    `cost.recorded`.
@@ -31,8 +33,8 @@ are owned by [kernel-loop.md](../kernel-loop.md); the tool gate by
    takes another step. An `Ask` parks the turn (`approval.requested`), and the rest
    of that assistant message gets `tool.result` "not run"; a failed or denied call is
    an ordinary `tool.result` with `ok: false`.
-6. **End.** Answered, asked, stopped, step limit, refused or error. The six endings
-   and their `TurnOutcome` fields are [kernel-loop.md](../kernel-loop.md) §6.
+6. **End.** Answered, asked, stopped, stalled, step limit, refused or error. The
+   endings and their `TurnOutcome` fields are [kernel-loop.md](../kernel-loop.md) §6.
 
 The one nudge detail the sequence needs: the correction is pushed into
 `Kernel.messages`, is not a `message.appended` event and adds no ledger entry, and it
@@ -68,7 +70,11 @@ sequenceDiagram
             K->>L: turn.interrupted
             K-->>S: TurnOutcome { interrupted: true }
         end
-        K->>E: refresh_map (engine on)
+        alt stalled
+            K->>L: message.appended (stall note)
+            K-->>S: TurnOutcome { final_text }
+        end
+        K->>E: refresh_memory (engine on); map seated once per turn
         K->>L: compaction.applied (only if changed)
         K->>R: select(Facts { context_tokens, step })
         K->>L: model.selected (only if the model changed)

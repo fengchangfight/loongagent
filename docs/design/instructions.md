@@ -139,7 +139,7 @@ repository and a person have instructions, and the model reads them.
 The leading messages are all pinned: the operator's system prompt, the
 instruction blocks, and, when the layered engine is on, the L4 cognitive map.
 `Kernel::drop_oldest_exchange` skips every leading `System` message before it
-looks for a user turn, and `Kernel::refresh_map` inserts the map after those
+looks for a user turn, and `Kernel::seat_map` inserts the map after those
 blocks. Compaction therefore removes history, never the prompt or its
 instructions.
 

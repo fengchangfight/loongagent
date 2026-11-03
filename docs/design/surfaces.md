@@ -84,8 +84,8 @@ does not know — the drift that made `/qui` look like a command while enter sen
 model. Everything not in that table still goes to the agent, where `/help` and the workspace's
 skills live, and the menu says so instead of pretending the word does not exist.
 
-Two rules keep the prompt title honest. The turn's status always wins it — working, waiting,
-finished — and the YOLO warning is a red mark in front of that status, never a replacement: a
+Two rules keep the prompt title honest. The turn's status always wins it — working,
+interrupting, waiting, finished — and the YOLO warning is a red mark in front of that status, never a replacement: a
 session that stops asking is dangerous, but a title that says only that is a session nobody can
 tell is alive. And a turn that stops for a question is **paused, not finished**: the question is
 the state, no `✓ 完成` is recorded, and the turn's clock keeps running across the pause, because

@@ -4335,6 +4335,47 @@ fn a_turn_the_person_stopped_says_so_rather_than_showing_a_tick() {
     );
 }
 
+/// Purpose: While a stop is pending, the title says interrupting and never claims the turn is still running.
+#[test]
+fn the_title_says_interrupting_while_the_server_finishes_the_call() {
+    let mut app = App::new("s-interrupt", "v");
+    app.interrupt = Some(Box::new(|| {}));
+    app.busy = true;
+    app.busy_since = Some(std::time::Instant::now());
+    app.activity = Some("shell: node --test".to_string());
+    app.stop_turn();
+    let screen = draw(&mut app, 110, 20);
+    assert!(
+        despaced(&screen).contains(&despaced("正在中断")),
+        "{screen}"
+    );
+    assert!(
+        !despaced(&screen).contains("运行"),
+        "the title still claims it is running:\n{screen}"
+    );
+}
+
+/// Purpose: A second esc retries the signal without repeating the line.
+#[test]
+fn a_second_interrupt_does_not_repeat_the_line() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    let calls = Rc::new(Cell::new(0));
+    let seen = Rc::clone(&calls);
+    let mut app = App::new("s-interrupt-twice", "v");
+    app.interrupt = Some(Box::new(move || seen.set(seen.get() + 1)));
+    app.busy = true;
+    app.handle_key(key(KeyCode::Esc));
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(calls.get(), 2, "the signal is retried");
+    assert_eq!(
+        app.transcript().matches("正在中断…").count(),
+        1,
+        "the line is said once: {}",
+        app.transcript()
+    );
+}
+
 /// Purpose: `/new`, `/clear` and `/reset` ask for a fresh session rather than wiping the view.
 #[test]
 fn new_and_clear_both_ask_for_a_fresh_session() {

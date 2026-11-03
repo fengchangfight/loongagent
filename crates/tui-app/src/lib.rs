@@ -1444,16 +1444,30 @@ impl App {
                     .as_deref()
                     .map(|what| format!(" · {what}"))
                     .unwrap_or_default();
-                (
-                    // The mark turns, so the line proves the process is alive even while
-                    // the words beside it are the same ones it said ten seconds ago.
-                    format!(
-                        "{}{} 运行 {secs}s{doing}",
-                        self.yolo_mark(),
-                        spinner_frame(self.busy_since)
-                    ),
-                    self.title_style(Style::default().fg(Color::Cyan)),
-                )
+                // "Interrupting" is a state of its own, not a note in the transcript: the
+                // server stops at the next step boundary, so the title must keep saying
+                // what is happening until it actually does. Leaving "运行" there is the
+                // line that makes a cooperative stop look like a broken key.
+                if self.stopping {
+                    (
+                        format!(
+                            "{} 正在中断 {secs}s{doing} — 等当前调用结束",
+                            spinner_frame(self.busy_since)
+                        ),
+                        self.title_style(Style::default().fg(Color::Yellow)),
+                    )
+                } else {
+                    (
+                        // The mark turns, so the line proves the process is alive even while
+                        // the words beside it are the same ones it said ten seconds ago.
+                        format!(
+                            "{}{} 运行 {secs}s{doing}",
+                            self.yolo_mark(),
+                            spinner_frame(self.busy_since)
+                        ),
+                        self.title_style(Style::default().fg(Color::Cyan)),
+                    )
+                }
             }
             // The last turn's ending, held on screen until the next prompt starts.
             //
@@ -1759,20 +1773,31 @@ impl App {
     }
 
     /// Purpose: Ask the server process to stop the running turn, saying "interrupting" rather than "stopped".
-    /// Contract: called by `handle_key`'s Ctrl-C and Esc arms and by `a_turn_the_person_stopped_says_so_rather_than_showing_a_tick`; signals `App::interrupt` and calls `push_lines`.
+    /// Serves: a person who wants the turn to end without killing the interface.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `App::handle_key`'s Ctrl-C and Esc arms.
+    /// Down: `App.interrupt`, `App.stopping` and `push_lines`.
+    /// Verify: `cargo test -p loong-tui-app tests::a_second_interrupt_does_not_repeat_the_line`.
     /// Ask for the turn to stop. The server stops at the next step boundary — after the
     /// tool that is already running finishes — so the line says "interrupting", not
     /// "stopped".
     fn stop_turn(&mut self) {
+        // A second esc while the first stop is pending retries the signal (a handler
+        // that missed it is cheap to call again) but does not repeat the line: the
+        // transcript should say it once, the title says it until the turn ends.
+        let already = self.stopping;
         self.stopping = true;
         match &self.interrupt {
             Some(interrupt) => {
                 interrupt();
-                self.push_lines(vec!["⏹ 正在中断…".to_string()]);
+                if !already {
+                    self.push_lines(vec!["⏹ 正在中断…".to_string()]);
+                }
             }
-            None => self.push_lines(vec![
+            None if !already => self.push_lines(vec![
                 "⏹ 无法中断：这个界面没有可通知的服务端进程".to_string()
             ]),
+            None => {}
         }
     }
 

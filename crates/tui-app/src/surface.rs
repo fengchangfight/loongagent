@@ -25,7 +25,10 @@ pub fn run<T: Transport + Send + 'static>(
     health: Option<Receiver<ModelHealth>>,
 ) -> Result<(), String> {
     use ratatui::backend::CrosstermBackend;
-    use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, KeyEventKind};
+    use ratatui::crossterm::event::{
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        KeyEventKind,
+    };
     use ratatui::crossterm::execute;
     use ratatui::crossterm::terminal::{
         disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -107,7 +110,7 @@ pub fn run<T: Transport + Send + 'static>(
     // Mouse capture so the wheel scrolls the conversation. Text selection then needs
     // the terminal's modifier (Shift or Option) — the usual trade for this.
     // Deliberately **not** `EnableMouseCapture`: see `App::mouse`.
-    execute!(stdout, EnterAlternateScreen).map_err(|e| e.to_string())?;
+    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste).map_err(|e| e.to_string())?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).map_err(|e| e.to_string())?;
 
@@ -163,6 +166,11 @@ pub fn run<T: Transport + Send + 'static>(
                         }
                     }
                     event::Event::Mouse(mouse) => app.handle_mouse(mouse.kind),
+                    // A bracketed paste arrives as one block, including its newlines: it
+                    // goes into the input, and enter later sends the whole thing.
+                    event::Event::Paste(text) => {
+                        app.paste(&text);
+                    }
                     _ => {}
                 }
             }
@@ -176,7 +184,8 @@ pub fn run<T: Transport + Send + 'static>(
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
-        DisableMouseCapture
+        DisableMouseCapture,
+        DisableBracketedPaste
     )
     .ok();
     terminal.show_cursor().ok();

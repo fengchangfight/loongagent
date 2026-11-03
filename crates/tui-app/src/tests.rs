@@ -968,7 +968,10 @@ fn a_fold_never_takes_enter_away_from_a_prompt() {
         Action::Send(ToWorker::Submit("hello".to_string()))
     );
     // With a fold selected and something typed, enter still sends: a prompt with text
-    // in it means send, and the fold is let go with it.
+    // in it means send, and the fold is let go with it. The first send started a turn,
+    // so end it here: a second prompt is refused while one is running (§4.2 of the
+    // paste/busy spec), and this test is about the fold, not about that guard.
+    app.busy = false;
     app.handle_key(key(KeyCode::Tab));
     type_text(&mut app, "again");
     assert_eq!(
@@ -1059,6 +1062,66 @@ fn a_failure_is_visible_and_does_not_wedge_the_screen() {
         Some("the server closed the connection")
     );
     assert!(draw(&mut app, 80, 16).contains("the server closed the connection"));
+}
+
+/// Purpose: A pasted block lands in the input as one block and never submits itself.
+#[test]
+fn a_pasted_block_stays_one_prompt() {
+    let mut app = App::new("s-paste", "v");
+    let action = app.paste("第一行\r\n第二行\n");
+    assert!(
+        matches!(action, Action::None),
+        "a paste never sends: {action:?}"
+    );
+    assert_eq!(app.input, "第一行\n第二行");
+    assert!(!app.busy, "and it does not start a turn");
+}
+
+/// Purpose: A plain prompt typed during a turn is refused; a slash command still runs.
+#[test]
+fn enter_while_busy_refuses_a_prompt_but_not_a_command() {
+    let mut app = App::new("s-busy", "v");
+    app.busy = true;
+    app.input = "do it again".to_string();
+    let action = app.handle_key(key(KeyCode::Enter));
+    assert!(matches!(action, Action::None), "{action:?}");
+    assert!(
+        app.transcript().contains("上一轮还在跑"),
+        "the refusal says why: {}",
+        app.transcript()
+    );
+    assert_eq!(app.input, "do it again", "the text is kept, not sent");
+
+    app.input = "/yolo".to_string();
+    let action = app.handle_key(key(KeyCode::Enter));
+    assert!(
+        matches!(action, Action::Send(_) | Action::None),
+        "a slash command still reaches its handler: {action:?}"
+    );
+}
+
+/// Purpose: The pending-approval refusal is shown as an instruction, not a JSON-RPC error.
+#[test]
+fn a_pending_approval_failure_reads_as_advice() {
+    let (to_app, from_worker) = channel::<FromWorker>();
+    let mut app = App::new("s-pending", "v");
+    app.busy = true;
+    to_app
+        .send(FromWorker::Failed(
+            "out of order: approval appr-1 is still pending — answer it (approve or deny) before sending another prompt".to_string(),
+        ))
+        .unwrap();
+    app.drain(&from_worker);
+    assert!(
+        app.transcript().contains("还有一条操作在等审批"),
+        "{}",
+        app.transcript()
+    );
+    assert!(
+        !app.transcript().contains("appr-1"),
+        "the protocol id is not the user's problem: {}",
+        app.transcript()
+    );
 }
 
 /// Purpose: A streamed answer longer than the window shows its newest line, not its first.

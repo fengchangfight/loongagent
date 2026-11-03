@@ -1795,6 +1795,27 @@ impl App {
         self.refresh_picker();
     }
 
+    /// Purpose: Insert a pasted block as one input, never submitting it.
+    ///
+    /// Serves: a multi-line prompt copied from an editor: without bracketed paste the
+    /// terminal delivers each newline as enter, which submits the first line and leaves
+    /// the rest to become a second prompt.
+    /// Design: `docs/superpowers/specs/2026-11-03-tui-paste-and-approval-ids-design.md` §4.1.
+    /// Up: `surface::run`'s `Event::Paste` arm.
+    /// Down: `App::insert`; normalises line endings before it.
+    /// Verify: `cargo test -p loong-tui-app tests::a_pasted_block_stays_one_prompt`.
+    fn paste(&mut self, text: &str) -> Action {
+        // Terminals differ on the line ending a paste carries. The input renders `\n` as
+        // a hard break, so one form is enough; a single trailing newline is dropped so a
+        // copied block does not leave an empty last line to send.
+        let normalised = text.replace("\r\n", "\n").replace('\r', "\n");
+        let trimmed = normalised.strip_suffix('\n').unwrap_or(&normalised);
+        if !trimmed.is_empty() {
+            self.insert(trimmed);
+        }
+        Action::None
+    }
+
     /// Purpose: Keep the `@` picker in step with the text and the caret, reading the file list only once.
     /// Serves: `App::insert`, `App::delete_before_cursor`, `App::delete_at_cursor` and `App::handle_key`.
     /// Design: `docs/design/surfaces.md` §3.
@@ -2233,8 +2254,9 @@ impl App {
                         seconds,
                         outcome: Outcome::Failed,
                     });
-                    self.error = Some(message.clone());
-                    self.push_lines(vec![format!("! {message}")]);
+                    let shown = friendly_failure(&message);
+                    self.error = Some(shown.clone());
+                    self.push_lines(vec![format!("! {shown}")]);
                 }
                 Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
             }
@@ -2544,6 +2566,14 @@ impl App {
                 // the server, where skills and MCP prompts live.
                 if let Some(action) = self.surface_command(&text) {
                     return action;
+                }
+                // A second prompt does not join a running turn: the worker would hold it
+                // until the turn returns, and a turn that returns **paused on an
+                // approval** would reject it with a protocol error. Say so instead of
+                // putting it in that queue.
+                if self.busy {
+                    self.push_lines(vec!["· 上一轮还在跑 — 等它结束，或 ctrl-c 停下".to_string()]);
+                    return Action::None;
                 }
                 self.begin_submit(text)
             }
@@ -3200,6 +3230,16 @@ impl App {
             }
         }
         frame.render_widget(Paragraph::new(Line::from(hints)), keys);
+    }
+}
+
+/// Purpose: Turn the kernel's pending-approval refusal into an instruction a person can act on.
+/// Contract: `App::drain`'s `Failed` arm; other failures pass through unchanged.
+fn friendly_failure(message: &str) -> String {
+    if message.contains("is still pending") {
+        "还有一条操作在等审批 — 先回答它（y/n 或方向键 + 回车），再发新的提问".to_string()
+    } else {
+        message.to_string()
     }
 }
 

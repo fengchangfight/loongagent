@@ -20,6 +20,18 @@ use super::hooks::tighten;
 use super::nudge::{leaked_tool_call, looks_like_pasted_file};
 use super::recall::RECALL_TOOL;
 
+/// Purpose: Whether a path is a throwaway script location: a `.tmp` component anywhere, or
+/// the system temp directory outside the workspace.
+///
+/// Serves: the scratch trigger of the stall guard, without counting a test workspace or a
+/// project that happens to live under `/tmp`.
+/// Contract: `turn/loop.rs` stall guard; `Kernel::note_scratch_write` is the only caller.
+fn is_scratch_path(path: &str, cwd: &std::path::Path) -> bool {
+    let path = std::path::Path::new(path);
+    path.components().any(|part| part.as_os_str() == ".tmp")
+        || (path.starts_with(std::env::temp_dir()) && !path.starts_with(cwd))
+}
+
 /// Purpose: What a dispatched tool call did: finish, or park the turn for a human.
 ///
 /// Serves: one assistant message whose every call gets an answer, either by
@@ -92,6 +104,9 @@ impl Kernel {
                 p.request_id
             )));
         }
+        // A new turn starts with a fresh budget and fresh stall state. The approval
+        // resume path deliberately does not call this: it is the same turn.
+        self.begin_turn();
         // `/name args` is an invocation (T-18). A sentence that merely starts with
         // a path (`/etc/hosts is wrong`) is a sentence, and `parse_invocation` is
         // strict about the difference.
@@ -196,6 +211,25 @@ impl Kernel {
             });
         }
         self.run(events, on_delta)
+    }
+
+    /// Start a new turn's bookkeeping: a fresh step budget, a fresh stall window and a map
+    /// that must be seated again.
+    ///
+    /// Purpose: Reset the state that belongs to one turn, and only to one turn.
+    /// Serves: a reply after a step-limit or stall note gets a full budget, while an
+    /// approval resume keeps spending the current one.
+    /// Design: `docs/superpowers/specs/2026-11-03-turn-budget-and-stall-guard-design.md` §4.1–§4.3.
+    /// Up: `Kernel::submit_with`, before command expansion and the prompt hook.
+    /// Down: `Kernel.steps_taken`, `Kernel.map_seated`, `Kernel.recent_calls`,
+    /// `Kernel.consecutive_failures` and `Kernel.scratch_writes`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::the_step_budget_survives_an_approval_resume`.
+    fn begin_turn(&mut self) {
+        self.steps_taken = 0;
+        self.map_seated = false;
+        self.recent_calls.clear();
+        self.consecutive_failures = 0;
+        self.scratch_writes.clear();
     }
 
     /// Answer a pending approval; the decision is an event either way.
@@ -331,12 +365,21 @@ impl Kernel {
         // then quoted the call in its summary must not be asked to write it again.
         let mut ran: Vec<String> = Vec::new();
         let mut nudged = false;
+        // The budget belongs to the turn, not to this run of the loop: an approval
+        // resume re-enters here and must spend what is left, not a second budget.
+        let start = self.steps_taken;
+        let remaining = self.config.max_steps.saturating_sub(start);
         // The L4 map is seated once, before the first request of the turn. Seating it
         // inside the loop rewrites a block that sits before the conversation, which
-        // invalidates every provider cache entry after it (spec §4.3).
-        self.refresh_memory();
-        self.seat_map();
-        for step in 1..=self.config.max_steps {
+        // invalidates every provider cache entry after it (spec §4.3). An approval
+        // resume already seated it and starts from the same bytes.
+        if !self.map_seated {
+            self.refresh_memory();
+            self.seat_map();
+            self.map_seated = true;
+        }
+        for offset in 1..=remaining {
+            let step = start + offset;
             // A permissions change asked for from outside is applied here, before the
             // step's model call and its tool decisions: the question this step would
             // have asked must never be asked after the person already said yes.
@@ -357,6 +400,25 @@ impl Kernel {
                     refused: None,
                     events,
                     interrupted: true,
+                });
+            }
+            // A model that repeats a call, keeps failing, or churns throwaway scripts is
+            // not making progress. Stop and ask, rather than spending the rest of the
+            // budget on the same loop.
+            if let Some(reason) = self.stall_reason() {
+                let note = format!(
+                    "stopped after {} steps without progress (stall guard): {reason} — \
+                     tell me how you want to proceed",
+                    self.steps_taken
+                );
+                events.push(self.record_assistant(Some(&note), &[])?);
+                return Ok(TurnOutcome {
+                    steps: self.steps_taken,
+                    final_text: Some(note),
+                    pending_approval: None,
+                    refused: None,
+                    events,
+                    interrupted: false,
                 });
             }
             self.refresh_memory();
@@ -388,6 +450,9 @@ impl Kernel {
                     &facts,
                 )?);
             }
+            // The completion this step is about to take belongs to the turn's budget,
+            // whatever run of the loop it is in.
+            self.steps_taken = step;
             let response = self
                 .models
                 .get_mut(&chosen)
@@ -468,9 +533,8 @@ impl Kernel {
                         // asks for permission on the first of them — breaks its own session.
                         // Say they did not run; the model re-issues what it still wants.
                         for skipped in &response.tool_calls[at + 1..] {
-                            events.push(self.record_tool_result(
+                            events.push(self.record_skipped_result(
                                 &skipped.call_id,
-                                false,
                                 &format!(
                                     "not run: the turn stopped to ask about {} first",
                                     pending.request_id
@@ -506,6 +570,94 @@ impl Kernel {
         })
     }
 
+    /// Purpose: Remember one dispatched call so a run of identical calls is visible.
+    ///
+    /// Serves: the repeat trigger of the stall guard; the window holds only the last
+    /// `STALL_REPEAT_CALLS` calls because the question is "the last few are equal?".
+    /// Design: `docs/superpowers/specs/2026-11-03-turn-budget-and-stall-guard-design.md` §4.2.
+    /// Up: `Kernel::dispatch`, before the call runs.
+    /// Down: `Kernel.recent_calls` and `RecentCall`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_repeated_call_stops_as_stalled`.
+    fn note_tool_call(&mut self, tool: &str, args: &Json) {
+        if self.recent_calls.len() == STALL_REPEAT_CALLS {
+            self.recent_calls.pop_front();
+        }
+        self.recent_calls.push_back(RecentCall {
+            tool: tool.to_string(),
+            args: args.to_string(),
+        });
+    }
+
+    /// Purpose: Remember a throwaway script written this turn, because a new path defeats
+    /// an equality check.
+    ///
+    /// Serves: the scratch trigger of the stall guard.
+    /// Design: `docs/superpowers/specs/2026-11-03-turn-budget-and-stall-guard-design.md` §4.2.
+    /// Up: `Kernel::dispatch`, for every call; only `write_file` into a temp path counts.
+    /// Down: `Kernel.scratch_writes` and `is_scratch_path`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::scratch_script_churn_stops_as_stalled`.
+    fn note_scratch_write(&mut self, tool: &str, args: &Json) {
+        if tool != "write_file" {
+            return;
+        }
+        let Some(path) = args.get("path").and_then(|value| value.as_str()) else {
+            return;
+        };
+        if is_scratch_path(path, &self.config.cwd) {
+            self.scratch_writes.insert(path.to_string());
+        }
+    }
+
+    /// Purpose: Feed one tool outcome to the consecutive-failure counter.
+    ///
+    /// Serves: a run of failed calls that changes nothing between attempts.
+    /// Design: `docs/superpowers/specs/2026-11-03-turn-budget-and-stall-guard-design.md` §4.2.
+    /// Up: `Kernel::record_tool_result`, so only real outcomes count; a "not run"
+    /// result uses `Kernel::record_skipped_result` and skips this.
+    /// Down: `Kernel.consecutive_failures`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_run_of_failed_calls_stops_as_stalled`.
+    pub(super) fn note_tool_result(&mut self, ok: bool) {
+        if ok {
+            self.consecutive_failures = 0;
+        } else {
+            self.consecutive_failures += 1;
+        }
+    }
+
+    /// Purpose: Why this turn should stop for lack of progress, if it should.
+    ///
+    /// Serves: the three stall triggers, checked at a step boundary so a running tool
+    /// is never cut in half.
+    /// Design: `docs/superpowers/specs/2026-11-03-turn-budget-and-stall-guard-design.md` §4.2.
+    /// Up: `Kernel::run_inner`, once per step after the interrupt check.
+    /// Down: `Kernel.consecutive_failures`, `Kernel.scratch_writes` and
+    /// `Kernel.recent_calls`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_repeated_call_stops_as_stalled`.
+    fn stall_reason(&self) -> Option<String> {
+        if self.consecutive_failures >= STALL_FAILURES {
+            return Some(format!(
+                "the last {} tool calls failed",
+                self.consecutive_failures
+            ));
+        }
+        if self.scratch_writes.len() >= STALL_SCRATCH_WRITES {
+            return Some(format!(
+                "{} distinct throwaway files were written under a temp directory",
+                self.scratch_writes.len()
+            ));
+        }
+        if self.recent_calls.len() == STALL_REPEAT_CALLS {
+            let last = self.recent_calls.back()?;
+            if self.recent_calls.iter().all(|call| call == last) {
+                return Some(format!(
+                    "the same {} call ran {} times in a row",
+                    last.tool, STALL_REPEAT_CALLS
+                ));
+            }
+        }
+        None
+    }
+
     /// Purpose: Turn one model tool call into a recorded verdict and, unless it
     /// asks or is denied, an execution.
     ///
@@ -523,6 +675,10 @@ impl Kernel {
         call: &ToolCallRequest,
         events: &mut Vec<u64>,
     ) -> Result<Dispatch, KernelError> {
+        // Every call the model makes is seen by the stall guard before it runs: three
+        // identical calls in a row, or five scratch scripts, is a loop rather than work.
+        self.note_tool_call(&call.tool, &call.args);
+        self.note_scratch_write(&call.tool, &call.args);
         // The last boundary before a verdict: a request that arrived while the model was
         // returning this call applies now, so the call is allowed rather than asked about.
         self.apply_requested_permissions()?;

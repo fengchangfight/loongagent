@@ -565,6 +565,201 @@ fn the_step_limit_stops_a_spinning_model() {
     assert!(out.final_text.unwrap().contains("step limit"));
 }
 
+/// Purpose: One step budget covers a turn across an approval resume, so a parked call cannot double it.
+#[test]
+fn the_step_budget_survives_an_approval_resume() {
+    let t = Temp::new();
+    std::fs::write(t.dir.join("a.txt"), "x").unwrap();
+    let (model, seen) = RecordingModel::new(vec![
+        response(
+            vec![call("c1", "read_file", json!({"path": "/etc/hostname"}))],
+            None,
+        ),
+        response(
+            vec![call("c2", "read_file", json!({"path": "a.txt"}))],
+            None,
+        ),
+        response(
+            vec![call("c3", "read_file", json!({"path": "a.txt"}))],
+            None,
+        ),
+        response(vec![], Some("fresh budget")),
+    ]);
+    let mut config = KernelConfig::new(&t.dir);
+    config.max_steps = 3;
+    let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+
+    let asked = k.submit("go").unwrap();
+    let pending = asked.pending_approval.expect("the first call asks");
+    let out = k
+        .respond_to_approval(&pending.request_id, true, gen::ApprovalScope::Once, None)
+        .unwrap();
+    assert_eq!(
+        out.steps, 3,
+        "the approval resume spends the same budget: {out:?}"
+    );
+    assert!(out.final_text.unwrap().contains("step limit"));
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        3,
+        "the fourth response belongs to the next turn, not this one"
+    );
+
+    // A new user turn is a new budget: the queued answer is taken on its first call.
+    let fresh = k.submit("go again").unwrap();
+    assert_eq!(fresh.steps, 1, "{fresh:?}");
+    assert_eq!(fresh.final_text.as_deref(), Some("fresh budget"));
+}
+
+/// Purpose: An approval resume starts from the bytes the parked request ended with, so the provider cache still matches.
+#[test]
+fn an_approval_resume_does_not_move_the_request_prefix() {
+    let t = Temp::new();
+    let (model, seen) = RecordingModel::new(vec![
+        response(
+            vec![call("c1", "read_file", json!({"path": "/etc/hostname"}))],
+            None,
+        ),
+        response(vec![], Some("done")),
+    ]);
+    let mut config = KernelConfig::new(&t.dir);
+    config.context_engine = Some(crate::context_engine::ContextEngineConfig::new(
+        t.dir.join("session.context.db"),
+        t.log.clone(),
+    ));
+    let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+    let asked = k.submit("read it").unwrap();
+    let pending = asked.pending_approval.expect("the read asks");
+    k.respond_to_approval(&pending.request_id, true, gen::ApprovalScope::Once, None)
+        .unwrap();
+
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 2, "one request before and one after the answer");
+    let first = &seen[0];
+    let second = &seen[1];
+    assert_eq!(
+        &second[..first.len()],
+        &first[..],
+        "the approval resume moved the prefix"
+    );
+    assert_eq!(
+        second.len(),
+        first.len() + 2,
+        "the assistant call and its result are the only additions"
+    );
+}
+
+/// Purpose: Re-seating the same map changes neither the message bytes nor the ledger total.
+#[test]
+fn seat_map_keeps_the_message_bytes_when_the_text_is_unchanged() {
+    let t = Temp::new();
+    let model = ScriptedModel::new(vec![response(vec![], Some("done"))]);
+    let mut config = KernelConfig::new(&t.dir);
+    config.context_engine = Some(crate::context_engine::ContextEngineConfig::new(
+        t.dir.join("session.context.db"),
+        t.log.clone(),
+    ));
+    let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+    k.submit("hello").unwrap();
+
+    // The first call may catch up with a map the per-step refresh changed; the second
+    // is the one that must be a no-op.
+    k.seat_map();
+    let messages = k.messages.clone();
+    let tokens = k.ledger().total_tokens();
+    k.seat_map();
+    assert_eq!(k.messages, messages, "the map was rewritten");
+    assert_eq!(k.ledger().total_tokens(), tokens, "the ledger moved");
+}
+
+/// Purpose: Three identical calls in a row stop the turn before the budget, naming the repeat.
+#[test]
+fn a_repeated_call_stops_as_stalled() {
+    let t = Temp::new();
+    std::fs::write(t.dir.join("a.txt"), "x").unwrap();
+    let model = ScriptedModel::new(
+        (0..10)
+            .map(|round| {
+                response(
+                    vec![call(
+                        &format!("c{round}"),
+                        "read_file",
+                        json!({"path": "a.txt"}),
+                    )],
+                    None,
+                )
+            })
+            .collect(),
+    );
+    let mut config = KernelConfig::new(&t.dir);
+    config.max_steps = 20;
+    let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+    let out = k.submit("look again").unwrap();
+    assert_eq!(out.steps, 3, "{out:?}");
+    let note = out.final_text.expect("the guard says why");
+    assert!(note.contains("stall guard"), "{note}");
+    assert!(note.contains("same read_file call"), "{note}");
+}
+
+/// Purpose: Five consecutive failed tool results stop the turn, without needing identical calls.
+#[test]
+fn a_run_of_failed_calls_stops_as_stalled() {
+    let t = Temp::new();
+    let model = ScriptedModel::new(
+        (0..6)
+            .map(|round| {
+                response(
+                    vec![call(
+                        &format!("c{round}"),
+                        "read_file",
+                        json!({"path": format!("missing{round}.txt")}),
+                    )],
+                    None,
+                )
+            })
+            .collect(),
+    );
+    let mut config = KernelConfig::new(&t.dir);
+    config.max_steps = 20;
+    let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+    let out = k.submit("read the missing files").unwrap();
+    assert_eq!(out.steps, STALL_FAILURES, "{out:?}");
+    let note = out.final_text.expect("the guard says why");
+    assert!(note.contains("stall guard"), "{note}");
+    assert!(note.contains("tool calls failed"), "{note}");
+}
+
+/// Purpose: Five distinct throwaway scripts under `.tmp` stop the turn, even when every call differs.
+#[test]
+fn scratch_script_churn_stops_as_stalled() {
+    let t = Temp::new();
+    let model = ScriptedModel::new(
+        (0..6)
+            .map(|round| {
+                response(
+                    vec![call(
+                        &format!("w{round}"),
+                        "write_file",
+                        json!({
+                            "path": format!(".tmp/repro{round}.js"),
+                            "content": "console.log('still looking');",
+                        }),
+                    )],
+                    None,
+                )
+            })
+            .collect(),
+    );
+    let mut config = KernelConfig::new(&t.dir);
+    config.max_steps = 20;
+    let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+    let out = k.submit("reproduce it").unwrap();
+    assert_eq!(out.steps, STALL_SCRATCH_WRITES, "{out:?}");
+    let note = out.final_text.expect("the guard says why");
+    assert!(note.contains("stall guard"), "{note}");
+    assert!(note.contains("throwaway files"), "{note}");
+}
+
 /// Purpose: When one call in a batched message asks, the rest still get `tool.result` saying they did not run, because a provider rejects two calls with one result.
 #[test]
 fn a_message_that_stops_for_an_approval_still_answers_every_call_it_made() {
@@ -624,8 +819,12 @@ fn the_default_step_limit_leaves_room_for_a_real_task() {
     // mid-edit and the transcript blames a "step limit". The limit is deliberately not
     // set here, so it is the **default** under test.
     let t = Temp::new();
-    std::fs::write(t.dir.join("a.txt"), "x").unwrap();
     let rounds = 20;
+    // Distinct paths on purpose: the stall guard stops a run of identical calls, and
+    // this test is about the budget, not about the guard.
+    for round in 0..rounds {
+        std::fs::write(t.dir.join(format!("a{round}.txt")), "x").unwrap();
+    }
     let model = ScriptedModel::new(
         (0..rounds)
             .map(|round| {
@@ -633,7 +832,7 @@ fn the_default_step_limit_leaves_room_for_a_real_task() {
                     vec![call(
                         &format!("c{round}"),
                         "read_file",
-                        json!({"path": "a.txt"}),
+                        json!({"path": format!("a{round}.txt")}),
                     )],
                     None,
                 )
@@ -2935,23 +3134,26 @@ fn an_explicit_budget_wins_over_the_derived_one() {
 #[test]
 fn a_huge_window_still_compacts_at_its_derived_budget() {
     let t = Temp::new();
-    big_file(&t.dir, "huge.txt", 4_000); // ≈ 40k chars ≈ 10k tokens per read
+    big_file(&t.dir, "huge1.txt", 4_000); // ≈ 40k chars ≈ 10k tokens per read
+    big_file(&t.dir, "huge2.txt", 4_000);
+    big_file(&t.dir, "huge3.txt", 4_000);
+    big_file(&t.dir, "huge4.txt", 4_000);
     let (model, _seen) = RecordingModel::with_window(
         vec![
             response(
-                vec![call("c1", "read_file", json!({"path": "huge.txt"}))],
+                vec![call("c1", "read_file", json!({"path": "huge1.txt"}))],
                 None,
             ),
             response(
-                vec![call("c2", "read_file", json!({"path": "huge.txt"}))],
+                vec![call("c2", "read_file", json!({"path": "huge2.txt"}))],
                 None,
             ),
             response(
-                vec![call("c3", "read_file", json!({"path": "huge.txt"}))],
+                vec![call("c3", "read_file", json!({"path": "huge3.txt"}))],
                 None,
             ),
             response(
-                vec![call("c4", "read_file", json!({"path": "huge.txt"}))],
+                vec![call("c4", "read_file", json!({"path": "huge4.txt"}))],
                 None,
             ),
             response(vec![], Some("done")),
@@ -2973,19 +3175,21 @@ fn a_huge_window_still_compacts_at_its_derived_budget() {
 #[test]
 fn tool_output_ages_before_any_ceiling_is_crossed() {
     let t = Temp::new();
-    big_file(&t.dir, "big.txt", 4_000); // ≈ 40k chars ≈ 10k tokens per read
+    big_file(&t.dir, "big1.txt", 4_000); // ≈ 40k chars ≈ 10k tokens per read
+    big_file(&t.dir, "big2.txt", 4_000);
+    big_file(&t.dir, "big3.txt", 4_000);
     let (model, _seen) = RecordingModel::with_window(
         vec![
             response(
-                vec![call("c1", "read_file", json!({"path": "big.txt"}))],
+                vec![call("c1", "read_file", json!({"path": "big1.txt"}))],
                 None,
             ),
             response(
-                vec![call("c2", "read_file", json!({"path": "big.txt"}))],
+                vec![call("c2", "read_file", json!({"path": "big2.txt"}))],
                 None,
             ),
             response(
-                vec![call("c3", "read_file", json!({"path": "big.txt"}))],
+                vec![call("c3", "read_file", json!({"path": "big3.txt"}))],
                 None,
             ),
             response(vec![], Some("done")),

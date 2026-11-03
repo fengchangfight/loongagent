@@ -242,6 +242,14 @@ impl Kernel {
         };
         match (self.map_entry, self.map_index) {
             (Some(entry), Some(index)) if index < self.messages.len() => {
+                // An unchanged map is not rewritten: the block sits before the
+                // conversation, so a write with the same text would still discard the
+                // provider's cache for no gain.
+                if let ChatMessage::System { text: current } = &self.messages[index] {
+                    if current == &text {
+                        return;
+                    }
+                }
                 self.messages[index] = ChatMessage::System { text: text.clone() };
                 self.ledger.replace(entry, &text);
             }

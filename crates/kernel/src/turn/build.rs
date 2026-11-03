@@ -489,6 +489,11 @@ impl Kernel {
             context_engine: engine,
             map_entry: None,
             map_index: None,
+            steps_taken: 0,
+            map_seated: false,
+            recent_calls: std::collections::VecDeque::new(),
+            consecutive_failures: 0,
+            scratch_writes: std::collections::HashSet::new(),
         };
         // The catalogue enters context before any work does.
         kernel.seat_system_prompt()?;

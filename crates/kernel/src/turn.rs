@@ -149,6 +149,20 @@ pub struct PendingCall {
     pub reason: String,
 }
 
+/// Purpose: One dispatched call, kept only long enough to notice a model that repeats itself.
+///
+/// Serves: the stall guard's equality check; it holds the canonical JSON so two calls that
+/// differ only in key order compare equal.
+/// Design: `docs/superpowers/specs/2026-11-03-turn-budget-and-stall-guard-design.md` §4.2.
+/// Up: `Kernel::note_tool_call` pushes it; `Kernel::stall_reason` reads the window.
+/// Down: no callee; it is data.
+/// Verify: `cargo test -p loong-kernel turn::tests::a_repeated_call_stops_as_stalled`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecentCall {
+    tool: String,
+    args: String,
+}
+
 /// Purpose: What one turn produced: steps, answer, pending call, refusal, events and interruption.
 ///
 /// Serves: the six endings in one value a surface can render.
@@ -177,10 +191,34 @@ pub struct TurnOutcome {
 /// task may be, so it has to sit well above what honest work needs. It was 8, which is how
 /// an agent writing one file came to die mid-edit with "stopped after 8 steps".
 ///
-/// A step is not how cost is bounded: the token budget and compaction are, and those are
-/// what a person actually chooses. This is the backstop behind them, and a config layer may
-/// still narrow it (`max_steps`, ADR-0008 §2).
-pub const DEFAULT_MAX_STEPS: usize = 100;
+/// The budget belongs to the **turn**, including the runs an approval resumes. At a
+/// steady-state request near 60k tokens, 100 steps is ≈ 6M input tokens even when every
+/// step is honest work, which is more than a per-turn backstop should allow; 50 keeps a
+/// page-sized task inside one turn and halves the worst case. A person who wants more
+/// replies, raises `max_steps`; a config layer may still narrow it (`max_steps`,
+/// ADR-0008 §2).
+pub const DEFAULT_MAX_STEPS: usize = 50;
+
+/// How many identical calls in a row mean the model is spinning.
+///
+/// The guard compares one call with the one before it, not with the whole turn: a model
+/// that re-reads a file after editing it is working, while three calls with byte-identical
+/// arguments in a row are a loop. Three is the smallest run that cannot be explained by a
+/// retry after a transient failure.
+pub(super) const STALL_REPEAT_CALLS: usize = 3;
+
+/// How many consecutive failed tool results mean the model is not making progress.
+///
+/// A single failure is information: the model reads the error and changes approach. Five
+/// in a row is a loop that costs a step each time without changing the facts.
+pub(super) const STALL_FAILURES: usize = 5;
+
+/// How many distinct throwaway files a turn may write under a temp directory.
+///
+/// Scratch scripts are legitimate once or twice; `repro1.js`, `repro2.js`, … written to
+/// `.tmp/` one after another are a loop the equal-arguments rule cannot see, because every
+/// path is new. Five is above normal use and far below the seventeen a real session spent.
+pub(super) const STALL_SCRATCH_WRITES: usize = 5;
 
 /// How much room to leave in the model's window for its own answer, by default.
 ///
@@ -480,6 +518,22 @@ pub struct Kernel {
     map_entry: Option<u64>,
     /// Index of the L4 map message in `messages`, kept in step with `entry_of`.
     map_index: Option<usize>,
+    /// Model completions taken by the **current turn**, including the runs an approval
+    /// resumes. Reset only by `Kernel::begin_turn`; `run_inner` starts its loop here, so
+    /// an approval cannot hand the model a second budget.
+    steps_taken: usize,
+    /// True once the L4 map has been seated for this turn. An approval resume must not
+    /// reseat it: the map sits before the conversation, so rewriting it discards every
+    /// provider cache entry after it.
+    map_seated: bool,
+    /// The last few dispatched calls, for the stall guard. A run of three identical
+    /// calls is a loop, not a retry.
+    recent_calls: std::collections::VecDeque<RecentCall>,
+    /// Consecutive failed tool results in this turn. Five is the stall threshold.
+    consecutive_failures: usize,
+    /// Distinct throwaway paths written this turn (`write_file` under a temp directory).
+    /// New paths defeat the equal-arguments rule, so this counts the churn directly.
+    scratch_writes: std::collections::HashSet<String>,
 }
 impl Kernel {
     /// Purpose: Fire the hooks registered for an event, record every answer, and report the aggregate verdict.
@@ -625,6 +679,38 @@ impl Kernel {
     /// Down: `Kernel::append` and `Ledger::add` with `Lifetime::Turn`.
     /// Verify: `cargo test -p loong-kernel turn::tests::compaction_clears_stale_tool_output_before_dropping_anything`.
     fn record_tool_result(
+        &mut self,
+        call_id: &str,
+        ok: bool,
+        output: &str,
+    ) -> Result<u64, KernelError> {
+        // A real outcome, so the stall guard may count it. The "not run" results after a
+        // parked approval go through `record_skipped_result` instead: nothing ran, so
+        // nothing failed.
+        self.note_tool_result(ok);
+        self.append_tool_result(call_id, ok, output)
+    }
+
+    /// Purpose: Record a tool result that says a call did not run, without counting it as a failure.
+    ///
+    /// Serves: the calls after a parked approval: the provider needs an answer for each,
+    /// but the stall guard must not read "not run" as five failed attempts.
+    /// Design: `docs/superpowers/specs/2026-11-03-turn-budget-and-stall-guard-design.md` §4.2.
+    /// Up: `Kernel::run_inner`, for the calls it skipped after `Dispatch::Pending`.
+    /// Down: `Kernel::append_tool_result`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_message_that_stops_for_an_approval_still_answers_every_call_it_made`.
+    fn record_skipped_result(&mut self, call_id: &str, output: &str) -> Result<u64, KernelError> {
+        self.append_tool_result(call_id, false, output)
+    }
+
+    /// Purpose: Append the `tool.result` event and its ledger/message pair, for both result paths.
+    ///
+    /// Serves: one write path, so the counted and skipped results cannot drift apart.
+    /// Design: `docs/design/context-ledger.md` §1 and §4.
+    /// Up: `Kernel::record_tool_result` and `Kernel::record_skipped_result`.
+    /// Down: `Kernel::append` and `Ledger::add` with `Lifetime::Turn`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_message_that_stops_for_an_approval_still_answers_every_call_it_made`.
+    fn append_tool_result(
         &mut self,
         call_id: &str,
         ok: bool,

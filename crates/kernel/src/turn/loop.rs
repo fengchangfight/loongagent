@@ -100,7 +100,8 @@ impl Kernel {
             .store(false, std::sync::atomic::Ordering::SeqCst);
         if let Some(p) = &self.pending {
             return Err(KernelError::OutOfOrder(format!(
-                "approval {} is still pending",
+                "approval {} is still pending — answer it (approve or deny) before \
+                 sending another prompt",
                 p.request_id
             )));
         }

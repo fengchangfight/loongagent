@@ -611,6 +611,45 @@ fn the_step_budget_survives_an_approval_resume() {
     assert_eq!(fresh.final_text.as_deref(), Some("fresh budget"));
 }
 
+/// Purpose: A reopened log's next approval id continues from the log instead of colliding with the first.
+#[test]
+fn approval_ids_continue_after_a_resume() {
+    let t = Temp::new();
+    let (model, _seen) = RecordingModel::new(vec![
+        response(
+            vec![call("c1", "read_file", json!({"path": "/etc/hostname"}))],
+            None,
+        ),
+        response(vec![], Some("first done")),
+        response(
+            vec![call("c2", "read_file", json!({"path": "/etc/hostname"}))],
+            None,
+        ),
+        response(vec![], Some("second done")),
+    ]);
+    let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+    let asked = k.submit("first").unwrap();
+    let pending = asked.pending_approval.expect("the first read asks");
+    assert_eq!(pending.request_id, "appr-1");
+    k.respond_to_approval(&pending.request_id, true, gen::ApprovalScope::Once, None)
+        .unwrap();
+    drop(k);
+
+    // The log now holds one `approval.requested`. A fresh process must not use that id
+    // again: the panel and `respond_to_approval` both address a request by its id.
+    let (model, _seen) = RecordingModel::new(vec![
+        response(
+            vec![call("c3", "read_file", json!({"path": "/etc/hostname"}))],
+            None,
+        ),
+        response(vec![], Some("second done")),
+    ]);
+    let mut k = Kernel::open(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+    let asked = k.submit("second").unwrap();
+    let pending = asked.pending_approval.expect("the second read asks too");
+    assert_eq!(pending.request_id, "appr-2");
+}
+
 /// Purpose: An approval resume starts from the bytes the parked request ended with, so the provider cache still matches.
 #[test]
 fn an_approval_resume_does_not_move_the_request_prefix() {

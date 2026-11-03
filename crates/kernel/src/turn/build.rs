@@ -341,6 +341,20 @@ impl Kernel {
         // a stale index that silently disagrees with the log is worse than a
         // few milliseconds of replay.
         let index = loong_index::Index::rebuild_into(&index_path, log.path())?;
+        // Approval ids are unique within a log, not within a process. A resumed session
+        // that started the counter at zero issued a second `appr-1` while the log already
+        // held the first one; the index already counts what the log holds, so start where
+        // it stopped. A fresh session still begins at `appr-1`.
+        let approvals: u64 = index
+            .kinds()
+            .map(|kinds| {
+                kinds
+                    .iter()
+                    .filter(|kind| kind.kind == gen::event::APPROVAL_REQUESTED)
+                    .map(|kind| kind.count)
+                    .sum()
+            })
+            .unwrap_or(0);
         // External tools join the same registry as the built-ins (T-15): one
         // interface, one PDP, one event stream, one audit trail.
         let mut tools = Registry::with_builtins();
@@ -471,7 +485,7 @@ impl Kernel {
             permissions_request: std::sync::Arc::new(std::sync::Mutex::new(None)),
             entry_of: Vec::new(),
             pending: None,
-            approvals: 0,
+            approvals,
             confinement,
             confinement_note,
             hooks,

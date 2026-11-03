@@ -760,6 +760,37 @@ fn scratch_script_churn_stops_as_stalled() {
     assert!(note.contains("throwaway files"), "{note}");
 }
 
+/// Purpose: Three clearing passes within five steps stop the turn, because the keep window is smaller than one step's output.
+#[test]
+fn compaction_thrash_stops_the_turn() {
+    let t = Temp::new();
+    for round in 1..=6 {
+        big_file(&t.dir, &format!("big{round}.txt"), 4_000); // ≈ 10k tokens each
+    }
+    let model = ScriptedModel::new(
+        (0..6)
+            .map(|round| {
+                response(
+                    vec![call(
+                        &format!("c{round}"),
+                        "read_file",
+                        json!({"path": format!("big{}.txt", round + 1)}),
+                    )],
+                    None,
+                )
+            })
+            .collect(),
+    );
+    let mut config = KernelConfig::new(&t.dir);
+    config.keep_newest_tokens = 100; // every step's output is far larger
+    config.max_steps = 20;
+    let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+    let out = k.submit("read them").unwrap();
+    assert_eq!(out.steps, 4, "the fifth request was never sent: {out:?}");
+    let note = out.final_text.expect("the guard says why");
+    assert!(note.contains("compaction thrash"), "{note}");
+}
+
 /// Purpose: When one call in a batched message asks, the rest still get `tool.result` saying they did not run, because a provider rejects two calls with one result.
 #[test]
 fn a_message_that_stops_for_an_approval_still_answers_every_call_it_made() {

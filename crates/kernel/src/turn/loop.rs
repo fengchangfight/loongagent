@@ -222,7 +222,8 @@ impl Kernel {
     /// Design: `docs/superpowers/specs/2026-11-03-turn-budget-and-stall-guard-design.md` §4.1–§4.3.
     /// Up: `Kernel::submit_with`, before command expansion and the prompt hook.
     /// Down: `Kernel.steps_taken`, `Kernel.map_seated`, `Kernel.recent_calls`,
-    /// `Kernel.consecutive_failures` and `Kernel.scratch_writes`.
+    /// `Kernel.consecutive_failures`, `Kernel.scratch_writes` and
+    /// `Kernel.compaction_steps`.
     /// Verify: `cargo test -p loong-kernel turn::tests::the_step_budget_survives_an_approval_resume`.
     fn begin_turn(&mut self) {
         self.steps_taken = 0;
@@ -230,6 +231,7 @@ impl Kernel {
         self.recent_calls.clear();
         self.consecutive_failures = 0;
         self.scratch_writes.clear();
+        self.compaction_steps.clear();
     }
 
     /// Answer a pending approval; the decision is an event either way.
@@ -426,6 +428,26 @@ impl Kernel {
             self.age_tool_outputs(&mut events)?;
             self.compact_if_needed(&mut events)?;
             if events.len() > before_clear {
+                // A pass that fires three times inside five steps is not keeping up: the
+                // keep window is smaller than one step's output. Stop before the next
+                // model call rather than paying for the same clear-then-refill loop.
+                self.note_compaction(step);
+                if let Some(reason) = self.compaction_thrash() {
+                    let note = format!(
+                        "stopped after {} steps without progress (compaction thrash): {reason} — \
+                         raise `budget_tokens` or `keep_newest_tokens`, or split the task",
+                        self.steps_taken
+                    );
+                    events.push(self.record_assistant(Some(&note), &[])?);
+                    return Ok(TurnOutcome {
+                        steps: self.steps_taken,
+                        final_text: Some(note),
+                        pending_approval: None,
+                        refused: None,
+                        events,
+                        interrupted: false,
+                    });
+                }
                 self.seat_map();
             }
             let request = CompletionRequest {
@@ -656,6 +678,44 @@ impl Kernel {
             }
         }
         None
+    }
+
+    /// Purpose: Remember the step on which a clearing pass fired, keeping only the last few.
+    ///
+    /// Serves: the compaction-thrash check, which asks whether three passes fell inside a
+    /// five-step window.
+    /// Contract: `turn/loop.rs` compaction guard.
+    fn note_compaction(&mut self, step: usize) {
+        if self.compaction_steps.len() == COMPACTION_THRASH_PASSES {
+            self.compaction_steps.pop_front();
+        }
+        self.compaction_steps.push_back(step);
+    }
+
+    /// Purpose: Why compaction is thrashing, if it is.
+    ///
+    /// Serves: the stop that keeps a clear-then-refill loop from spending the rest of the
+    /// budget; three passes inside five steps means the keep window is below one step's
+    /// output.
+    /// Design: `docs/superpowers/specs/2026-11-03-context-visibility-and-compaction-thrash-design.md` §4.2.
+    /// Up: `Kernel::run_inner`, after a clearing pass appended an event.
+    /// Down: `Kernel.compaction_steps`, `COMPACTION_THRASH_PASSES` and
+    /// `COMPACTION_THRASH_STEPS`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::compaction_thrash_stops_the_turn`.
+    fn compaction_thrash(&self) -> Option<String> {
+        if self.compaction_steps.len() < COMPACTION_THRASH_PASSES {
+            return None;
+        }
+        let first = *self.compaction_steps.front()?;
+        let last = *self.compaction_steps.back()?;
+        if last.saturating_sub(first) > COMPACTION_THRASH_STEPS {
+            return None;
+        }
+        Some(format!(
+            "clearing fired {} times within {} steps",
+            self.compaction_steps.len(),
+            last - first + 1
+        ))
     }
 
     /// Purpose: Turn one model tool call into a recorded verdict and, unless it

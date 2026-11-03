@@ -222,6 +222,22 @@ pub(super) const STALL_FAILURES: usize = 4;
 /// path is new. Five is above normal use and far below the seventeen a real session spent.
 pub(super) const STALL_SCRATCH_WRITES: usize = 5;
 
+/// How many clearing passes in a short span mean compaction is not keeping up.
+///
+/// A pass that frees something is useful even when another follows; a pass that fires
+/// three times inside five steps is not. The keep window is smaller than one step's
+/// output, and repeating the pass only re-bills the provider. Claude Code calls the same
+/// pattern thrash and stops auto-compacting when the context refills immediately; this is
+/// the kernel's version of that stop.
+pub(super) const COMPACTION_THRASH_PASSES: usize = 3;
+
+/// The widest distance the oldest and newest pass may have, in steps.
+///
+/// Four apart means the three passes sit inside a five-step window (steps 3 through 7,
+/// for example). Anything wider is ordinary housekeeping, not a compaction that cannot
+/// keep up.
+pub(super) const COMPACTION_THRASH_STEPS: usize = 4;
+
 /// How much room to leave in the model's window for its own answer, by default.
 ///
 /// A request carries the prompt **and** the completion, and both fit in one window. Fill it
@@ -536,6 +552,10 @@ pub struct Kernel {
     /// Distinct throwaway paths written this turn (`write_file` under a temp directory).
     /// New paths defeat the equal-arguments rule, so this counts the churn directly.
     scratch_writes: std::collections::HashSet<String>,
+    /// The steps in this turn whose clearing pass appended a `compaction.applied`.
+    /// Three inside a five-step window mean the pass cannot keep up; the last three are
+    /// all the guard needs.
+    compaction_steps: std::collections::VecDeque<usize>,
 }
 impl Kernel {
     /// Purpose: Fire the hooks registered for an event, record every answer, and report the aggregate verdict.

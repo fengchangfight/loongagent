@@ -494,6 +494,7 @@ impl Kernel {
             recent_calls: std::collections::VecDeque::new(),
             consecutive_failures: 0,
             scratch_writes: std::collections::HashSet::new(),
+            compaction_steps: std::collections::VecDeque::new(),
         };
         // The catalogue enters context before any work does.
         kernel.seat_system_prompt()?;

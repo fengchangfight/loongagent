@@ -11,7 +11,7 @@ use super::*;
 
 use crate::control::{cached_pack_state, connect, load_control};
 use crate::local::{configure_local, session_needs_a_model, spawn_model_health};
-use crate::session::session_intro;
+use crate::session::{history_path, session_intro};
 
 // ---------------------------------------------------------------- the client
 
@@ -370,6 +370,7 @@ pub(crate) fn full_screen(args: Args) -> Result<(), String> {
         client,
         attached.session_id,
         attached.schema_version,
+        history_path(&args.cwd),
         notes,
         intro,
         Some(Box::new(move || loong_tui::interrupt(server_pid))),

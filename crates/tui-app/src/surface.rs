@@ -18,6 +18,7 @@ pub fn run<T: Transport + Send + 'static>(
     client: Client<T>,
     session: String,
     schema: String,
+    history_path: std::path::PathBuf,
     notes: Option<Receiver<String>>,
     intro: Vec<String>,
     interrupt: Option<Box<dyn Fn()>>,
@@ -61,6 +62,9 @@ pub fn run<T: Transport + Send + 'static>(
     // yet; asking once here is what makes the first turn's percentage appear at all.
     let _ = to_worker.send(ToWorker::RefreshContext);
     let mut app = App::new(session, schema);
+    // Read before the first frame: the up-arrow should work on the first key, not after
+    // the first prompt of the run. A missing file is an empty history, not an error.
+    app.load_history(history_path);
     app.spend = Spend::from_events(&costs);
     app.interrupt = interrupt;
     app.set_permissions = permissions;

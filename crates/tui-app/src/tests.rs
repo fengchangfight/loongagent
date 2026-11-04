@@ -808,10 +808,11 @@ fn scrolling_back_cannot_push_the_newest_lines_off_the_end() {
     let mut app = App::new("s", "v");
     app.push_lines(startup.iter().map(|line| line.to_string()));
     // A window with room to spare: there is nothing above these lines to scroll to, so
-    // `up` has to leave them where they are. It used to drop the newest ones instead —
-    // the opposite of what the key means, and it looked like output being erased.
+    // paging up has to leave them where they are. It used to drop the newest ones
+    // instead — the opposite of what the key means, and it looked like output being
+    // erased. PageUp, because the arrows belong to the prompt's history.
     for _ in 0..startup.len() {
-        app.handle_key(key(KeyCode::Up));
+        app.handle_key(key(KeyCode::PageUp));
     }
     let screen = draw(&mut app, 60, 24);
     for line in startup {
@@ -4955,4 +4956,203 @@ fn the_status_line_says_what_a_model_command_will_do_before_it_is_pressed() {
         despaced(&screen).contains(&despaced("把上一个提问再问一遍")),
         "{screen}"
     );
+}
+
+/// Purpose: A history file of the test's own, so the developer's real history is never read or written.
+/// Contract: test helper; the history tests call it and remove the file afterwards.
+fn history_file(name: &str) -> std::path::PathBuf {
+    let path =
+        std::env::temp_dir().join(format!("loong-history-{}-{name}.jsonl", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    path
+}
+
+/// Purpose: Prompts survive a save and a load, including the newlines a pasted block carries.
+#[test]
+fn prompt_history_round_trips_through_the_file() {
+    let path = history_file("round-trip");
+    let mut history = history::History::new();
+    history.record("first line\nsecond line");
+    history.record("second prompt");
+    history.save(&path);
+
+    let loaded = history::History::load(&path);
+    assert_eq!(
+        loaded.entries(),
+        vec![
+            "first line\nsecond line".to_string(),
+            "second prompt".to_string()
+        ]
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Purpose: The file stays bounded: only the newest prompts are kept.
+#[test]
+fn prompt_history_keeps_only_the_newest_entries() {
+    let mut history = history::History::new();
+    for index in 0..history::MAX_ENTRIES + 5 {
+        history.record(&format!("prompt {index}"));
+    }
+    assert_eq!(history.entries().len(), history::MAX_ENTRIES);
+    assert_eq!(history.entries()[0], "prompt 5");
+    assert_eq!(
+        history.entries().last().unwrap(),
+        &format!("prompt {}", history::MAX_ENTRIES + 4)
+    );
+}
+
+/// Purpose: Sending the same prompt twice in a row does not make up-arrow repeat itself.
+#[test]
+fn prompt_history_skips_a_repeated_submission() {
+    let mut history = history::History::new();
+    history.record("same");
+    history.record("same");
+    history.record("other");
+    history.record("same");
+    assert_eq!(
+        history.entries(),
+        vec!["same".to_string(), "other".to_string(), "same".to_string()]
+    );
+}
+
+/// Purpose: A line the store cannot read is skipped, not treated as the end of the file.
+#[test]
+fn prompt_history_ignores_a_line_it_cannot_read() {
+    let path = history_file("malformed");
+    std::fs::write(
+        &path,
+        "{\"prompt\":\"kept\"}\nnot json\n{\"prompt\":\"also kept\"}\n",
+    )
+    .unwrap();
+
+    let loaded = history::History::load(&path);
+    assert_eq!(
+        loaded.entries(),
+        vec!["kept".to_string(), "also kept".to_string()]
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Purpose: Up walks older prompts, down walks newer ones, and down past the newest restores the draft.
+#[test]
+fn up_browses_history_and_down_restores_the_draft() {
+    let mut app = App::new("s", "v");
+    app.begin_submit("first".to_string());
+    app.begin_submit("second".to_string());
+    type_text(&mut app, "draft");
+
+    app.handle_key(key(KeyCode::Up));
+    assert_eq!(app.input, "second");
+    assert_eq!(app.cursor, 6, "the caret lands after the recalled prompt");
+    app.handle_key(key(KeyCode::Up));
+    assert_eq!(app.input, "first");
+    app.handle_key(key(KeyCode::Up));
+    assert_eq!(
+        app.input, "first",
+        "the oldest entry is the end of the walk"
+    );
+
+    app.handle_key(key(KeyCode::Down));
+    assert_eq!(app.input, "second");
+    app.handle_key(key(KeyCode::Down));
+    assert_eq!(app.input, "draft", "past the newest is the draft");
+    assert_eq!(app.cursor, 5, "with the caret it had");
+    assert!(!app.history.is_browsing());
+}
+
+/// Purpose: A submitted prompt reaches the file and is there for the next run.
+#[test]
+fn a_submitted_prompt_is_written_and_recalled_after_a_restart() {
+    let path = history_file("persist");
+    let mut app = App::new("s", "v");
+    app.load_history(path.clone());
+    type_text(&mut app, "remember me");
+    assert_eq!(
+        app.handle_key(key(KeyCode::Enter)),
+        Action::Send(ToWorker::Submit("remember me".to_string()))
+    );
+
+    let mut restarted = App::new("s", "v");
+    restarted.load_history(path.clone());
+    restarted.handle_key(key(KeyCode::Up));
+    assert_eq!(restarted.input, "remember me");
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Purpose: While history is being browsed, the picker and the command menu stay out of the arrows.
+#[test]
+fn history_browsing_keeps_the_menus_out_of_the_arrows() {
+    let mut app = App::new("s", "v");
+    app.mention_files = Some(mention::FileIndex::from_files(Vec::new()));
+    app.begin_submit("/help".to_string());
+    app.begin_submit("@src".to_string());
+    app.busy = false;
+
+    // The newest prompt would open the `@` picker from its text alone.
+    app.handle_key(key(KeyCode::Up));
+    assert_eq!(app.input, "@src");
+    assert!(
+        app.picker.is_none(),
+        "history keeps the picker out of the arrows"
+    );
+
+    app.handle_key(key(KeyCode::Up));
+    assert_eq!(app.input, "/help");
+    assert!(
+        app.command_candidates().is_none(),
+        "and the command menu too"
+    );
+    app.handle_key(key(KeyCode::Up));
+    assert_eq!(app.input, "/help", "up still walks on a slash prompt");
+
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::Down));
+    assert_eq!(app.input, "");
+    type_text(&mut app, "/he");
+    assert!(
+        app.command_candidates().is_some(),
+        "the menu returns with the draft"
+    );
+}
+
+/// Purpose: The prompt title says where in history the line is, and stops saying it back at the draft.
+#[test]
+fn the_prompt_title_says_where_in_history_the_line_is() {
+    let mut app = App::new("s", "v");
+    app.begin_submit("one".to_string());
+    app.begin_submit("two".to_string());
+    app.busy = false;
+
+    app.handle_key(key(KeyCode::Up));
+    let title = box_titles(&draw(&mut app, 80, 24));
+    assert!(title.contains("历史2/2"), "{title}");
+
+    app.handle_key(key(KeyCode::Up));
+    let title = box_titles(&draw(&mut app, 80, 24));
+    assert!(title.contains("历史1/2"), "{title}");
+
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::Down));
+    let title = box_titles(&draw(&mut app, 80, 24));
+    assert!(
+        !title.contains("历史"),
+        "the draft's own title is back: {title}"
+    );
+}
+
+/// Purpose: With nothing to recall, up and down leave both the line and the page alone.
+#[test]
+fn up_with_no_history_leaves_the_line_and_the_page_alone() {
+    let mut app = App::new("s", "v");
+    app.push_lines((1..=30).map(|index| format!("line {index}")));
+    type_text(&mut app, "draft");
+
+    app.handle_key(key(KeyCode::Up));
+    assert_eq!(app.input, "draft");
+    assert_eq!(app.scroll, 0, "up no longer scrolls the transcript");
+
+    app.handle_key(key(KeyCode::Down));
+    assert_eq!(app.input, "draft");
+    assert_eq!(app.scroll, 0);
 }

@@ -1032,6 +1032,20 @@ pub(crate) fn default_session_path(cwd: &Path) -> PathBuf {
         .join("session.jsonl")
 }
 
+/// Purpose: The file a project's prompt history lives in, beside its session files.
+/// Serves: `tui.rs`'s `full_screen`, which hands it to the screen.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `tui.rs`.
+/// Down: `default_session_path`; no further call.
+/// Verify: `cargo test -p loongagent` · `./scripts/check.sh`.
+///
+/// A project's history, not the user's: a prompt that names this repository's files is
+/// rarely the one wanted in another checkout, and the same directory already holds the
+/// project's sessions.
+pub(crate) fn history_path(cwd: &Path) -> PathBuf {
+    default_session_path(cwd).with_file_name("history.jsonl")
+}
+
 /// Purpose: A readable directory name for a project path, with a hash so two paths cannot share a conversation.
 /// Serves: every path in this file.
 /// Design: `docs/design/sessions-lineage.md` §1.
@@ -1500,5 +1514,16 @@ mod session_tests {
             age_text(now - std::time::Duration::from_secs(172800)),
             "2 d ago"
         );
+    }
+
+    /// Purpose: Prompt history sits beside the project's sessions, so one checkout's prompts do not leak into another's.
+    #[test]
+    fn prompt_history_lives_beside_the_sessions() {
+        let cwd = Path::new("/tmp/loong-history-project");
+        assert_eq!(
+            history_path(cwd).parent(),
+            default_session_path(cwd).parent()
+        );
+        assert_eq!(history_path(cwd).file_name().unwrap(), "history.jsonl");
     }
 }

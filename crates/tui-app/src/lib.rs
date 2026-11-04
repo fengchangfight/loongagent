@@ -22,6 +22,7 @@
 //! over two channels.
 
 pub mod commands;
+pub mod history;
 pub mod mention;
 pub mod spend;
 use loong_tui::{Client, Transport};
@@ -607,6 +608,12 @@ pub struct App {
     /// same question* to a different model, and a question that got edited in between
     /// would make the two answers incomparable.
     pub last_prompt: Option<String>,
+    /// The project's prompts and the up/down walk through them. Kept here rather than in
+    /// the log because it is a convenience of the prompt, not a record of the session.
+    pub history: history::History,
+    /// Where that history is kept, when the surface could name a file. `None` in the
+    /// tests: the walk still works, it just does not outlive the process.
+    history_path: Option<std::path::PathBuf>,
     /// Which models a background check has confirmed, by name. Absent means nobody has
     /// checked yet, which is not the same as failed.
     pub health: std::collections::BTreeMap<String, bool>,
@@ -663,6 +670,8 @@ impl App {
             models: Vec::new(),
             selected: String::new(),
             last_prompt: None,
+            history: history::History::new(),
+            history_path: None,
             health: std::collections::BTreeMap::new(),
             spend: Spend::default(),
             quit: false,
@@ -696,6 +705,14 @@ impl App {
         self.activity = None;
         self.error = None;
         self.last_prompt = Some(text.clone());
+        // The prompt is now part of this project's history before the send returns: a
+        // prompt a hook refuses is still something the person asked, and remembering it
+        // is what lets them fix it with one up-arrow.
+        if self.history.record(&text) {
+            if let Some(path) = &self.history_path {
+                self.history.save(path);
+            }
+        }
         Action::Send(ToWorker::Submit(text))
     }
 
@@ -727,6 +744,43 @@ impl App {
             self.selected_model_label()
         )]);
         self.begin_submit(text)
+    }
+
+    /// Purpose: Load the project's prompt history from the file the surface named, and remember where to write it back.
+    /// Serves: `surface::run`, before the first frame.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `surface::run`.
+    /// Down: `history::History::load`.
+    /// Verify: `cargo test -p loong-tui-app`.
+    pub fn load_history(&mut self, path: std::path::PathBuf) {
+        self.history = history::History::load(&path);
+        self.history_path = Some(path);
+    }
+
+    /// Purpose: The up-arrow: show the previous prompt and put the caret after it.
+    /// Contract: called by `handle_key`'s up arm; calls `History::older` and `refresh_picker`.
+    fn recall_older(&mut self) -> Action {
+        if let Some(text) = self.history.older(&self.input, self.cursor) {
+            self.cursor = text.chars().count();
+            self.input = text;
+            self.refresh_picker();
+        }
+        Action::None
+    }
+
+    /// Purpose: The down-arrow: show the next prompt, or the draft once past the newest.
+    /// Contract: called by `handle_key`'s down arm; calls `History::newer` and `refresh_picker`.
+    fn recall_newer(&mut self) -> Action {
+        match self.history.newer() {
+            Some(history::Recalled::Entry { text, cursor })
+            | Some(history::Recalled::Draft { text, cursor }) => {
+                self.input = text;
+                self.cursor = cursor;
+                self.refresh_picker();
+            }
+            None => {}
+        }
+        Action::None
     }
 
     /// Purpose: The current model as every caller should name it, with its slot when it has one.
@@ -1469,6 +1523,19 @@ impl App {
                     )
                 }
             }
+            // A recalled prompt is a state of the prompt line, so the title says where
+            // the walk is: without it, up-arrow looks like the input mysteriously
+            // changing, and there is no sign that down returns to the draft.
+            None if self.history.is_browsing() => {
+                let (at, total) = self.history.position().unwrap_or((0, 0));
+                (
+                    format!(
+                        "{}历史 {at}/{total} · ↑ 更早 · ↓ 回到草稿",
+                        self.yolo_mark()
+                    ),
+                    self.title_style(Style::default().fg(Color::Cyan)),
+                )
+            }
             // The last turn's ending, held on screen until the next prompt starts.
             //
             // Placed after the command hint so a half-typed `/new` still completes, and
@@ -1854,6 +1921,12 @@ impl App {
     /// is actually typed. Called from every path that moves the caret or edits the
     /// line, because a picker that lags one keystroke behind lists the wrong files.
     fn refresh_picker(&mut self) {
+        // History browsing owns the arrows. A picker derived from a recalled prompt
+        // would take them back, and the walk would stop dead on the first `@` prompt.
+        if self.history.is_browsing() {
+            self.picker = None;
+            return;
+        }
         // Any edit or caret move re-arms the picker; the dismissal only covers the
         // text it was given for.
         self.mention_dismissed = false;
@@ -1896,7 +1969,9 @@ impl App {
     /// what their keys mean. `commands_dismissed` only covers the key that asked it to
     /// go; every later key derives it again.
     fn command_candidates(&self) -> Option<Vec<commands::Candidate>> {
-        if self.pending.is_some() || self.commands_dismissed {
+        // The same rule as the picker: while the walk is live the arrows move history,
+        // so a menu on screen would be a list the keys do not walk.
+        if self.pending.is_some() || self.commands_dismissed || self.history.is_browsing() {
             return None;
         }
         if !self.input.starts_with('/')
@@ -2538,14 +2613,11 @@ impl App {
                 self.scroll = self.scroll.saturating_sub(5);
                 Action::None
             }
-            KeyCode::Up => {
-                self.scroll = (self.scroll + 1).min(self.lines.len());
-                Action::None
-            }
-            KeyCode::Down => {
-                self.scroll = self.scroll.saturating_sub(1);
-                Action::None
-            }
+            // The arrows belong to the prompt's history, as they do in every other
+            // agent. Scrolling keeps the page keys and the wheel: a history walk is
+            // what someone reaches for far more often than a one-line scroll.
+            KeyCode::Up => self.recall_older(),
+            KeyCode::Down => self.recall_newer(),
             // Home/End belong to the line — that is what every prompt does, and the
             // transcript has PageUp/PageDown plus ctrl-Home/ctrl-End of its own.
             KeyCode::Home if !ctrl => {

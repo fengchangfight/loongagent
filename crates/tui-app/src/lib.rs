@@ -596,12 +596,14 @@ pub struct App {
     /// Bounded by [`FOLD_KEEP`]: a session can run all day, and the oldest folds can always
     /// be fetched from the log — just not until the turn lets go of the connection.
     pub folded: std::collections::BTreeMap<usize, Vec<String>>,
-    /// The models this session offers, in the order the profile declared them — which
-    /// is the order the bar numbers them, and the user's own ranking from cheapest to
-    /// most capable.
+    /// The models this session offers, in the order the bar numbers them: the profile's
+    /// declaration until `Alt+←`/`Alt+→` moves one, then the arrangement this run keeps.
     pub models: Vec<loong_schema::generated::ModelOffering>,
     /// Which of them the next call will use.
     pub selected: String,
+    /// The names as the user arranged them, once they have moved one. `None` means the
+    /// bar follows whatever order the server last sent, which is the profile's.
+    model_order: Option<Vec<String>>,
     /// The last thing the user asked for, so `Alt+R` has something to resend.
     ///
     /// Kept in full rather than as a reference: the point of a resend is to send *the
@@ -669,6 +671,7 @@ impl App {
             folded: std::collections::BTreeMap::new(),
             models: Vec::new(),
             selected: String::new(),
+            model_order: None,
             last_prompt: None,
             history: history::History::new(),
             history_path: None,
@@ -801,13 +804,27 @@ impl App {
     /// Serves: `surface::run` before the first draw, `App::drain` after a switch or a new session, and the tests.
     /// Design: `docs/design/surfaces.md` §3.
     /// Up: `surface::run`, `App::drain` and the test helpers.
-    /// Down: no call; it assigns `models` and `selected`.
+    /// Down: no call; it arranges `models` and assigns `selected`.
     /// Verify: `cargo test -p loong-tui-app`.
     /// Take the session's model list, which is a read and arrives before the first
     /// frame. Doing it here rather than on a worker round trip is what keeps the bar
     /// from appearing one frame late, which on a slow link would be the whole session.
+    ///
+    /// A switch sends the server's list again in declaration order. Once the user has
+    /// arranged the bar, that arrangement wins for the names still present, so choosing
+    /// a model does not silently throw the order away; new names append in the server's
+    /// order.
     pub fn set_models(&mut self, list: loong_schema::generated::ModelList) {
-        self.models = list.models;
+        let mut models = list.models;
+        if let Some(order) = &self.model_order {
+            models.sort_by_key(|model| {
+                order
+                    .iter()
+                    .position(|name| name == &model.name)
+                    .unwrap_or(usize::MAX)
+            });
+        }
+        self.models = models;
         self.selected = list.selected;
     }
 
@@ -900,6 +917,49 @@ impl App {
         self.switch_to_slot(next + 1)
     }
 
+    /// Purpose: `Alt+←`/`Alt+→`: move the selected model one slot and keep it selected.
+    /// Serves: `App::handle_key`'s Alt+Left and Alt+Right arms.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `App::handle_key`.
+    /// Down: `App::push_lines` and `App::selected_model_label`; it reorders `App::models`.
+    /// Verify: `cargo test -p loong-tui-app`.
+    /// Move the selected model one slot left or right.
+    ///
+    /// This is the bar's order, not the profile's: the digits are keys, and somebody who
+    /// keeps reaching for the same model wants it under the same finger. The selection
+    /// stays on the model that moved, so the next call is still the one they chose; no
+    /// `model.select` is sent, because nothing about which model runs has changed.
+    fn move_selected_model(&mut self, delta: isize) -> Action {
+        if self.models.is_empty() {
+            self.push_lines(vec![
+                "· 这个会话没有可选模型 — 配一个：loongagent local add".to_string(),
+            ]);
+            return Action::None;
+        }
+        let Some(index) = self
+            .models
+            .iter()
+            .position(|model| model.name == self.selected)
+        else {
+            self.push_lines(vec!["· 当前模型不在这个列表里 — 无法移动".to_string()]);
+            return Action::None;
+        };
+        let target = index as isize + delta;
+        if target < 0 || target as usize >= self.models.len() {
+            self.push_lines(vec![format!(
+                "· {} 已经在最{}边了",
+                self.selected_model_label(),
+                if delta < 0 { "左" } else { "右" }
+            )]);
+            return Action::None;
+        }
+        self.models.swap(index, target as usize);
+        // Remembered by name rather than by index: the server sends the declaration
+        // order again after every switch, and the arrangement has to survive that.
+        self.model_order = Some(self.models.iter().map(|model| model.name.clone()).collect());
+        Action::None
+    }
+
     /// Purpose: Turn a slot press into a model switch, saying so when the slot is empty or already current.
     /// Serves: `App::handle_key`'s Alt+digit arm, `App::surface_command`'s `/N` and `App::switch_relative`.
     /// Design: `docs/design/surfaces.md` §3.
@@ -981,8 +1041,12 @@ impl App {
         let mut hint = String::new();
         if self.models.len() > 1 {
             // `ctrl+n`/`ctrl+p` lead, because they are the ones that work everywhere. The
-            // numbered forms follow for anybody whose terminal does deliver them.
-            hint.push_str(&format!("  ctrl+n/p 切换 · alt+1..{slots} · /1../{slots}"));
+            // numbered forms follow for anybody whose terminal does deliver them. The
+            // arrows reorder rather than switch, so they are named last and never implied
+            // to be a way of choosing a different model.
+            hint.push_str(&format!(
+                "  ctrl+n/p 切换 · alt+1..{slots} · /1../{slots} · alt+←/→ 调顺序"
+            ));
         }
         if self.last_prompt.is_some() {
             hint.push_str(" · alt+r 重发");
@@ -2388,7 +2452,17 @@ impl App {
         // fire other things instead of switching, and the two that alias are the two a
         // user would press first. Alt arrives as a modifier crossterm can actually see.
         // `/<digit>` is the fallback, for terminals that eat Alt.
+        //
+        // Alt+←/→ reorder the bar rather than moving the caret: the prompt's own
+        // word-jump is not implemented, so the pair is free, and a keyboard order for the
+        // models is worth more here than a second way to move one character.
         if key.modifiers.contains(KeyModifiers::ALT) {
+            if let KeyCode::Left = key.code {
+                return self.move_selected_model(-1);
+            }
+            if let KeyCode::Right = key.code {
+                return self.move_selected_model(1);
+            }
             if let KeyCode::Char(c) = key.code {
                 if let Some(slot) = c.to_digit(10).filter(|d| (1..=9).contains(d)) {
                     return self.switch_to_slot(slot as usize);

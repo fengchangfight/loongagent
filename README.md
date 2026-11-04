@@ -139,6 +139,7 @@ loongagent local semantic off
 | `alt+1` … `alt+9` | 直接跳到第 N 个槽位（最常用） |
 | `/1` … `/9` | 同上；给会吞掉 Alt 的终端（tmux、部分 Windows 终端）兜底 |
 | `ctrl+n` / `ctrl+p` | 下一个 / 上一个模型，循环 |
+| `alt+←` / `alt+→` | 把当前模型左/右移一位（只改本次会话的槽位顺序，不改 `[[models]]`） |
 | `alt+r` 或 `/r` | 用**当前选中的模型**重发上一条 prompt |
 
 **会话内**：
@@ -233,8 +234,8 @@ skills/commands、**插件**、六个内置工具（`read_file` / `write_file` /
 可选的**分层记忆**（R 模式 + S 模式、后台增量、`recall`/`expand`、F2 可见性）和**控制面**
 （签名 pack 由固定公钥验签后才进 control 层（高于 org），`loongagent-control` 二进制与 runbook 都在；身份/SSO、
 审计、密钥轮换还没做完）。Linux 与 **Windows** 都能构建运行，命令面一致。
-测试 846 个通过、11 个忽略。
-<!-- test-counts: 846 passed, 11 ignored -->
+测试 849 个通过、11 个忽略。
+<!-- test-counts: 849 passed, 11 ignored -->
 
 **没做完，也不假装**：subagents、插件的索引/搜索与逐插件开关（现在用 `disable_skills`）、
 第三方内容的签名与信任分级（[ADR-0018](docs/decisions/0018-plugin-install-and-bootstrap.md)

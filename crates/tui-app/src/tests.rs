@@ -4010,6 +4010,12 @@ fn alt(c: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT)
 }
 
+/// Purpose: An arrow key with the Alt modifier.
+/// Contract: test helper; the model-reorder tests use it.
+fn alt_arrow(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::ALT)
+}
+
 /// Purpose: The bar numbers models left to right in the profile's declaration order.
 #[test]
 fn the_model_bar_numbers_the_models_in_the_order_the_profile_declared_them() {
@@ -4486,6 +4492,76 @@ fn plain_n_and_p_still_type_letters() {
     assert_eq!(app.input, "np");
 }
 
+/// Purpose: Alt+Left and Alt+Right move the selected model one slot and keep it selected.
+#[test]
+fn alt_left_and_right_move_the_selected_model_one_slot() {
+    let mut app = app_with_models(&["a", "b", "c"]);
+    app.selected = "b".to_string();
+
+    assert_eq!(
+        app.handle_key(alt_arrow(KeyCode::Left)),
+        Action::None,
+        "reordering is presentation, so no model switch is sent"
+    );
+    let names: Vec<&str> = app.models.iter().map(|model| model.name.as_str()).collect();
+    assert_eq!(names, ["b", "a", "c"]);
+    assert_eq!(app.selected, "b", "the model in hand did not change");
+
+    assert_eq!(app.handle_key(alt_arrow(KeyCode::Right)), Action::None);
+    let names: Vec<&str> = app.models.iter().map(|model| model.name.as_str()).collect();
+    assert_eq!(names, ["a", "b", "c"], "and it moves back");
+    assert_eq!(app.selected, "b");
+}
+
+/// Purpose: Moving past the edge changes nothing and says why, rather than looking broken.
+#[test]
+fn moving_a_model_past_the_edge_explains_itself() {
+    let mut app = app_with_models(&["a", "b"]);
+    assert_eq!(app.handle_key(alt_arrow(KeyCode::Left)), Action::None);
+    let said = app.lines.join("\n");
+    assert!(
+        shows(&said, "已经在最左边了"),
+        "a key that appears to do nothing is worse than one that explains: {said:?}"
+    );
+
+    app.selected = "b".to_string();
+    assert_eq!(app.handle_key(alt_arrow(KeyCode::Right)), Action::None);
+    let said = app.lines.join("\n");
+    assert!(shows(&said, "已经在最右边了"), "{said:?}");
+
+    let names: Vec<&str> = app.models.iter().map(|model| model.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["a", "b"],
+        "and neither edge press reordered anything"
+    );
+}
+
+/// Purpose: A switch or new session sends declaration order again, and a manual order survives it.
+#[test]
+fn a_manual_order_survives_the_next_model_list_the_server_sends() {
+    let mut app = app_with_models(&["a", "b", "c"]);
+    app.selected = "c".to_string();
+    app.handle_key(alt_arrow(KeyCode::Left));
+    app.handle_key(alt_arrow(KeyCode::Left));
+    let names: Vec<&str> = app.models.iter().map(|model| model.name.as_str()).collect();
+    assert_eq!(names, ["c", "a", "b"]);
+
+    // The server answers a switch, or a new session, with the profile's order again.
+    app.set_models(model_list(&["a", "b", "c"]));
+    let names: Vec<&str> = app.models.iter().map(|model| model.name.as_str()).collect();
+    assert_eq!(names, ["c", "a", "b"], "the arrangement outlives the reply");
+    assert_eq!(
+        app.selected, "a",
+        "the server still says which model is current"
+    );
+
+    // A model configured in between is reachable, at the end, rather than lost.
+    app.set_models(model_list(&["a", "b", "c", "d"]));
+    let names: Vec<&str> = app.models.iter().map(|model| model.name.as_str()).collect();
+    assert_eq!(names, ["c", "a", "b", "d"]);
+}
+
 /// Purpose: The bar hint names the always-delivered keys first and still offers the numbered ones.
 #[test]
 fn the_bar_hint_leads_with_the_keys_that_always_arrive() {
@@ -4499,6 +4575,10 @@ fn the_bar_hint_leads_with_the_keys_that_always_arrive() {
     assert!(
         despaced(&bar).contains(&despaced("alt+1..3")),
         "and the numbered ones are still offered: {bar:?}"
+    );
+    assert!(
+        despaced(&bar).contains(&despaced("alt+←/→ 调顺序")),
+        "and so is the way to arrange the slots: {bar:?}"
     );
 }
 

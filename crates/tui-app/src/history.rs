@@ -60,19 +60,31 @@ impl History {
     }
 
     /// Purpose: The prompts, oldest first, so a test and the title can read them without a second source.
-    /// Contract: called by the tests and `position`; reads `entries`.
+    /// Serves: the history tests and `History::position`.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: the history tests; `History::position` reads the length.
+    /// Down: no call; it borrows the field.
+    /// Verify: `cargo test -p loong-tui-app`.
     pub fn entries(&self) -> &[String] {
         &self.entries
     }
 
     /// Purpose: Whether the prompt currently shows a recalled line, which is what keeps the menus out of the arrows.
-    /// Contract: called by `App`'s picker, command menu and title.
+    /// Serves: `App::status`, the `@` picker, the command menu and the arrow keys.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `App::status`, `App::refresh_picker` and `App::handle_key`'s prompt arms.
+    /// Down: no call; it reads the walk field.
+    /// Verify: `cargo test -p loong-tui-app`.
     pub fn is_browsing(&self) -> bool {
         self.at.is_some()
     }
 
     /// Purpose: The walk's place as one-based "at of total", for the prompt title.
-    /// Contract: called by `App::status`; reads `at` and `entries`.
+    /// Serves: `App::status`.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `App::status`.
+    /// Down: `History::entries`'s length.
+    /// Verify: `cargo test -p loong-tui-app`.
     pub fn position(&self) -> Option<(usize, usize)> {
         self.at.map(|at| (at + 1, self.entries.len()))
     }
@@ -142,7 +154,11 @@ impl History {
     }
 
     /// Purpose: End the walk and drop the draft, as submitting or leaving history does.
-    /// Contract: called by `record` and `App::begin_submit`; reads the walk fields.
+    /// Serves: `History::record`, so a new prompt is not appended inside a recalled position.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `History::record`.
+    /// Down: no call; it clears the walk fields.
+    /// Verify: `cargo test -p loong-tui-app`.
     pub fn stop(&mut self) {
         self.at = None;
         self.draft = None;

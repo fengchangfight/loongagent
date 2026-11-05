@@ -42,7 +42,7 @@
 //! silently forgotten. A directory without a manifest is not a plugin: cloning a
 //! repository into the plugin root is not an install, and `plugin add` is the act
 //! that puts skills into every session's context. That is the whole trust story
-//! here, and it is deliberately the same one `.loongagent/skills` already has.
+//! here, and it is deliberately the same one `.agents/skills` already has.
 
 use loong_skills::{Origin, SkillSet};
 use std::collections::BTreeMap;

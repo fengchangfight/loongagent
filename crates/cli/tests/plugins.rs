@@ -55,7 +55,7 @@ fn skill(checkout: &Path, name: &str, body: &str) {
 /// Contract: `plugins.rs` fixtures; the clash test calls it.
 /// A workspace skill, so a plugin can collide with something real.
 fn workspace_skill(ws: &Path, name: &str) {
-    let dir = ws.join(".loongagent/skills").join(name);
+    let dir = ws.join(".agents/skills").join(name);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("SKILL.md"),

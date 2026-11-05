@@ -3162,7 +3162,7 @@ fn a_profile_can_add_skill_roots_and_disable_names_by_identity() {
 #[test]
 fn a_broken_skill_file_is_fatal() {
     let t = Temp::new();
-    let dir = t.dir.join(".loongagent/skills/broken");
+    let dir = t.dir.join(".agents/skills/broken");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("SKILL.md"),

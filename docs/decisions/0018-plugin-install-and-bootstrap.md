@@ -54,7 +54,7 @@ So the gap was real, and the interesting question was not "how do we run their h
 `plugin add` writes `.loongagent-plugin.toml` inside the checkout. **A directory without a
 manifest is not a plugin**: `git clone` into the plugins root installs nothing, and every
 installed plugin got there through a command a person typed. This is the same trust story
-`.loongagent/skills` already has — content that enters context is put there by an explicit
+`.agents/skills` already has — content that enters context is put there by an explicit
 act — with the difference that a user-scope install follows the person into repositories
 they did not write, so the act has to be deliberate.
 
@@ -186,7 +186,7 @@ A root that *is* a directory of skills (`skill_dirs = ["~/team-skills"]`) is unc
   would make repo-shipped scripts a path into the prompt, which is the one thing the hook
   design deliberately refuses. `bootstrap` gives the same effect through a channel that is
   already audited (skills) and already inspectable (a file in a checkout you can read).
-- **Vendoring plugin skills into `.loongagent/skills/`.** Rejected: no provenance, no
+- **Vendoring plugin skills into `.agents/skills/`.** Rejected: no provenance, no
   update, and it duplicates content into repositories that then diverge.
 - **Auto-activating any directory under the plugins root.** Rejected: it would make
   `git clone` an installation, which is exactly the side effect §1 exists to prevent.

@@ -67,12 +67,19 @@ catalogue in the system prompt; its body loads only when invoked, by the person 
 `/name args` or by the model calling the `skill` tool. `$ARGUMENTS` and `$1`…`$9` are
 substituted, and arguments are appended rather than dropped when the body names none.
 
-`SkillSet::load_in` reads the workspace's `.loongagent/skills/<name>/SKILL.md` and
+`SkillSet::load_in` reads the workspace's `.agents/skills/<name>/SKILL.md` and
 `.loongagent/commands/<name>.md`, then every extra root a profile contributes through
 `skill_dirs`, then the installed plugins' skill directories. A root that has a `skills/`
 directory is read in the workspace shape only; a root that is a directory of skills is read
 flat. Duplicate names are a hard error, so `/name` never depends on directory order. `/help`
 is built from the final catalogue.
+
+The workspace skills directory is `.agents/skills/`, not a private `.loongagent/skills/`:
+`AGENTS.md` is the project-level file a repository already carries for every agent, and
+`.agents/` is its companion directory, so a repository's skills sit where other agents look
+too. The move is total — no fallback to the old path is kept — so a repository that still
+has `.loongagent/skills/` must move it. Commands did not move: they stay under
+`.loongagent/commands/`, and a profile's `skill_dirs` root still carries both shapes.
 
 There is no trust gate and nothing executes. That is not an oversight: a skill is content,
 and its description is an injection surface, so the audit trail is the control. The kernel

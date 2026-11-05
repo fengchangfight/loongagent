@@ -8,6 +8,48 @@
 //! - **Verify:** `cargo test -p loong-tui-app` · `./scripts/check.sh`
 use super::*;
 
+/// Purpose: Take the terminal for the full-screen view without capturing the mouse, and quiet the wheel-to-arrow translation so a wheel notch cannot walk prompt history.
+/// Serves: `run` and `the_mouse_can_be_handed_back_to_the_terminal`.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `run`.
+/// Down: crossterm's `execute!` for the alternate screen and bracketed paste, and the raw DECSET 1007 reset.
+/// Verify: `cargo test -p loong-tui-app`.
+/// Take the alternate screen and bracketed paste, but **not** the mouse: capture disables
+/// the terminal's own selection, and selection is the thing to keep. The escape that
+/// follows is xterm's alternate-scroll (DECSET 1007): with it on, the terminal turns a
+/// wheel notch into ↑/↓, and those keys are prompt history here — so a reader's wheel
+/// would rewrite the prompt. Off, the wheel is inert, PageUp/PageDown scroll, and
+/// `/mouse` opts into the wheel at the cost of Shift-to-select.
+pub(crate) fn take_screen(writer: &mut impl std::io::Write) -> std::io::Result<()> {
+    use ratatui::crossterm::event::EnableBracketedPaste;
+    use ratatui::crossterm::execute;
+    use ratatui::crossterm::terminal::EnterAlternateScreen;
+    execute!(writer, EnterAlternateScreen, EnableBracketedPaste)?;
+    write!(writer, "\x1b[?1007l")?;
+    writer.flush()
+}
+
+/// Purpose: Give the terminal back on exit: close the mouse if `/mouse` opened it, drop bracketed paste, and restore the wheel translation.
+/// Serves: `run`'s cleanup and `the_mouse_can_be_handed_back_to_the_terminal`.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `run`.
+/// Down: crossterm's `execute!` for leaving the screen, and the raw DECSET 1007 restore.
+/// Verify: `cargo test -p loong-tui-app`.
+pub(crate) fn leave_screen(writer: &mut impl std::io::Write) -> std::io::Result<()> {
+    use ratatui::crossterm::event::{DisableBracketedPaste, DisableMouseCapture};
+    use ratatui::crossterm::execute;
+    use ratatui::crossterm::terminal::LeaveAlternateScreen;
+    // The xterm default is on, so put it back rather than leaving the user's terminal
+    // with wheel-to-arrow quietly disabled in every other application.
+    write!(writer, "\x1b[?1007h")?;
+    execute!(
+        writer,
+        DisableMouseCapture,
+        DisableBracketedPaste,
+        LeaveAlternateScreen
+    )
+}
+
 /// Purpose: Replay the session, spawn the worker, own the terminal and loop: drain, draw, read a key, act, until quit.
 /// Serves: `crates/cli/src/tui.rs`.
 /// Design: `docs/design/surfaces.md` §3; `docs/design/sessions-lineage.md` §1 (replay reads the log) and §5.
@@ -27,14 +69,9 @@ pub fn run<T: Transport + Send + 'static>(
     health: Option<Receiver<ModelHealth>>,
 ) -> Result<(), String> {
     use ratatui::backend::CrosstermBackend;
-    use ratatui::crossterm::event::{
-        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        KeyEventKind,
-    };
+    use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, KeyEventKind};
     use ratatui::crossterm::execute;
-    use ratatui::crossterm::terminal::{
-        disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
-    };
+    use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode};
     use ratatui::Terminal;
 
     // A session that already has a past: show it before taking over the terminal, so a
@@ -115,10 +152,11 @@ pub fn run<T: Transport + Send + 'static>(
 
     enable_raw_mode().map_err(|e| e.to_string())?;
     let mut stdout = std::io::stdout();
-    // Mouse capture so the wheel scrolls the conversation. Text selection then needs
-    // the terminal's modifier (Shift or Option) — the usual trade for this.
-    // Deliberately **not** `EnableMouseCapture`: see `App::mouse`.
-    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste).map_err(|e| e.to_string())?;
+    // The terminal keeps the mouse: drag-select and copy stay the shell's own, which is
+    // what someone reading a transcript expects. `/mouse` trades that for the wheel;
+    // take_screen also turns off the wheel-as-arrow rule that would otherwise walk the
+    // prompt's history while the mouse is not captured.
+    take_screen(&mut stdout).map_err(|e| e.to_string())?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).map_err(|e| e.to_string())?;
 
@@ -189,13 +227,7 @@ pub fn run<T: Transport + Send + 'static>(
     })();
 
     disable_raw_mode().ok();
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture,
-        DisableBracketedPaste
-    )
-    .ok();
+    leave_screen(terminal.backend_mut()).ok();
     terminal.show_cursor().ok();
     outcome
 }

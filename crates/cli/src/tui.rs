@@ -224,9 +224,9 @@ impl Drop for ChildTransport {
 }
 
 /// Purpose: Resolve settings, make sure a model exists, spawn the child and hand the client to `loong_tui_app::run`.
-/// Serves: `loongagent tui` and `loongagent resume`.
+/// Serves: `loongagent` (the default surface), `loongagent tui` and `loongagent resume`.
 /// Design: `docs/design/surfaces.md` §2 and §3.
-/// Up: `main.rs`'s `tui` arm and `session.rs`'s `resume`; no other caller.
+/// Up: `main.rs`'s default and `tui` arms and `session.rs`'s `resume`; no other caller.
 /// Down: `Args::{is_local, settings_with_pack, session_id}`, `ChildTransport::{spawn, pid}`, `Client::{attach, submit}` and `loong_tui_app::run`.
 /// Verify: `cargo test -p loongagent --test tui_surface`.
 /// The full-screen surface: the client here, the screen in `loong-tui-app`.

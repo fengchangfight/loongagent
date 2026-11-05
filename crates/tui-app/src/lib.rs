@@ -523,7 +523,9 @@ pub struct App {
     /// Whether this program tracks the mouse. **Off by default**: tracking it is what
     /// disables the terminal's own selection, and left-drag-select / right-click-copy is
     /// what a shell does — a TUI should not take that away to gain a wheel. `/mouse`
-    /// trades it back for in-app scrolling, and page up/down work either way.
+    /// trades it back for in-app scrolling, and page up/down scroll either way. While it
+    /// is off the screen also turns off the terminal's wheel-to-arrow translation, so a
+    /// wheel notch cannot rewrite the prompt with a history entry.
     pub mouse: bool,
     /// True while approval prompts are off for this session — the interface must show
     /// it, because the dangerous state is one where nobody notices it is on (ADR-0007 §5).
@@ -1684,7 +1686,7 @@ impl App {
                             "/new" | "/clear" | "/reset" => {
                                 "回车开始新会话 — 这一条会存盘，上下文不带走".to_string()
                             }
-                            "/mouse" => "回车把鼠标还给终端".to_string(),
+                            "/mouse" => "回车让程序接管鼠标（滚轮滚动；默认还给终端）".to_string(),
                             // The model shortcuts, said in full only when they would work: a
                             // completion that promises a switch in a session with one model
                             // is a completion that lies.
@@ -1873,8 +1875,8 @@ impl App {
                 self.cursor = 0;
                 Some(Action::Copy)
             }
-            // And it has to be able to hand the mouse back, for someone who would rather
-            // use their terminal's own selection.
+            // Off by default, so this is the way to hand the mouse *over* for in-app
+            // wheel scrolling; turning it off again gives selection back to the terminal.
             "/mouse" => {
                 self.input.clear();
                 self.cursor = 0;

@@ -10,15 +10,17 @@
 //! loongagent — one binary, many faces (ADR-0009).
 //!
 //! ```text
+//! loongagent                [--session PATH] [--cwd DIR] [--model NAME]
+//! loongagent tui            the same screen, named explicitly
 //! loongagent server --stdio [--session PATH] [--cwd DIR] [--model NAME]
-//! loongagent tui            [--session PATH] [--cwd DIR] [--model NAME]
 //! loongagent run "PROMPT"   [--session PATH] [--cwd DIR] [--model NAME]
 //! ```
 //!
-//! `server` owns the session; `tui` and `run` are thin clients that speak
-//! JSON-RPC to it (the TUI spawns its own server child). The `demo-*` models are
-//! deterministic provider doubles so the whole slice can be exercised without a
-//! network or an API key; they disappear when a real adapter lands.
+//! `server` owns the session; the full-screen surface (no subcommand, or `tui`) and
+//! `run` are thin clients that speak JSON-RPC to it (the TUI spawns its own server
+//! child). The `demo-*` models are deterministic provider doubles so the whole slice
+//! can be exercised without a network or an API key; they disappear when a real
+//! adapter lands.
 
 use loong_kernel::{steps_or_unlimited, Kernel, KernelConfig};
 use loong_providers::{
@@ -84,7 +86,8 @@ USAGE:
   loongagent local semantic on --record                                    deterministic layers only
   loongagent local semantic off                                            turn it off
   loongagent setup          [--profile PATH]                                write a profile
-  loongagent tui            [--session ID|PATH] [--cwd DIR] [--new] [--local|--centered]  full-screen
+  loongagent                [--session ID|PATH] [--cwd DIR] [--new] [--local|--centered]  full-screen (default)
+  loongagent tui            the same screen, named explicitly
       with no --session it starts a new session; --session latest or `loongagent resume` continues
       --new says that explicitly and is otherwise unnecessary
       local is the default: no control plane, no pack, no sync, no setup form
@@ -242,10 +245,10 @@ impl Args {
         Self::parse_with(rest, false)
     }
 
-    /// Purpose: Parse `tui`'s flags, whose default with no `--session` is a fresh session.
-    /// Serves: `run`'s `tui` arm.
+    /// Purpose: Parse the full-screen surface's flags, whose default with no `--session` is a fresh session.
+    /// Serves: `run`'s `tui` arm and its default arm (no subcommand, or only flags).
     /// Design: `docs/design/surfaces.md` §2.
-    /// Up: `run`'s `tui` arm; no other caller.
+    /// Up: `run`'s `tui` arm and its default arm.
     /// Down: `parse_with`.
     /// Verify: `cargo test -p loongagent`.
     fn parse_tui(rest: &[String]) -> Result<Self, String> {
@@ -469,7 +472,8 @@ impl Args {
     /// Work out which session this run is about — once, here, so every command and the
     /// interface agree. Three ways to say it: a path (`./x.jsonl`), an id (the file's
     /// own name, or an unambiguous prefix of it), or `latest`. Nothing said means the
-    /// newest session in this project, except for `tui`, whose default is a fresh one.
+    /// newest session in this project, except for the full-screen surface (`tui`, or no
+    /// subcommand), whose default is a fresh one.
     /// If there is none, a fresh id is minted now so that the answer is stable for the
     /// rest of the run.
     fn finish_session(&mut self, fresh_by_default: bool) -> Result<(), String> {
@@ -682,12 +686,12 @@ fn config_dir() -> PathBuf {
     loong_config::loongagent_home()
 }
 
-/// Purpose: Dispatch the first word to its command module, or print the usage and the version.
+/// Purpose: Dispatch the first word to its command module; no first word is the full-screen surface, otherwise print the usage.
 /// Serves: `main`, and every command the binary offers.
 /// Design: `docs/design/surfaces.md` §2 (the command table).
 /// Up: `main`; no other caller.
 /// Down: every command module's entry function, `Args::parse` and `USAGE`.
-/// Verify: `cargo test -p loongagent --test local_mode`.
+/// Verify: `cargo test -p loongagent --test local_mode --test tui_surface`.
 fn run() -> Result<(), String> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let (command, rest) = argv
@@ -695,6 +699,9 @@ fn run() -> Result<(), String> {
         .map(|(c, r)| (c.as_str(), r))
         .unwrap_or(("", &[]));
     match command {
+        // No subcommand is the full-screen surface: `loongagent` is what people type,
+        // and `tui` stays as the explicit spelling of the same thing.
+        "" => full_screen(Args::parse_tui(rest)?),
         "server" => {
             let args = Args::parse(rest)?;
             if !args.stdio {
@@ -774,6 +781,13 @@ fn run() -> Result<(), String> {
             );
             Ok(())
         }
+        "-h" | "--help" => {
+            println!("{USAGE}");
+            Ok(())
+        }
+        // A run whose first token is a flag is the same default surface:
+        // `loongagent --cwd DIR` should not make someone discover `tui` first.
+        flag if flag.starts_with("--") => full_screen(Args::parse_tui(&argv)?),
         _ => {
             println!("{USAGE}");
             Ok(())

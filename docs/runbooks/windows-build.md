@@ -103,7 +103,7 @@ Invocation:
 |---|---|---|
 | build | `cargo build --release` | `scripts\build-windows.cmd`, or the same `cargo` command |
 | binary | `./target/release/loongagent` | `target\release\loongagent.exe` |
-| full-screen | `loongagent tui` | `loongagent.exe tui` (PowerShell needs `.\` in front of a program in the current directory) |
+| full-screen | `loongagent` (or `loongagent tui`) | `loongagent.exe` (or `loongagent.exe tui`; PowerShell needs `.\` in front of a program in the current directory) |
 | line mode | `loongagent repl` | `loongagent.exe repl` — no TTY needed, so pipes and scripts still work |
 | headless | `loongagent run "…"` | `loongagent.exe run "…"` |
 | usage | `loongagent --help` | `loongagent.exe --help` — the same tree |
@@ -120,11 +120,11 @@ server from the skills and commands the session actually has:
 | `/1` … `/9` · `alt+1` … `alt+9` · `ctrl+n` / `ctrl+p` · `ctrl+←` / `ctrl+→` · `/left` `/right` | choose a model; the bar shows the slots, and the arrows move the current one |
 | `/expand` | last tool result in full |
 | `/copy` | copy the transcript (OSC 52, plus a file path that always works) |
-| `/mouse` | hand the mouse back to the terminal |
+| `/mouse` | take the mouse for in-app wheel scrolling (off by default: drag to select; Shift selects once on) |
 | `/yolo` | toggle approval prompts (the sandbox is untouched by this) |
 | `/logo` | toggle the banner |
 | `F2` | the context panel: what the next request will carry |
-| `PgUp`/`PgDn`, wheel, `ctrl-PgUp`/`ctrl-PgDn` | scroll |
+| `PgUp`/`PgDn`, `ctrl-PgUp`/`ctrl-PgDn` (wheel after `/mouse`) | scroll |
 | `ctrl-c` while a turn runs | **stop the turn, keep the session** |
 
 `ctrl-c` deserves the footnote it gets, because the mechanism is the one thing that

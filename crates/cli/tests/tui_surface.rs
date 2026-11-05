@@ -180,3 +180,53 @@ fn a_bare_tui_starts_a_fresh_session() {
     assert_eq!(after.len(), 2, "the new session is a second log: {after:?}");
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// Purpose: No subcommand — or only flags — opens the full-screen surface, not the usage page.
+#[test]
+fn a_bare_loongagent_opens_the_full_screen_surface() {
+    let base = std::env::temp_dir().join(format!("loongagent-default-tui-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let cwd = base.to_str().unwrap();
+
+    // A pipe cannot hold the screen; the full-screen surface says so and names the
+    // line-mode way out. The usage page would be a success with `USAGE:` on stdout.
+    for extra in [&[][..], &["--cwd", cwd][..]] {
+        let out = common::isolated_command()
+            .current_dir(&base)
+            .args(extra)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .expect("the binary runs");
+        assert!(
+            !out.status.success(),
+            "the default surface must not run in a pipe: {extra:?}"
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(!stdout.contains("USAGE:"), "not the usage page: {stdout}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("stdout 不是终端"),
+            "the full-screen refusal is named: {stderr}"
+        );
+        assert!(
+            stderr.contains("loongagent repl"),
+            "the way out is named: {stderr}"
+        );
+    }
+
+    // `--help` stays the usage page even though other leading flags mean the screen.
+    let help = common::isolated_command()
+        .arg("--help")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .output()
+        .expect("the binary runs");
+    assert!(help.status.success(), "--help exits successfully");
+    let help = String::from_utf8_lossy(&help.stdout);
+    assert!(help.contains("USAGE:"), "--help still prints usage: {help}");
+
+    let _ = std::fs::remove_dir_all(&base);
+}

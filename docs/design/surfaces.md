@@ -38,7 +38,7 @@ arguments and dispatches; the command modules are the only place where the run i
 - **Build** the kernel: models, tools, hooks, MCP clients, skills, plugins, the PDP and the
   sandbox choice (`serve` and `build_kernel` in `crates/cli/src/server.rs`).
 - **Run** the chosen surface: spawn the server child (`tui`, `repl`, `run`, `web`) or run the
-  server itself (`server --stdio`); a bare `tui` starts fresh, `--session` opens an old one.
+  server itself (`server --stdio`); bare `loongagent` (or `tui`) starts fresh; `--session` opens an old one.
 
 So the CLI is not "another surface" in the thin-client sense. It is the composition root that
 turns a user's files and flags into one configured server. A surface crate below it receives a
@@ -70,12 +70,12 @@ because the client already saw the `tool.call` and `approval.requested`.
 lives on a worker thread and the screen talks to it over channels; the key handler and drawing
 are driven from ratatui's `TestBackend` in the tests. It adds only presentation and intents:
 the model picker, context panel, folds, `/yolo`, `/new`, and interrupt (a signal, not a
-protocol method); `Ctrl+←`/`Ctrl+→` reorder the model slots (`/left`, `/right` are the typed fallbacks). Local mode writes the new order back to `local.toml`'s `[[models]]`, so the next session starts with it and its first block is the default; a managed profile keeps the order for the run only. A paste arrives as one block; enter during a turn refuses a new prompt; `/yolo` still reaches the control channel.
+protocol method); `Ctrl+←`/`Ctrl+→` reorder the model slots (`/left`, `/right` are the typed fallbacks). Local mode writes the new order back to `local.toml`'s `[[models]]`, so the next session starts with it and its first block is the default; a managed profile keeps the order for the run only. A paste arrives as one block; enter during a turn refuses a new prompt; `/yolo` still reaches the control channel. The mouse is **not** captured by default — the terminal's own drag-select and copy keep working, and the wheel-to-arrow rule is turned off so a wheel notch cannot walk this history; `/mouse` trades that selection for in-app wheel scrolling (Shift then selects).
 
 The prompt keeps a per-project history: ↑/↓ walk the prompts this project asked
 (`~/.loongagent/projects/<slug>/history.jsonl`, newest 200, multi-line intact); ↓ past the
 newest restores the draft. The arrows belong to the prompt, so the transcript scrolls with
-PageUp/PageDown and the wheel. While the walk is live the `@` picker and command menu stay
+PageUp/PageDown (and the wheel once `/mouse` takes it). While the walk is live the `@` picker and command menu stay
 closed (a recalled `/` or `@` prompt would take the arrows back), the title says `历史 n/m`,
 and the file is written best effort — a read-only home costs history, never a prompt.
 

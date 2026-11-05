@@ -7,7 +7,7 @@
 一个装在你自己机器上的编码 agent。单个二进制，**会话原文（JSONL 日志）就是唯一真相**，
 每一次权限决定都是一条可审计的事件，模型、记忆、会话全部留在本机 —— 不依赖任何服务器也能用。
 
-- **本地版（默认）**：`loongagent tui`，模型可以是本机 ollama，也可以是你自己的 API key；
+- **本地版（默认）**：`loongagent`（或显式 `loongagent tui`），模型可以是本机 ollama，也可以是你自己的 API key；
   配置、密钥、会话都在 `~/.loongagent/` 下，别人碰不到。
 - **控制面**：显式 `--centered` 才走企业侧；用**签名 pack** 下发 profile：包由 Ed25519 签发、本地按固定公钥验签，
   验不过就用不了，模型/端点/密钥不进用户配置。**但本机的 org 层文件
@@ -53,12 +53,12 @@ Windows 用 `powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1`
 ### 跑起来
 
 ```bash
-loongagent tui                 # 在当前目录开一个本地会话（默认）
-loongagent tui --cwd ~/proj    # 指定工程目录
-loongagent tui --new           # 另起一个新会话（默认续最近一个）
+loongagent                     # 在当前目录开一个本地会话（默认）
+loongagent --cwd ~/proj        # 指定工程目录
+loongagent --new               # 显式新会话（默认就是新会话；续旧用 resume）
 loongagent resume              # 重新打开最近一个
 loongagent sessions --all      # 列出所有工程下的会话
-loongagent tui --centered      # 显式走控制面/profile，而不是本地配置
+loongagent --centered          # 显式走控制面/profile，而不是本地配置
 ```
 
 第一次跑且没有任何模型时，会**先弹配置向导**再进会话。默认就是 local；要读企业下发的
@@ -153,7 +153,7 @@ loongagent local semantic off
 | `/new` `/clear` `/reset` | 新开一个会话（旧日志保留） |
 | `/copy` | 复制整个会话（OSC 52 + 同时落一个文件路径） |
 | `/yolo` | 关掉审批提示（沙箱不受影响，照旧生效） |
-| `/logo` `/mouse` | 开关 logo / 把鼠标还给终端 |
+| `/logo` `/mouse` | 开关 logo / 把鼠标交给程序滚动聊天（默认还给终端：拖选复制照常，滚轮不翻历史） |
 | `/exit` `/quit` `/q`，`ctrl-d` | 退出 |
 | `ctrl-c` | **有任务在跑 = 中断这一轮**（会话不结束）；空闲 = 退出 |
 
@@ -235,8 +235,8 @@ skills/commands、**插件**、六个内置工具（`read_file` / `write_file` /
 可选的**分层记忆**（R 模式 + S 模式、后台增量、`recall`/`expand`、F2 可见性）和**控制面**
 （签名 pack 由固定公钥验签后才进 control 层（高于 org），`loongagent-control` 二进制与 runbook 都在；身份/SSO、
 审计、密钥轮换还没做完）。Linux 与 **Windows** 都能构建运行，命令面一致。
-测试 856 个通过、11 个忽略。
-<!-- test-counts: 856 passed, 11 ignored -->
+测试 857 个通过、11 个忽略。
+<!-- test-counts: 857 passed, 11 ignored -->
 
 **没做完，也不假装**：subagents、插件的索引/搜索与逐插件开关（现在用 `disable_skills`）、
 第三方内容的签名与信任分级（[ADR-0018](docs/decisions/0018-plugin-install-and-bootstrap.md)

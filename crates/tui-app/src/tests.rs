@@ -1795,13 +1795,21 @@ fn the_input_box_stops_growing_and_keeps_the_caret_on_screen() {
     );
 }
 
-/// Purpose: A wheel notch scrolls three lines and stops at the bottom.
+/// Purpose: A wheel notch scrolls three lines, stops at the bottom and never walks the prompt history.
 #[test]
 fn the_wheel_scrolls_the_conversation() {
     let mut app = App::new("s", "v");
     app.push_lines((1..=40).map(|i| format!("line {i}")));
+    app.history.record("older prompt");
+    app.input = "a draft".to_string();
+    app.cursor = app.input.chars().count();
     app.handle_mouse(ratatui::crossterm::event::MouseEventKind::ScrollUp);
     assert_eq!(app.scroll, 3, "a wheel notch moves three lines");
+    assert_eq!(app.input, "a draft", "the wheel leaves the prompt alone");
+    assert!(
+        !app.history.is_browsing(),
+        "and does not start a history walk"
+    );
     app.handle_mouse(ratatui::crossterm::event::MouseEventKind::ScrollDown);
     assert_eq!(app.scroll, 0);
     app.handle_mouse(ratatui::crossterm::event::MouseEventKind::ScrollDown);
@@ -2278,13 +2286,39 @@ fn base64_is_base64() {
     assert_eq!(base64(b"hello world"), "aGVsbG8gd29ybGQ=");
 }
 
-/// Purpose: The mouse is off until `/mouse`, which says what it costs and what comes back.
+/// Purpose: The mouse starts untracked so the terminal's own drag-select works, and `/mouse` hands it over and back.
 #[test]
 fn the_mouse_can_be_handed_back_to_the_terminal() {
     let mut app = App::new("s", "v");
-    // Off by default: the terminal's own selection is not something a TUI may take
-    // away in exchange for a wheel.
-    assert!(!app.mouse, "does not track the mouse unless asked");
+    // Off by default: capturing the mouse is what disables the terminal's own
+    // left-drag-select / right-click-copy. `/mouse` trades that for the wheel.
+    assert!(!app.mouse, "does not capture the mouse unless asked");
+
+    // Startup must not turn reporting on, and must turn off the alternate-screen rule
+    // that turns a wheel notch into an Up arrow — those arrows walk prompt history here,
+    // so without this a reader's wheel would rewrite the prompt.
+    let mut written = Vec::new();
+    crate::surface::take_screen(&mut written).expect("the screen is taken");
+    let screen = String::from_utf8_lossy(&written);
+    assert!(
+        !screen.contains("\x1b[?1000h"),
+        "mouse reporting stays off: {screen:?}"
+    );
+    assert!(
+        !screen.contains("\x1b[?1006h"),
+        "and so does SGR mouse encoding: {screen:?}"
+    );
+    assert!(
+        screen.contains("\x1b[?1007l"),
+        "the wheel no longer becomes an arrow: {screen:?}"
+    );
+    let mut left = Vec::new();
+    crate::surface::leave_screen(&mut left).expect("the screen is left");
+    let left = String::from_utf8_lossy(&left);
+    assert!(
+        left.contains("\x1b[?1007h"),
+        "the terminal's wheel translation comes back: {left:?}"
+    );
 
     type_text(&mut app, "/mouse");
     assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::Mouse(true));

@@ -8,23 +8,28 @@
 //! - **Verify:** `cargo test -p loong-tui-app` · `./scripts/check.sh`
 use super::*;
 
-/// Purpose: Take the terminal for the full-screen view without capturing the mouse, and quiet the wheel-to-arrow translation so a wheel notch cannot walk prompt history.
+/// Purpose: Take the terminal for the full-screen view with the mouse captured, and quiet the wheel-to-arrow translation for the state where `/mouse` hands it back.
 /// Serves: `run` and `the_mouse_can_be_handed_back_to_the_terminal`.
 /// Design: `docs/design/surfaces.md` §3.
 /// Up: `run`.
-/// Down: crossterm's `execute!` for the alternate screen and bracketed paste, and the raw DECSET 1007 reset.
+/// Down: crossterm's `execute!` for the alternate screen, mouse capture and bracketed paste, and the raw DECSET 1007 reset.
 /// Verify: `cargo test -p loong-tui-app`.
-/// Take the alternate screen and bracketed paste, but **not** the mouse: capture disables
-/// the terminal's own selection, and selection is the thing to keep. The escape that
-/// follows is xterm's alternate-scroll (DECSET 1007): with it on, the terminal turns a
-/// wheel notch into ↑/↓, and those keys are prompt history here — so a reader's wheel
-/// would rewrite the prompt. Off, the wheel is inert, PageUp/PageDown scroll, and
-/// `/mouse` opts into the wheel at the cost of Shift-to-select.
+/// Take the alternate screen, bracketed paste and the mouse: the screen needs wheel events
+/// to scroll, and because capture disables the terminal's own selection it draws and copies
+/// the selection itself (`tui-selection.md`). The escape that follows is xterm's
+/// alternate-scroll (DECSET 1007): it would turn a wheel notch into ↑/↓ when `/mouse` hands
+/// the mouse back, and those keys are prompt history here, so it is turned off for the rest
+/// of the run. Shift still bypasses capture and selects in the terminal.
 pub(crate) fn take_screen(writer: &mut impl std::io::Write) -> std::io::Result<()> {
-    use ratatui::crossterm::event::EnableBracketedPaste;
+    use ratatui::crossterm::event::{EnableBracketedPaste, EnableMouseCapture};
     use ratatui::crossterm::execute;
     use ratatui::crossterm::terminal::EnterAlternateScreen;
-    execute!(writer, EnterAlternateScreen, EnableBracketedPaste)?;
+    execute!(
+        writer,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
     write!(writer, "\x1b[?1007l")?;
     writer.flush()
 }
@@ -152,10 +157,9 @@ pub fn run<T: Transport + Send + 'static>(
 
     enable_raw_mode().map_err(|e| e.to_string())?;
     let mut stdout = std::io::stdout();
-    // The terminal keeps the mouse: drag-select and copy stay the shell's own, which is
-    // what someone reading a transcript expects. `/mouse` trades that for the wheel;
-    // take_screen also turns off the wheel-as-arrow rule that would otherwise walk the
-    // prompt's history while the mouse is not captured.
+    // Capture the mouse: the wheel scrolls the page, and the screen turns a drag into its
+    // own selection and copy because capture is what takes that away from the terminal.
+    // `/mouse` still hands the mouse back for a terminal-native selection.
     take_screen(&mut stdout).map_err(|e| e.to_string())?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).map_err(|e| e.to_string())?;
@@ -207,11 +211,21 @@ pub fn run<T: Transport + Send + 'static>(
                                 }
                                 // The screen is redrawn next pass; the terminal is what changed.
                             }
+                            // A key press never selects with the mouse; the arm exists so
+                            // this match stays exhaustive.
+                            Action::CopyText(_) => {}
                             Action::Quit => return Ok(()),
                             Action::None => {}
                         }
                     }
-                    event::Event::Mouse(mouse) => app.handle_mouse(mouse.kind),
+                    event::Event::Mouse(mouse) => {
+                        // A selection copy is silent on purpose: the highlight is the
+                        // feedback, and a transcript line about it is one more row the
+                        // reader has to scroll past. The file is still written.
+                        if let Action::CopyText(text) = app.handle_mouse(mouse) {
+                            let _ = copy_everywhere(&text, &app.session);
+                        }
+                    }
                     // A bracketed paste arrives as one block, including its newlines: it
                     // goes into the input, and enter later sends the whole thing.
                     event::Event::Paste(text) => {

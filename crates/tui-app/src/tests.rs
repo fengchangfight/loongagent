@@ -9,6 +9,8 @@
 
 use super::*;
 use ratatui::backend::TestBackend;
+use ratatui::buffer::Buffer;
+use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Terminal;
 
 /// Purpose: Every drawn box's title line, so a state assertion names the box and not the transcript.
@@ -76,6 +78,52 @@ fn draw(app: &mut App, width: u16, height: u16) -> String {
 fn type_text(app: &mut App, text: &str) {
     for c in text.chars() {
         app.handle_key(key(KeyCode::Char(c)));
+    }
+}
+
+/// Purpose: Render one frame and keep its cell buffer, for tests that read screen coordinates or styles.
+/// Serves: the mouse-selection tests.
+/// Design: `docs/design/tui-selection.md` §2.
+/// Up: the mouse-selection tests.
+/// Down: `App::draw` and ratatui's `TestBackend`.
+/// Verify: `cargo test -p loong-tui-app`.
+fn drawn_buffer(app: &mut App, width: u16, height: u16) -> Buffer {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    terminal.backend().buffer().clone()
+}
+
+/// Purpose: The top-left cell of an ASCII phrase on screen, so a test drags by what the reader sees rather than by a guessed layout.
+/// Serves: the mouse-selection tests.
+/// Design: `docs/design/tui-selection.md` §2.
+/// Up: the mouse-selection tests.
+/// Down: no call; it reads a rendered `Buffer`.
+/// Verify: `cargo test -p loong-tui-app`.
+fn cell_of(buffer: &Buffer, needle: &str) -> (u16, u16) {
+    let area = *buffer.area();
+    for y in 0..area.height {
+        let row: String = (0..area.width)
+            .map(|x| buffer[(x, y)].symbol().to_string())
+            .collect();
+        if let Some(byte) = row.find(needle) {
+            return (row[..byte].chars().count() as u16, y);
+        }
+    }
+    panic!("{needle:?} is not on screen");
+}
+
+/// Purpose: A mouse event with no modifiers, so a test names only the button and the cell.
+/// Serves: the mouse-selection tests.
+/// Design: `docs/design/tui-selection.md` §2.
+/// Up: the mouse-selection tests.
+/// Down: no call; it builds a crossterm event.
+/// Verify: `cargo test -p loong-tui-app`.
+fn mouse_at(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+    MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
     }
 }
 
@@ -1795,7 +1843,7 @@ fn the_input_box_stops_growing_and_keeps_the_caret_on_screen() {
     );
 }
 
-/// Purpose: A wheel notch scrolls three lines, stops at the bottom and never walks the prompt history.
+/// Purpose: A wheel notch scrolls three lines, stops at the bottom, clears a selection and never walks the prompt history.
 #[test]
 fn the_wheel_scrolls_the_conversation() {
     let mut app = App::new("s", "v");
@@ -1803,16 +1851,25 @@ fn the_wheel_scrolls_the_conversation() {
     app.history.record("older prompt");
     app.input = "a draft".to_string();
     app.cursor = app.input.chars().count();
-    app.handle_mouse(ratatui::crossterm::event::MouseEventKind::ScrollUp);
+    app.select = Some(Selection {
+        anchor: (0, 0),
+        head: (0, 2),
+        dragging: false,
+    });
+    assert_eq!(
+        app.handle_mouse(mouse_at(MouseEventKind::ScrollUp, 0, 2)),
+        Action::None
+    );
     assert_eq!(app.scroll, 3, "a wheel notch moves three lines");
+    assert!(app.select.is_none(), "the wheel lets go of the selection");
     assert_eq!(app.input, "a draft", "the wheel leaves the prompt alone");
     assert!(
         !app.history.is_browsing(),
         "and does not start a history walk"
     );
-    app.handle_mouse(ratatui::crossterm::event::MouseEventKind::ScrollDown);
+    app.handle_mouse(mouse_at(MouseEventKind::ScrollDown, 0, 2));
     assert_eq!(app.scroll, 0);
-    app.handle_mouse(ratatui::crossterm::event::MouseEventKind::ScrollDown);
+    app.handle_mouse(mouse_at(MouseEventKind::ScrollDown, 0, 2));
     assert_eq!(app.scroll, 0, "and it stops at the bottom");
 }
 
@@ -2286,31 +2343,30 @@ fn base64_is_base64() {
     assert_eq!(base64(b"hello world"), "aGVsbG8gd29ybGQ=");
 }
 
-/// Purpose: The mouse starts untracked so the terminal's own drag-select works, and `/mouse` hands it over and back.
+/// Purpose: The mouse starts captured so the wheel scrolls and the screen can select, and `/mouse` gives it back and takes it again.
 #[test]
 fn the_mouse_can_be_handed_back_to_the_terminal() {
     let mut app = App::new("s", "v");
-    // Off by default: capturing the mouse is what disables the terminal's own
-    // left-drag-select / right-click-copy. `/mouse` trades that for the wheel.
-    assert!(!app.mouse, "does not capture the mouse unless asked");
+    // On by default: capture is what lets the wheel scroll, and the screen now does the
+    // drag-select itself, so nothing is lost by taking the mouse.
+    assert!(app.mouse, "captures the mouse from the first frame");
 
-    // Startup must not turn reporting on, and must turn off the alternate-screen rule
-    // that turns a wheel notch into an Up arrow — those arrows walk prompt history here,
-    // so without this a reader's wheel would rewrite the prompt.
+    // Startup must ask for mouse events, and must turn off the alternate-screen rule
+    // that turns a wheel notch into an Up arrow for when `/mouse` later releases it.
     let mut written = Vec::new();
     crate::surface::take_screen(&mut written).expect("the screen is taken");
     let screen = String::from_utf8_lossy(&written);
     assert!(
-        !screen.contains("\x1b[?1000h"),
-        "mouse reporting stays off: {screen:?}"
+        screen.contains("\x1b[?1000h"),
+        "mouse reporting is on: {screen:?}"
     );
     assert!(
-        !screen.contains("\x1b[?1006h"),
-        "and so does SGR mouse encoding: {screen:?}"
+        screen.contains("\x1b[?1006h"),
+        "the wheel arrives as SGR mouse events: {screen:?}"
     );
     assert!(
         screen.contains("\x1b[?1007l"),
-        "the wheel no longer becomes an arrow: {screen:?}"
+        "a released mouse would not turn the wheel into an arrow: {screen:?}"
     );
     let mut left = Vec::new();
     crate::surface::leave_screen(&mut left).expect("the screen is left");
@@ -2321,15 +2377,6 @@ fn the_mouse_can_be_handed_back_to_the_terminal() {
     );
 
     type_text(&mut app, "/mouse");
-    assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::Mouse(true));
-    assert!(app.mouse);
-    assert!(
-        app.lines.iter().any(|line| shows(line, "这里用滚轮滚动")),
-        "and says what it costs: {:?}",
-        app.lines
-    );
-
-    type_text(&mut app, "/mouse");
     assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::Mouse(false));
     assert!(!app.mouse);
     assert!(
@@ -2337,6 +2384,246 @@ fn the_mouse_can_be_handed_back_to_the_terminal() {
         "and says what came back: {:?}",
         app.lines
     );
+
+    type_text(&mut app, "/mouse");
+    assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::Mouse(true));
+    assert!(app.mouse);
+    assert!(
+        app.lines.iter().any(|line| shows(line, "滚轮滚动")),
+        "and says what it costs: {:?}",
+        app.lines
+    );
+}
+
+/// Purpose: A left-drag over two transcript rows copies exactly what was dragged, joined by newlines.
+#[test]
+fn a_drag_copies_the_selected_transcript_text() {
+    let mut app = App::new("s", "v");
+    app.logo = false;
+    app.push_lines(vec!["alpha beta".to_string(), "gamma".to_string()]);
+    let buffer = drawn_buffer(&mut app, 40, 12);
+    let (x, y) = cell_of(&buffer, "alpha");
+
+    assert_eq!(
+        app.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), x, y)),
+        Action::None
+    );
+    assert_eq!(
+        app.handle_mouse(mouse_at(
+            MouseEventKind::Drag(MouseButton::Left),
+            x + 3,
+            y + 1
+        )),
+        Action::None
+    );
+    assert_eq!(
+        app.handle_mouse(mouse_at(
+            MouseEventKind::Up(MouseButton::Left),
+            x + 3,
+            y + 1
+        )),
+        Action::CopyText("alpha beta\ngam".to_string())
+    );
+    assert_eq!(
+        app.lines.len(),
+        2,
+        "copying a selection is not a transcript line"
+    );
+}
+
+/// Purpose: A right click copies the current selection again, for a reader whose habit is right-click copy.
+#[test]
+fn a_right_click_copies_the_selection() {
+    let mut app = App::new("s", "v");
+    app.logo = false;
+    app.push_lines(vec!["alpha beta".to_string()]);
+    let buffer = drawn_buffer(&mut app, 40, 12);
+    let (x, y) = cell_of(&buffer, "alpha");
+
+    // Nothing selected: right-click must not invent a range to copy.
+    assert_eq!(
+        app.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Right), x, y)),
+        Action::None
+    );
+
+    app.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), x, y));
+    app.handle_mouse(mouse_at(MouseEventKind::Drag(MouseButton::Left), x + 3, y));
+    assert_eq!(
+        app.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), x + 3, y)),
+        Action::CopyText("alp".to_string())
+    );
+    assert_eq!(
+        app.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Right), x, y)),
+        Action::CopyText("alp".to_string())
+    );
+    assert!(
+        app.select.is_none(),
+        "right-click puts the highlight away, like every other copy gesture"
+    );
+}
+
+/// Purpose: A drag that ends above where it started still copies in reading order.
+#[test]
+fn a_drag_backwards_copies_in_reading_order() {
+    let mut app = App::new("s", "v");
+    app.logo = false;
+    app.push_lines(vec!["alpha beta".to_string(), "gamma".to_string()]);
+    let buffer = drawn_buffer(&mut app, 40, 12);
+    let (x, y) = cell_of(&buffer, "gamma");
+
+    app.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), x + 3, y));
+    app.handle_mouse(mouse_at(
+        MouseEventKind::Drag(MouseButton::Left),
+        x + 3,
+        y - 1,
+    ));
+    assert_eq!(
+        app.handle_mouse(mouse_at(
+            MouseEventKind::Up(MouseButton::Left),
+            x + 3,
+            y - 1
+        )),
+        Action::CopyText("ha beta\ngam".to_string())
+    );
+}
+
+/// Purpose: Pressing and releasing on one cell is a click: it clears the selection and copies nothing.
+#[test]
+fn a_click_does_not_copy_anything() {
+    let mut app = App::new("s", "v");
+    app.logo = false;
+    app.push_lines(vec!["alpha beta".to_string()]);
+    let buffer = drawn_buffer(&mut app, 40, 12);
+    let (x, y) = cell_of(&buffer, "alpha");
+
+    app.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), x, y));
+    assert_eq!(
+        app.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), x, y)),
+        Action::None,
+        "a click is not a selection"
+    );
+    assert!(app.select.is_none(), "and it leaves nothing behind");
+}
+
+/// Purpose: A CJK glyph is two columns, so a drag includes the whole glyph and never half of it.
+#[test]
+fn selection_counts_a_wide_glyph_as_two_columns() {
+    let mut app = App::new("s", "v");
+    app.logo = false;
+    app.push_lines(vec!["中文abc".to_string()]);
+    let buffer = drawn_buffer(&mut app, 40, 12);
+    let (abc, y) = cell_of(&buffer, "abc");
+    assert_eq!(abc, 4, "中文 is four columns wide");
+
+    app.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), 0, y));
+    app.handle_mouse(mouse_at(MouseEventKind::Drag(MouseButton::Left), 2, y));
+    assert_eq!(
+        app.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), 2, y)),
+        Action::CopyText("中".to_string()),
+        "a drag ending on 文's first cell takes only 中"
+    );
+
+    // Starting inside the first half of 中 still takes the whole glyph.
+    app.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), 1, y));
+    app.handle_mouse(mouse_at(MouseEventKind::Drag(MouseButton::Left), 3, y));
+    assert_eq!(
+        app.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), 3, y)),
+        Action::CopyText("中文".to_string())
+    );
+}
+
+/// Purpose: The cells under a drag are visibly reversed while the button is still down.
+#[test]
+fn the_selection_is_highlighted_while_the_button_is_down() {
+    let mut app = App::new("s", "v");
+    app.logo = false;
+    app.push_lines(vec!["alpha beta".to_string(), "gamma".to_string()]);
+    let buffer = drawn_buffer(&mut app, 40, 12);
+    let (x, y) = cell_of(&buffer, "alpha");
+
+    app.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), x, y));
+    app.handle_mouse(mouse_at(
+        MouseEventKind::Drag(MouseButton::Left),
+        x + 3,
+        y + 1,
+    ));
+    let buffer = drawn_buffer(&mut app, 40, 12);
+    assert!(
+        buffer[(x, y)]
+            .style()
+            .add_modifier
+            .contains(Modifier::REVERSED),
+        "the selected cell is marked"
+    );
+    assert!(
+        !buffer[(x + 3, y + 1)]
+            .style()
+            .add_modifier
+            .contains(Modifier::REVERSED),
+        "a cell past the selection is not"
+    );
+
+    // A right-click copies and drops the highlight, so the screen stops looking like a
+    // selection is still waiting for something.
+    app.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Right), x, y));
+    let buffer = drawn_buffer(&mut app, 40, 12);
+    assert!(
+        !buffer[(x, y)]
+            .style()
+            .add_modifier
+            .contains(Modifier::REVERSED),
+        "right-click clears the highlight"
+    );
+}
+
+/// Purpose: Dragging out of the conversation clamps to its nearest row and column instead of selecting the prompt.
+#[test]
+fn a_drag_outside_the_page_clamps_to_it() {
+    let mut app = App::new("s", "v");
+    app.logo = false;
+    app.push_lines(vec!["alpha beta".to_string(), "gamma".to_string()]);
+    let buffer = drawn_buffer(&mut app, 40, 12);
+    let (x, y) = cell_of(&buffer, "alpha");
+
+    app.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), x, y));
+    // Row 0 is the status bar, above the page.
+    app.handle_mouse(mouse_at(MouseEventKind::Drag(MouseButton::Left), x + 3, 0));
+    assert_eq!(
+        app.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), x + 3, 0)),
+        Action::CopyText("alp".to_string())
+    );
+}
+
+/// Purpose: A selection on a scrolled page copies the rows under the pointer, not the transcript's first rows.
+#[test]
+fn a_selection_maps_through_the_scroll_offset() {
+    let mut app = App::new("s", "v");
+    app.logo = false;
+    app.push_lines((1..=40).map(|i| format!("line {i}")));
+    // One frame first, so `scroll_total` is the transcript's size and the offset means
+    // what it says; a scroll set before any frame is treated as growth on the first one.
+    let _ = drawn_buffer(&mut app, 40, 12);
+    app.scroll = 10;
+    let buffer = drawn_buffer(&mut app, 40, 12);
+    let (x, y) = cell_of(&buffer, "line 30");
+
+    app.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), x, y));
+    app.handle_mouse(mouse_at(MouseEventKind::Drag(MouseButton::Left), x + 4, y));
+    assert_eq!(
+        app.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), x + 4, y)),
+        Action::CopyText("line".to_string())
+    );
+}
+
+/// Purpose: A mouse event before the first frame has no page to map, and does nothing instead of panicking.
+#[test]
+fn a_mouse_event_before_the_first_frame_is_ignored() {
+    let mut app = App::new("s", "v");
+    assert_eq!(
+        app.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), 5, 1)),
+        Action::None
+    );
+    assert!(app.select.is_none());
 }
 
 /// Purpose: The character is drawn as red pixels, not as a font glyph on a coloured block.

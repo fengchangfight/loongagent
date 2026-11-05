@@ -151,9 +151,9 @@ loongagent local semantic off
 | `/expand` | 展开最后一条工具输出 |
 | `F2` | 上下文面板：下一次请求实际会带什么，以及分层记忆的状态 |
 | `/new` `/clear` `/reset` | 新开一个会话（旧日志保留） |
-| `/copy` | 复制整个会话（OSC 52 + 同时落一个文件路径） |
+| `/copy` | 复制整个会话（系统剪贴板 + OSC 52 + 同时落一个文件路径） |
 | `/yolo` | 关掉审批提示（沙箱不受影响，照旧生效） |
-| `/logo` `/mouse` | 开关 logo / 把鼠标交给程序滚动聊天（默认还给终端：拖选复制照常，滚轮不翻历史） |
+| `/logo` `/mouse` | 开关 logo / 开关鼠标（默认接管：滚轮滚动、拖动选中即复制、右键再复制；关掉用终端原生选择） |
 | `/exit` `/quit` `/q`，`ctrl-d` | 退出 |
 | `ctrl-c` | **有任务在跑 = 中断这一轮**（会话不结束）；空闲 = 退出 |
 
@@ -235,8 +235,8 @@ skills/commands、**插件**、六个内置工具（`read_file` / `write_file` /
 可选的**分层记忆**（R 模式 + S 模式、后台增量、`recall`/`expand`、F2 可见性）和**控制面**
 （签名 pack 由固定公钥验签后才进 control 层（高于 org），`loongagent-control` 二进制与 runbook 都在；身份/SSO、
 审计、密钥轮换还没做完）。Linux 与 **Windows** 都能构建运行，命令面一致。
-测试 857 个通过、11 个忽略。
-<!-- test-counts: 857 passed, 11 ignored -->
+测试 866 个通过、11 个忽略。
+<!-- test-counts: 866 passed, 11 ignored -->
 
 **没做完，也不假装**：subagents、插件的索引/搜索与逐插件开关（现在用 `disable_skills`）、
 第三方内容的签名与信任分级（[ADR-0018](docs/decisions/0018-plugin-install-and-bootstrap.md)

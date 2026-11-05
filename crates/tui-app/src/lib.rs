@@ -26,7 +26,7 @@ pub mod history;
 pub mod mention;
 pub mod spend;
 use loong_tui::{Client, Transport};
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -132,18 +132,21 @@ pub enum Action {
     Send(ToWorker),
     /// Put the transcript on the clipboard (and in a file, which always works).
     Copy,
+    /// Put a mouse selection on the clipboard, the same way `/copy` puts the transcript there.
+    CopyText(String),
     /// Tell the terminal whether this program is tracking the mouse.
     Mouse(bool),
     Quit,
 }
 
-/// Purpose: Put the transcript on the clipboard with OSC 52 and also write it to a session-named temporary file.
-/// Contract: called by `surface::run` for `/copy` and by `copy_puts_the_transcript_on_the_clipboard_and_in_a_file`; calls `base64` for the escape payload and writes the file the caller names on screen.
-/// Put text on the clipboard with OSC 52 — the escape sequence terminals honour, and the
-/// only way to reach a clipboard from an application that is not the window system's — and
-/// also write it beside the session's other files. The file is the honest half: OSC 52 is
-/// size-limited and some terminals ignore it, whereas a path always works.
+/// Purpose: Put text on every clipboard road available — the window system's own clipboard, the terminal's OSC 52, and a session-named file.
+/// Contract: called by `surface::run` for `/copy` and a mouse selection and by `copy_puts_the_transcript_on_the_clipboard_and_in_a_file`; calls `set_system_clipboard`, `base64` and writes the file.
+/// The window system's clipboard is the one that always works on a local desktop, but it is
+/// not the only road: OSC 52 reaches a terminal that honours it (and a remote session), and
+/// the file beside the session works everywhere. Some terminals — GNOME Terminal is the one
+/// that keeps being reported — silently discard OSC 52, which is why both are tried.
 fn copy_everywhere(text: &str, session: &str) -> String {
+    set_system_clipboard(text);
     let path = std::env::temp_dir().join(format!("loongagent-{session}.txt"));
     let _ = std::fs::write(&path, text);
     let payload = base64(text.as_bytes());
@@ -153,6 +156,38 @@ fn copy_everywhere(text: &str, session: &str) -> String {
     let _ = out.flush();
     path.display().to_string()
 }
+
+// One window-system clipboard handle per thread: an X11 clipboard owner must go on
+// serving the text after the write, so creating one per copy would lose it.
+#[cfg(not(test))]
+thread_local! {
+    static SYSTEM_CLIPBOARD: std::cell::RefCell<Option<arboard::Clipboard>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Purpose: Put text on the window system's clipboard when there is one, so a terminal that ignores OSC 52 still gets a copy.
+/// Serves: `copy_everywhere`.
+/// Design: `docs/design/tui-selection.md` §3.
+/// Up: `copy_everywhere`.
+/// Down: `arboard::Clipboard::{new, set_text}`.
+/// Verify: `cargo test -p loong-tui-app`; `cargo build -p loongagent`.
+#[cfg(not(test))]
+fn set_system_clipboard(text: &str) {
+    SYSTEM_CLIPBOARD.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_none() {
+            *slot = arboard::Clipboard::new().ok();
+        }
+        if let Some(clipboard) = slot.as_mut() {
+            let _ = clipboard.set_text(text);
+        }
+    });
+}
+
+/// Purpose: The test build has no window system to write to; the copy is proved through the OSC 52 payload and the file instead.
+/// Contract: called by `copy_everywhere` in `cfg(test)` builds; does nothing.
+#[cfg(test)]
+fn set_system_clipboard(_text: &str) {}
 
 /// Purpose: Encode the OSC 52 clipboard payload, so `/copy` needs no dependency for forty lines.
 /// Serves: `copy_everywhere` and the `base64_is_base64` test.
@@ -238,6 +273,54 @@ fn clip(text: &str, columns: usize) -> String {
         used += char_width;
     }
     format!("{head}…")
+}
+
+/// Purpose: The plain text of one drawn line, with every span's styling dropped, for the mouse selector to read.
+/// Serves: `App::draw`'s page map.
+/// Design: `docs/design/tui-selection.md` §2.
+/// Up: `App::draw`.
+/// Down: no call; it concatenates `Line::spans`.
+/// Verify: `cargo test -p loong-tui-app`.
+fn line_text(line: &Line<'_>) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect()
+}
+
+/// Purpose: The part of one line between two display columns, so a selection copies whole glyphs and never half a CJK character.
+/// Serves: `App::selection_text`.
+/// Design: `docs/design/tui-selection.md` §3.
+/// Up: `App::selection_text`.
+/// Down: `unicode_width` for the column measurement.
+/// Verify: `cargo test -p loong-tui-app`.
+fn slice_cells(text: &str, from: u16, to: u16, width: u16) -> String {
+    use unicode_width::UnicodeWidthChar;
+    let to = to.min(width);
+    if from >= to {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut column = 0u16;
+    for ch in text.chars() {
+        if column >= width || column >= to {
+            break;
+        }
+        let glyph = ch.width().unwrap_or(0) as u16;
+        let end = column.saturating_add(glyph);
+        // A zero-width mark belongs to the glyph before it; either cell of a wide glyph
+        // takes the whole of it.
+        let hit = if glyph == 0 {
+            column >= from && column < to
+        } else {
+            column < to && end > from
+        };
+        if hit {
+            out.push(ch);
+        }
+        column = end;
+    }
+    out
 }
 
 /// Purpose: One pending approval as the screen needs it: the request id, action class, reason, tool and arguments.
@@ -504,6 +587,40 @@ pub struct OpenFold {
     pub scroll: usize,
 }
 
+/// Purpose: A mouse selection over the conversation: where the drag started and where it is now, in body rows and display columns.
+/// Serves: `App::handle_mouse`, `App::selection_text` and `App::draw`.
+/// Design: `docs/design/tui-selection.md` §1.
+/// Up: `App::handle_mouse` builds it; `draw` paints it.
+/// Down: no call; it is two anchors and a drag flag.
+/// Verify: `cargo test -p loong-tui-app`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Selection {
+    /// The body row and display column where the drag started.
+    anchor: (usize, u16),
+    /// The body row and display column under the pointer now.
+    head: (usize, u16),
+    /// True between the press and the release, so a wheel event knows not to move the page.
+    dragging: bool,
+}
+
+/// Purpose: What the last frame drew: the page's rectangle, where its body starts, and the plain text of each body row.
+/// Serves: `App::draw`, `App::handle_mouse` and `App::selection_text`.
+/// Design: `docs/design/tui-selection.md` §2.
+/// Up: `App::draw` writes it; mouse handling and copy read it.
+/// Down: no call; it is geometry plus plain text.
+/// Verify: `cargo test -p loong-tui-app`.
+#[derive(Debug, Default)]
+struct PageMap {
+    /// The page's screen rectangle.
+    area: ratatui::layout::Rect,
+    /// The first body row's offset from the page's top.
+    body_top: u16,
+    /// The body index of the first body row, so a scrolled page still maps to the right line.
+    body_base: usize,
+    /// The plain text of every body row on screen, top to bottom.
+    body: Vec<String>,
+}
+
 /// Purpose: The whole screen state: transcript, input, folds, models, the pending decision and the last turn's outcome.
 /// Serves: `surface::run`, which owns one, and every test in this crate.
 /// Design: `docs/design/surfaces.md` §3 and §6; `docs/design/sessions-lineage.md` §1 and §5 for the replayed past.
@@ -520,12 +637,10 @@ pub struct App {
     pub pending: Option<String>,
     /// Whether the mark is drawn at the top (`/logo` turns it off).
     pub logo: bool,
-    /// Whether this program tracks the mouse. **Off by default**: tracking it is what
-    /// disables the terminal's own selection, and left-drag-select / right-click-copy is
-    /// what a shell does — a TUI should not take that away to gain a wheel. `/mouse`
-    /// trades it back for in-app scrolling, and page up/down scroll either way. While it
-    /// is off the screen also turns off the terminal's wheel-to-arrow translation, so a
-    /// wheel notch cannot rewrite the prompt with a history entry.
+    /// Whether this program tracks the mouse. **On by default**: capture is what lets the
+    /// wheel scroll, and the screen then does the drag-select itself (`tui-selection.md`),
+    /// so nothing is lost by taking it. `/mouse` hands the mouse back to the terminal and
+    /// keeps the wheel-to-arrow rule off, so the wheel cannot walk the prompt's history.
     pub mouse: bool,
     /// True while approval prompts are off for this session — the interface must show
     /// it, because the dangerous state is one where nobody notices it is on (ADR-0007 §5).
@@ -592,6 +707,11 @@ pub struct App {
     /// transcript only ever appends, so an index into it stays true; and nothing has to
     /// be re-found when new output arrives.
     pub fold: Option<usize>,
+    /// What the last frame drew, for turning a mouse cell into a body row. `None` until the
+    /// first draw, which is why a mouse event before it does nothing.
+    page: Option<PageMap>,
+    /// The mouse selection, while it is being dragged or has just been copied.
+    select: Option<Selection>,
     /// The fold the reader opened, if any. While it is open the output takes the
     /// transcript's place: reading a result is the one thing on screen worth the room.
     pub open: Option<OpenFold>,
@@ -660,7 +780,7 @@ impl App {
             approval: None,
             choice: 0,
             logo: true,
-            mouse: false,
+            mouse: true,
             interrupt: None,
             set_permissions: None,
             save_order: None,
@@ -677,6 +797,8 @@ impl App {
             scroll: 0,
             scroll_total: 0,
             fold: None,
+            page: None,
+            select: None,
             open: None,
             folded: std::collections::BTreeMap::new(),
             models: Vec::new(),
@@ -1686,7 +1808,7 @@ impl App {
                             "/new" | "/clear" | "/reset" => {
                                 "回车开始新会话 — 这一条会存盘，上下文不带走".to_string()
                             }
-                            "/mouse" => "回车让程序接管鼠标（滚轮滚动；默认还给终端）".to_string(),
+                            "/mouse" => "回车让程序接管鼠标（滚轮滚动；拖动即复制）".to_string(),
                             // The model shortcuts, said in full only when they would work: a
                             // completion that promises a switch in a session with one model
                             // is a completion that lies.
@@ -1881,11 +2003,12 @@ impl App {
                 self.input.clear();
                 self.cursor = 0;
                 self.mouse = !self.mouse;
+                self.select = None;
                 let state = if self.mouse { "已开启" } else { "已关闭" };
                 self.push_lines(vec![format!(
                     "· 鼠标{state}{}",
                     if self.mouse {
-                        " — 这里用滚轮滚动；按住 shift 交给终端选择"
+                        " — 滚轮滚动；拖动选中聊天内容，松开即复制；按住 shift 交给终端选择"
                     } else {
                         " — 照常拖动选择、复制；这里用 pgup/pgdn 滚动"
                     }
@@ -2377,6 +2500,7 @@ impl App {
                     self.lines.clear();
                     self.folded.clear();
                     self.open = None;
+                    self.select = None;
                     self.fold = None;
                     self.pending = None;
                     self.approval = None;
@@ -2623,6 +2747,7 @@ impl App {
             KeyCode::Enter if self.command_to_complete() => self.accept_command(),
             KeyCode::Esc if self.open.is_some() && self.pending.is_none() => {
                 self.open = None;
+                self.select = None;
                 Action::None
             }
             // One more esc lets go of the selected fold, so the keyboard can always get
@@ -2776,6 +2901,7 @@ impl App {
             // selected nothing here changes.
             KeyCode::Enter if self.open.is_some() => {
                 self.open = None;
+                self.select = None;
                 Action::None
             }
             KeyCode::Enter if self.fold.is_some() && self.input.trim().is_empty() => {
@@ -2919,6 +3045,7 @@ impl App {
         };
         if self.open.as_ref().is_some_and(|open| open.marker == marker) {
             self.open = None;
+            self.select = None;
             return Action::None;
         }
         let at = self.fold_at(marker);
@@ -2954,6 +3081,7 @@ impl App {
             lines,
             scroll: 0,
         });
+        self.select = None;
         Action::None
     }
 
@@ -2968,27 +3096,185 @@ impl App {
         self.lines.join("\n")
     }
 
-    /// Purpose: Scroll the conversation on a wheel event, or the open fold when one is on screen.
-    /// Serves: `surface::run`'s mouse event arm.
-    /// Design: `docs/design/surfaces.md` §3.
-    /// Up: `surface::run` and `the_wheel_scrolls_the_conversation`.
-    /// Down: `App::scroll_fold`.
+    /// Purpose: Turn a mouse event into scrolling, a selection change, or a copy of the selection when the button comes up.
+    /// Serves: `surface::run`'s mouse event arm and the mouse tests.
+    /// Design: `docs/design/tui-selection.md` §1–§3.
+    /// Up: `surface::run` and the mouse tests.
+    /// Down: `App::scroll_fold`, `App::cell_at`, `App::clamp_cell` and `App::selection_text`.
     /// Verify: `cargo test -p loong-tui-app`.
-    /// A mouse wheel event: scrolling the conversation is the one thing a wheel
-    /// should do here, and it is what people try first. Over an open fold it scrolls the
-    /// output instead — the wheel follows what is on screen.
-    pub fn handle_mouse(&mut self, kind: ratatui::crossterm::event::MouseEventKind) {
-        use ratatui::crossterm::event::MouseEventKind;
-        match kind {
+    /// The wheel scrolls, and a left-drag selects the conversation and copies it when the
+    /// button comes up. A wheel notch during a drag is ignored: the rows the drag is
+    /// anchored to must not move under it.
+    pub fn handle_mouse(&mut self, event: MouseEvent) -> Action {
+        use ratatui::crossterm::event::{MouseButton, MouseEventKind};
+        if self.select.as_ref().is_some_and(|select| select.dragging)
+            && matches!(
+                event.kind,
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+            )
+        {
+            return Action::None;
+        }
+        match event.kind {
             MouseEventKind::ScrollUp if self.open.is_some() => {
+                self.select = None;
                 self.scroll_fold(3);
             }
             MouseEventKind::ScrollDown if self.open.is_some() => {
+                self.select = None;
                 self.scroll_fold(-3);
             }
-            MouseEventKind::ScrollUp => self.scroll = (self.scroll + 3).min(self.lines.len()),
-            MouseEventKind::ScrollDown => self.scroll = self.scroll.saturating_sub(3),
+            MouseEventKind::ScrollUp => {
+                self.select = None;
+                self.scroll = (self.scroll + 3).min(self.lines.len());
+            }
+            MouseEventKind::ScrollDown => {
+                self.select = None;
+                self.scroll = self.scroll.saturating_sub(3);
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.select = self
+                    .cell_at(event.column, event.row)
+                    .map(|(at, column)| Selection {
+                        anchor: (at, column),
+                        head: (at, column),
+                        dragging: true,
+                    });
+            }
+            // Right-click is the copy gesture a terminal reader already has. It copies
+            // the selection and puts the highlight away, the same way a terminal drops its
+            // own selection after a copy; leaving it lit suggests there is more to do.
+            MouseEventKind::Down(MouseButton::Right) => {
+                if self.select.is_some() {
+                    let text = self.selection_text();
+                    self.select = None;
+                    if !text.is_empty() {
+                        return Action::CopyText(text);
+                    }
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let Some((at, column)) = self.clamp_cell(event.column, event.row) else {
+                    return Action::None;
+                };
+                if let Some(select) = self.select.as_mut() {
+                    if select.dragging {
+                        select.head = (at, column);
+                    }
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                let Some(select) = self.select.as_mut() else {
+                    return Action::None;
+                };
+                select.dragging = false;
+                let clicked = select.anchor == select.head;
+                let text = self.selection_text();
+                if clicked || text.is_empty() {
+                    self.select = None;
+                    return Action::None;
+                }
+                return Action::CopyText(text);
+            }
             _ => {}
+        }
+        Action::None
+    }
+
+    /// Purpose: The body row and display column under a mouse cell, or `None` when the cell is outside the conversation page.
+    /// Contract: called by `handle_mouse`'s Down arm; reads the last frame's `PageMap`.
+    fn cell_at(&self, column: u16, row: u16) -> Option<(usize, u16)> {
+        let page = self.page.as_ref()?;
+        let offset = row.checked_sub(page.area.y)?;
+        let index = offset.checked_sub(page.body_top)? as usize;
+        if index >= page.body.len() {
+            return None;
+        }
+        let column = column
+            .saturating_sub(page.area.x)
+            .min(page.area.width.saturating_sub(1));
+        Some((page.body_base + index, column))
+    }
+
+    /// Purpose: The body row and display column a drag ends on, clamped to the page so a drag outside it still selects.
+    /// Contract: called by `handle_mouse`'s Drag arm; reads the last frame's `PageMap`.
+    fn clamp_cell(&self, column: u16, row: u16) -> Option<(usize, u16)> {
+        let page = self.page.as_ref()?;
+        if page.body.is_empty() {
+            return None;
+        }
+        let column = column
+            .saturating_sub(page.area.x)
+            .min(page.area.width.saturating_sub(1));
+        let last = page.body_top + page.body.len() as u16 - 1;
+        let offset = row.saturating_sub(page.area.y).clamp(page.body_top, last);
+        Some((page.body_base + (offset - page.body_top) as usize, column))
+    }
+
+    /// Purpose: The selected text in reading order, lines joined by `\n` and clipped to the page's width.
+    /// Serves: `handle_mouse`'s Up arm.
+    /// Design: `docs/design/tui-selection.md` §3.
+    /// Up: `App::handle_mouse`.
+    /// Down: `slice_cells`.
+    /// Verify: `cargo test -p loong-tui-app`.
+    fn selection_text(&self) -> String {
+        let (Some(select), Some(page)) = (self.select.as_ref(), self.page.as_ref()) else {
+            return String::new();
+        };
+        let (start, end) = if select.anchor <= select.head {
+            (select.anchor, select.head)
+        } else {
+            (select.head, select.anchor)
+        };
+        let mut rows = Vec::new();
+        for at in start.0..=end.0 {
+            let Some(index) = at.checked_sub(page.body_base) else {
+                continue;
+            };
+            let Some(text) = page.body.get(index) else {
+                continue;
+            };
+            let from = if at == start.0 { start.1 } else { 0 };
+            let to = if at == end.0 { end.1 } else { u16::MAX };
+            rows.push(slice_cells(text, from, to, page.area.width));
+        }
+        rows.join("\n")
+    }
+
+    /// Purpose: Reverse the selected cells after the page is drawn, so a selection is visible without touching the transcript.
+    /// Serves: `App::draw`.
+    /// Design: `docs/design/tui-selection.md` §1.
+    /// Up: `App::draw`.
+    /// Down: the last frame's `PageMap` and the selection.
+    /// Verify: `cargo test -p loong-tui-app`.
+    fn paint_selection(&self, frame: &mut Frame) {
+        let (Some(page), Some(select)) = (self.page.as_ref(), self.select.as_ref()) else {
+            return;
+        };
+        let (start, end) = if select.anchor <= select.head {
+            (select.anchor, select.head)
+        } else {
+            (select.head, select.anchor)
+        };
+        for (index, text) in page.body.iter().enumerate() {
+            let at = page.body_base + index;
+            if at < start.0 || at > end.0 {
+                continue;
+            }
+            let width = unicode_width::UnicodeWidthStr::width(text.as_str()) as u16;
+            let from = if at == start.0 { start.1 } else { 0 }.min(width);
+            let to = if at == end.0 { end.1 } else { u16::MAX }.min(width);
+            if from >= to {
+                continue;
+            }
+            let y = page.area.y + page.body_top + index as u16;
+            for column in from..to {
+                let x = page.area.x + column;
+                if let Some(cell) = frame.buffer_mut().cell_mut((x, y)) {
+                    let style = cell.style().add_modifier(Modifier::REVERSED);
+                    cell.set_style(style);
+                }
+            }
         }
     }
 
@@ -3352,7 +3638,21 @@ impl App {
                 });
             }
         }
+        // Remember what the page shows before it is consumed: a mouse event maps a cell
+        // back to one of these body rows, and the copy reads the same plain text.
+        let body_from = body_start.max(first).min(last);
+        let body: Vec<String> = page[body_from - first..]
+            .iter()
+            .map(|line| line_text(line))
+            .collect();
+        self.page = Some(PageMap {
+            area: view,
+            body_top: (body_from - first) as u16,
+            body_base: body_from.saturating_sub(body_start),
+            body,
+        });
         frame.render_widget(Paragraph::new(page), view);
+        self.paint_selection(frame);
 
         // The bottom stack: the question, then the menus, then the prompt, then the usage
         // row — the answer nearest the line it is typed into, the session's bill below it.

@@ -12,3 +12,4 @@ serde_json.workspace = true
 unicode-width = "0.2"
 ratatui = "0.30.2"
 crossterm = "0.29.0"
+arboard = { version = "3.7.0", default-features = false }

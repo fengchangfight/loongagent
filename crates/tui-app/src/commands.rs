@@ -66,7 +66,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "/mouse",
         aliases: &[],
-        description: "让程序接管鼠标滚动（默认还给终端；打开后 shift 选择）",
+        description: "让程序接管鼠标（滚轮滚动、拖动选中复制；shift 交给终端）",
     },
     Command {
         name: "/r",

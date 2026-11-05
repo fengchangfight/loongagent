@@ -12,6 +12,13 @@ code --install-extension loongagent-vscode-0.1.0.vsix
 
 VSIX 只包含扩展；先按下面说明安装 `loongagent` binary，扩展才能在启动时找到它。
 
+## 卸载
+
+```bash
+code --list-extensions | grep -i loong            # 确认扩展 ID
+code --uninstall-extension loongagent.loongagent-vscode
+```
+
 ## 开发运行
 
 ```bash

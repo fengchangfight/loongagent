@@ -126,12 +126,15 @@ be a heuristic, but a write tool that disagrees with it still refuses.
 
 **The OS sandbox.** `Kernel.confinement` is chosen once, when the kernel is
 built: `WorkspacePolicy::new(&config.cwd)` becomes a `LandlockConfinement`,
-whose `confine` installs a `pre_exec` hook. In the forked child, before exec,
-`WorkspacePolicy::apply` adds a read-only rule for `/`, a read-write rule for the
-workspace and for `/dev/null` (ordinary tools open it read-write at startup, and
-it stores nothing), sets `PR_SET_NO_NEW_PRIVS`, and restricts itself. The
-restriction is irreversible and inherited — it lands on the child and never on
-the server.
+whose `confine` installs a `pre_exec` hook and gives the child a `TMPDIR`. In the
+forked child, before exec, `WorkspacePolicy::apply` adds a read-only rule for `/`,
+a read-write rule for the workspace, one for the session's private scratch
+directory (0700, under `$XDG_RUNTIME_DIR`, `~/.cache` or `/tmp`, chosen outside the
+workspace), and one for `/dev/null` (ordinary tools open it read-write at startup,
+and it stores nothing), sets `PR_SET_NO_NEW_PRIVS`, and restricts itself. The
+scratch directory is what lets compilers, linkers and `std::env::temp_dir()` tests
+work without giving them anywhere else to write. The restriction is irreversible
+and inherited — it lands on the child and never on the server.
 When Landlock is unavailable the kernel falls back to `NoConfinement` and
 records why in `Kernel::confinement_note()` (`unconfined: …`) for diagnostics
 and tests. The startup log does not read that string; it reports the sandbox

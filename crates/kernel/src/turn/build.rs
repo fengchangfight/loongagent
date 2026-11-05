@@ -454,7 +454,7 @@ impl Kernel {
             match WorkspacePolicy::new(&config.cwd) {
                 Ok(policy) => (
                     Box::new(LandlockConfinement { policy }),
-                    "landlock: writes are confined to the workspace".to_string(),
+                    "landlock: writes are confined to the workspace and a private scratch directory".to_string(),
                 ),
                 Err(e) => (Box::new(NoConfinement), format!("unconfined: {e}")),
             };

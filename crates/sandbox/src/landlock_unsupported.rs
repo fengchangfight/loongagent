@@ -93,6 +93,16 @@ impl WorkspacePolicy {
         Err(LandlockError::Unsupported)
     }
 
+    /// Purpose: A platform with no policy has no scratch directory to export, which is the honest answer.
+    /// Serves: `LandlockConfinement::confine`, which asks every platform the same question.
+    /// Design: `docs/design/tools-permissions.md` §4.
+    /// Up: `crates/kernel/src/turn/confinement.rs`.
+    /// Down: no call; it answers `None`.
+    /// Verify: `cargo test -p loong-sandbox`.
+    pub fn scratch(&self) -> Option<&Path> {
+        None
+    }
+
     /// Purpose: Refuse to apply a policy that was never constructed.
     /// Serves: signature parity with the Linux implementation.
     /// Design: `docs/design/tools-permissions.md` §4.

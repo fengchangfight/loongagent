@@ -15,15 +15,15 @@
 //! current process confines every subprocess a tool spawns.
 //!
 //! The rules this module installs: read and execute everywhere, **write only
-//! under the workspace root** — plus `/dev/null`, the one sink that stores
-//! nothing and that ordinary tools open read-write. Everything else in the
-//! handled set is denied by omission, which is what makes the boundary
-//! structural rather than advisory.
+//! under the workspace root and the session's private scratch directory** — plus
+//! `/dev/null`, the one sink that stores nothing and that ordinary tools open
+//! read-write. Everything else in the handled set is denied by omission, which is
+//! what makes the boundary structural rather than advisory.
 
 use std::ffi::c_long;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 // --- syscalls (generic numbering; identical on x86_64 and aarch64) ----------
 const SYS_LANDLOCK_CREATE_RULESET: c_long = 444;
@@ -74,7 +74,7 @@ const O_CLOEXEC: i32 = 0o2000000;
 
 #[repr(C)]
 /// Purpose: The `landlock_create_ruleset` argument: the filesystem access to mediate.
-/// Serves: `WorkspacePolicy::apply` and `confine_workspace`.
+/// Serves: `WorkspacePolicy::apply`, `confine_workspace` and the scratch rule.
 /// Design: `docs/design/tools-permissions.md` §4.
 /// Up: those two functions.
 /// Down: `SYS_LANDLOCK_CREATE_RULESET`.
@@ -203,7 +203,7 @@ pub fn read_only_mask(abi: u32) -> u64 {
     m
 }
 
-/// What is permitted under the workspace root.
+/// What is permitted under a writable root: the workspace and the scratch directory.
 /// Purpose: What the workspace root grants: the read-only set plus writes, removal and creation.
 /// Serves: the workspace's writable rule.
 /// Design: `docs/design/tools-permissions.md` §4.
@@ -229,11 +229,11 @@ pub fn read_write_mask(abi: u32) -> u64 {
     m
 }
 
-/// The only paths outside the workspace a confined child may open for writing:
+/// The only **devices** outside the workspace a confined child may open for writing:
 /// sinks that store nothing. `/dev/null` is opened read-write by ordinary tools
 /// at startup — git does it before it parses any argument — so denying the
 /// write breaks commands that never touch the workspace.
-/// Purpose: The only paths outside the workspace that a confined child may write.
+/// Purpose: The only **devices** outside the workspace that a confined child may write.
 /// Serves: `add_device_rules`, the self-test and the mask test.
 /// Design: `docs/design/tools-permissions.md` §4.
 /// Up: `add_device_rules`.
@@ -257,7 +257,7 @@ pub fn device_write_mask() -> u64 {
 /// allocates nothing, so `WorkspacePolicy::apply` may call it between `fork`
 /// and `exec`.
 /// Purpose: Add the writable-device rules to a prepared ruleset.
-/// Serves: `WorkspacePolicy::apply` and `confine_workspace`.
+/// Serves: `WorkspacePolicy::apply`, `confine_workspace` and the scratch rule.
 /// Design: `docs/design/tools-permissions.md` §4.
 /// Up: those two functions.
 /// Down: `WRITABLE_DEVICES`, `device_write_mask` and `add_path_rule_raw`.
@@ -267,6 +267,56 @@ fn add_device_rules(ruleset_fd: i32) -> Result<(), LandlockError> {
         add_path_rule_raw(ruleset_fd, path, device_write_mask())?;
     }
     Ok(())
+}
+
+/// Purpose: Find and create the private scratch directory outside the workspace, preferring the runtime directory over the shared temp.
+/// Serves: `WorkspacePolicy::new`, and through it every confined tool child's `TMPDIR`.
+/// Design: `docs/design/tools-permissions.md` §4.
+/// Up: `WorkspacePolicy::new`.
+/// Down: `private_directory` and the environment (`XDG_RUNTIME_DIR`, `HOME`).
+/// Verify: `cargo test -p loong-sandbox`.
+fn scratch_directory(workspace: &Path) -> Option<PathBuf> {
+    let pid = std::process::id();
+    let mut bases = Vec::new();
+    if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR").filter(|dir| !dir.is_empty()) {
+        bases.push(PathBuf::from(dir));
+    }
+    if let Some(home) = std::env::var_os("HOME").filter(|dir| !dir.is_empty()) {
+        bases.push(PathBuf::from(home).join(".cache"));
+    }
+    bases.push(PathBuf::from("/tmp"));
+    for base in bases {
+        if !base.is_dir() {
+            continue;
+        }
+        let dir = base.join(format!("loongagent-{pid}"));
+        // A temp directory inside the project is the trap that broke the instructions
+        // tests: git_root() walks up from it and finds the real repository.
+        if dir.starts_with(workspace) {
+            continue;
+        }
+        if private_directory(&dir) {
+            return Some(dir);
+        }
+    }
+    None
+}
+
+/// Purpose: Create one 0700 directory, or accept a leftover one only when it is a real directory and no one else can see inside.
+/// Serves: `scratch_directory`.
+/// Design: `docs/design/tools-permissions.md` §4.
+/// Up: `scratch_directory`.
+/// Down: `DirBuilderExt::mode` and `MetadataExt::mode`.
+/// Verify: `cargo test -p loong-sandbox`.
+fn private_directory(dir: &Path) -> bool {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => std::fs::symlink_metadata(dir)
+            .map(|meta| meta.is_dir() && meta.mode() & 0o077 == 0)
+            .unwrap_or(false),
+        Err(_) => false,
+    }
 }
 
 /// A workspace policy **prepared in the parent** so a forked child can apply it
@@ -281,6 +331,12 @@ fn add_device_rules(ruleset_fd: i32) -> Result<(), LandlockError> {
 /// Verify: `cargo test -p loong-sandbox`.
 pub struct WorkspacePolicy {
     root: std::ffi::CString,
+    /// The session's private scratch directory, when one could be created outside the
+    /// workspace and outside any repository. Exported to the child as `TMPDIR`.
+    scratch: Option<PathBuf>,
+    /// The same path in the C form `apply` needs, prepared here so the child half can
+    /// add the rule without allocating.
+    scratch_rule: Option<std::ffi::CString>,
 }
 
 impl WorkspacePolicy {
@@ -311,8 +367,33 @@ impl WorkspacePolicy {
             use std::os::unix::ffi::OsStrExt;
             let root = std::ffi::CString::new(workspace.as_os_str().as_bytes())
                 .map_err(|_| LandlockError::Failed("workspace path contains a NUL".to_string()))?;
-            Ok(Self { root })
+            // The scratch directory is what lets a confined compiler or test write its
+            // temporary files. Keep the path and its C form together: a path that cannot
+            // be a rule is no use as TMPDIR.
+            let scratch = scratch_directory(workspace);
+            let scratch_rule = scratch
+                .as_ref()
+                .and_then(|path| std::ffi::CString::new(path.as_os_str().as_bytes()).ok());
+            let (scratch, scratch_rule) = match (scratch, scratch_rule) {
+                (Some(path), Some(rule)) => (Some(path), Some(rule)),
+                _ => (None, None),
+            };
+            Ok(Self {
+                root,
+                scratch,
+                scratch_rule,
+            })
         }
+    }
+
+    /// Purpose: The scratch directory this policy grants the child, when it could create one.
+    /// Serves: `LandlockConfinement::confine`, which exports it as `TMPDIR`.
+    /// Design: `docs/design/tools-permissions.md` §4.
+    /// Up: `crates/kernel/src/turn/confinement.rs`.
+    /// Down: no call; it reads the prepared field.
+    /// Verify: `cargo test -p loong-sandbox -p loong-kernel`.
+    pub fn scratch(&self) -> Option<&Path> {
+        self.scratch.as_deref()
     }
 
     /// Apply the policy to the calling process. Intended for `pre_exec`: the
@@ -342,6 +423,9 @@ impl WorkspacePolicy {
         let result = (|| {
             add_path_rule_raw(ruleset as i32, c"/", read_only_mask(abi))?;
             add_path_rule_raw(ruleset as i32, &self.root, read_write_mask(abi))?;
+            if let Some(scratch) = &self.scratch_rule {
+                add_path_rule_raw(ruleset as i32, scratch, read_write_mask(abi))?;
+            }
             add_device_rules(ruleset as i32)?;
             if unsafe { prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
                 return Err(errno("prctl(PR_SET_NO_NEW_PRIVS)"));
@@ -559,8 +643,8 @@ mod tests {
     }
 
     #[test]
-    /// Purpose: Pin that only `/dev/null` is writable outside the workspace, and only for reads and writes.
-    fn the_only_writable_place_outside_the_workspace_is_dev_null() {
+    /// Purpose: Pin that `/dev/null` is the only writable *device*; the scratch directory is the one writable directory outside the workspace.
+    fn the_only_writable_device_outside_the_workspace_is_dev_null() {
         assert_eq!(WRITABLE_DEVICES.len(), 1, "one sink is deliberately chosen");
         assert_eq!(WRITABLE_DEVICES[0], c"/dev/null");
         let m = device_write_mask();
@@ -572,6 +656,34 @@ mod tests {
         assert_eq!(m & READ_FILE, READ_FILE);
         assert_eq!(m & MAKE_REG, 0, "no device may be created");
         assert_eq!(m & REMOVE_FILE, 0, "no device may be removed");
+    }
+
+    #[test]
+    /// Purpose: Pin that a policy prepares a private scratch directory outside the workspace, so compilers and tests have a temp.
+    fn a_policy_prepares_a_private_scratch_directory_outside_the_workspace() {
+        use std::os::unix::fs::MetadataExt;
+        let workspace =
+            std::env::temp_dir().join(format!("loong-scratch-ws-{}", std::process::id()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        match WorkspacePolicy::new(&workspace) {
+            Ok(policy) => {
+                let scratch = policy
+                    .scratch()
+                    .expect("a policy prepares a scratch directory");
+                assert!(scratch.is_dir(), "{} exists", scratch.display());
+                assert!(
+                    !scratch.starts_with(&workspace),
+                    "{} is outside {}",
+                    scratch.display(),
+                    workspace.display()
+                );
+                let mode = std::fs::metadata(scratch).unwrap().mode() & 0o777;
+                assert_eq!(mode, 0o700, "only this session may use its temp");
+            }
+            Err(LandlockError::Unsupported) => { /* older kernels: reported elsewhere */ }
+            Err(e) => panic!("unexpected failure preparing a policy: {e}"),
+        }
+        let _ = std::fs::remove_dir_all(&workspace);
     }
 
     #[test]

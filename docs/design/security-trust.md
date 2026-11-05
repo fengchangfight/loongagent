@@ -65,7 +65,7 @@ flowchart TB
         CFG["resolved layers<br/>control above org"]
         HOOKS["trusted hooks / MCP servers"]
         KERNEL["kernel · tool runner"]
-        PEP["Landlock PEP on children<br/>read-only / · rw workspace"]
+        PEP["Landlock PEP on children<br/>read-only / · rw workspace + scratch"]
     end
 
     REPO --> HASH --> HOOKS

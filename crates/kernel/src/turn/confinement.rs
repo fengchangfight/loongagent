@@ -25,6 +25,13 @@ impl Confinement for LandlockConfinement {
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
+            // The child's own temp is a directory the policy grants writes to; without
+            // this, rustc and cc write to /tmp, which the confinement refuses.
+            if let Some(scratch) = self.policy.scratch() {
+                command.env("TMPDIR", scratch);
+                command.env("TMP", scratch);
+                command.env("TEMP", scratch);
+            }
             let policy = self.policy.clone();
             // SAFETY: `apply` is documented to do no allocation on its success
             // path, which is what makes it safe between fork and exec.

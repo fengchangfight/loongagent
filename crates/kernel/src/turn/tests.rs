@@ -1175,6 +1175,41 @@ fn the_pep_still_allows_a_workspace_write_through_the_shell() {
     assert_eq!(result.data["ok"], true, "{:?}", result.data["output"]);
 }
 
+/// Purpose: A confined child gets a writable `TMPDIR` outside the workspace, so rustc, cc and tests can create temporary files.
+#[test]
+#[cfg(target_os = "linux")]
+fn the_pep_gives_the_shell_a_writable_scratch_directory() {
+    let t = Temp::new();
+    let command = "case \"$TMPDIR\" in \"$PWD\"/*) exit 9;; esac; \
+                   printf ok > \"$TMPDIR/pep-probe.txt\" && cat \"$TMPDIR/pep-probe.txt\"";
+    let model = ScriptedModel::new(vec![
+        response(vec![call("c1", "shell", json!({"command": command}))], None),
+        response(vec![], Some("done")),
+    ]);
+    let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+    assert!(
+        k.confinement_note().contains("landlock"),
+        "the kernel must confine tool children: {}",
+        k.confinement_note()
+    );
+    k.submit("use the scratch directory").unwrap();
+    let events = loong_eventlog::replay(&t.log).unwrap().events;
+    let result = events.iter().find(|e| e.kind == ev::TOOL_RESULT).unwrap();
+    assert_eq!(
+        result.data["ok"], true,
+        "the scratch write must succeed: {:?}",
+        result.data["output"]
+    );
+    assert!(
+        result.data["output"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("ok"),
+        "the command's output carries the written word: {:?}",
+        result.data["output"]
+    );
+}
+
 /// Purpose: A confined child keeps `/dev/null` writable: git opens it read-write at startup, so denying the write broke every git command.
 #[test]
 #[cfg(target_os = "linux")]

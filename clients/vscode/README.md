@@ -4,7 +4,21 @@
 `loongagent: Open Chat` 打开；不是 Copilot 的聊天框，也不是 Activity Bar 侧边栏。
 它不需要 Copilot 登录，也不需要选 VS Code 的模型；模型来自 `loongagent server`。
 
-## 安装 VSIX
+## 打包并安装 VSIX
+
+需要 Node.js 和 npm。在 `clients/vscode` 下执行：
+
+```bash
+cd clients/vscode
+npm ci
+npm run package:vsix
+```
+
+`package:vsix` 会先跑 `npm run compile`（esbuild 打包 + `tsc --noEmit` 类型检查），再用
+`@vscode/vsce package` 生成 `loongagent-vscode-0.1.0.vsix`；文件名里的版本号取自
+`package.json`。产物就在 `clients/vscode/` 目录下。
+
+然后安装：
 
 ```bash
 code --install-extension loongagent-vscode-0.1.0.vsix

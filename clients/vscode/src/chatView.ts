@@ -6,6 +6,7 @@ import { ApprovalBook } from "./approval.ts";
 import { previewEdit, previewWrite } from "./diff.ts";
 import { DiffProvider } from "./diffProvider.ts";
 import { fileChoices } from "./filePicker.ts";
+import { focusedFile, sameFocus } from "./focus.ts";
 import { refusalToStart } from "./guards.ts";
 import { PreviewProvider } from "./previewProvider.ts";
 import { promptText } from "./prompt.ts";
@@ -22,7 +23,7 @@ import { EVENTS } from "../../ts/protocol.generated.ts";
 import type { ApprovalRequested, ModelList, ToolCall, ToolResult } from "../../ts/protocol.generated.ts";
 import type { DiffUris } from "./diffProvider.ts";
 import type { Preview } from "./diff.ts";
-import type { Attachment, BinaryStatus, HostMessage, UiPart } from "./webviewProtocol.ts";
+import type { Attachment, BinaryStatus, Focus, HostMessage, UiPart } from "./webviewProtocol.ts";
 import type { ApprovalAnswer } from "./turn.ts";
 import type { SessionAgent as Agent } from "./sessionAgent.ts";
 import type { LoongSession } from "./session.ts";
@@ -81,6 +82,7 @@ export class ChatViewProvider {
   private binary: HostBinary | undefined;
   private readonly runtime = new Map<string, TabRuntime>();
   private selection: Attachment | undefined;
+  private focus: Focus | undefined;
   private nextAttachment = 1;
   private ready = false;
   private restored = false;
@@ -98,14 +100,14 @@ export class ChatViewProvider {
     this.tabs.open({ id: "tab-1", title: "New session", status: "idle" });
     this.context.subscriptions.push(
       vscode.window.onDidChangeTextEditorSelection((event) =>
-        this.captureSelection(event.textEditor)),
-      vscode.window.onDidChangeActiveTextEditor((editor) => this.captureSelection(editor)),
+        this.captureEditor(event.textEditor)),
+      vscode.window.onDidChangeActiveTextEditor((editor) => this.captureEditor(editor)),
       vscode.workspace.onDidChangeWorkspaceFolders(() => {
-        this.captureSelection(vscode.window.activeTextEditor);
+        this.captureEditor(vscode.window.activeTextEditor);
         void this.refreshFiles();
       }),
     );
-    this.captureSelection(vscode.window.activeTextEditor);
+    this.captureEditor(vscode.window.activeTextEditor);
 
     const leftUris: DiffUris<vscode.Uri> = {
       make: (token, path, label) =>
@@ -389,6 +391,7 @@ export class ChatViewProvider {
       ...(this.agent?.sessionId === undefined ? {} : { sessionId: this.agent.sessionId }),
       ...(this.binary === undefined ? {} : { binary: this.binary }),
       ...(this.selection === undefined ? {} : { selection: { ...this.selection } }),
+      ...(this.focus === undefined ? {} : { focus: { ...this.focus } }),
     });
   }
 
@@ -602,6 +605,29 @@ export class ChatViewProvider {
   }
 
   /**
+   * Capture the file the active editor shows and its cursor line, independently
+   * of the selection. Like the selection, the last file survives focus moving to
+   * the chat (the active editor becomes `undefined`); switching to another text
+   * editor replaces it, and a non-workspace or untitled editor clears it.
+   */
+  private captureEditor(editor: vscode.TextEditor | undefined): void {
+    if (editor === undefined) return;
+    const folder = vscode.workspace.workspaceFolders?.[0];
+    const next = folder === undefined
+      ? undefined
+      : focusedFile({
+        scheme: editor.document.uri.scheme,
+        path: editor.document.uri.fsPath,
+        cursorLine: editor.selection.active.line,
+      }, folder.uri.fsPath);
+    if (!sameFocus(this.focus, next)) {
+      this.focus = next;
+      this.postFocus();
+    }
+    this.captureSelection(editor);
+  }
+
+  /**
    * Capture a selection, but do not clear it when focus leaves the editor.
    *
    * Clicking the chat webview changes the active editor to `undefined`; treating
@@ -630,6 +656,13 @@ export class ChatViewProvider {
     this.post({
       type: "selection",
       ...(this.selection === undefined ? {} : { selection: { ...this.selection } }),
+    });
+  }
+
+  private postFocus(): void {
+    this.post({
+      type: "focus",
+      ...(this.focus === undefined ? {} : { focus: { ...this.focus } }),
     });
   }
 
@@ -731,7 +764,7 @@ export class ChatViewProvider {
 
     const prompt = promptText(text, this.selection === undefined
       ? runtime.attachments
-      : [...runtime.attachments, this.selection]);
+      : [...runtime.attachments, this.selection], this.focus);
     runtime.attachments.length = 0;
     this.postAttachments(tabId);
     const renderer = new Renderer({ cwd: folder.uri.fsPath });

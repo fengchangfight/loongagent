@@ -84,6 +84,12 @@ transcript, never a file the extension reads.
   `read_file` has no line-range parameter. A passive chip names it; it survives clicking into
   the chat (the active editor becomes undefined), and a new tab inherits it. Deselecting or
   switching to another text editor clears it.
+- When nothing is selected, the focused workspace file and its 1-based cursor line are named
+  in the prompt as `current file: <path> (cursor at line N)`, so "the current file" has a
+  referent. A passive `file · <path>:<line>` chip shows it; it survives clicking into the
+  chat, follows cursor movement and editor switches, and a new tab inherits it. A selection
+  block already names its file, so the line is omitted then. A non-workspace or untitled
+  editor clears it. The kernel's `read_file` fetches the body; the extension only names it.
 - The model dropdown comes from `model.list`; a change is `model.select` and is recorded as
   `model.selected`.
 - While a turn is running without a live delta, the bottom of the transcript shows an animated

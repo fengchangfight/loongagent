@@ -1,4 +1,4 @@
-import type { Attachment } from "./webviewProtocol.ts";
+import type { Attachment, Focus } from "./webviewProtocol.ts";
 
 function longestRunOf(text: string, character: string): number {
   let longest = 0;
@@ -15,9 +15,15 @@ function longestRunOf(text: string, character: string): number {
  *
  * Files are paths only: the kernel's own read tools fetch their content.
  * A selection is the one inlined body, because `read_file` has no line-range
- * parameter and the person explicitly attached those lines.
+ * parameter and the person explicitly attached those lines. The focused file
+ * is named when nothing is selected, so "the current file" has a referent;
+ * a selection block already names its file, so the line is not repeated.
  */
-export function promptText(prompt: string, attachments: readonly Attachment[]): string {
+export function promptText(
+  prompt: string,
+  attachments: readonly Attachment[],
+  focus?: Focus,
+): string {
   const files: string[] = [];
   for (const attachment of attachments) {
     if (attachment.kind !== "file") continue;
@@ -25,6 +31,10 @@ export function promptText(prompt: string, attachments: readonly Attachment[]): 
   }
 
   let text = prompt;
+  const hasSelection = attachments.some((attachment) => attachment.kind === "selection");
+  if (focus !== undefined && !hasSelection) {
+    text += `\n\ncurrent file: ${focus.path} (cursor at line ${focus.line})`;
+  }
   if (files.length > 0) {
     text += `\n\nreferenced files:\n${files.map((path) => `- ${path}`).join("\n")}`;
   }

@@ -22,6 +22,22 @@ test("two file attachments are not repeated", () => {
 test("no attachments leaves the prompt unchanged", () => {
   assert.equal(promptText("look", []), "look");
 });
+test("a focused file adds its path and cursor line", () => {
+  const text = promptText("explain", [], { path: "/w/a.ts", line: 12 });
+  assert.ok(text.includes("/w/a.ts"));
+  assert.ok(text.includes("cursor at line 12"));
+});
+test("a focused file is still named when another file is attached", () => {
+  const text = promptText("explain", [{ id: "a", kind: "file", path: "/w/b.ts" }],
+    { path: "/w/a.ts", line: 12 });
+  assert.ok(text.includes("current file: /w/a.ts"));
+});
+test("a selection replaces the focused file line", () => {
+  const text = promptText("explain", [{ id: "s", kind: "selection", path: "/w/a.ts",
+    startLine: 10, endLine: 12, text: "const a = 1;" }], { path: "/w/a.ts", line: 12 });
+  assert.ok(!text.includes("current file"));
+  assert.ok(text.includes("lines 10-12"));
+});
 test("a selection containing backticks uses a longer fence", () => {
   const text = promptText("explain", [{ id: "s", kind: "selection", path: "/w/a.ts",
     startLine: 1, endLine: 1, text: "```" }]);

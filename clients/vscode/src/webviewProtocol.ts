@@ -62,6 +62,12 @@ export type Attachment =
       text: string;
     };
 
+/** The workspace file the active editor is focused on, with its 1-based cursor line. */
+export interface Focus {
+  path: string;
+  line: number;
+}
+
 /** One workspace file offered by the inline `@` picker. */
 export interface FileChoice {
   label: string;
@@ -96,6 +102,7 @@ export type HostMessage =
       sessionId?: string;
       binary?: BinaryStatus;
       selection?: Attachment;
+      focus?: Focus;
     }
   | { type: "tabs"; tabs: TabState[] }
   | { type: "transcript"; tabId: string; parts: UiPart[] }
@@ -104,6 +111,7 @@ export type HostMessage =
   | { type: "assistantFinal"; tabId: string; text: string; html: string }
   | { type: "attachments"; tabId: string; items: Attachment[] }
   | { type: "selection"; selection?: Attachment }
+  | { type: "focus"; focus?: Focus }
   | { type: "files"; files: FileChoice[] }
   | { type: "sessions"; sessions: SessionInfo[] }
   | { type: "error"; tabId?: string; message: string; detail?: string };

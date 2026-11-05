@@ -1,4 +1,4 @@
-import type { Attachment, BinaryStatus, FileChoice, HostMessage, SessionInfo, TabState, UiPart } from "../src/webviewProtocol.ts";
+import type { Attachment, BinaryStatus, FileChoice, Focus, HostMessage, SessionInfo, TabState, UiPart } from "../src/webviewProtocol.ts";
 import { insertMention, matchingFiles, mentionAt } from "../src/mention.ts";
 
 type Models = Extract<HostMessage, { type: "bootstrap" }>["models"];
@@ -81,6 +81,7 @@ interface State {
   model?: string;
   attachments: Attachment[];
   selection?: Attachment;
+  focus?: Focus;
   files: FileChoice[];
   filesLoaded: boolean;
   mention?: { start: number; query: string; index: number };
@@ -90,7 +91,7 @@ interface State {
 
 const state: State = {
   parts: [], live: "", tabs: [], activeTabId: undefined, sessions: [], historyOpen: false,
-  models: [], attachments: [], selection: undefined, files: [],
+  models: [], attachments: [], selection: undefined, focus: undefined, files: [],
   filesLoaded: false, mention: undefined, busy: false, yolo: false,
 };
 
@@ -249,6 +250,11 @@ function renderAttachments(): void {
     chip.append(element("span", "chip-label", label));
     chip.title = "From the active editor selection; deselect to remove";
     attachmentsBar.append(chip);
+  } else if (state.focus !== undefined) {
+    const chip = element("span", "chip file");
+    chip.append(element("span", "chip-label", `file · ${state.focus.path}:${state.focus.line}`));
+    chip.title = "The file in the active editor; open another file to change it";
+    attachmentsBar.append(chip);
   }
   for (const attachment of state.attachments) {
     const chip = element("span", "chip");
@@ -337,7 +343,7 @@ function renderEmpty(): void {
   const empty = element("div", "empty");
   empty.append(element("h1", "empty-title", "loongagent"));
   empty.append(element("p", "empty-copy",
-    "Ask for a change in this workspace. Files you attach and the editor selection become part of the prompt."));
+    "Ask for a change in this workspace. The file you are in, files you attach, and the editor selection become part of the prompt."));
   if (state.binary === undefined) {
     empty.append(element("p", "empty-warn",
       "The loongagent binary was not found. Set loongagent.path or run \"loongagent: Locate the binary\"."));
@@ -592,6 +598,7 @@ window.addEventListener("message", (event: MessageEvent<HostMessage>) => {
       state.models = message.models;
       state.model = message.model;
       state.selection = message.selection;
+      state.focus = message.focus;
       // The file list is host state. A second bootstrap (models ready) must
       // not erase a list the earlier `files` message already delivered.
       state.mention = undefined;
@@ -670,6 +677,10 @@ window.addEventListener("message", (event: MessageEvent<HostMessage>) => {
       break;
     case "selection":
       state.selection = message.selection;
+      renderAttachments();
+      break;
+    case "focus":
+      state.focus = message.focus;
       renderAttachments();
       break;
     case "files":

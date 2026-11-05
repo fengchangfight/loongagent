@@ -366,11 +366,25 @@ pub(crate) fn full_screen(args: Args) -> Result<(), String> {
         Ok(None) => {}
         Err(e) => intro.push(format!("control plane: {e}")),
     }
+    // Local mode's models are `local.toml`'s `[[models]]`, so a reorder can go back to
+    // the source: the next session reads the new order, and the first block (the model
+    // in hand) becomes its default. A managed profile or a profile named with
+    // `--profile` is not this run's file to rewrite, so the order stays on the bar.
+    let save_order: Option<Box<dyn Fn(&[String]) -> Result<(), String>>> =
+        if local && args.profile.is_none() {
+            let path = loong_config::local_profile_path();
+            Some(Box::new(move |names: &[String]| {
+                crate::local::reorder_local_models(&path, names)
+            }))
+        } else {
+            None
+        };
     let outcome = loong_tui_app::run(
         client,
         attached.session_id,
         attached.schema_version,
         history_path(&args.cwd),
+        save_order,
         notes,
         intro,
         Some(Box::new(move || loong_tui::interrupt(server_pid))),

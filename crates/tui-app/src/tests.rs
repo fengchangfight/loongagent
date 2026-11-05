@@ -4620,6 +4620,45 @@ fn a_model_move_is_reported_in_the_transcript() {
     assert!(shows(&said, "已把 b 从第 2 位移到第 1 位"), "{said:?}");
 }
 
+/// Purpose: A reorder is handed to the saver that writes the profile, and the line says it stuck.
+#[test]
+fn a_reorder_is_handed_to_the_profile_saver() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let mut app = app_with_models(&["a", "b", "c"]);
+    app.selected = "b".to_string();
+    let seen = Rc::new(RefCell::new(Vec::<Vec<String>>::new()));
+    let sink = seen.clone();
+    app.set_order_saver(Box::new(move |names: &[String]| {
+        sink.borrow_mut().push(names.to_vec());
+        Ok(())
+    }));
+
+    app.handle_key(ctrl_arrow(KeyCode::Left));
+
+    assert_eq!(seen.borrow().len(), 1, "the saver ran once");
+    assert_eq!(seen.borrow()[0], ["b", "a", "c"], "with the new order");
+    let said = app.lines.join("\n");
+    assert!(shows(&said, "已写入 local.toml"), "{said:?}");
+}
+
+/// Purpose: A saver that cannot write leaves the reorder in place and says why.
+#[test]
+fn a_failed_profile_write_does_not_undo_the_reorder() {
+    let mut app = app_with_models(&["a", "b", "c"]);
+    app.set_order_saver(Box::new(|_| Err("磁盘满了".to_string())));
+    app.handle_key(ctrl_arrow(KeyCode::Right));
+
+    let names: Vec<&str> = app.models.iter().map(|model| model.name.as_str()).collect();
+    assert_eq!(names, ["b", "a", "c"], "the screen still moved");
+    let said = app.lines.join("\n");
+    assert!(shows(&said, "磁盘满了"), "{said:?}");
+    assert!(
+        !shows(&said, "已写入"),
+        "and did not claim a write: {said:?}"
+    );
+}
+
 /// Purpose: The bar hint names the always-delivered keys first and still offers the numbered ones.
 #[test]
 fn the_bar_hint_leads_with_the_keys_that_always_arrive() {

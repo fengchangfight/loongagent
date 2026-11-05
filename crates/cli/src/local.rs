@@ -1489,6 +1489,44 @@ fn write_local_blocks(path: &Path, blocks: &[LocalBlock]) -> Result<(), String> 
     Ok(())
 }
 
+/// Purpose: Rewrite `local.toml`'s model blocks in the order the screen arranged them, first block first.
+/// Serves: the reorder saver `tui.rs` hands to `loong_tui_app::run`; the `local.rs` tests.
+/// Design: `docs/design/config-routing.md` §3; `docs/design/surfaces.md` §3.
+/// Up: `tui.rs`'s `full_screen`.
+/// Down: `read_local_blocks` and `write_local_blocks`.
+/// Verify: `cargo test -p loongagent` · `./scripts/check.sh`.
+/// Reorder the `[[models]]` blocks of `local.toml` to match `order`.
+///
+/// The blocks keep their own text, comments included, and everything outside the
+/// model section stays as it was. `write_local_blocks` points `[router] default` at
+/// the first block, which is this file's documented contract: the first model is the
+/// one a new session starts with. The screen only moves the model in hand, so that
+/// model becomes the first, and the next session starts with it.
+///
+/// Refuses to write when the file and the screen disagree about which models exist:
+/// the file is hand-edited, and guessing around a name the session never saw could
+/// drop a model's block.
+pub(crate) fn reorder_local_models(path: &Path, order: &[String]) -> Result<(), String> {
+    let mut remaining = read_local_blocks(path);
+    let mut ordered = Vec::with_capacity(remaining.len());
+    for name in order {
+        let Some(index) = remaining.iter().position(|block| &block.model.name == name) else {
+            return Err(format!(
+                "{} 里没有模型 {name:?}，顺序没有写回（文件可能被手工改过）",
+                path.display()
+            ));
+        };
+        ordered.push(remaining.remove(index));
+    }
+    if !remaining.is_empty() {
+        return Err(format!(
+            "{} 里的模型比当前列表多，顺序没有写回（文件可能被手工改过）",
+            path.display()
+        ));
+    }
+    write_local_blocks(path, &ordered)
+}
+
 /// Purpose: What follows the models, with `router.default` pointed at a model that exists.
 /// Serves: `write_local_blocks`, so a delete cannot leave a file that will not load.
 /// Design: `docs/design/config-routing.md` §3.
@@ -1793,6 +1831,81 @@ mod tests {
         text.lines()
             .filter(|line| line.trim_start().starts_with(header))
             .count()
+    }
+
+    /// Purpose: Reordering the local models rewrites the blocks in place, and the first one becomes the default.
+    #[test]
+    fn reordering_local_models_keeps_the_comments_and_moves_the_default() {
+        let path = local_temp("reorder");
+        std::fs::write(
+            &path,
+            "# hand-written header\n\
+             [[models]]\n\
+             name = \"alpha\"\n\
+             # alpha is the cheap one\n\
+             provider = \"deepseek/alpha\"\n\n\
+             [[models]]\n\
+             name = \"beta\"\n\
+             provider = \"deepseek/beta\"\n\n\
+             [[models]]\n\
+             name = \"gamma\"\n\
+             provider = \"deepseek/gamma\"\n\n\
+             [router]\n\
+             default = \"alpha\"\n\n\
+             [context_engine]\n\
+             enabled = true\n",
+        )
+        .unwrap();
+
+        reorder_local_models(
+            &path,
+            &["gamma".to_string(), "alpha".to_string(), "beta".to_string()],
+        )
+        .unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let gamma = text.find("name = \"gamma\"").expect("gamma");
+        let alpha = text.find("name = \"alpha\"").expect("alpha");
+        let beta = text.find("name = \"beta\"").expect("beta");
+        assert!(gamma < alpha && alpha < beta, "the blocks moved: {text}");
+        let alpha_block = text
+            .split("[[models]]")
+            .find(|block| block.contains("name = \"alpha\""))
+            .expect("alpha's block");
+        assert!(
+            alpha_block.contains("# alpha is the cheap one"),
+            "the note stayed with its model: {text}"
+        );
+        assert!(
+            text.contains("default = \"gamma\""),
+            "the first block is the default: {text}"
+        );
+        assert!(
+            text.contains("[context_engine]") && text.contains("enabled = true"),
+            "the rest of the file is untouched: {text}"
+        );
+        assert!(text.starts_with("# hand-written header"), "{text}");
+    }
+
+    /// Purpose: A name the file does not declare is refused, and the file is left exactly as it was.
+    #[test]
+    fn reordering_refuses_a_name_the_file_does_not_have() {
+        let path = local_temp("reorder-unknown");
+        let original = "[[models]]\nname = \"alpha\"\nprovider = \"deepseek/alpha\"\n\n\
+                        [router]\ndefault = \"alpha\"\n";
+        std::fs::write(&path, original).unwrap();
+
+        let error =
+            reorder_local_models(&path, &["alpha".to_string(), "missing".to_string()]).unwrap_err();
+        assert!(
+            error.contains("missing") || error.contains("对不上"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            original,
+            "a refusal writes nothing"
+        );
     }
 
     // ------------------------------------------------ the semantic switch

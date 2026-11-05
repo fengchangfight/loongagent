@@ -70,7 +70,7 @@ because the client already saw the `tool.call` and `approval.requested`.
 lives on a worker thread and the screen talks to it over channels; the key handler and drawing
 are driven from ratatui's `TestBackend` in the tests. It adds only presentation and intents:
 the model picker, context panel, folds, `/yolo`, `/new`, and interrupt (a signal, not a
-protocol method); `Ctrl+←`/`Ctrl+→` reorder this run's model slots (`/left`, `/right` are the typed fallbacks). A paste arrives as one block; enter during a turn refuses a new prompt; `/yolo` still reaches the control channel.
+protocol method); `Ctrl+←`/`Ctrl+→` reorder the model slots (`/left`, `/right` are the typed fallbacks). Local mode writes the new order back to `local.toml`'s `[[models]]`, so the next session starts with it and its first block is the default; a managed profile keeps the order for the run only. A paste arrives as one block; enter during a turn refuses a new prompt; `/yolo` still reaches the control channel.
 
 The prompt keeps a per-project history: ↑/↓ walk the prompts this project asked
 (`~/.loongagent/projects/<slug>/history.jsonl`, newest 200, multi-line intact); ↓ past the

@@ -19,6 +19,7 @@ pub fn run<T: Transport + Send + 'static>(
     session: String,
     schema: String,
     history_path: std::path::PathBuf,
+    save_order: Option<Box<dyn Fn(&[String]) -> Result<(), String>>>,
     notes: Option<Receiver<String>>,
     intro: Vec<String>,
     interrupt: Option<Box<dyn Fn()>>,
@@ -68,6 +69,9 @@ pub fn run<T: Transport + Send + 'static>(
     app.spend = Spend::from_events(&costs);
     app.interrupt = interrupt;
     app.set_permissions = permissions;
+    if let Some(save) = save_order {
+        app.set_order_saver(save);
+    }
     if let Some(list) = models {
         app.set_models(list);
     }

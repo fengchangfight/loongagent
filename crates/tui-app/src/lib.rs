@@ -538,6 +538,10 @@ pub struct App {
     /// surface has no private control channel (Windows, today): `/yolo` then waits for
     /// the worker like any other command.
     pub set_permissions: Option<Box<dyn Fn(bool)>>,
+    /// How to write a new slot order back to the profile. `None` when the models did
+    /// not come from a writable local file (a managed profile) or in the tests: the
+    /// bar then keeps the order for this run only.
+    pub save_order: Option<Box<dyn Fn(&[String]) -> Result<(), String>>>,
     /// What the running turn is doing, and since when — the interface's answer to "is
     /// it stuck, or working?".
     pub activity: Option<String>,
@@ -602,7 +606,10 @@ pub struct App {
     /// Which of them the next call will use.
     pub selected: String,
     /// The names as the user arranged them, once they have moved one. `None` means the
-    /// bar follows whatever order the server last sent, which is the profile's.
+    /// bar follows whatever order the server last sent, which is the local profile's or
+    /// the pack's. Local mode also writes this order back to `local.toml`, so a new
+    /// session starts with it; the field still carries it in a managed run, where the
+    /// order lasts only as long as the session.
     model_order: Option<Vec<String>>,
     /// The last thing the user asked for, so `Alt+R` has something to resend.
     ///
@@ -654,6 +661,7 @@ impl App {
             mouse: false,
             interrupt: None,
             set_permissions: None,
+            save_order: None,
             activity: None,
             busy_since: None,
             debug: false,
@@ -925,10 +933,15 @@ impl App {
     /// Verify: `cargo test -p loong-tui-app`.
     /// Move the selected model one slot left or right.
     ///
-    /// This is the bar's order, not the profile's: the digits are keys, and somebody who
-    /// keeps reaching for the same model wants it under the same finger. The selection
-    /// stays on the model that moved, so the next call is still the one they chose; no
-    /// `model.select` is sent, because nothing about which model runs has changed.
+    /// This is the bar's order: the digits are keys, and somebody who keeps reaching for
+    /// the same model wants it under the same finger. The selection stays on the model
+    /// that moved, so the next call is still the one they chose; no `model.select` is
+    /// sent, because nothing about which model runs in this session has changed.
+    ///
+    /// Local mode hands the new order to the CLI's saver, which writes `local.toml`'s
+    /// `[[models]]` blocks. The next session reads that order, and its first block is
+    /// the default, so the model in hand starts it. A managed profile has no writable
+    /// local file, so there the order stays in the bar for this run only.
     fn move_selected_model(&mut self, delta: isize) -> Action {
         if self.models.is_empty() {
             self.push_lines(vec![
@@ -954,18 +967,41 @@ impl App {
             return Action::None;
         }
         self.models.swap(index, target as usize);
+        // Remembered by name rather than by index: the server sends the declaration
+        // order again after every switch, and the arrangement has to survive that.
+        let names: Vec<String> = self.models.iter().map(|model| model.name.clone()).collect();
+        self.model_order = Some(names.clone());
         // Said out loud as well as drawn: the bar is the proof, but a move that only
         // changes a digit can be missed, and the line also says which two slots changed.
-        self.push_lines(vec![format!(
+        let mut said = format!(
             "· 已把 {} 从第 {} 位移到第 {} 位",
             self.selected,
             index + 1,
             target + 1
-        )]);
-        // Remembered by name rather than by index: the server sends the declaration
-        // order again after every switch, and the arrangement has to survive that.
-        self.model_order = Some(self.models.iter().map(|model| model.name.clone()).collect());
+        );
+        let mut warning = None;
+        match self.save_order.as_ref().map(|save| save(&names)) {
+            Some(Ok(())) => said.push_str("（已写入 local.toml）"),
+            Some(Err(error)) => {
+                warning = Some(format!("! 顺序没能写回 local.toml：{error}"));
+            }
+            None => {}
+        }
+        self.push_lines(vec![said]);
+        if let Some(warning) = warning {
+            self.push_lines(vec![warning]);
+        }
         Action::None
+    }
+
+    /// Purpose: Give the screen the writer that persists the slot order, when this run has one.
+    /// Serves: `surface::run`; the reorder tests.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `surface::run`.
+    /// Down: no call; it stores the closure that `App::move_selected_model` calls.
+    /// Verify: `cargo test -p loong-tui-app`.
+    pub fn set_order_saver(&mut self, saver: Box<dyn Fn(&[String]) -> Result<(), String>>) {
+        self.save_order = Some(saver);
     }
 
     /// Purpose: Turn a slot press into a model switch, saying so when the slot is empty or already current.

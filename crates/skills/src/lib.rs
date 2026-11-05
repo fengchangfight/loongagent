@@ -18,7 +18,7 @@
 //! spelling still works:
 //!
 //! ```text
-//! .loongagent/skills/<name>/SKILL.md
+//! .agents/skills/<name>/SKILL.md
 //! .loongagent/commands/<name>.md
 //! ```
 //!
@@ -234,24 +234,28 @@ impl SkillSet {
         disabled: &[String],
     ) -> Result<Self, SkillError> {
         let workspace = workspace.as_ref().to_path_buf();
-        let root = workspace.join(".loongagent");
+        let skills_root = workspace.join(".agents");
+        let commands_root = workspace.join(".loongagent");
         let mut skills: Vec<Skill> = Vec::new();
 
-        // The workspace's own two spellings, then every extra root in the same two
-        // shapes: a directory per skill, or flat markdown files.
-        let mut roots: Vec<PathBuf> = vec![root.clone()];
-        roots.extend(extra_dirs.iter().cloned());
-        for root in roots {
+        // The workspace's own two spellings live in different places now: skills
+        // under `.agents/skills/`, commands under `.loongagent/commands/`. Extra
+        // roots (a profile's `skill_dirs`) still carry both shapes under one root.
+        if skills_root.is_dir() {
+            skills.extend(scan_skills_root(&skills_root)?);
+        }
+        if commands_root.is_dir() {
+            skills.extend(scan_commands_root(&commands_root)?);
+        }
+        for root in extra_dirs {
             if !root.is_dir() {
-                if root != workspace.join(".loongagent") {
-                    return Err(SkillError::Io(format!(
-                        "{} is not a directory (a profile's skill_dirs must exist)",
-                        root.display()
-                    )));
-                }
-                continue;
+                return Err(SkillError::Io(format!(
+                    "{} is not a directory (a profile's skill_dirs must exist)",
+                    root.display()
+                )));
             }
-            skills.extend(scan_root(&root)?);
+            skills.extend(scan_skills_root(root)?);
+            skills.extend(scan_commands_root(root)?);
         }
 
         // A disabled entry is removed before anything is built from the set, so the
@@ -492,9 +496,9 @@ fn substitute(body: &str, args: &str) -> String {
 /// Serves: `SkillSet::load_in`.
 /// Design: `docs/design/extension-model.md` §2.
 /// Up: `load_in`.
-/// Down: `read_skill` and the `skills/`/`commands/` layout.
+/// Down: `read_skill` and the `skills/` layout.
 /// Verify: `cargo test -p loong-skills`.
-fn scan_root(root: &Path) -> Result<Vec<Skill>, SkillError> {
+fn scan_skills_root(root: &Path) -> Result<Vec<Skill>, SkillError> {
     let mut skills = Vec::new();
     // Both readings are natural, so both work: a root that holds a `skills/`
     // directory (the workspace layout) and a root that *is* a directory of skills
@@ -521,15 +525,27 @@ fn scan_root(root: &Path) -> Result<Vec<Skill>, SkillError> {
             skills.push(read_skill(&file, fallback.as_deref())?);
         }
     }
-    // `<name>.md` — the older "commands" spelling of the same concept. Accepted at
-    // a root directly as well, so an extra profile root can be flat.
-    //
-    // A root that carries the workspace shape (`skills/`) is read in that shape only:
-    // `skills/` and `commands/`. Otherwise the README, AGENTS.md and release notes of
-    // any repository laid out the way the plugin ecosystem lays one out would each be
-    // read as a command — and, having no frontmatter, fail the whole load. The cost is
-    // named rather than hidden: a stray `<name>.md` beside a `skills/` directory is no
-    // longer a skill, and `commands/<name>.md` is where it belongs.
+    Ok(skills)
+}
+
+/// `<name>.md` files under one root — the older "commands" spelling of the same
+/// concept. Accepted at a root directly as well, so an extra profile root can be
+/// flat.
+///
+/// A root that carries the workspace shape (`skills/`) is read in that shape only:
+/// `skills/` and `commands/`. Otherwise the README, AGENTS.md and release notes of
+/// any repository laid out the way the plugin ecosystem lays one out would each be
+/// read as a command — and, having no frontmatter, fail the whole load. The cost is
+/// named rather than hidden: a stray `<name>.md` beside a `skills/` directory is no
+/// longer a skill, and `commands/<name>.md` is where it belongs.
+/// Purpose: Every command file under one root.
+/// Serves: `SkillSet::load_in`.
+/// Design: `docs/design/extension-model.md` §2.
+/// Up: `load_in`.
+/// Down: `read_skill` and the `commands/` layout.
+/// Verify: `cargo test -p loong-skills`.
+fn scan_commands_root(root: &Path) -> Result<Vec<Skill>, SkillError> {
+    let mut skills = Vec::new();
     let mut command_dirs = vec![root.join(COMMANDS_DIR)];
     if !root.join(SKILLS_DIR).is_dir() {
         command_dirs.push(root.to_path_buf());
@@ -803,7 +819,7 @@ mod tests {
             std::process::id(),
             N.fetch_add(1, Ordering::SeqCst)
         ));
-        std::fs::create_dir_all(dir.join(".loongagent/skills")).unwrap();
+        std::fs::create_dir_all(dir.join(".agents/skills")).unwrap();
         std::fs::create_dir_all(dir.join(".loongagent/commands")).unwrap();
         dir
     }
@@ -811,7 +827,7 @@ mod tests {
     /// Purpose: Write a `skills/<name>/SKILL.md` file and return its path.
     /// Contract: `crates/skills/src/lib.rs`.
     fn skill_file(ws: &Path, name: &str, body: &str) -> PathBuf {
-        let dir = ws.join(".loongagent/skills").join(name);
+        let dir = ws.join(".agents/skills").join(name);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(SKILL_FILE);
         std::fs::write(&path, body).unwrap();

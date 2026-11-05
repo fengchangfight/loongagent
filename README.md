@@ -158,7 +158,7 @@ loongagent local semantic off
 | `ctrl-c` | **有任务在跑 = 中断这一轮**（会话不结束）；空闲 = 退出 |
 
 `/name args` 形式（不是内置命令的）会当作 **skill / 命令**发给服务端，来自
-`.loongagent/skills/`、`.loongagent/commands/`、profile 的 `skill_dirs`、已安装插件和
+`.agents/skills/`、`.loongagent/commands/`、profile 的 `skill_dirs`、已安装插件和
 MCP prompt。界面细节（折叠、配色、mark）由 [docs/design/surfaces.md](docs/design/surfaces.md) §3 拥有。
 
 ---

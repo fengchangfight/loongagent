@@ -7,7 +7,6 @@
 //! - **Downstream:** `App` for state and drawing, `spawn_worker` for the client thread, `copy_everywhere` for `/copy`, and `loong_tui::Client` for replay and models.
 //! - **Verify:** `cargo test -p loong-tui-app` · `./scripts/check.sh`
 use super::*;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 /// Purpose: Replay the session, spawn the worker, own the terminal and loop: drain, draw, read a key, act, until quit.
 /// Serves: `crates/cli/src/tui.rs`.
@@ -28,7 +27,8 @@ pub fn run<T: Transport + Send + 'static>(
 ) -> Result<(), String> {
     use ratatui::backend::CrosstermBackend;
     use ratatui::crossterm::event::{
-        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, KeyEventKind,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        KeyEventKind,
     };
     use ratatui::crossterm::execute;
     use ratatui::crossterm::terminal::{
@@ -119,12 +119,6 @@ pub fn run<T: Transport + Send + 'static>(
     let mut terminal = Terminal::new(backend).map_err(|e| e.to_string())?;
 
     let outcome = (|| -> Result<(), String> {
-        // A terminal that spells Meta as an ESC prefix — xterm's `metaSendsEscape`,
-        // and the readline convention — sends Alt+Left as ESC ESC [ D. Crossterm
-        // reads the first two bytes as one bare Esc and then hands over `[` and `D`
-        // as characters, so the key would be typed into the prompt rather than
-        // reorder anything. `MetaPrefix` holds that start for one short poll.
-        let mut prefix = MetaPrefix::default();
         loop {
             app.drain(&from_worker);
             // A background check reports when it reports; the bar is redrawn either way,
@@ -143,48 +137,46 @@ pub fn run<T: Transport + Send + 'static>(
                 .draw(|frame| app.draw(frame))
                 .map_err(|e| e.to_string())?;
 
-            let wait = if prefix.is_holding() {
-                std::time::Duration::from_millis(30)
-            } else {
-                std::time::Duration::from_millis(80)
-            };
-            let mut keys: Vec<KeyEvent> = Vec::new();
-            let mut mouse = None;
-            let mut pasted = None;
-            if event::poll(wait).map_err(|e| e.to_string())? {
+            if event::poll(std::time::Duration::from_millis(80)).map_err(|e| e.to_string())? {
                 match event::read().map_err(|e| e.to_string())? {
                     // Crossterm's Windows backend reports a Release alongside
                     // every Press; only Press may act.
                     event::Event::Key(key) if key.kind == KeyEventKind::Press => {
-                        keys = prefix.feed(key);
+                        match app.handle_key(key) {
+                            Action::Send(command) => {
+                                let _ = to_worker.send(command);
+                            }
+                            // The interface cannot reach the terminal or the clipboard from
+                            // `handle_key`; the loop that owns them does it here.
+                            Action::Copy => {
+                                let text = app.transcript();
+                                let path = copy_everywhere(&text, &app.session);
+                                app.push_lines(vec![format!(
+                                    "⧉ 已复制 {} 行 → {path}",
+                                    text.lines().count()
+                                )]);
+                            }
+                            Action::Mouse(on) => {
+                                let backend = terminal.backend_mut();
+                                if on {
+                                    let _ = execute!(backend, EnableMouseCapture);
+                                } else {
+                                    let _ = execute!(backend, DisableMouseCapture);
+                                }
+                                // The screen is redrawn next pass; the terminal is what changed.
+                            }
+                            Action::Quit => return Ok(()),
+                            Action::None => {}
+                        }
                     }
-                    // A held prefix is older than the mouse or the paste: settle it
-                    // first, so an Esc still closes what it was closing.
-                    event::Event::Mouse(found) => {
-                        keys = prefix.flush();
-                        mouse = Some(found);
-                    }
+                    event::Event::Mouse(mouse) => app.handle_mouse(mouse.kind),
                     // A bracketed paste arrives as one block, including its newlines: it
                     // goes into the input, and enter later sends the whole thing.
                     event::Event::Paste(text) => {
-                        keys = prefix.flush();
-                        pasted = Some(text);
+                        app.paste(&text);
                     }
                     _ => {}
                 }
-            } else {
-                keys = prefix.flush();
-            }
-            for key in keys {
-                if act(&mut app, &mut terminal, &to_worker, key)? {
-                    return Ok(());
-                }
-            }
-            if let Some(mouse) = mouse {
-                app.handle_mouse(mouse.kind);
-            }
-            if let Some(text) = pasted {
-                app.paste(&text);
             }
             if app.quit {
                 return Ok(());
@@ -202,162 +194,4 @@ pub fn run<T: Transport + Send + 'static>(
     .ok();
     terminal.show_cursor().ok();
     outcome
-}
-
-/// Purpose: Hold the start of a Meta-prefix arrow and rejoin it as the one Alt+arrow it means.
-/// Serves: `run`'s key arm.
-/// Design: `docs/design/surfaces.md` §3.
-/// Up: `run`.
-/// Down: no call; `feed` and `flush` return the keys that `act` handles.
-/// Verify: `cargo test -p loong-tui-app` (the `MetaPrefix` tests).
-/// A terminal that encodes Meta as an ESC prefix sends Alt+Left as ESC ESC [ D.
-/// Crossterm consumes the first two bytes as one bare `Esc`, then reports `[` and
-/// `D` as ordinary characters — so the whole thing would be typed into the prompt
-/// instead of reordering anything. Holding those first keys for one short poll is
-/// what puts the key back together.
-///
-/// A real `Esc` followed by a key is not swallowed: `feed` gives it back as soon
-/// as the next key is not the opener of an arrow sequence. `Esc` then `Left` or
-/// `Right` as two separate events is also rejoined, because that is the same
-/// split seen from the other side of a slow read; `Esc` then `Up`/`Down` is left
-/// alone, since closing a menu and walking the history is a useful pair.
-#[derive(Default)]
-pub(crate) struct MetaPrefix {
-    /// The keys held so far: nothing, `Esc`, or `Esc` and the `[`/`O` that starts
-    /// the arrow sequence. Never longer than two.
-    held: Vec<KeyEvent>,
-}
-
-impl MetaPrefix {
-    /// Purpose: Take one key and return the keys that are now settled, in order.
-    /// Serves: `run`'s key arm.
-    /// Design: `docs/design/surfaces.md` §3.
-    /// Up: `run`.
-    /// Down: no call; the result goes to `act`.
-    /// Verify: `cargo test -p loong-tui-app` (the `MetaPrefix` test).
-    /// An empty return means a prefix is being held and the next key decides.
-    pub(crate) fn feed(&mut self, key: KeyEvent) -> Vec<KeyEvent> {
-        let bare = key.kind == KeyEventKind::Press && key.modifiers.is_empty();
-        // Crossterm marks an uppercase character with SHIFT even when the user
-        // never pressed it: `ESC [ C` arrives as `Char('C')` + SHIFT. The letters
-        // that end the sequence are uppercase by definition, so they are accepted
-        // with that synthesized modifier and no other.
-        let letter = key.kind == KeyEventKind::Press
-            && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT);
-        if self.held.is_empty() {
-            if bare && key.code == KeyCode::Esc {
-                self.held.push(key);
-                return Vec::new();
-            }
-            return vec![key];
-        }
-        // Two Esc bytes can arrive in different reads; the later one is the prefix,
-        // so the earlier one is dropped rather than acted on.
-        if bare && key.code == KeyCode::Esc {
-            if self.held.len() == 1 {
-                self.held[0] = key;
-                return Vec::new();
-            }
-            let mut settled = std::mem::take(&mut self.held);
-            settled.push(key);
-            return settled;
-        }
-        if self.held.len() == 1 {
-            // The arrow sequence's own opener, or an arrow crossterm parsed directly.
-            if letter && matches!(key.code, KeyCode::Char('[') | KeyCode::Char('O')) {
-                self.held.push(key);
-                return Vec::new();
-            }
-            if bare && matches!(key.code, KeyCode::Left | KeyCode::Right) {
-                self.held.clear();
-                return vec![KeyEvent::new(key.code, KeyModifiers::ALT)];
-            }
-            let mut settled = std::mem::take(&mut self.held);
-            settled.push(key);
-            return settled;
-        }
-        // `Esc` and the opener are held: the final byte names the arrow. Up and
-        // Down are settled as Alt+Up/Alt+Down (which this screen ignores) rather
-        // than left to be typed as `[A`/`[B`.
-        if letter {
-            let arrow = match key.code {
-                KeyCode::Char('C') => Some(KeyCode::Right),
-                KeyCode::Char('D') => Some(KeyCode::Left),
-                KeyCode::Char('A') => Some(KeyCode::Up),
-                KeyCode::Char('B') => Some(KeyCode::Down),
-                _ => None,
-            };
-            if let Some(code) = arrow {
-                self.held.clear();
-                return vec![KeyEvent::new(code, KeyModifiers::ALT)];
-            }
-        }
-        let mut settled = std::mem::take(&mut self.held);
-        settled.push(key);
-        settled
-    }
-
-    /// Purpose: Hand back whatever a timeout left held, in the order it arrived.
-    /// Serves: `run`'s key arm, on the poll that times out.
-    /// Design: `docs/design/surfaces.md` §3.
-    /// Up: `run`.
-    /// Down: no call; the result goes to `act`.
-    /// Verify: `cargo test -p loong-tui-app` (the `MetaPrefix` test).
-    pub(crate) fn flush(&mut self) -> Vec<KeyEvent> {
-        std::mem::take(&mut self.held)
-    }
-
-    /// Purpose: Whether a prefix is being held, so the loop can poll briefly for its rest.
-    /// Serves: `run`'s key arm.
-    /// Design: `docs/design/surfaces.md` §3.
-    /// Up: `run`.
-    /// Down: no call; it reads `MetaPrefix::held`.
-    /// Verify: `cargo test -p loong-tui-app` (the `MetaPrefix` test).
-    pub(crate) fn is_holding(&self) -> bool {
-        !self.held.is_empty()
-    }
-}
-
-/// Purpose: Carry out one key's intent — send it to the worker, copy, flip the mouse, or quit.
-/// Serves: `run`'s key arm, including the Alt+arrow rejoin.
-/// Design: `docs/design/surfaces.md` §3.
-/// Up: `run`.
-/// Down: `App::handle_key`, `to_worker`, `copy_everywhere` and the backend's mouse capture.
-/// Verify: `cargo test -p loong-tui-app` · `./scripts/check.sh`.
-/// Returns `true` when the run should end.
-fn act<B: ratatui::backend::Backend + std::io::Write>(
-    app: &mut App,
-    terminal: &mut ratatui::Terminal<B>,
-    to_worker: &Sender<ToWorker>,
-    key: KeyEvent,
-) -> Result<bool, String> {
-    use ratatui::crossterm::event::{DisableMouseCapture, EnableMouseCapture};
-    use ratatui::crossterm::execute;
-    match app.handle_key(key) {
-        Action::Send(command) => {
-            let _ = to_worker.send(command);
-        }
-        // The interface cannot reach the terminal or the clipboard from
-        // `handle_key`; the loop that owns them does it here.
-        Action::Copy => {
-            let text = app.transcript();
-            let path = copy_everywhere(&text, &app.session);
-            app.push_lines(vec![format!(
-                "⧉ 已复制 {} 行 → {path}",
-                text.lines().count()
-            )]);
-        }
-        Action::Mouse(on) => {
-            let backend = terminal.backend_mut();
-            if on {
-                let _ = execute!(backend, EnableMouseCapture);
-            } else {
-                let _ = execute!(backend, DisableMouseCapture);
-            }
-            // The screen is redrawn next pass; the terminal is what changed.
-        }
-        Action::Quit => return Ok(true),
-        Action::None => {}
-    }
-    Ok(false)
 }

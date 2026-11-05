@@ -70,7 +70,7 @@ because the client already saw the `tool.call` and `approval.requested`.
 lives on a worker thread and the screen talks to it over channels; the key handler and drawing
 are driven from ratatui's `TestBackend` in the tests. It adds only presentation and intents:
 the model picker, context panel, folds, `/yolo`, `/new`, and interrupt (a signal, not a
-protocol method); `Alt+←`/`Alt+→` reorder this run's model slots (`Ctrl+←`/`Ctrl+→` and `/left`, `/right` are the fallbacks). A terminal that spells Meta as an ESC prefix sends `ESC ESC [ D`, which crossterm reports as `Esc`, `[` and the arrow letter; the loop holds that start for one short poll and settles it as the Alt+arrow it means, while a real `Esc` is handed back as soon as the next key cannot be an arrow. A paste arrives as one block; enter during a turn refuses a new prompt; `/yolo` still reaches the control channel.
+protocol method); `Ctrl+←`/`Ctrl+→` reorder this run's model slots (`/left`, `/right` are the typed fallbacks). A paste arrives as one block; enter during a turn refuses a new prompt; `/yolo` still reaches the control channel.
 
 The prompt keeps a per-project history: ↑/↓ walk the prompts this project asked
 (`~/.loongagent/projects/<slug>/history.jsonl`, newest 200, multi-line intact); ↓ past the

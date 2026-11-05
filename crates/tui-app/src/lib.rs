@@ -597,7 +597,7 @@ pub struct App {
     /// be fetched from the log — just not until the turn lets go of the connection.
     pub folded: std::collections::BTreeMap<usize, Vec<String>>,
     /// The models this session offers, in the order the bar numbers them: the profile's
-    /// declaration until `Alt+←`/`Alt+→` moves one, then the arrangement this run keeps.
+    /// declaration until `Ctrl+←`/`Ctrl+→` moves one, then the arrangement this run keeps.
     pub models: Vec<loong_schema::generated::ModelOffering>,
     /// Which of them the next call will use.
     pub selected: String,
@@ -917,8 +917,8 @@ impl App {
         self.switch_to_slot(next + 1)
     }
 
-    /// Purpose: `Alt+←`/`Alt+→`: move the selected model one slot and keep it selected.
-    /// Serves: `App::handle_key`'s Alt+Left and Alt+Right arms.
+    /// Purpose: `Ctrl+←`/`Ctrl+→`: move the selected model one slot and keep it selected.
+    /// Serves: `App::handle_key`'s Ctrl+Left and Ctrl+Right arms.
     /// Design: `docs/design/surfaces.md` §3.
     /// Up: `App::handle_key`.
     /// Down: `App::push_lines` and `App::selected_model_label`; it reorders `App::models`.
@@ -1053,7 +1053,7 @@ impl App {
             // arrows reorder rather than switch, so they are named last and never implied
             // to be a way of choosing a different model.
             hint.push_str(&format!(
-                "  ctrl+n/p 切换 · alt+1..{slots} · /1../{slots} · alt+←/→ 调顺序"
+                "  ctrl+n/p 切换 · alt+1..{slots} · /1../{slots} · ctrl+←/→ 调顺序"
             ));
         }
         if self.last_prompt.is_some() {
@@ -2472,26 +2472,7 @@ impl App {
         // fire other things instead of switching, and the two that alias are the two a
         // user would press first. Alt arrives as a modifier crossterm can actually see.
         // `/<digit>` is the fallback, for terminals that eat Alt.
-        //
-        // Alt+←/→ reorder the bar rather than moving the caret: the prompt's own
-        // word-jump is not implemented, so the pair is free, and a keyboard order for the
-        // models is worth more here than a second way to move one character.
-        //
-        // `Alt+b`/`Alt+f` are the same request in readline spelling, which is what
-        // macOS's Option+arrow usually sends. `Ctrl+←`/`Ctrl+→` are handled below for
-        // terminals and multiplexers that keep Alt+arrow for themselves.
         if key.modifiers.contains(KeyModifiers::ALT) {
-            match key.code {
-                KeyCode::Left => return self.move_selected_model(-1),
-                KeyCode::Right => return self.move_selected_model(1),
-                KeyCode::Char(c) if c.eq_ignore_ascii_case(&'b') => {
-                    return self.move_selected_model(-1);
-                }
-                KeyCode::Char(c) if c.eq_ignore_ascii_case(&'f') => {
-                    return self.move_selected_model(1);
-                }
-                _ => {}
-            }
             if let KeyCode::Char(c) = key.code {
                 if let Some(slot) = c.to_digit(10).filter(|d| (1..=9).contains(d)) {
                     return self.switch_to_slot(slot as usize);
@@ -2512,10 +2493,11 @@ impl App {
             match key.code {
                 KeyCode::Char('n') => return self.switch_relative(1),
                 KeyCode::Char('p') => return self.switch_relative(-1),
-                // The fallback for a terminal or multiplexer that keeps Alt+arrow for
-                // itself (zellij's pane focus is the common one). A control-modified
-                // arrow is still delivered as a key, and the prompt has no word-jump to
-                // lose.
+                // The reorder keys. A control arrow is the spelling a terminal is
+                // least likely to keep for itself: Alt+arrow belongs to Tilix's
+                // terminal switching and to a browser's Back/Forward, while
+                // Ctrl+arrow is the app's. `/left` and `/right` are the typed
+                // fallback for a multiplexer that still keeps it.
                 KeyCode::Left => return self.move_selected_model(-1),
                 KeyCode::Right => return self.move_selected_model(1),
                 _ => {}

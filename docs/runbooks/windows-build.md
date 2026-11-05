@@ -117,7 +117,7 @@ server from the skills and commands the session actually has:
 | `/new`, `/clear`, `/reset` | start a fresh session, keeping the old log |
 | `/exit`, `/quit`, `/q` · `ctrl-c` (idle) · `ctrl-d` | leave |
 | `/r` · `alt+r` | ask the last prompt again, of the model chosen now |
-| `/1` … `/9` · `alt+1` … `alt+9` · `ctrl+n` / `ctrl+p` · `alt+←` / `alt+→` · `ctrl+←` / `ctrl+→` · `/left` `/right` | choose a model; the bar shows the slots, and the arrows move the current one |
+| `/1` … `/9` · `alt+1` … `alt+9` · `ctrl+n` / `ctrl+p` · `ctrl+←` / `ctrl+→` · `/left` `/right` | choose a model; the bar shows the slots, and the arrows move the current one |
 | `/expand` | last tool result in full |
 | `/copy` | copy the transcript (OSC 52, plus a file path that always works) |
 | `/mouse` | hand the mouse back to the terminal |

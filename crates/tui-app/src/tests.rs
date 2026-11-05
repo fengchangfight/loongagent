@@ -4011,13 +4011,13 @@ fn alt(c: char) -> KeyEvent {
 }
 
 /// Purpose: An arrow key with the Alt modifier.
-/// Contract: test helper; the model-reorder tests use it.
+/// Contract: test helper; the Alt-is-not-a-reorder-shortcut test uses it.
 fn alt_arrow(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::ALT)
 }
 
 /// Purpose: An arrow key with the Ctrl modifier.
-/// Contract: test helper; the model-reorder fallback test uses it.
+/// Contract: test helper; the model-reorder tests use it.
 fn ctrl_arrow(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::CONTROL)
 }
@@ -4498,14 +4498,14 @@ fn plain_n_and_p_still_type_letters() {
     assert_eq!(app.input, "np");
 }
 
-/// Purpose: Alt+Left and Alt+Right move the selected model one slot and keep it selected.
+/// Purpose: Ctrl+Left and Ctrl+Right move the selected model one slot and keep it selected.
 #[test]
-fn alt_left_and_right_move_the_selected_model_one_slot() {
+fn ctrl_left_and_right_move_the_selected_model_one_slot() {
     let mut app = app_with_models(&["a", "b", "c"]);
     app.selected = "b".to_string();
 
     assert_eq!(
-        app.handle_key(alt_arrow(KeyCode::Left)),
+        app.handle_key(ctrl_arrow(KeyCode::Left)),
         Action::None,
         "reordering is presentation, so no model switch is sent"
     );
@@ -4513,7 +4513,7 @@ fn alt_left_and_right_move_the_selected_model_one_slot() {
     assert_eq!(names, ["b", "a", "c"]);
     assert_eq!(app.selected, "b", "the model in hand did not change");
 
-    assert_eq!(app.handle_key(alt_arrow(KeyCode::Right)), Action::None);
+    assert_eq!(app.handle_key(ctrl_arrow(KeyCode::Right)), Action::None);
     let names: Vec<&str> = app.models.iter().map(|model| model.name.as_str()).collect();
     assert_eq!(names, ["a", "b", "c"], "and it moves back");
     assert_eq!(app.selected, "b");
@@ -4523,7 +4523,7 @@ fn alt_left_and_right_move_the_selected_model_one_slot() {
 #[test]
 fn moving_a_model_past_the_edge_explains_itself() {
     let mut app = app_with_models(&["a", "b"]);
-    assert_eq!(app.handle_key(alt_arrow(KeyCode::Left)), Action::None);
+    assert_eq!(app.handle_key(ctrl_arrow(KeyCode::Left)), Action::None);
     let said = app.lines.join("\n");
     assert!(
         shows(&said, "已经在最左边了"),
@@ -4531,7 +4531,7 @@ fn moving_a_model_past_the_edge_explains_itself() {
     );
 
     app.selected = "b".to_string();
-    assert_eq!(app.handle_key(alt_arrow(KeyCode::Right)), Action::None);
+    assert_eq!(app.handle_key(ctrl_arrow(KeyCode::Right)), Action::None);
     let said = app.lines.join("\n");
     assert!(shows(&said, "已经在最右边了"), "{said:?}");
 
@@ -4548,8 +4548,8 @@ fn moving_a_model_past_the_edge_explains_itself() {
 fn a_manual_order_survives_the_next_model_list_the_server_sends() {
     let mut app = app_with_models(&["a", "b", "c"]);
     app.selected = "c".to_string();
-    app.handle_key(alt_arrow(KeyCode::Left));
-    app.handle_key(alt_arrow(KeyCode::Left));
+    app.handle_key(ctrl_arrow(KeyCode::Left));
+    app.handle_key(ctrl_arrow(KeyCode::Left));
     let names: Vec<&str> = app.models.iter().map(|model| model.name.as_str()).collect();
     assert_eq!(names, ["c", "a", "b"]);
 
@@ -4568,94 +4568,27 @@ fn a_manual_order_survives_the_next_model_list_the_server_sends() {
     assert_eq!(names, ["c", "a", "b", "d"]);
 }
 
-/// Purpose: Alt+b/f and Ctrl+Left/Right move the model for terminals that spell the keys differently.
+/// Purpose: The old Alt spellings are not reorder shortcuts any more: Ctrl+arrows is the one shortcut.
 #[test]
-fn reorder_has_fallbacks_for_readline_and_swallowed_alt() {
-    // macOS maps Option+arrow to the readline word motions, so the program sees
-    // Alt+b/f. A multiplexer that keeps Alt+arrow (zellij's pane focus) still passes
-    // Ctrl+arrow, and the prompt has no word-jump for those to take away.
+fn alt_arrows_are_not_a_reorder_shortcut() {
+    // Tilix keeps Alt+Left/Right for switching terminals and a browser keeps them
+    // for Back/Forward, so the one advertised spelling is the control arrow.
     let mut app = app_with_models(&["a", "b", "c"]);
-    app.selected = "c".to_string();
+    app.selected = "b".to_string();
 
-    assert_eq!(app.handle_key(alt('b')), Action::None);
+    for key in [
+        alt_arrow(KeyCode::Left),
+        alt_arrow(KeyCode::Right),
+        alt('b'),
+        alt('f'),
+    ] {
+        assert_eq!(app.handle_key(key), Action::None);
+    }
     let names: Vec<&str> = app.models.iter().map(|model| model.name.as_str()).collect();
-    assert_eq!(names, ["a", "c", "b"]);
-
-    assert_eq!(app.handle_key(ctrl_arrow(KeyCode::Left)), Action::None);
-    let names: Vec<&str> = app.models.iter().map(|model| model.name.as_str()).collect();
-    assert_eq!(names, ["c", "a", "b"]);
-
-    assert_eq!(app.handle_key(alt('f')), Action::None);
-    let names: Vec<&str> = app.models.iter().map(|model| model.name.as_str()).collect();
-    assert_eq!(names, ["a", "c", "b"]);
-
-    assert_eq!(app.handle_key(ctrl_arrow(KeyCode::Right)), Action::None);
-    let names: Vec<&str> = app.models.iter().map(|model| model.name.as_str()).collect();
-    assert_eq!(names, ["a", "b", "c"]);
-}
-
-/// Purpose: A terminal's Meta prefix — `Esc`, `[`/`O`, then an arrow letter — is the Alt+arrow it means.
-#[test]
-fn an_esc_prefix_is_the_alt_arrow_it_means() {
-    use crate::surface::MetaPrefix;
-    // xterm's `metaSendsEscape` and the readline convention encode Alt+Left as
-    // ESC ESC [ D. Crossterm eats the two Esc bytes as one bare Esc and then hands
-    // over `[` and `D` as characters, so the rejoin has to span three keys. It
-    // marks those uppercase letters with SHIFT, which is why they are built that way.
-    let run = |keys: &[KeyEvent]| {
-        let mut prefix = MetaPrefix::default();
-        keys.iter()
-            .flat_map(|key| prefix.feed(key.clone()))
-            .collect::<Vec<_>>()
-    };
-    let esc = key(KeyCode::Esc);
-    let letter = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT);
     assert_eq!(
-        run(&[esc.clone(), key(KeyCode::Char('[')), letter('D')]),
-        vec![alt_arrow(KeyCode::Left)]
-    );
-    assert_eq!(
-        run(&[esc.clone(), key(KeyCode::Char('[')), letter('C')]),
-        vec![alt_arrow(KeyCode::Right)]
-    );
-    assert_eq!(
-        run(&[esc.clone(), letter('O'), letter('D')]),
-        vec![alt_arrow(KeyCode::Left)],
-        "application cursor keys spell the opener O"
-    );
-    assert_eq!(
-        run(&[esc.clone(), key(KeyCode::Char('[')), letter('A')]),
-        vec![alt_arrow(KeyCode::Up)],
-        "Alt+Up is a key this screen ignores, not text to type"
-    );
-
-    // A real Esc still reaches the screen: it is only held while it could be the
-    // start of the sequence.
-    assert_eq!(
-        run(&[esc.clone(), key(KeyCode::Char('x'))]),
-        vec![esc.clone(), key(KeyCode::Char('x'))]
-    );
-    assert_eq!(
-        run(&[esc.clone(), key(KeyCode::Up)]),
-        vec![esc.clone(), key(KeyCode::Up)],
-        "Esc then Up stays two keys: close this, then walk the history"
-    );
-    assert_eq!(
-        run(&[esc.clone(), key(KeyCode::Left)]),
-        vec![alt_arrow(KeyCode::Left)],
-        "a split read gives Esc then Left, which is the same key from the other side"
-    );
-
-    let mut prefix = MetaPrefix::default();
-    assert!(prefix.feed(esc.clone()).is_empty(), "a lone Esc is held");
-    assert!(prefix.is_holding());
-    assert_eq!(prefix.flush(), vec![esc], "and a timeout gives it back");
-
-    let ctrl_esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::CONTROL);
-    assert_eq!(
-        run(&[ctrl_esc.clone(), key(KeyCode::Left)]),
-        vec![ctrl_esc, key(KeyCode::Left)],
-        "only a bare Esc is a Meta prefix"
+        names,
+        ["a", "b", "c"],
+        "the bar stayed in the order the profile declared"
     );
 }
 
@@ -4682,7 +4615,7 @@ fn slash_left_and_right_are_the_typed_reorder_fallback() {
 fn a_model_move_is_reported_in_the_transcript() {
     let mut app = app_with_models(&["a", "b", "c"]);
     app.selected = "b".to_string();
-    app.handle_key(alt_arrow(KeyCode::Left));
+    app.handle_key(ctrl_arrow(KeyCode::Left));
     let said = app.lines.join("\n");
     assert!(shows(&said, "已把 b 从第 2 位移到第 1 位"), "{said:?}");
 }
@@ -4702,7 +4635,7 @@ fn the_bar_hint_leads_with_the_keys_that_always_arrive() {
         "and the numbered ones are still offered: {bar:?}"
     );
     assert!(
-        despaced(&bar).contains(&despaced("alt+←/→ 调顺序")),
+        despaced(&bar).contains(&despaced("ctrl+←/→ 调顺序")),
         "and so is the way to arrange the slots: {bar:?}"
     );
 }
@@ -4742,7 +4675,7 @@ fn the_current_model_is_drawn_as_a_filled_key_and_underlined_name() {
     );
 }
 
-/// Purpose: The bar advertises both the Alt shortcut and the slash fallback.
+/// Purpose: The bar advertises both the shortcut and the slash fallback.
 #[test]
 fn the_model_bar_shows_how_to_switch_without_being_asked() {
     // The bar is the whole discoverability story: a shortcut nobody is told about is

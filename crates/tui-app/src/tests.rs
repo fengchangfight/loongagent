@@ -4594,6 +4594,71 @@ fn reorder_has_fallbacks_for_readline_and_swallowed_alt() {
     assert_eq!(names, ["a", "b", "c"]);
 }
 
+/// Purpose: A terminal's Meta prefix — `Esc`, `[`/`O`, then an arrow letter — is the Alt+arrow it means.
+#[test]
+fn an_esc_prefix_is_the_alt_arrow_it_means() {
+    use crate::surface::MetaPrefix;
+    // xterm's `metaSendsEscape` and the readline convention encode Alt+Left as
+    // ESC ESC [ D. Crossterm eats the two Esc bytes as one bare Esc and then hands
+    // over `[` and `D` as characters, so the rejoin has to span three keys. It
+    // marks those uppercase letters with SHIFT, which is why they are built that way.
+    let run = |keys: &[KeyEvent]| {
+        let mut prefix = MetaPrefix::default();
+        keys.iter()
+            .flat_map(|key| prefix.feed(key.clone()))
+            .collect::<Vec<_>>()
+    };
+    let esc = key(KeyCode::Esc);
+    let letter = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT);
+    assert_eq!(
+        run(&[esc.clone(), key(KeyCode::Char('[')), letter('D')]),
+        vec![alt_arrow(KeyCode::Left)]
+    );
+    assert_eq!(
+        run(&[esc.clone(), key(KeyCode::Char('[')), letter('C')]),
+        vec![alt_arrow(KeyCode::Right)]
+    );
+    assert_eq!(
+        run(&[esc.clone(), letter('O'), letter('D')]),
+        vec![alt_arrow(KeyCode::Left)],
+        "application cursor keys spell the opener O"
+    );
+    assert_eq!(
+        run(&[esc.clone(), key(KeyCode::Char('[')), letter('A')]),
+        vec![alt_arrow(KeyCode::Up)],
+        "Alt+Up is a key this screen ignores, not text to type"
+    );
+
+    // A real Esc still reaches the screen: it is only held while it could be the
+    // start of the sequence.
+    assert_eq!(
+        run(&[esc.clone(), key(KeyCode::Char('x'))]),
+        vec![esc.clone(), key(KeyCode::Char('x'))]
+    );
+    assert_eq!(
+        run(&[esc.clone(), key(KeyCode::Up)]),
+        vec![esc.clone(), key(KeyCode::Up)],
+        "Esc then Up stays two keys: close this, then walk the history"
+    );
+    assert_eq!(
+        run(&[esc.clone(), key(KeyCode::Left)]),
+        vec![alt_arrow(KeyCode::Left)],
+        "a split read gives Esc then Left, which is the same key from the other side"
+    );
+
+    let mut prefix = MetaPrefix::default();
+    assert!(prefix.feed(esc.clone()).is_empty(), "a lone Esc is held");
+    assert!(prefix.is_holding());
+    assert_eq!(prefix.flush(), vec![esc], "and a timeout gives it back");
+
+    let ctrl_esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::CONTROL);
+    assert_eq!(
+        run(&[ctrl_esc.clone(), key(KeyCode::Left)]),
+        vec![ctrl_esc, key(KeyCode::Left)],
+        "only a bare Esc is a Meta prefix"
+    );
+}
+
 /// Purpose: `/left` and `/right` reorder from typed text, which no terminal can swallow.
 #[test]
 fn slash_left_and_right_are_the_typed_reorder_fallback() {

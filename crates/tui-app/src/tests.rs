@@ -436,7 +436,7 @@ fn typing_a_slash_offers_the_commands_this_screen_answers() {
     let screen = draw(&mut app, 100, 24);
     assert!(shows(&screen, "命令"), "the menu is named: {screen}");
     for command in [
-        "/new", "/exit", "/yolo", "/copy", "/mouse", "/logo", "/expand", "/cost",
+        "/new", "/exit", "/yolo", "/copy", "/mouse", "/logo", "/expand", "/cost", "/left", "/right",
     ] {
         assert!(screen.contains(command), "{command} is offered: {screen}");
     }
@@ -4016,6 +4016,12 @@ fn alt_arrow(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::ALT)
 }
 
+/// Purpose: An arrow key with the Ctrl modifier.
+/// Contract: test helper; the model-reorder fallback test uses it.
+fn ctrl_arrow(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::CONTROL)
+}
+
 /// Purpose: The bar numbers models left to right in the profile's declaration order.
 #[test]
 fn the_model_bar_numbers_the_models_in_the_order_the_profile_declared_them() {
@@ -4560,6 +4566,60 @@ fn a_manual_order_survives_the_next_model_list_the_server_sends() {
     app.set_models(model_list(&["a", "b", "c", "d"]));
     let names: Vec<&str> = app.models.iter().map(|model| model.name.as_str()).collect();
     assert_eq!(names, ["c", "a", "b", "d"]);
+}
+
+/// Purpose: Alt+b/f and Ctrl+Left/Right move the model for terminals that spell the keys differently.
+#[test]
+fn reorder_has_fallbacks_for_readline_and_swallowed_alt() {
+    // macOS maps Option+arrow to the readline word motions, so the program sees
+    // Alt+b/f. A multiplexer that keeps Alt+arrow (zellij's pane focus) still passes
+    // Ctrl+arrow, and the prompt has no word-jump for those to take away.
+    let mut app = app_with_models(&["a", "b", "c"]);
+    app.selected = "c".to_string();
+
+    assert_eq!(app.handle_key(alt('b')), Action::None);
+    let names: Vec<&str> = app.models.iter().map(|model| model.name.as_str()).collect();
+    assert_eq!(names, ["a", "c", "b"]);
+
+    assert_eq!(app.handle_key(ctrl_arrow(KeyCode::Left)), Action::None);
+    let names: Vec<&str> = app.models.iter().map(|model| model.name.as_str()).collect();
+    assert_eq!(names, ["c", "a", "b"]);
+
+    assert_eq!(app.handle_key(alt('f')), Action::None);
+    let names: Vec<&str> = app.models.iter().map(|model| model.name.as_str()).collect();
+    assert_eq!(names, ["a", "c", "b"]);
+
+    assert_eq!(app.handle_key(ctrl_arrow(KeyCode::Right)), Action::None);
+    let names: Vec<&str> = app.models.iter().map(|model| model.name.as_str()).collect();
+    assert_eq!(names, ["a", "b", "c"]);
+}
+
+/// Purpose: `/left` and `/right` reorder from typed text, which no terminal can swallow.
+#[test]
+fn slash_left_and_right_are_the_typed_reorder_fallback() {
+    let mut app = app_with_models(&["a", "b", "c"]);
+    app.selected = "c".to_string();
+
+    type_text(&mut app, "/left");
+    assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::None);
+    let names: Vec<&str> = app.models.iter().map(|model| model.name.as_str()).collect();
+    assert_eq!(names, ["a", "c", "b"]);
+    assert!(app.input.is_empty(), "the command does not reach the agent");
+
+    type_text(&mut app, "/right");
+    assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::None);
+    let names: Vec<&str> = app.models.iter().map(|model| model.name.as_str()).collect();
+    assert_eq!(names, ["a", "b", "c"]);
+}
+
+/// Purpose: A successful move says which two slots changed, so it is visible even if the bar is clipped.
+#[test]
+fn a_model_move_is_reported_in_the_transcript() {
+    let mut app = app_with_models(&["a", "b", "c"]);
+    app.selected = "b".to_string();
+    app.handle_key(alt_arrow(KeyCode::Left));
+    let said = app.lines.join("\n");
+    assert!(shows(&said, "已把 b 从第 2 位移到第 1 位"), "{said:?}");
 }
 
 /// Purpose: The bar hint names the always-delivered keys first and still offers the numbered ones.

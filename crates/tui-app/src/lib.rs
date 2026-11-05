@@ -954,6 +954,14 @@ impl App {
             return Action::None;
         }
         self.models.swap(index, target as usize);
+        // Said out loud as well as drawn: the bar is the proof, but a move that only
+        // changes a digit can be missed, and the line also says which two slots changed.
+        self.push_lines(vec![format!(
+            "· 已把 {} 从第 {} 位移到第 {} 位",
+            self.selected,
+            index + 1,
+            target + 1
+        )]);
         // Remembered by name rather than by index: the server sends the declaration
         // order again after every switch, and the arrangement has to survive that.
         self.model_order = Some(self.models.iter().map(|model| model.name.clone()).collect());
@@ -1892,6 +1900,18 @@ impl App {
                 self.cursor = 0;
                 Some(self.resend_last_prompt())
             }
+            // `/left` and `/right`: the reorder keys, for a terminal that eats both
+            // Alt+arrow and Ctrl+arrow. Typed text always arrives.
+            "/left" => {
+                self.input.clear();
+                self.cursor = 0;
+                Some(self.move_selected_model(-1))
+            }
+            "/right" => {
+                self.input.clear();
+                self.cursor = 0;
+                Some(self.move_selected_model(1))
+            }
             // `/cost`: the session's own bill, summed from what the providers reported.
             "/cost" => {
                 self.input.clear();
@@ -2456,12 +2476,21 @@ impl App {
         // Alt+←/→ reorder the bar rather than moving the caret: the prompt's own
         // word-jump is not implemented, so the pair is free, and a keyboard order for the
         // models is worth more here than a second way to move one character.
+        //
+        // `Alt+b`/`Alt+f` are the same request in readline spelling, which is what
+        // macOS's Option+arrow usually sends. `Ctrl+←`/`Ctrl+→` are handled below for
+        // terminals and multiplexers that keep Alt+arrow for themselves.
         if key.modifiers.contains(KeyModifiers::ALT) {
-            if let KeyCode::Left = key.code {
-                return self.move_selected_model(-1);
-            }
-            if let KeyCode::Right = key.code {
-                return self.move_selected_model(1);
+            match key.code {
+                KeyCode::Left => return self.move_selected_model(-1),
+                KeyCode::Right => return self.move_selected_model(1),
+                KeyCode::Char(c) if c.eq_ignore_ascii_case(&'b') => {
+                    return self.move_selected_model(-1);
+                }
+                KeyCode::Char(c) if c.eq_ignore_ascii_case(&'f') => {
+                    return self.move_selected_model(1);
+                }
+                _ => {}
             }
             if let KeyCode::Char(c) = key.code {
                 if let Some(slot) = c.to_digit(10).filter(|d| (1..=9).contains(d)) {
@@ -2483,6 +2512,12 @@ impl App {
             match key.code {
                 KeyCode::Char('n') => return self.switch_relative(1),
                 KeyCode::Char('p') => return self.switch_relative(-1),
+                // The fallback for a terminal or multiplexer that keeps Alt+arrow for
+                // itself (zellij's pane focus is the common one). A control-modified
+                // arrow is still delivered as a key, and the prompt has no word-jump to
+                // lose.
+                KeyCode::Left => return self.move_selected_model(-1),
+                KeyCode::Right => return self.move_selected_model(1),
                 _ => {}
             }
         }

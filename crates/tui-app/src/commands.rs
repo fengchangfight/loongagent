@@ -74,6 +74,16 @@ pub const COMMANDS: &[Command] = &[
         description: "把上一个提问再问一遍，用当前模型",
     },
     Command {
+        name: "/left",
+        aliases: &[],
+        description: "把当前模型向左移一位（只影响本会话）",
+    },
+    Command {
+        name: "/right",
+        aliases: &[],
+        description: "把当前模型向右移一位（只影响本会话）",
+    },
+    Command {
         name: "/cost",
         aliases: &["/usage", "/spend"],
         description: "本会话的令牌、缓存命中与估算消费",

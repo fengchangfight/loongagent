@@ -176,7 +176,14 @@ pub fn run<T: Transport + Send + 'static>(
             }
             if let Some(notes) = &notes {
                 while let Ok(note) = notes.try_recv() {
-                    app.push_note(note);
+                    // Wrap to the page that is actually on screen; before the first frame,
+                    // ask the terminal. A startup note is the one line that most needs it.
+                    let width = app
+                        .page
+                        .as_ref()
+                        .map(|page| page.area.width)
+                        .unwrap_or_else(|| terminal.size().map(|size| size.width).unwrap_or(80));
+                    app.push_note(note, width);
                 }
             }
             terminal

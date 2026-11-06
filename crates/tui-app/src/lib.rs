@@ -323,6 +323,49 @@ fn slice_cells(text: &str, from: u16, to: u16, width: u16) -> String {
     out
 }
 
+/// Purpose: Wrap one server note to the page width, so a long `[skills]` line is readable instead of clipped.
+/// Serves: `App::push_note`.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `App::push_note`.
+/// Down: `unicode_width` for the column measurement.
+/// Verify: `cargo test -p loong-tui-app`.
+fn wrap_note(note: &str, width: usize) -> Vec<String> {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    let content = width.max(20).saturating_sub(2);
+    let mut lines = Vec::new();
+    let mut rest = note.trim();
+    if rest.is_empty() {
+        return vec!["· ".to_string()];
+    }
+    while rest.width() > content {
+        let mut used = 0usize;
+        let mut cut = 0usize;
+        let mut last_space = None;
+        for (index, ch) in rest.char_indices() {
+            let glyph = ch.width().unwrap_or(0);
+            if used + glyph > content {
+                break;
+            }
+            used += glyph;
+            cut = index + ch.len_utf8();
+            if ch == ' ' {
+                last_space = Some(index);
+            }
+        }
+        let cut = last_space.filter(|index| *index > 0).unwrap_or(cut);
+        if cut == 0 {
+            break;
+        }
+        lines.push(format!("· {}", rest[..cut].trim_end()));
+        rest = rest[cut..].trim_start();
+        if rest.is_empty() {
+            return lines;
+        }
+    }
+    lines.push(format!("· {rest}"));
+    lines
+}
+
 /// Purpose: One pending approval as the screen needs it: the request id, action class, reason, tool and arguments.
 /// Serves: `App::approval`, `App::info`, `draw_approval` and the `FromWorker::Approval` path.
 /// Design: `docs/design/surfaces.md` §3 and §6; the surface shows the decision but does not make it.
@@ -2455,14 +2498,14 @@ impl App {
     /// where it scrolls with the turn it explains. It used to be a two-row strip above the
     /// box that showed only the newest line, which read as a caption floating outside the
     /// conversation rather than as part of it.
-    pub fn push_note(&mut self, note: String) {
-        let line = format!("· {note}");
+    pub fn push_note(&mut self, note: String, width: u16) {
+        let lines = wrap_note(&note, width as usize);
         // A repeat is the same fact restated, not a second fact: the screen should not grow
         // a second copy because the child printed its configuration twice.
-        if self.lines.last() == Some(&line) {
+        if self.lines.last() == lines.last() {
             return;
         }
-        self.push_lines(vec![line]);
+        self.push_lines(lines);
     }
 
     /// Purpose: Fold every message the worker has sent into the screen state, once per pass of the draw loop.

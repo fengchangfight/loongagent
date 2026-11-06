@@ -1061,8 +1061,14 @@ fn enter_opens_a_fold_the_turn_sent_without_asking_the_log() {
 #[test]
 fn server_notes_are_drawn_instead_of_corrupting_the_screen() {
     let mut app = App::new("s", "v");
-    app.push_note("[sandbox] filesystem boundary enforced by landlock".to_string());
-    app.push_note("[sandbox] filesystem boundary enforced by landlock".to_string());
+    app.push_note(
+        "[sandbox] filesystem boundary enforced by landlock".to_string(),
+        80,
+    );
+    app.push_note(
+        "[sandbox] filesystem boundary enforced by landlock".to_string(),
+        80,
+    );
     assert_eq!(
         app.lines
             .iter()
@@ -1071,7 +1077,7 @@ fn server_notes_are_drawn_instead_of_corrupting_the_screen() {
         1,
         "repeats are collapsed"
     );
-    app.push_note("[hooks] no hooks".to_string());
+    app.push_note("[hooks] no hooks".to_string(), 80);
     let screen = draw(&mut app, 70, 16);
     assert!(screen.contains("[hooks] no hooks"), "{screen}");
     // On the page, above the prompt: the server's stderr is history, and history scrolls
@@ -2624,6 +2630,27 @@ fn a_mouse_event_before_the_first_frame_is_ignored() {
         Action::None
     );
     assert!(app.select.is_none());
+}
+
+/// Purpose: A long server note wraps to the page width, so every skill name is readable instead of clipped.
+#[test]
+fn a_long_server_note_wraps_instead_of_being_clipped() {
+    let mut app = App::new("s", "v");
+    let note = "[skills] workspace: brainstorming, diagnosing-superpowers,                 dispatching-parallel-agents, executing-plans, finishing-a-development-branch,                 receiving-code-review, requesting-code-review, subagent-driven-development,                 systematic-debugging, test-driven-development, using-git-worktrees,                 using-superpowers, verification-before-completion, writing-plans, writing-skills";
+    app.push_note(note.to_string(), 40);
+    assert!(app.lines.len() > 1, "the note takes more than one row");
+    for line in &app.lines {
+        let width = unicode_width::UnicodeWidthStr::width(line.as_str());
+        assert!(width <= 40, "line is too wide ({width}): {line:?}");
+    }
+    let joined = app.lines.join(" ");
+    assert!(joined.contains("[skills] workspace:"), "{joined}");
+    assert!(joined.contains("writing-skills"), "{joined}");
+
+    // The whole note is on screen after a draw at that width, not clipped at the edge.
+    let screen = draw(&mut app, 40, 24);
+    assert!(shows(&screen, "[skills] workspace:"), "{screen}");
+    assert!(shows(&screen, "writing-skills"), "{screen}");
 }
 
 /// Purpose: The character is drawn as red pixels, not as a font glyph on a coloured block.

@@ -67,6 +67,10 @@ catalogue in the system prompt; its body loads only when invoked, by the person 
 `/name args` or by the model calling the `skill` tool. `$ARGUMENTS` and `$1`…`$9` are
 substituted, and arguments are appended rather than dropped when the body names none.
 
+The frontmatter is YAML (ADR-0008 §3), so a description may be one line, a `>` folded
+block, a `|` literal block, or a plain value wrapped over indented lines. The reader
+accepts those shapes; it is not a general YAML parser.
+
 `SkillSet::load_in` reads the workspace's `.agents/skills/<name>/SKILL.md` and
 `.loongagent/commands/<name>.md`, then every extra root a profile contributes through
 `skill_dirs`, then the installed plugins' skill directories. A root that has a `skills/`

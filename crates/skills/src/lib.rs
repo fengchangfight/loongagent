@@ -637,27 +637,183 @@ fn split_frontmatter(text: &str) -> Option<(&str, &str)> {
     Some((front, body))
 }
 
-/// Purpose: Parse `key: value` frontmatter lines into a lowercase-keyed map.
+/// Purpose: Parse `key: value` frontmatter into a lowercase-keyed map, block scalars included.
 /// Serves: `read_skill`.
 /// Design: `docs/design/extension-model.md` §2.
 /// Up: `read_skill`.
 /// Down: the `Skill` fields.
 /// Verify: `cargo test -p loong-skills`.
+///
+/// A description is written as YAML frontmatter (ADR-0008 §3), so the reader
+/// accepts the two shapes the ecosystem actually uses beyond a single line: a
+/// `>` folded or `|` literal block whose content is indented under the key, and a
+/// plain value whose continuation lines are indented. Everything else keeps the
+/// older strictness: a top-level line without a colon is still an error, because
+/// silently skipping it could drop the `description` itself.
 fn parse_frontmatter(front: &str) -> Result<BTreeMap<String, String>, String> {
     let mut fields = BTreeMap::new();
+    let mut last_key: Option<String> = None;
+    let mut block: Option<BlockScalar> = None;
     for (index, line) in front.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
+        let number = index + 1;
+        let raw = line.trim_end_matches('\r');
+        if let Some(mut open) = block.take() {
+            if raw.trim().is_empty() {
+                open.lines.push(String::new());
+                block = Some(open);
+                continue;
+            }
+            if raw.starts_with(' ') || raw.starts_with('\t') {
+                let indent = raw.len() - raw.trim_start().len();
+                let base = *open.indent.get_or_insert(indent);
+                if indent >= base {
+                    open.lines.push(raw[base..].to_string());
+                    block = Some(open);
+                    continue;
+                }
+            }
+            // A non-indented line closes the block; it is parsed below as a key.
+            let value = finish_block(&open);
+            fields.insert(open.key, value);
+        }
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        let (key, value) = line
+        if raw.starts_with(' ') || raw.starts_with('\t') {
+            // A plain scalar may wrap: join the continuation to the previous value.
+            let Some(key) = last_key.as_ref() else {
+                return Err(format!("line {number}: {trimmed:?} is not `key: value`"));
+            };
+            let value = fields.entry(key.clone()).or_default();
+            if !value.is_empty() {
+                value.push(' ');
+            }
+            value.push_str(trimmed);
+            continue;
+        }
+        let (key, value) = raw
             .split_once(':')
-            .ok_or_else(|| format!("line {}: {line:?} is not `key: value`", index + 1))?;
+            .ok_or_else(|| format!("line {number}: {trimmed:?} is not `key: value`"))?;
         let key = key.trim().to_lowercase();
-        let value = value.trim().trim_matches(['"', '\'']).to_string();
-        fields.insert(key, value);
+        if key.is_empty() {
+            return Err(format!("line {number}: {trimmed:?} is not `key: value`"));
+        }
+        let value = value.trim();
+        last_key = Some(key.clone());
+        if let Some(style) = block_style(value) {
+            block = Some(BlockScalar {
+                key,
+                style,
+                indent: None,
+                lines: Vec::new(),
+            });
+            continue;
+        }
+        fields.insert(key, value.trim_matches(['"', '\'']).to_string());
+    }
+    if let Some(open) = block {
+        let value = finish_block(&open);
+        fields.insert(open.key, value);
     }
     Ok(fields)
+}
+
+/// Purpose: The two YAML block-scalar styles a frontmatter value can use.
+/// Serves: `parse_frontmatter`.
+/// Design: `docs/design/extension-model.md` §2.
+/// Up: `block_style` decides it.
+/// Down: `finish_block` renders it.
+/// Verify: `cargo test -p loong-skills`.
+#[derive(Clone, Copy)]
+enum BlockStyle {
+    /// `>` folds line breaks into spaces and a blank line into a paragraph break.
+    Folded,
+    /// `|` keeps every line break.
+    Literal,
+}
+
+/// Purpose: A block scalar that is still collecting its indented content lines.
+/// Serves: `parse_frontmatter`.
+/// Design: `docs/design/extension-model.md` §2.
+/// Up: `parse_frontmatter` opens it.
+/// Down: `finish_block` consumes it.
+/// Verify: `cargo test -p loong-skills`.
+struct BlockScalar {
+    key: String,
+    style: BlockStyle,
+    /// The indentation of the first content line, stripped from every line.
+    indent: Option<usize>,
+    lines: Vec<String>,
+}
+
+/// Purpose: Recognise `>`, `|`, `>-`, `|-`, `>+` or `|+` as a block-scalar header.
+/// Serves: `parse_frontmatter`.
+/// Design: `docs/design/extension-model.md` §2.
+/// Up: `parse_frontmatter`.
+/// Down: the `BlockStyle` it returns.
+/// Verify: `cargo test -p loong-skills`.
+///
+/// Trailing whitespace is trimmed from every field, so the chomping indicator
+/// changes nothing here; it is accepted so the header itself is not read as the
+/// literal value `">-"`.
+fn block_style(value: &str) -> Option<BlockStyle> {
+    let mut chars = value.chars();
+    let style = match chars.next()? {
+        '>' => BlockStyle::Folded,
+        '|' => BlockStyle::Literal,
+        _ => return None,
+    };
+    let rest = chars.as_str();
+    let rest = rest
+        .strip_prefix('-')
+        .or_else(|| rest.strip_prefix('+'))
+        .unwrap_or(rest);
+    let rest = rest.trim();
+    if rest.is_empty() || rest.starts_with('#') {
+        Some(style)
+    } else {
+        None
+    }
+}
+
+/// Purpose: Turn a collected block scalar into one trimmed value.
+/// Contract: `crates/skills/src/lib.rs`.
+fn finish_block(open: &BlockScalar) -> String {
+    let text = match open.style {
+        BlockStyle::Folded => fold_block(&open.lines),
+        BlockStyle::Literal => open.lines.join("\n"),
+    };
+    text.trim().to_string()
+}
+
+/// Purpose: Fold a `>` block: spaces inside a paragraph, a newline per blank line between.
+/// Serves: `finish_block`.
+/// Design: `docs/design/extension-model.md` §2.
+/// Up: `finish_block`.
+/// Down: the folded `String`.
+/// Verify: `cargo test -p loong-skills`.
+fn fold_block(lines: &[String]) -> String {
+    let mut out = String::new();
+    let mut blanks = 0usize;
+    for line in lines {
+        if line.trim().is_empty() {
+            blanks += 1;
+            continue;
+        }
+        if !out.is_empty() {
+            if blanks > 0 {
+                for _ in 0..blanks {
+                    out.push('\n');
+                }
+            } else {
+                out.push(' ');
+            }
+        }
+        out.push_str(line.trim_end());
+        blanks = 0;
+    }
+    out
 }
 
 /// Purpose: The rough token estimate used for budgets and catalogue cost.
@@ -1033,6 +1189,64 @@ mod tests {
         let set = SkillSet::load(&ws).unwrap();
         let skill = set.get("quoted").unwrap();
         assert_eq!(skill.description, "A description: with a colon");
+    }
+
+    #[test]
+    /// Purpose: Pin that a folded (`>`) description joins its indented continuation lines.
+    fn a_folded_description_survives_the_frontmatter() {
+        let ws = workspace();
+        skill_file(
+            &ws,
+            "folded",
+            "---\nname: folded\ndescription: >\n  Update the workspace's dependencies and repair\n  the breakages so every check passes again.\n---\nbody\n",
+        );
+        // The chomping indicator is part of the header, not the value.
+        skill_file(
+            &ws,
+            "chomped",
+            "---\ndescription: >-\n  The indicator is not the value.\n---\nbody\n",
+        );
+        let set = SkillSet::load(&ws).unwrap();
+        assert_eq!(
+            set.get("folded").unwrap().description,
+            "Update the workspace's dependencies and repair the breakages so every check passes again."
+        );
+        assert_eq!(
+            set.get("chomped").unwrap().description,
+            "The indicator is not the value."
+        );
+    }
+
+    #[test]
+    /// Purpose: Pin that a literal (`|`) block keeps its line breaks.
+    fn a_literal_block_keeps_its_line_breaks() {
+        let ws = workspace();
+        skill_file(
+            &ws,
+            "literal",
+            "---\ndescription: |\n  first line\n  second line\n---\nbody\n",
+        );
+        let set = SkillSet::load(&ws).unwrap();
+        assert_eq!(
+            set.get("literal").unwrap().description,
+            "first line\nsecond line"
+        );
+    }
+
+    #[test]
+    /// Purpose: Pin that an indented plain scalar continues the previous key.
+    fn an_indented_plain_scalar_continues_the_previous_key() {
+        let ws = workspace();
+        skill_file(
+            &ws,
+            "plain",
+            "---\ndescription: one long line\n  that a person wrapped\n---\nbody\n",
+        );
+        let set = SkillSet::load(&ws).unwrap();
+        assert_eq!(
+            set.get("plain").unwrap().description,
+            "one long line that a person wrapped"
+        );
     }
 
     #[test]

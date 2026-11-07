@@ -579,7 +579,16 @@ fn a_turn_with_progress_continues_past_the_step_budget() {
         std::fs::write(t.dir.join(format!("a{n}.txt")), format!("body {n}")).unwrap();
     }
     let script: Vec<_> = (1..=5)
-        .map(|n| response(vec![call(&format!("c{n}"), "read_file", json!({"path": format!("a{n}.txt")}))], None))
+        .map(|n| {
+            response(
+                vec![call(
+                    &format!("c{n}"),
+                    "read_file",
+                    json!({"path": format!("a{n}.txt")}),
+                )],
+                None,
+            )
+        })
         .chain(std::iter::once(response(vec![], Some("all five read"))))
         .collect();
     let model = ScriptedModel::new(script);
@@ -608,7 +617,11 @@ fn a_turn_without_progress_still_stops_at_the_budget() {
     let script: Vec<_> = (1..=5)
         .map(|n| {
             response(
-                vec![call(&format!("c{n}"), "read_file", json!({"path": "missing.txt"}))],
+                vec![call(
+                    &format!("c{n}"),
+                    "read_file",
+                    json!({"path": "missing.txt"}),
+                )],
                 None,
             )
         })
@@ -618,7 +631,10 @@ fn a_turn_without_progress_still_stops_at_the_budget() {
     config.max_steps = 2;
     let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
     let out = k.submit("read the missing file forever").unwrap();
-    assert_eq!(out.steps, 2, "the budget was renewed with nothing to show: {out:?}");
+    assert_eq!(
+        out.steps, 2,
+        "the budget was renewed with nothing to show: {out:?}"
+    );
     assert!(
         out.final_text.unwrap().contains("step limit"),
         "the stop must name the budget"
@@ -653,7 +669,16 @@ fn a_turn_that_may_not_renew_stops_at_the_step_limit() {
         std::fs::write(t.dir.join(format!("a{n}.txt")), format!("body {n}")).unwrap();
     }
     let script: Vec<_> = (1..=5)
-        .map(|n| response(vec![call(&format!("c{n}"), "read_file", json!({"path": format!("a{n}.txt")}))], None))
+        .map(|n| {
+            response(
+                vec![call(
+                    &format!("c{n}"),
+                    "read_file",
+                    json!({"path": format!("a{n}.txt")}),
+                )],
+                None,
+            )
+        })
         .collect();
     let model = ScriptedModel::new(script);
     let mut config = KernelConfig::new(&t.dir);
@@ -674,7 +699,16 @@ fn the_renewals_are_capped() {
     }
     // Ten reads with a two-step budget and one renewal allowed: 2 + 2 steps, then stop.
     let script: Vec<_> = (1..=10)
-        .map(|n| response(vec![call(&format!("c{n}"), "read_file", json!({"path": format!("a{n}.txt")}))], None))
+        .map(|n| {
+            response(
+                vec![call(
+                    &format!("c{n}"),
+                    "read_file",
+                    json!({"path": format!("a{n}.txt")}),
+                )],
+                None,
+            )
+        })
         .collect();
     let model = ScriptedModel::new(script);
     let mut config = KernelConfig::new(&t.dir);
@@ -4525,8 +4559,14 @@ fn a_cleared_recall_result_can_be_recalled_again() {
         response(vec![], Some("查到了")),
         // Turn 3 reads enough to cross the ceiling, which clears the oldest tool
         // output — the recall answer from turn 2.
-        response(vec![call("c2", "read_file", json!({"path": "big.txt"}))], None),
-        response(vec![call("c3", "read_file", json!({"path": "big.txt"}))], None),
+        response(
+            vec![call("c2", "read_file", json!({"path": "big.txt"}))],
+            None,
+        ),
+        response(
+            vec![call("c3", "read_file", json!({"path": "big.txt"}))],
+            None,
+        ),
         response(vec![], Some("读完了")),
         // Turn 4 asks the same question again: the answer must still be there.
         response(vec![call("c4", "recall", json!({"query": "层叠"}))], None),
@@ -4693,7 +4733,8 @@ fn the_task_card_survives_every_compaction_pass() {
         t.log.clone(),
     ));
     let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
-    k.submit(&format!("修好 a.txt 的读取，不要动 b.txt {filler}")).unwrap();
+    k.submit(&format!("修好 a.txt 的读取，不要动 b.txt {filler}"))
+        .unwrap();
     k.submit(&format!("继续 {filler}")).unwrap();
     k.submit(&format!("继续 {filler}")).unwrap();
 
@@ -4759,7 +4800,10 @@ fn old_exchanges_become_stubs_with_an_address() {
     let t = Temp::new();
     let filler = "x".repeat(2_000);
     let (model, seen) = RecordingModel::new(vec![
-        response(vec![call("c1", "read_file", json!({"path": "a.txt"}))], None),
+        response(
+            vec![call("c1", "read_file", json!({"path": "a.txt"}))],
+            None,
+        ),
         response(vec![], Some("第一轮完成")),
         response(vec![], Some("第二轮完成")),
         response(vec![], Some("第三轮完成")),
@@ -4868,7 +4912,8 @@ fn a_rejected_plan_survives_as_a_stub() {
         t.log.clone(),
     ));
     let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
-    k.submit(&format!("不要用方案 A 深拷贝，太重了 {filler}")).unwrap();
+    k.submit(&format!("不要用方案 A 深拷贝，太重了 {filler}"))
+        .unwrap();
     k.submit(&format!("换成方案 B {filler}")).unwrap();
     k.submit(&format!("继续 {filler}")).unwrap();
 

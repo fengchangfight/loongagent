@@ -169,11 +169,8 @@ impl Kernel {
                         // comes first in the conversation, and it must carry every call
                         // this turn made — not just the first.
                         if let Some(slot) = pending.as_mut() {
-                            slot.2.push((
-                                result.call_id.clone(),
-                                result.output.clone(),
-                                event.seq,
-                            ));
+                            slot.2
+                                .push((result.call_id.clone(), result.output.clone(), event.seq));
                         }
                     }
                     gen::event::COMPACTION_APPLIED => {

@@ -323,7 +323,10 @@ fn an_alias_makes_a_different_wording_find_the_summary() {
     let mut store = digested(tmp.path());
     // Before enrichment the other wording finds nothing: this is the failure the
     // alias exists to fix, and what `record` mode still looks like.
-    assert!(store.recall(&SearchQuery::new(["overlay"])).unwrap().is_empty());
+    assert!(store
+        .recall(&SearchQuery::new(["overlay"]))
+        .unwrap()
+        .is_empty());
 
     let (mut model, _) = Scripted::saying(Synthesis {
         aliases: vec!["overlay".into(), "合并优先级".into(), "merge 顺序".into()],

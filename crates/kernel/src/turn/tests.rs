@@ -4675,6 +4675,84 @@ fn with_the_engine_on_a_long_session_never_drops_an_exchange() {
     );
 }
 
+/// Purpose: The task card is pinned, so the goal and the words the person used survive every compaction pass.
+#[test]
+fn the_task_card_survives_every_compaction_pass() {
+    let t = Temp::new();
+    let filler = "x".repeat(2_000);
+    let (model, seen) = RecordingModel::new(vec![
+        response(vec![], Some("第一轮完成")),
+        response(vec![], Some("第二轮完成")),
+        response(vec![], Some("第三轮完成")),
+    ]);
+    let mut config = KernelConfig::new(&t.dir);
+    config.budget_tokens = Some(1_200);
+    config.keep_newest_tokens = 200;
+    config.context_engine = Some(crate::context_engine::ContextEngineConfig::new(
+        t.dir.join("session.context.db"),
+        t.log.clone(),
+    ));
+    let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+    k.submit(&format!("修好 a.txt 的读取，不要动 b.txt {filler}")).unwrap();
+    k.submit(&format!("继续 {filler}")).unwrap();
+    k.submit(&format!("继续 {filler}")).unwrap();
+
+    let seen = seen.lock().unwrap();
+    let last = seen.last().expect("the third request was recorded");
+    let card = last
+        .iter()
+        .find_map(|m| match m {
+            ChatMessage::System { text } if text.contains("任务卡") => Some(text.clone()),
+            _ => None,
+        })
+        .expect("the task card is seated");
+    assert!(
+        card.contains("修好 a.txt"),
+        "the goal is still on the card after every compaction: {card}"
+    );
+    assert!(
+        card.contains("不要动 b.txt"),
+        "and so is the constraint the person stated: {card}"
+    );
+}
+
+/// Purpose: A card that does not fit loses detail, not the goal: pinned content is merged rather than evicted.
+#[test]
+fn an_overflowing_task_card_is_merged_not_evicted() {
+    let facts = super::task_card::CardFacts {
+        goal: Some("修好 a.txt 的读取".to_string()),
+        constraints: (0..40)
+            .map(|n| {
+                format!(
+                    "不要动第 {n} 个模块，{}",
+                    "因为那部分最近才验证过而且没有回归测试".repeat(20)
+                )
+            })
+            .collect(),
+        done: (0..40).map(|n| format!("改了 src/file{n}.rs")).collect(),
+        verification: Some("cargo test -p loong-config".to_string()),
+    };
+    let text = super::task_card::render_card(&facts);
+    assert!(!text.trim().is_empty(), "the card is never evicted");
+    assert!(
+        text.contains("修好 a.txt"),
+        "the goal is never trimmed: {text}"
+    );
+    assert!(
+        crate::ledger::estimate_tokens(&text) <= super::task_card::TASK_CARD_MAX_TOKENS,
+        "the card stays inside its ceiling: {} chars",
+        text.chars().count()
+    );
+    assert!(
+        !text.contains("src/file0.rs"),
+        "the completed-detail list is dropped before anything is taken from the goal: {text}"
+    );
+    assert!(
+        text.contains("不要动第 0 个模块"),
+        "the first stated constraint stays even when the rest fold into a reference: {text}"
+    );
+}
+
 /// Purpose: An old exchange leaves the prompt but keeps an address, so the original is one recall away instead of gone.
 #[test]
 fn old_exchanges_become_stubs_with_an_address() {

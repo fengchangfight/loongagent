@@ -43,6 +43,7 @@ mod model;
 mod nudge;
 mod recall;
 mod session;
+mod task_card;
 #[cfg(test)]
 mod tests;
 
@@ -567,6 +568,16 @@ pub struct Kernel {
     map_entry: Option<u64>,
     /// Index of the L4 map message in `messages`, kept in step with `entry_of`.
     map_index: Option<usize>,
+    /// Ledger entry holding the pinned task card, so it is refreshed in place.
+    card_entry: Option<u64>,
+    /// Index of the task card in `messages`, kept in step with `entry_of`.
+    card_index: Option<usize>,
+    /// The goal the card holds. Kept once it is known, because the message it came
+    /// from may later be stubbed away — re-deriving it would quietly replace the
+    /// task with the last thing the person happened to say.
+    card_goal: Option<String>,
+    /// Every constraint the person has stated, in the order they said it. Grows only.
+    card_constraints: Vec<String>,
     /// Model completions taken by the **current turn**, including the runs an approval
     /// resumes. Reset only by `Kernel::begin_turn`; `run_inner` starts its loop here, so
     /// an approval cannot hand the model a second budget.

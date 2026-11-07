@@ -397,6 +397,9 @@ impl Kernel {
         if !self.map_seated {
             self.refresh_memory();
             self.seat_map();
+            // The card follows the map: intent is seated next to the map that says
+            // where the work stands, and both stay in front of the conversation.
+            self.seat_task_card();
             self.map_seated = true;
         }
         loop {
@@ -641,6 +644,9 @@ impl Kernel {
             segments += 1;
             self.renewals += 1;
             self.segment_start = self.steps_taken;
+            // A renewal is the moment to restate the goal: the segment that just
+            // ended is exactly the material the card lost to stubs.
+            self.seat_task_card();
         }
         // The stop says which rule stopped it: a spent budget, or a cap on how often a
         // working turn may extend it. "renewed" is the word that makes the difference

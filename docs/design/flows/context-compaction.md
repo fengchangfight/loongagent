@@ -84,9 +84,11 @@ context-ledger §4.
 
 **When the provider still refuses** (`ModelError::is_context_overflow`),
 `Kernel::complete_with_ladder` retries inside the same turn: rung 1 forces a
-compaction at half the context, rung 2 sheds to the minimal request, then the
-turn ends in words the person can act on and a `context.degraded` event — never
-as an `Err`. Only a size error takes this path; a 500 or a bad key is reported.
+compaction at half the context, rung 2 sheds to the minimal request — with the
+engine on that *stubs* the older exchanges rather than dropping them, so the
+promise holds even here. If the smallest request is refused too, the turn ends in
+words the person can act on and a `context.degraded` event — never as an `Err`.
+Only a size error takes this path; a 500 or a bad key is reported.
 
 ## 3. The engine's digests and map
 

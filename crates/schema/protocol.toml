@@ -195,6 +195,18 @@ fields = [
 ]
 
 [[types]]
+name = "ContextDegraded"
+kind = "struct"
+doc = "The context was too big to send and the turn degraded instead of failing (finite-memory spec §5). `ladder` names the rung that fired: overflow-retry, minimal, or give-up."
+fields = [
+  { name = "ladder", type = "string", doc = "overflow-retry | minimal | give-up" },
+  { name = "attempts", type = "u64", doc = "how many times the request was sent" },
+  { name = "tokens_before", type = "u64" },
+  { name = "tokens_after", type = "u64" },
+  { name = "note", type = "string", doc = "what was shed, in words the person can act on" },
+]
+
+[[types]]
 name = "SessionAttachParams"
 kind = "struct"
 fields = [
@@ -558,6 +570,11 @@ ignorable = false
 name = "compaction.applied"
 payload = "CompactionApplied"
 ignorable = false
+
+[[events]]
+name = "context.degraded"
+payload = "ContextDegraded"
+ignorable = true
 
 [[types]]
 name = "SkillsLoaded"

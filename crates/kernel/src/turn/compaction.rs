@@ -406,9 +406,14 @@ impl Kernel {
     pub(super) fn compact_if_needed(
         &mut self,
         events: &mut Vec<u64>,
+        forced_ceiling: Option<u64>,
     ) -> Result<Option<(u64, u64)>, KernelError> {
-        let Some(ceiling) = self.input_ceiling() else {
-            return Ok(None);
+        let ceiling = match forced_ceiling {
+            Some(ceiling) => ceiling,
+            None => match self.input_ceiling() {
+                Some(ceiling) => ceiling,
+                None => return Ok(None),
+            },
         };
         let before = self.ledger.total_tokens();
         if before <= ceiling {

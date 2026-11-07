@@ -200,6 +200,39 @@ impl std::fmt::Display for ModelError {
 
 impl std::error::Error for ModelError {}
 
+impl ModelError {
+    /// Purpose: Say whether this failure means "the request is too big", the one signal the kernel may degrade on.
+    ///
+    /// Serves: `Kernel::request_with_ladder`, so an oversized request costs a
+    /// compaction pass instead of the whole task.
+    /// Design: `docs/superpowers/specs/2026-11-07-finite-memory-unbounded-conversation-design.md` §5.
+    /// Up: `Kernel::request_with_ladder`'s error branch.
+    /// Down: no callee; substring match over the rendered provider message.
+    /// Verify: `cargo test -p loong-providers context_overflow_is_recognised_across_providers`.
+    ///
+    /// Providers disagree on the words — OpenAI-compatible servers send
+    /// `context_length_exceeded`, Anthropic says "prompt is too long", a proxy
+    /// answers 413 — and an adapter that renames its error must not turn a
+    /// recoverable overflow back into a fatal one. Everything else, including a
+    /// 500, is a genuine fault: degrading on it would hide the fault behind a
+    /// compaction pass that cannot fix it.
+    pub fn is_context_overflow(&self) -> bool {
+        const NEEDLES: [&str; 6] = [
+            "context_length_exceeded",
+            "context length",
+            "maximum context",
+            "prompt is too long",
+            "request too large",
+            "too many tokens",
+        ];
+        let text = match self {
+            ModelError::Transport(t) | ModelError::Protocol(t) => t,
+        };
+        let lower = text.to_lowercase();
+        NEEDLES.iter().any(|needle| lower.contains(needle))
+    }
+}
+
 /// The one interface the kernel knows (ADR-0004: provider adapters are edges).
 /// Purpose: The one model interface the kernel knows.
 /// Serves: the kernel's turn and every surface; adapters are edges behind it.
@@ -421,5 +454,32 @@ mod tests {
         })
         .unwrap();
         assert_eq!(assistant["role"], "assistant");
+    }
+
+    /// Purpose: Every provider wording for "this request is too big" is the same signal, while a server fault is not.
+    #[test]
+    fn context_overflow_is_recognised_across_providers() {
+        // The kernel degrades on this signal and keeps going. A 500 that is
+        // misread as an overflow would hide a real fault behind a compaction
+        // pass, so the negative case matters as much as the positive ones.
+        for text in [
+            r#"HTTP 400 from https://api.x/v1: {"error":{"code":"context_length_exceeded"}}"#,
+            "HTTP 400 from https://api.x/v1: prompt is too long: 210000 tokens",
+            "HTTP 400 from https://api.x/v1: This model's maximum context length is 128000 tokens",
+            "HTTP 413 from https://api.x/v1: request too large",
+        ] {
+            let e = ModelError::Transport(text.to_string());
+            assert!(e.is_context_overflow(), "{text}");
+        }
+        let protocol = ModelError::Protocol("context_length_exceeded".to_string());
+        assert!(
+            protocol.is_context_overflow(),
+            "protocol wording counts too"
+        );
+        let other = ModelError::Transport("HTTP 500 from https://api.x/v1: boom".to_string());
+        assert!(
+            !other.is_context_overflow(),
+            "a 500 is not a context problem"
+        );
     }
 }

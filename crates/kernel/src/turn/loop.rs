@@ -19,6 +19,17 @@ use super::*;
 use super::hooks::tighten;
 use super::nudge::{leaked_tool_call, looks_like_pasted_file};
 use super::recall::RECALL_TOOL;
+use loong_providers::CompletionResponse;
+
+/// Purpose: How many rungs the context ladder may descend before the turn gives up in words.
+///
+/// Serves: `Kernel::complete_with_ladder`, which must not loop forever on a provider
+/// that refuses everything.
+/// Design: `docs/superpowers/specs/2026-11-07-finite-memory-unbounded-conversation-design.md` §5.
+/// Up: `Kernel::complete_with_ladder`.
+/// Down: no callee.
+/// Verify: `cargo test -p loong-kernel turn::tests::an_overflowing_request_is_compacted_and_retried_instead_of_failing`.
+const MAX_LADDER_RUNGS: usize = 2;
 
 /// Purpose: Whether a path is a throwaway script location: a `.tmp` component anywhere, or
 /// the system temp directory outside the workspace.
@@ -428,7 +439,7 @@ impl Kernel {
             // Both passes report what they freed. If both fired in one step they are one
             // pass for the thrash window: the earlier `before` and the later `after`.
             let aged = self.age_tool_outputs(&mut events)?;
-            let compacted = self.compact_if_needed(&mut events)?;
+            let compacted = self.compact_if_needed(&mut events, None)?;
             let pass = match (aged, compacted) {
                 (Some((before, _)), Some((_, after))) => Some((before, after)),
                 (Some(pass), None) | (None, Some(pass)) => Some(pass),
@@ -458,7 +469,7 @@ impl Kernel {
                 }
                 self.seat_map();
             }
-            let request = CompletionRequest {
+            let mut request = CompletionRequest {
                 messages: self.messages.clone(),
                 tools: self.tool_specs(),
             };
@@ -483,12 +494,28 @@ impl Kernel {
             // The completion this step is about to take belongs to the turn's budget,
             // whatever run of the loop it is in.
             self.steps_taken = step;
-            let response = self
-                .models
-                .get_mut(&chosen)
-                .expect("the chosen model exists")
-                .complete_streaming(&request, on_delta)
-                .map_err(KernelError::Model)?;
+            let Some(response) =
+                self.complete_with_ladder(&chosen, &mut request, on_delta, &mut events)?
+            else {
+                // The provider refuses even the smallest request we can build. This is
+                // the ladder's last rung and it is not a failure: the log, the plan and
+                // the work so far are all still here, so the next sentence continues.
+                let note = format!(
+                    "stopped after {} steps: this turn could not be sent, the context is full \
+                     even after shedding what could be shed — the work so far is saved; send a \
+                     new message to continue, or raise `budget_tokens` in the configuration",
+                    self.steps_taken
+                );
+                events.push(self.record_assistant(Some(&note), &[])?);
+                return Ok(TurnOutcome {
+                    steps: self.steps_taken,
+                    final_text: Some(note),
+                    pending_approval: None,
+                    refused: None,
+                    events,
+                    interrupted: false,
+                });
+            };
             events.push(self.record_cost(&response.usage)?);
 
             if response.tool_calls.is_empty() {
@@ -598,6 +625,127 @@ impl Kernel {
             events,
             interrupted: false,
         })
+    }
+
+    /// Purpose: Send one request; when the provider refuses it as too big, shed and retry inside the turn.
+    ///
+    /// Serves: `Kernel::run_inner`'s single model call, so an oversized request costs
+    /// a compaction pass instead of the whole task. The report that prompted this:
+    /// a long session died with `Model(Transport("context_length_exceeded"))` on the
+    /// first call it made after the history grew, and every later turn died the same
+    /// way because a new turn starts from the same context.
+    /// Design: `docs/superpowers/specs/2026-11-07-finite-memory-unbounded-conversation-design.md` §5.
+    /// Up: `Kernel::run_inner`.
+    /// Down: `Model::complete_streaming`, `Kernel::compact_if_needed`,
+    /// `Kernel::drop_oldest_exchange`, `ModelError::is_context_overflow`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::an_overflowing_request_is_compacted_and_retried_instead_of_failing`.
+    ///
+    /// Two rungs, then one honest stop. Rung 1 forces a compaction pass at half the
+    /// context, which is stricter than any configured ceiling and therefore frees
+    /// real room; rung 2 drops the oldest exchanges, which is the only lever left
+    /// when clearing cannot reach the ceiling. Nothing here calls a model: the moment
+    /// the context is full is the worst moment to queue another inference behind it.
+    ///
+    /// `Ok(None)` means "the provider will not take this even at its smallest"; the
+    /// caller ends the turn in words the person can act on, and never as `Err`.
+    fn complete_with_ladder(
+        &mut self,
+        chosen: &str,
+        request: &mut CompletionRequest,
+        on_delta: &mut dyn FnMut(&str),
+        events: &mut Vec<u64>,
+    ) -> Result<Option<CompletionResponse>, KernelError> {
+        let before = self.ledger.total_tokens();
+        let mut attempts = 0;
+        let mut rung: Option<&'static str> = None;
+        let mut rungs = 0;
+        loop {
+            attempts += 1;
+            let outcome = {
+                let model = self
+                    .models
+                    .get_mut(chosen)
+                    .expect("the chosen model exists");
+                model.complete_streaming(request, on_delta)
+            };
+            match outcome {
+                Ok(response) => {
+                    if let Some(rung) = rung {
+                        events.push(
+                            self.append(
+                                gen::event::CONTEXT_DEGRADED,
+                                &gen::ContextDegraded {
+                                    ladder: rung.to_string(),
+                                    attempts,
+                                    tokens_before: before,
+                                    tokens_after: self.ledger.total_tokens(),
+                                    note:
+                                        "the provider refused the request for size; the turn shed \
+                                       context and continued"
+                                            .to_string(),
+                                },
+                            )?,
+                        );
+                    }
+                    return Ok(Some(response));
+                }
+                Err(error) if !error.is_context_overflow() => {
+                    // Not a size problem: a 500, a bad key, a dead socket. Degrading
+                    // here would hide the fault behind a compaction pass that cannot
+                    // fix it.
+                    return Err(KernelError::Model(error));
+                }
+                Err(_) if rungs >= MAX_LADDER_RUNGS => {
+                    events.push(
+                        self.append(
+                            gen::event::CONTEXT_DEGRADED,
+                            &gen::ContextDegraded {
+                                ladder: "give-up".to_string(),
+                                attempts,
+                                tokens_before: before,
+                                tokens_after: self.ledger.total_tokens(),
+                                note: "the smallest request this turn can build was still refused"
+                                    .to_string(),
+                            },
+                        )?,
+                    );
+                    return Ok(None);
+                }
+                Err(_) => {
+                    rungs += 1;
+                    if rungs == 1 {
+                        rung = Some("overflow-retry");
+                        // Stricter than any ceiling the configuration asks for, so the
+                        // pass cannot decline for being already under it.
+                        let desperate = before / 2;
+                        self.compact_if_needed(events, Some(desperate))?;
+                    } else {
+                        rung = Some("minimal");
+                        self.shed_to_minimal();
+                    }
+                    *request = CompletionRequest {
+                        messages: self.messages.clone(),
+                        tools: self.tool_specs(),
+                    };
+                }
+            }
+        }
+    }
+
+    /// Purpose: Drop exchanges until only the prompt blocks and the turn being answered are left.
+    ///
+    /// Serves: the ladder's last rung, when clearing tool output cannot reach the
+    /// ceiling. It keeps every leading `System` message — the operator's prompt, the
+    /// workspace's instructions, the cognitive map — because losing those changes who
+    /// the model is, not what it remembers.
+    /// Design: `docs/superpowers/specs/2026-11-07-finite-memory-unbounded-conversation-design.md` §5.
+    /// Up: `Kernel::complete_with_ladder`.
+    /// Down: `Kernel::drop_oldest_exchange` and `Ledger::forget`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::an_overflowing_request_is_compacted_and_retried_instead_of_failing`.
+    fn shed_to_minimal(&mut self) {
+        // `drop_oldest_exchange` stops by itself at the last exchange: the prompt being
+        // answered is never the thing it drops.
+        while self.drop_oldest_exchange() > 0 {}
     }
 
     /// Purpose: Remember one dispatched call so a run of identical calls is visible.

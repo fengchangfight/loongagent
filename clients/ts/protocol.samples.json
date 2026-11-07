@@ -69,6 +69,13 @@
       "dropped_messages": 1,
       "summary": "<string>"
     },
+    "ContextDegraded": {
+      "ladder": "<string>",
+      "attempts": 1,
+      "tokens_before": 1,
+      "tokens_after": 1,
+      "note": "<string>"
+    },
     "SessionAttachParams": {
       "cwd": "<string>",
       "client": "<string>"
@@ -388,6 +395,11 @@
       "name": "compaction.applied",
       "payload": "CompactionApplied",
       "ignorable": false
+    },
+    {
+      "name": "context.degraded",
+      "payload": "ContextDegraded",
+      "ignorable": true
     },
     {
       "name": "hook.fired",

@@ -172,6 +172,19 @@ pub struct CompactionApplied {
     pub summary: String,
 }
 
+/// The context was too big to send and the turn degraded instead of failing (finite-memory spec §5). `ladder` names the rung that fired: overflow-retry, minimal, or give-up.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContextDegraded {
+    /// overflow-retry | minimal | give-up
+    pub ladder: String,
+    /// how many times the request was sent
+    pub attempts: u64,
+    pub tokens_before: u64,
+    pub tokens_after: u64,
+    /// what was shed, in words the person can act on
+    pub note: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionAttachParams {
     pub cwd: String,
@@ -504,6 +517,7 @@ pub mod event {
     pub const POLICY_DECIDED: &str = "policy.decided";
     pub const COST_RECORDED: &str = "cost.recorded";
     pub const COMPACTION_APPLIED: &str = "compaction.applied";
+    pub const CONTEXT_DEGRADED: &str = "context.degraded";
     pub const HOOK_FIRED: &str = "hook.fired";
     pub const CONTROL_SYNCED: &str = "control.synced";
     pub const PROFILE_SELECTED: &str = "profile.selected";
@@ -535,6 +549,7 @@ pub const EVENT_KINDS: &[(&str, bool)] = &[
     ("policy.decided", false),
     ("cost.recorded", false),
     ("compaction.applied", false),
+    ("context.degraded", true),
     ("hook.fired", false),
     ("control.synced", false),
     ("profile.selected", false),

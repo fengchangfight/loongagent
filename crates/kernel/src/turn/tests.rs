@@ -962,6 +962,148 @@ fn no_window_fits_when_the_history_alone_reaches_the_ceiling() {
     );
 }
 
+/// Purpose: A model double that refuses a call on demand, either once as "too big" or always as a server fault.
+///
+/// Serves: `an_overflowing_request_is_compacted_and_retried_instead_of_failing` and
+/// `a_server_fault_still_fails_the_turn`, which need a provider refusal on demand —
+/// `ScriptedModel` always succeeds.
+/// Design: `docs/superpowers/specs/2026-11-07-finite-memory-unbounded-conversation-design.md` §5.
+/// Up: those two tests.
+/// Down: `ScriptedModel::complete`.
+/// Verify: `cargo test -p loong-kernel turn::tests::an_overflowing_request_is_compacted_and_retried_instead_of_failing`.
+struct RefusingModel {
+    inner: ScriptedModel,
+    /// 1-based call number to refuse as too big; `None` refuses nothing that way.
+    refuse_on: Option<usize>,
+    /// When set, every call fails with this message — a fault that must stay fatal.
+    fault: Option<&'static str>,
+    calls: usize,
+    /// Serialized size of the messages per call, so a test can prove the retry was smaller.
+    sizes: Arc<Mutex<Vec<usize>>>,
+}
+
+impl RefusingModel {
+    /// Purpose: Wrap a script with no refusal at all, for the fault case.
+    /// Serves: `a_server_fault_still_fails_the_turn`.
+    /// Contract: `turn/tests.rs` fixture.
+    fn always(inner: ScriptedModel, fault: &'static str) -> Self {
+        Self {
+            inner,
+            refuse_on: None,
+            fault: Some(fault),
+            calls: 0,
+            sizes: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
+impl Model for RefusingModel {
+    /// Purpose: Refuse the chosen call with the fixture's wording, delegate every other.
+    ///
+    /// Serves: both ladder tests; the model call is the point they measure.
+    /// Design: `docs/superpowers/specs/2026-11-07-finite-memory-unbounded-conversation-design.md` §5.
+    /// Up: `Kernel::complete_with_ladder`.
+    /// Down: `ScriptedModel::complete`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::an_overflowing_request_is_compacted_and_retried_instead_of_failing`.
+    fn complete(
+        &mut self,
+        req: &CompletionRequest,
+    ) -> Result<CompletionResponse, loong_providers::ModelError> {
+        self.calls += 1;
+        let size = serde_json::to_string(&req.messages).unwrap().len();
+        self.sizes.lock().unwrap().push(size);
+        if let Some(fault) = self.fault {
+            return Err(loong_providers::ModelError::Transport(fault.to_string()));
+        }
+        if self.refuse_on == Some(self.calls) {
+            return Err(loong_providers::ModelError::Transport(
+                "HTTP 400 from https://api.x/v1: {\"error\":{\"code\":\"context_length_exceeded\"}}"
+                    .to_string(),
+            ));
+        }
+        self.inner.complete(req)
+    }
+}
+
+/// Purpose: A request the provider refuses for size is degraded and retried inside the turn, not failed.
+#[test]
+fn an_overflowing_request_is_compacted_and_retried_instead_of_failing() {
+    // The provider refuses the moment the history is smallest-room — exactly the
+    // session in the report. Before the ladder, `submit` returned `Err` and the
+    // task died; the person was told the session was unusable.
+    let t = Temp::new();
+    big_file(&t.dir, "big1.txt", 400);
+    big_file(&t.dir, "big2.txt", 400);
+    let sizes = Arc::new(Mutex::new(Vec::new()));
+    let model = RefusingModel {
+        inner: ScriptedModel::new(vec![
+            // Turn 1: read, then finish. Leaves a large stale tool result behind.
+            response(
+                vec![call("c1", "read_file", json!({"path": "big1.txt"}))],
+                None,
+            ),
+            response(vec![], Some("first done")),
+            // Turn 2: read, then the request is refused once, then finish.
+            response(
+                vec![call("c2", "read_file", json!({"path": "big2.txt"}))],
+                None,
+            ),
+            response(vec![], Some("second done")),
+        ]),
+        refuse_on: Some(4),
+        fault: None,
+        calls: 0,
+        sizes: Arc::clone(&sizes),
+    };
+    let mut config = KernelConfig::new(&t.dir);
+    config.budget_tokens = Some(8_000);
+    config.max_steps = 12;
+    let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+    let first = k.submit("read big1").unwrap();
+    assert_eq!(first.final_text.as_deref(), Some("first done"));
+
+    let second = k
+        .submit("read big2")
+        .expect("a refusal must not fail the task");
+    assert_eq!(second.final_text.as_deref(), Some("second done"));
+    let sizes = sizes.lock().unwrap();
+    assert_eq!(
+        sizes.len(),
+        5,
+        "the refused call was sent once more: {sizes:?}"
+    );
+    assert!(
+        sizes[4] < sizes[3],
+        "the retry must carry less than the refused request: {sizes:?}"
+    );
+
+    let degraded: Vec<_> = loong_eventlog::replay(&t.log)
+        .unwrap()
+        .events
+        .into_iter()
+        .filter(|e| e.kind == ev::CONTEXT_DEGRADED)
+        .collect();
+    assert!(!degraded.is_empty(), "the ladder must leave a trace");
+    assert_eq!(degraded[0].data["ladder"], "overflow-retry", "{degraded:?}");
+}
+
+/// Purpose: A server fault is not a size problem, so it still fails the turn instead of being hidden by a compaction pass.
+#[test]
+fn a_server_fault_still_fails_the_turn() {
+    let t = Temp::new();
+    let model = RefusingModel::always(
+        ScriptedModel::new(vec![response(vec![], Some("never reached"))]),
+        "HTTP 500 from https://api.x/v1: boom",
+    );
+    let mut config = KernelConfig::new(&t.dir);
+    config.budget_tokens = Some(8_000);
+    let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+    assert!(
+        k.submit("anything").is_err(),
+        "a 500 is a real fault; degrading on it would hide it"
+    );
+}
+
 /// Purpose: When one call in a batched message asks, the rest still get `tool.result` saying they did not run, because a provider rejects two calls with one result.
 #[test]
 fn a_message_that_stops_for_an_approval_still_answers_every_call_it_made() {

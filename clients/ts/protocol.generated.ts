@@ -125,6 +125,18 @@ export interface CompactionApplied {
   summary: string;
 }
 
+/** The context was too big to send and the turn degraded instead of failing (finite-memory spec §5). `ladder` names the rung that fired: overflow-retry, minimal, or give-up. */
+export interface ContextDegraded {
+  /** overflow-retry | minimal | give-up */
+  ladder: string;
+  /** how many times the request was sent */
+  attempts: number;
+  tokens_before: number;
+  tokens_after: number;
+  /** what was shed, in words the person can act on */
+  note: string;
+}
+
 export interface SessionAttachParams {
   cwd: string;
   /** tui | web | vscode | acp */
@@ -414,6 +426,7 @@ export const EVENTS = {
   policyDecided: "policy.decided",
   costRecorded: "cost.recorded",
   compactionApplied: "compaction.applied",
+  contextDegraded: "context.degraded",
   hookFired: "hook.fired",
   controlSynced: "control.synced",
   profileSelected: "profile.selected",
@@ -430,4 +443,6 @@ export type MethodName = (typeof METHODS)[keyof typeof METHODS];
 export type EventKind = (typeof EVENTS)[keyof typeof EVENTS];
 
 /** Event kinds a reader may skip when it does not understand them. */
-export const IGNORABLE_EVENTS: readonly EventKind[] = [] as const;
+export const IGNORABLE_EVENTS: readonly EventKind[] = [
+  "context.degraded"
+] as const;

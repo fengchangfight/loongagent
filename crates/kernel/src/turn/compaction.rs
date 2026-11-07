@@ -635,7 +635,7 @@ impl Kernel {
                     .unwrap_or_else(|| "earlier work".to_string()),
                 _ => "earlier work".to_string(),
             };
-            let text = format_stub(span, &title, 2, None, &[], &[], clues.clone(), 2);
+            let text = format_stub(span, &title, 0, None, &[], &[], clues.clone(), true);
             self.messages[index] = ChatMessage::System { text: text.clone() };
             self.ledger.replace(left, &text);
             self.ledger.set_clues(left, clues);
@@ -702,16 +702,18 @@ impl Kernel {
         let rounds: Vec<usize> = (start..self.messages.len())
             .filter(|index| matches!(self.messages[*index], ChatMessage::User { .. }))
             .collect();
+        // One pass over the ledger, then a map: a linear scan per message would be
+        // quadratic on exactly the long sessions this rule exists for.
+        let cost_of: std::collections::BTreeMap<u64, u64> = self
+            .ledger
+            .entries()
+            .iter()
+            .map(|entry| (entry.id, entry.tokens))
+            .collect();
         let tokens = |from: usize, to: usize| -> u64 {
             (from..to)
                 .filter_map(|index| self.entry_of.get(index).copied().flatten())
-                .filter_map(|id| {
-                    self.ledger
-                        .entries()
-                        .iter()
-                        .find(|entry| entry.id == id)
-                        .map(|entry| entry.tokens)
-                })
+                .filter_map(|id| cost_of.get(&id).copied())
                 .sum()
         };
         let mut seen = 0u64;
@@ -826,7 +828,11 @@ fn stub_text(messages: &[ChatMessage], span: Option<(u64, u64)>) -> (String, Vec
         match message {
             ChatMessage::User { text } => {
                 if title.is_empty() {
-                    title = text.chars().take(STUB_TITLE_CHARS).collect();
+                    title = text
+                        .chars()
+                        .take(STUB_TITLE_CHARS)
+                        .map(|c| if c == '\n' { ' ' } else { c })
+                        .collect();
                 }
                 for term in split_terms(text) {
                     push_clue(&mut clues, term);
@@ -881,7 +887,7 @@ fn stub_text(messages: &[ChatMessage], span: Option<(u64, u64)>) -> (String, Vec
         &files,
         &commands,
         clues.clone(),
-        1,
+        false,
     );
     (text, clues)
 }
@@ -905,7 +911,7 @@ fn format_stub(
     files: &[String],
     commands: &[(String, bool)],
     clues: Vec<String>,
-    merged: usize,
+    merged: bool,
 ) -> String {
     let mut out = String::new();
     match span {
@@ -921,8 +927,8 @@ fn format_stub(
             if !header.is_empty() {
                 out.push_str(&format!("（{}）", header.join("，")));
             }
-            if merged > 1 {
-                out.push_str(&format!("（并段 {merged}）"));
+            if merged {
+                out.push_str("（并段）");
             }
             out.push('\n');
             if !files.is_empty() {

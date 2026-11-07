@@ -55,11 +55,38 @@ pub(crate) fn leave_screen(writer: &mut impl std::io::Write) -> std::io::Result<
     )
 }
 
+/// Purpose: What a closed screen reports back: which log was on screen at the end, and how the run ended.
+/// Serves: `crates/cli/src/tui.rs`, which prints the way back after the terminal is restored.
+/// Design: `docs/design/sessions-lineage.md` §5 (the way back into a log); `docs/design/surfaces.md` §3.
+/// Up: returned by `run`; no other producer.
+/// Down: `App::session`, which `/new` moves when the worker answers with `session.started`.
+/// Verify: `cargo test -p loongagent --test tui_surface`.
+///
+/// `/new` writes a second log, so the id the process started with stops being the live
+/// one. The exit hint resumes a session, and naming the first one would reopen a log the
+/// person had already left — hence the field, rather than the caller's own copy.
+pub struct RunOutcome {
+    /// Purpose: The id of the log on screen when the screen closed; `/new` moves it.
+    /// Serves: `crates/cli/src/tui.rs`'s `session` and `reopen` lines.
+    /// Design: `docs/design/sessions-lineage.md` §5.
+    /// Up: `run`'s return value.
+    /// Down: nothing.
+    /// Verify: `cargo test -p loongagent --test tui_surface`.
+    pub session: String,
+    /// Purpose: `Ok` when someone left on purpose, `Err` when the screen itself failed.
+    /// Serves: `crates/cli/src/tui.rs`, which hands it back to `main`.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `run`'s return value.
+    /// Down: nothing.
+    /// Verify: `cargo test -p loongagent --test tui_surface`.
+    pub outcome: Result<(), String>,
+}
+
 /// Purpose: Replay the session, spawn the worker, own the terminal and loop: drain, draw, read a key, act, until quit.
 /// Serves: `crates/cli/src/tui.rs`.
 /// Design: `docs/design/surfaces.md` §3; `docs/design/sessions-lineage.md` §1 (replay reads the log) and §5.
 /// Up: `crates/cli/src/tui.rs`.
-/// Down: `Client::{replay, folded_results, models}`, `spawn_worker`, `App` and `copy_everywhere`.
+/// Down: `Client::{replay, folded_results, models}`, `spawn_worker`, `App`, `copy_everywhere` and `RunOutcome`.
 /// Verify: `cargo test -p loong-tui-app`.
 pub fn run<T: Transport + Send + 'static>(
     client: Client<T>,
@@ -72,7 +99,7 @@ pub fn run<T: Transport + Send + 'static>(
     interrupt: Option<Box<dyn Fn()>>,
     permissions: Option<Box<dyn Fn(bool)>>,
     health: Option<Receiver<ModelHealth>>,
-) -> Result<(), String> {
+) -> RunOutcome {
     use ratatui::backend::CrosstermBackend;
     use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, KeyEventKind};
     use ratatui::crossterm::execute;
@@ -155,14 +182,27 @@ pub fn run<T: Transport + Send + 'static>(
         }
     }
 
-    enable_raw_mode().map_err(|e| e.to_string())?;
+    // Taking the terminal can fail before the first frame. Nothing has moved the session
+    // yet, so even that report names the one this call started with.
+    let failed = |e: std::io::Error| RunOutcome {
+        session: app.session.clone(),
+        outcome: Err(e.to_string()),
+    };
+    if let Err(e) = enable_raw_mode() {
+        return failed(e);
+    }
     let mut stdout = std::io::stdout();
     // Capture the mouse: the wheel scrolls the page, and the screen turns a drag into its
     // own selection and copy because capture is what takes that away from the terminal.
     // `/mouse` still hands the mouse back for a terminal-native selection.
-    take_screen(&mut stdout).map_err(|e| e.to_string())?;
+    if let Err(e) = take_screen(&mut stdout) {
+        return failed(e);
+    }
     let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend).map_err(|e| e.to_string())?;
+    let mut terminal = match Terminal::new(backend) {
+        Ok(terminal) => terminal,
+        Err(e) => return failed(e),
+    };
 
     let outcome = (|| -> Result<(), String> {
         loop {
@@ -250,5 +290,10 @@ pub fn run<T: Transport + Send + 'static>(
     disable_raw_mode().ok();
     leave_screen(terminal.backend_mut()).ok();
     terminal.show_cursor().ok();
-    outcome
+    // The session that was on screen at the end, which `/new` may have moved: the caller
+    // prints the way back to this log, not to the one the process started with.
+    RunOutcome {
+        session: app.session.clone(),
+        outcome,
+    }
 }

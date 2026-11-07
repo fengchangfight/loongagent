@@ -128,12 +128,14 @@ the user's x-ray into agent behavior — and with shadow git snapshots
 
 Seeded 2026-09-30.
 
-MCP supported but **lazily loaded** — Pi's critique stands (Playwright MCP =
-21 tools / 13.7k tokens dumped into every context); Amp's pattern: skills
-bundle their MCP config so tools enter context only when the skill triggers.
-Goose's orthogonality: even built-in tools as MCP servers. Org angle (T-05):
-an approved-server gateway/registry; prompt injection via MCP content is the
-dominant attack class — pinning, scanning, and trust levels required.
+MCP supported, and **lazy loading landed**: a server whose schema is large
+(> 10 tools or > 8 KiB) is advertised through `tool_search` instead of into
+every request, which answers Pi's critique (Playwright MCP = 21 tools / 13.7k
+tokens dumped into every context) without Amp's per-skill bundling. Still open:
+Goose's orthogonality (even built-in tools as MCP servers), the org angle
+(T-05: an approved-server gateway/registry), and prompt injection via MCP
+content — the dominant attack class, so pinning, scanning and trust levels stay
+unbuilt. Detail: [mcp-client.md](../design/mcp-client.md) §6.
 
 ## T-20 · Git-diff-centric workflow & spec-driven process — `Seed`
 

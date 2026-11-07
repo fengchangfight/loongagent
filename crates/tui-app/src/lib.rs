@@ -4258,7 +4258,7 @@ mod worker;
 #[cfg(test)]
 pub(crate) use setup::draw_setup_form;
 pub use setup::{full_screen_needs_a_terminal, setup_form, SetupAction, SetupForm};
-pub use surface::run;
+pub use surface::{run, RunOutcome};
 #[cfg(test)]
 pub(crate) use wizard::draw_local_wizard;
 pub use wizard::{

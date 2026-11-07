@@ -17,14 +17,17 @@
 //! to leave the workspace, and every subprocess a tool spawns is confined by the
 //! policy the kernel hands in through [`ExecContext`].
 
+pub mod deferred;
 pub mod search;
 
+use deferred::DeferredTool;
 use loong_schema::generated::{ActionClass, Json};
 use search::{Glob, Grep};
 use serde_json::json;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,14 +136,20 @@ pub trait Tool: Send + Sync {
 }
 
 #[derive(Default)]
-/// Purpose: Every registered tool by name.
+/// Purpose: Every registered tool by name, plus which deferred ones are visible.
 /// Serves: the kernel's dispatch lookup and the model's tool specs.
-/// Design: `docs/design/tools-permissions.md` §1.
+/// Design: `docs/design/tools-permissions.md` §1 and `docs/design/mcp-client.md` §6.
 /// Up: the kernel's build step and dispatch.
-/// Down: `with_builtins`, `register`, `get`, `names` and `specs`.
+/// Down: `with_builtins`, `register`, `register_deferred`, `get`, `names` and `specs`.
 /// Verify: `cargo test -p loong-tools`.
 pub struct Registry {
     tools: BTreeMap<String, Box<dyn Tool>>,
+    /// Tools that exist but are not shown until `tool_search` reveals them. Shared
+    /// with `tool_search`, so a refresh is visible to the next search without a
+    /// rebuild.
+    deferred: Arc<Mutex<BTreeMap<String, DeferredTool>>>,
+    /// The deferred tools the model has already been shown, shared with `tool_search`.
+    active: Arc<Mutex<BTreeSet<String>>>,
 }
 
 impl Registry {
@@ -182,6 +191,109 @@ impl Registry {
         self.tools.insert(tool.name().to_string(), Box::new(tool));
     }
 
+    /// Register a tool that exists but is not shown until `tool_search` reveals
+    /// it. It stays dispatchable: a model that already knows the name from an
+    /// earlier turn can call it directly, and the PDP still decides.
+    /// Purpose: Register a tool that is hidden until `tool_search` reveals it.
+    /// Serves: the kernel's `attach_mcp`, for a server above the defer threshold.
+    /// Design: `docs/design/mcp-client.md` §6.
+    /// Up: `crates/kernel/src/turn/build.rs`.
+    /// Down: `register` and the deferred map.
+    /// Verify: `cargo test -p loong-tools`.
+    pub fn register_deferred(&mut self, tool: impl Tool + 'static, server: &str) {
+        let entry = DeferredTool {
+            name: tool.name().to_string(),
+            server: server.to_string(),
+            description: tool.description().to_string(),
+            parameters: tool.parameters(),
+        };
+        if let Ok(mut deferred) = self.deferred.lock() {
+            deferred.insert(entry.name.clone(), entry);
+        }
+        self.register(tool);
+    }
+
+    /// Purpose: Remove every tool a server contributed, and forget its deferred entries.
+    /// Serves: `Kernel::refresh_mcp`, after a `list_changed` notification.
+    /// Design: `docs/design/mcp-client.md` §6.
+    /// Up: `crates/kernel/src/turn/loop.rs`.
+    /// Down: the tool map, the deferred map and the activation set.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_changed_tool_list_is_replaced_at_the_next_turn`.
+    pub fn unregister_server(&mut self, server: &str) {
+        let prefix = format!("mcp__{server}__");
+        self.tools.retain(|name, _| !name.starts_with(&prefix));
+        let mut removed = Vec::new();
+        if let Ok(mut deferred) = self.deferred.lock() {
+            deferred.retain(|name, _| {
+                let keep = !name.starts_with(&prefix);
+                if !keep {
+                    removed.push(name.clone());
+                }
+                keep
+            });
+        }
+        if let Ok(mut active) = self.active.lock() {
+            for name in removed {
+                active.remove(&name);
+            }
+        }
+    }
+
+    /// Purpose: The tools that are deferred, for `tool_search` to search.
+    /// Serves: the kernel's `attach_mcp`, which builds `tool_search` from them.
+    /// Design: `docs/design/mcp-client.md` §6.
+    /// Up: `crates/kernel/src/turn/build.rs`.
+    /// Down: the deferred map.
+    /// Verify: `cargo test -p loong-tools`.
+    pub fn deferred(&self) -> Vec<DeferredTool> {
+        match self.deferred.lock() {
+            Ok(deferred) => deferred.values().cloned().collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Purpose: The shared deferred catalogue, so `tool_search` sees a refresh live.
+    /// Serves: the kernel's `attach_mcp`, which builds `tool_search` from it.
+    /// Design: `docs/design/mcp-client.md` §6.
+    /// Up: `crates/kernel/src/turn/build.rs`.
+    /// Down: the `deferred` field.
+    /// Verify: `cargo test -p loong-tools`.
+    pub fn deferred_catalogue(&self) -> Arc<Mutex<BTreeMap<String, DeferredTool>>> {
+        self.deferred.clone()
+    }
+
+    /// Purpose: The activation set, shared so `tool_search` can add to it.
+    /// Serves: the kernel's `attach_mcp`.
+    /// Design: `docs/design/mcp-client.md` §6.
+    /// Up: `crates/kernel/src/turn/build.rs`.
+    /// Down: the `active` field.
+    /// Verify: `cargo test -p loong-tools`.
+    pub fn activation_set(&self) -> Arc<Mutex<BTreeSet<String>>> {
+        self.active.clone()
+    }
+
+    /// Purpose: Whether a tool is hidden right now.
+    /// Serves: `specs`.
+    /// Design: `docs/design/mcp-client.md` §6.
+    /// Up: `specs`.
+    /// Down: the deferred map and the activation set.
+    /// Verify: `cargo test -p loong-tools`.
+    fn is_hidden(&self, name: &str) -> bool {
+        let is_deferred = match self.deferred.lock() {
+            Ok(deferred) => deferred.contains_key(name),
+            Err(_) => false,
+        };
+        if !is_deferred {
+            return false;
+        }
+        match self.active.lock() {
+            Ok(active) => !active.contains(name),
+            // A poisoned set shows everything: hiding a tool the model asked for is
+            // the worse failure of the two.
+            Err(_) => false,
+        }
+    }
+
     /// Purpose: The tool registered under a name, if any.
     /// Serves: the kernel's dispatch lookup before the PDP and execute path.
     /// Design: `docs/design/tools-permissions.md` §1.
@@ -213,6 +325,7 @@ impl Registry {
     pub fn specs(&self) -> Vec<(String, String, Json)> {
         self.tools
             .values()
+            .filter(|t| !self.is_hidden(t.name()))
             .map(|t| {
                 (
                     t.name().to_string(),

@@ -10,6 +10,7 @@ loong-schema.workspace = true
 loong-protocol.workspace = true
 loong-tools.workspace = true
 loong-manifest.workspace = true
+loong-http.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true

@@ -379,7 +379,7 @@ pub(crate) fn full_screen(args: Args) -> Result<(), String> {
         } else {
             None
         };
-    let outcome = loong_tui_app::run(
+    let closed = loong_tui_app::run(
         client,
         attached.session_id,
         attached.schema_version,
@@ -392,8 +392,10 @@ pub(crate) fn full_screen(args: Args) -> Result<(), String> {
         health,
     );
     // Leaving the interface — by `/exit`, ctrl-c, or an error — says where the session
-    // went, so the way out is not a dead end.
-    println!("session {session_id}");
-    println!("reopen:  loongagent resume {session_id}");
-    outcome
+    // went, so the way out is not a dead end. It is the session the screen ended on:
+    // `/new` moves it, and printing `session_id` here would offer to resume the log the
+    // person just left.
+    println!("session {}", closed.session);
+    println!("reopen:  loongagent resume {}", closed.session);
+    closed.outcome
 }

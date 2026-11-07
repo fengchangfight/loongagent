@@ -100,25 +100,26 @@ the pinned system prompt at session build, under a line that says where they cam
 
 ## 3. MCP tools: a server behind the tool interface
 
-`McpSet::load` reads `<workspace>/.loongagent/mcp.toml`. A server entry names a command,
-args, env, a default action class and optional per-tool overrides. The default class is
-`out_of_bounds`, the cautious one: a tool the kernel knows nothing about asks every time.
-A configured server is `required` by default; a server that cannot start or list its tools
-fails the session rather than quietly removing a guard rail, and `required = false` opts
-into a note instead.
+`McpSet::load` reads `<workspace>/.loongagent/mcp.toml`. A server entry names one transport (a
+command, or a URL), a default action class and optional per-tool overrides. The default class is
+`out_of_bounds`, the cautious one: a tool the kernel knows nothing about asks every time. A
+configured server is `required` by default; a server that cannot start or list its tools fails
+the session rather than quietly removing a guard rail, and `required = false` opts into a note
+instead.
 
 The trust gate is `loongagent mcp trust`, recorded in `mcp.trusted`. Here the known limit is
 important and visible in the code: `sources_of` fingerprints **`mcp.toml` and nothing else**.
-The command binary, its PATH lookup, and anything it later reads are not hashed. Trust means
-"I read this manifest", not "this server is verified".
+The command binary, its PATH lookup, the endpoint behind a URL, and anything it later reads are
+not hashed. Trust means "I read this manifest", not "this server is verified".
 
-Only trusted servers are started, by `attach_mcp` during kernel build. The client is stdio,
-speaks JSON-RPC 2.0, and has a deadline on every read; dropping it kills the process group.
-Tools are registered into the same `Registry` as the built-ins, so `Pdp::decide` runs before
-every model-facing call and the action class comes from the manifest. Server-initiated
-requests are not served, and resources and sampling are not implemented. A server's prompts become commands
-in the same catalogue. Like hooks, the server process itself is not inside the tool sandbox;
-the trust gate is the barrier, not confinement.
+Only trusted servers are started, by `attach_mcp` during kernel build. Tools are registered into
+the same `Registry` as the built-ins, so `Pdp::decide` runs before every model-facing call and
+the action class comes from the manifest; a server's prompts become commands in the same
+catalogue. Like hooks, the server process is not inside the tool sandbox; the trust gate is the
+barrier, not confinement.
+
+MCP has its own page: [mcp-client.md](mcp-client.md) owns both transports, pagination, result
+flattening, the `tool_search` deferral rule and the protocol parts that are answered `-32601`.
 
 ## 4. Plugins: install content by name
 
@@ -218,8 +219,9 @@ A pack is not invoked at all: it resolves into configuration before the kernel i
   six implemented events leave ADR-0007's session end, compaction, file/cwd and subagent
   events unimplemented; LLM and subagent hooks are deferred. A trusted hook is an
   unsandboxed child.
-- **MCP:** the trust record covers `mcp.toml` only, not the command it names. The server
-  process is not confined by the tool sandbox. There is no resources or sampling support.
+- **MCP:** the trust record covers `mcp.toml` only, not the command or the URL it names. The
+  server process is not confined by the tool sandbox. There is no resources, sampling, roots or
+  elicitation support ([mcp-client.md](mcp-client.md) §9).
 - **Skills:** no trust gate, and `allowed_tools` is not enforced; descriptions enter every
   session's context, so the catalogue is an injection surface with an audit trail, not a
   boundary.
@@ -240,6 +242,7 @@ A pack is not invoked at all: it resolves into configuration before the kernel i
 - [ADR-0018](../decisions/0018-plugin-install-and-bootstrap.md) — install by name, only
   skills, and `bootstrap` as the native `SessionStart`.
 - [tools-permissions.md](tools-permissions.md) — the PDP and the two enforcers every
-  model-facing MCP tool also passes through.
+  model-facing MCP tool also passes through; [mcp-client.md](mcp-client.md) — the client, its
+  two transports and what it does not implement.
 - `crates/hooks/src/config.rs`, `crates/mcp/src/config.rs`, `crates/plugin/src/lib.rs` — the
   three trust implementations, each with its own tests; procedures: [extending/](../extending/README.md).

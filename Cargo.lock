@@ -922,6 +922,7 @@ version = "0.0.1"
 name = "loong-mcp"
 version = "0.0.1"
 dependencies = [
+ "loong-http",
  "loong-manifest",
  "loong-protocol",
  "loong-schema",

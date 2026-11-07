@@ -90,6 +90,9 @@ struct AttachedMcp {
     note: String,
     clients: Vec<Arc<Mutex<McpClient>>>,
     prompt_skills: Vec<Skill>,
+    /// The specs behind those clients, so a `list_changed` refresh can re-register
+    /// with the same classes and the same defer rule.
+    specs: Vec<loong_mcp::McpServerSpec>,
 }
 
 /// Purpose: Start the trusted MCP servers and register their tools and prompts.
@@ -127,9 +130,18 @@ fn attach_mcp(workspace: &Path, tools: &mut Registry) -> Result<AttachedMcp, Ker
         };
         let count = listed.len();
         let client = Arc::new(Mutex::new(client));
+        // A server is deferred when the manifest says so, or when its schemas are
+        // expensive enough to crowd the request. A deferred tool is still callable;
+        // it is simply not pasted into every turn (mcp-client.md §6).
+        let deferred = spec.defer.applies(loong_mcp::defer_by_default(&listed));
         for info in listed {
             let class = spec.class_for(&info.name);
-            tools.register(McpTool::new(&spec.name, info, class, Arc::clone(&client)));
+            let tool = McpTool::new(&spec.name, info, class, Arc::clone(&client));
+            if deferred {
+                tools.register_deferred(tool, &spec.name);
+            } else {
+                tools.register(tool);
+            }
         }
         // A server's prompts become commands: same catalogue, same /name syntax,
         // body fetched from the server on invoke.
@@ -185,12 +197,28 @@ fn attach_mcp(workspace: &Path, tools: &mut Registry) -> Result<AttachedMcp, Ker
             }
         }
         clients.push(client);
-        note.push_str(&format!("; {} exposed {count} tool(s)", spec.name));
+        note.push_str(&format!(
+            "; {} exposed {count} tool(s){}",
+            spec.name,
+            if deferred { " (deferred)" } else { "" }
+        ));
+    }
+    // One search tool for the whole session, only when something is deferred: a
+    // session with no deferred server should not be asked to search for anything.
+    let catalogue = tools.deferred();
+    if !catalogue.is_empty() {
+        let count = catalogue.len();
+        tools.register(loong_tools::deferred::ToolSearch::new(
+            tools.deferred_catalogue(),
+            tools.activation_set(),
+        ));
+        note.push_str(&format!("; {count} tool(s) behind tool_search"));
     }
     Ok(AttachedMcp {
         note,
         clients,
         prompt_skills,
+        specs: set.active().to_vec(),
     })
 }
 impl Kernel {
@@ -359,8 +387,12 @@ impl Kernel {
         // interface, one PDP, one event stream, one audit trail.
         let mut tools = Registry::with_builtins();
         let attached = attach_mcp(&config.cwd, &mut tools)?;
-        let (mcp_note, mcp_clients, mut prompt_skills) =
-            (attached.note, attached.clients, attached.prompt_skills);
+        let (mcp_note, mcp_clients, mut prompt_skills, mcp_specs) = (
+            attached.note,
+            attached.clients,
+            attached.prompt_skills,
+            attached.specs,
+        );
         // Configuration can disable an entry by identity (ADR-0008 add-only rule:
         // content is advisory, so a project may switch off an org's skill — and it
         // is recorded rather than silently dropped).
@@ -492,6 +524,7 @@ impl Kernel {
             hooks_note,
             mcp_clients,
             mcp_note,
+            mcp_specs,
             skills,
             disabled_skills: disabled,
             bootstrap,

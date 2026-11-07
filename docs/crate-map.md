@@ -23,7 +23,7 @@ listed is a violation. The middle column is each crate's own `//!` header.
 | `loong-index` | Answer tree, search and count queries from a disposable SQLite copy of the JSONL log. | `loong-eventlog`, `loong-schema` |
 | `loong-kernel` | The fixed kernel (ADR-0004): the model+tool loop and the context ledger that is its only write path. | `loong-config`, `loong-context`, `loong-eventlog`, `loong-hooks`, `loong-index`, `loong-mcp`, `loong-providers`, `loong-sandbox`, `loong-schema`, `loong-skills`, `loong-tools` |
 | `loong-manifest` | Gate repository manifests behind a human trust decision and a change-detection hash. | — |
-| `loong-mcp` | MCP: external tools behind the same `Tool` interface as the built-ins. | `loong-manifest`, `loong-protocol`, `loong-schema`, `loong-tools` |
+| `loong-mcp` | MCP: external tools behind the same `Tool` interface as the built-ins. | `loong-http`, `loong-manifest`, `loong-protocol`, `loong-schema`, `loong-tools` |
 | `loong-pack` | Sign and verify the one envelope every distributed artifact travels in. | — |
 | `loong-plugin` | Plugins: install a reviewed checkout's skills by name, and never its hooks, servers or code. | `loong-config`, `loong-skills` |
 | `loong-proc` | Run a child process with bounded output, a hard timeout and teardown of its whole tree. | — |

@@ -2,9 +2,9 @@
 //!
 //! # Contract
 //! - **Serves:** the kernel's registry and the CLI's `mcp` command.
-//! - **Design:** `docs/design/extension-model.md` §3 and `docs/design/security-trust.md` §1.
+//! - **Design:** `docs/design/mcp-client.md` and `docs/design/security-trust.md` §1.
 //! - **Upstream:** `crates/kernel/src/turn/build.rs` (`attach_mcp`) and `crates/cli/src/mcp.rs`.
-//! - **Downstream:** `client` (stdio JSON-RPC) and `config` (manifest and trust gate).
+//! - **Downstream:** `client` (JSON-RPC over stdio or HTTP) and `config` (manifest and trust gate).
 //! - **Verify:** `cargo test -p loong-mcp` · `./scripts/check.sh`
 //!
 //! MCP (T-15): external tools behind the same interface as the built-ins.
@@ -16,17 +16,21 @@
 //! to accommodate an external server, which is what makes "integrate through
 //! MCP" a boundary argument rather than a promise.
 //!
-//! Two things are declared rather than discovered: the server command (and it is
-//! repository content, so it sits behind the trust gate) and each tool's
-//! **action class** — the kernel cannot know what an external tool does, and
+//! Two things are declared rather than discovered: the transport (a command, or a
+//! URL — repository content either way, so it sits behind the trust gate) and each
+//! tool's **action class** — the kernel cannot know what an external tool does, and
 //! guessing generously would be a hole in the boundary.
+//!
+//! `docs/design/mcp-client.md` owns the details: the two transports, pagination,
+//! result flattening, the `tool_search` deferral rule, and the protocol parts the
+//! client answers with `-32601` instead of pretending to serve.
 
 pub mod client;
 pub mod config;
 
 pub use client::{
-    map_prompt_arguments, McpCapabilities, McpClient, McpError, McpPromptArgument, McpPromptInfo,
-    McpTool, McpToolInfo, PROTOCOL_VERSION,
+    defer_by_default, map_prompt_arguments, media_dir, McpCapabilities, McpClient, McpError,
+    McpPromptArgument, McpPromptInfo, McpTool, McpToolInfo, PROTOCOL_VERSION,
 };
-pub use config::{ConfigError, McpServerSpec, McpSet, MCP_DIR, MCP_FILE, MCP_TRUST_FILE};
+pub use config::{ConfigError, Defer, McpServerSpec, McpSet, MCP_DIR, MCP_FILE, MCP_TRUST_FILE};
 pub use loong_manifest::TrustStatus;

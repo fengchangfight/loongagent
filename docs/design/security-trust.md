@@ -96,7 +96,9 @@ is a property of the code today, not a future plan.
   [extension-model.md](extension-model.md) §1 and §8.
 - **MCP servers and hooks are outside the tool PEP.** They start at kernel build or as ordinary
   children; their tool calls still reach `Kernel::dispatch`, but the process itself is
-  unconfined. Detail: [extension-model.md](extension-model.md) §1 and §3, and
+  unconfined. An MCP server reached over HTTPS is also an egress path a trusted `mcp.toml` opens
+  (`https` only, loopback `http` for the local case): [mcp-client.md](mcp-client.md) §1 owns that
+  rule. Detail: [extension-model.md](extension-model.md) §1 and §3, and
   [tools-permissions.md](tools-permissions.md) §4.
 - **A tool's own in-process I/O is unconfined.** `Tool::execute` runs in the server process, so
   a custom tool's `Command::spawn` or in-process write is outside both the sandbox and the

@@ -9,11 +9,11 @@
 
 use super::*;
 
-/// Purpose: Print every configured server, its action class and overrides, and whether the manifest is trusted enough to run.
+/// Purpose: Print every configured server, its transport, action class, overrides and defer policy, and whether the manifest is trusted enough to run.
 /// Serves: `loongagent mcp list`, the read before an `mcp trust` decision.
-/// Design: `docs/design/extension-model.md` §3 and §7.
+/// Design: `docs/design/mcp-client.md` §1 and `docs/design/extension-model.md` §3 and §7.
 /// Up: `main.rs`'s `mcp` → `list` arm; no other caller.
-/// Down: `McpSet::load`, `McpSet::summary` and the `servers`/`trust` fields.
+/// Down: `McpSet::load`, `McpSet::summary` and `McpServerSpec::{transport, endpoint}`.
 /// Verify: `cargo test -p loongagent` (no dedicated test; the command is inspection only).
 /// Show which external tools would join the session.
 pub(crate) fn mcp_list(args: Args) -> Result<(), String> {
@@ -22,9 +22,17 @@ pub(crate) fn mcp_list(args: Args) -> Result<(), String> {
     println!("status:   {}", set.summary());
     for spec in &set.servers {
         println!();
-        println!("  {} — {}", spec.name, spec.command);
-        if !spec.args.is_empty() {
-            println!("    args:        {}", spec.args.join(" "));
+        println!(
+            "  {} — [{}] {}",
+            spec.name,
+            spec.transport(),
+            spec.endpoint()
+        );
+        if spec.url.is_some() && !spec.headers.is_empty() {
+            // Names only: a header value is a secret (an `Authorization`), so it is
+            // never printed. `${VAR}` was expanded at load, so the value is real.
+            let names: Vec<&str> = spec.headers.keys().map(String::as_str).collect();
+            println!("    headers:      {}", names.join(", "));
         }
         println!("    action class: {:?}", spec.action_class);
         for (tool, class) in &spec.tools {
@@ -32,6 +40,7 @@ pub(crate) fn mcp_list(args: Args) -> Result<(), String> {
         }
         println!("    timeout:      {}ms", spec.timeout.as_millis());
         println!("    required:     {}", spec.required);
+        println!("    defer:        {:?}", spec.defer);
     }
     if let loong_mcp::TrustStatus::Untrusted { changed } = &set.trust {
         println!();
@@ -39,7 +48,7 @@ pub(crate) fn mcp_list(args: Args) -> Result<(), String> {
             "INERT until trusted — new or changed: {}",
             changed.join(", ")
         );
-        println!("A server entry names a command to run, so read it first, then:");
+        println!("A server entry names a command to run or a URL to call, so read it first, then:");
         println!("  loongagent mcp trust --cwd {}", args.cwd.display());
     }
     Ok(())

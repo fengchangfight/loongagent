@@ -33,7 +33,7 @@ ALLOWED = {
     "loong-sandbox": {"loong-schema"},
     "loong-tools": {"loong-schema", "loong-proc"},
     "loong-hooks": {"loong-schema", "loong-http", "loong-proc", "loong-manifest"},
-    "loong-mcp": {"loong-schema", "loong-protocol", "loong-tools", "loong-manifest"},
+    "loong-mcp": {"loong-schema", "loong-protocol", "loong-http", "loong-tools", "loong-manifest"},
     "loong-skills": {"loong-schema", "loong-tools"},
     "loong-config": {"loong-schema"},
     # plugins are content bundles: they install a repository's skills and read the

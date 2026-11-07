@@ -211,7 +211,7 @@ pub fn get_json_raw(
         .flush()
         .map_err(|e| err(format!("sending the request: {e}")))?;
 
-    let (status, _content_type, mut reader) = read_head(&mut stream)?;
+    let (status, _content_type, _headers, mut reader) = read_head(&mut stream)?;
     let mut body = String::new();
     reader
         .read_to_string(&mut body)
@@ -262,13 +262,76 @@ pub fn post_json(
     timeout: Duration,
 ) -> Result<HttpResponse, HttpError> {
     let mut stream = open(url, timeout)?;
-    write_request(&mut stream, url, body, bearer)?;
-    let (status, _content_type, mut reader) = read_head(&mut stream)?;
+    write_request(&mut stream, url, body, bearer, &[])?;
+    let (status, _content_type, _headers, mut reader) = read_head(&mut stream)?;
     let mut raw = String::new();
     reader
         .read_to_string(&mut raw)
         .map_err(|e| err(format!("reading the response: {e}")))?;
     Ok(HttpResponse { status, body: raw })
+}
+
+/// A whole POST reply: status, every response header, and the body as text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// Purpose: A POST reply with its status, headers and whole body.
+///
+/// Serves: the MCP HTTP transport, which needs `Mcp-Session-Id` and the content type (mcp-client.md §2).
+/// Design: `docs/design/mcp-client.md` §2.
+/// Up: `post_json_reply`.
+/// Down: `loong-mcp`'s `HttpTransport`.
+/// Verify: `cargo test -p loong-http`.
+pub struct HttpReply {
+    pub status: u16,
+    /// Lowercased header names, in the order the server sent them.
+    pub headers: Vec<(String, String)>,
+    pub body: String,
+}
+
+impl HttpReply {
+    /// Purpose: The first header with this name, matched case-insensitively.
+    /// Serves: the MCP HTTP transport reading `Mcp-Session-Id` and `Content-Type`.
+    /// Design: `docs/design/mcp-client.md` §2.
+    /// Up: `loong-mcp`'s `HttpTransport`.
+    /// Down: the `headers` field.
+    /// Verify: `cargo test -p loong-http`.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        let name = name.to_ascii_lowercase();
+        self.headers
+            .iter()
+            .find(|(header, _)| *header == name)
+            .map(|(_, value)| value.as_str())
+    }
+}
+
+/// POST a JSON body with extra request headers and read the whole reply, headers
+/// included. `Connection: close` is sent, so a server that answers must close the
+/// response for the body to end; a stream kept open until `timeout` is a failure,
+/// not a hang.
+/// Purpose: POST JSON with caller-supplied headers and return the whole reply.
+///
+/// Serves: the MCP HTTP transport, which needs an `Authorization` from `mcp.toml` and a session id back (mcp-client.md §2).
+/// Design: `docs/design/mcp-client.md` §2.
+/// Up: `loong-mcp`'s `HttpTransport`.
+/// Down: `open`, `write_request` and `read_head`.
+/// Verify: `cargo test -p loong-http`.
+pub fn post_json_reply(
+    url: &str,
+    body: &str,
+    headers: &[(String, String)],
+    timeout: Duration,
+) -> Result<HttpReply, HttpError> {
+    let mut stream = open(url, timeout)?;
+    write_request(&mut stream, url, body, None, headers)?;
+    let (status, _content_type, reply_headers, mut reader) = read_head(&mut stream)?;
+    let mut raw = String::new();
+    reader
+        .read_to_string(&mut raw)
+        .map_err(|e| err(format!("reading the response: {e}")))?;
+    Ok(HttpReply {
+        status,
+        headers: reply_headers,
+        body: raw,
+    })
 }
 
 /// POST and hand each Server-Sent Event `data:` payload to `on_data` as it
@@ -293,8 +356,8 @@ pub fn post_sse(
     on_data: &mut dyn FnMut(&str),
 ) -> Result<u16, HttpError> {
     let mut stream = open(url, timeout)?;
-    write_request(&mut stream, url, body, bearer)?;
-    let (status, content_type, mut reader) = read_head(&mut stream)?;
+    write_request(&mut stream, url, body, bearer, &[])?;
+    let (status, content_type, _headers, mut reader) = read_head(&mut stream)?;
     if !(200..300).contains(&status) {
         // An error reply is ordinary JSON, and the caller wants to see it.
         let mut raw = String::new();
@@ -398,6 +461,7 @@ fn write_request(
     url: &str,
     body: &str,
     bearer: Option<&str>,
+    extra: &[(String, String)],
 ) -> Result<(), HttpError> {
     let (host, port, path, tls) = parse_http_url(url)?;
     let authority = if (tls && port == 443) || (!tls && port == 80) {
@@ -413,6 +477,9 @@ fn write_request(
     );
     if let Some(token) = bearer {
         head.push_str(&format!("Authorization: Bearer {token}\r\n"));
+    }
+    for (name, value) in extra {
+        head.push_str(&format!("{name}: {value}\r\n"));
     }
     head.push_str("User-Agent: loongagent\r\n\r\n");
     stream
@@ -433,7 +500,9 @@ fn write_request(
 /// Up: `get_json_raw`, `post_json` and `post_sse`.
 /// Down: `Transport::read`, the chunk-size check and `BodyReader`.
 /// Verify: `cargo test -p loong-http`.
-fn read_head(stream: &mut Transport) -> Result<(u16, String, BodyReader<'_>), HttpError> {
+fn read_head(
+    stream: &mut Transport,
+) -> Result<(u16, String, Vec<(String, String)>, BodyReader<'_>), HttpError> {
     let mut head = Vec::new();
     let mut byte = [0u8; 1];
     while !head.ends_with(b"\r\n\r\n") {
@@ -474,9 +543,18 @@ fn read_head(stream: &mut Transport) -> Result<(u16, String, BodyReader<'_>), Ht
                 .unwrap_or_default()
         })
         .unwrap_or_default();
+    // Every header, lowercased name, in order: a caller that needs `Mcp-Session-Id`
+    // or a `Location` should not have to re-parse the head.
+    let headers = head
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.split_once(':'))
+        .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_string()))
+        .collect::<Vec<_>>();
     Ok((
         status,
         content_type,
+        headers,
         BodyReader {
             stream,
             chunked,
@@ -952,7 +1030,7 @@ mod tests {
             .unwrap();
         stream.flush().unwrap();
 
-        let (status, _content_type, mut reader) = read_head(&mut stream).unwrap();
+        let (status, _content_type, _headers, mut reader) = read_head(&mut stream).unwrap();
         assert_eq!(status, 200);
 
         // Read with a buffer far smaller than the chunk. A `Read` may fill less than it

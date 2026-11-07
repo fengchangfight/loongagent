@@ -2,7 +2,7 @@
 
 - **Up:** [design/README.md](README.md) · [04 System overview](../04-system-overview.md)
 - **Authority:** [ADR-0003](../decisions/0003-jsonl-truth-sqlite-index.md) · [ADR-0014](../decisions/0014-session-export-import.md) · [ADR-0015](../decisions/0015-two-tree-levels.md)
-- **Code:** `crates/server/src/lib.rs`, `crates/kernel/src/turn/session.rs`, `crates/eventlog/src/lib.rs`
+- **Code:** `crates/server/src/lib.rs`, `crates/kernel/src/turn/session.rs`, `crates/eventlog/src/lib.rs`, `crates/cli/src/tui.rs`, `crates/tui-app/src/surface.rs`
 - **Verify:** `cargo test -p loong-server -p loong-kernel -p loong-eventlog` · `./scripts/check.sh`
 
 A **session** is one append-only JSONL file and one unit of work: attach, write token, cost,
@@ -71,6 +71,13 @@ Linux-only), since unlinking a file a writer is appending to loses the conversat
 A bare `loongagent` (or `loongagent tui`) starts a fresh session; `loongagent --session ID|latest`
 or `loongagent resume [ID]` opens an existing one. The other surfaces (`repl`, `run`, `web`,
 `server`) still continue this project's newest session when nothing is named.
+
+Leaving the TUI prints the way back — `session <id>` and `reopen:  loongagent resume <id>` — and
+that id is the log on screen at that moment. `/new` starts a second log, so the id the process
+opened with stops being the live one; the hint must name the session the run moved to, because
+resuming the first would reopen a conversation the person had already left. The screen reports it
+(`RunOutcome.session`, `crates/tui-app/src/surface.rs`) and `crates/cli/src/tui.rs` prints what it
+is told instead of keeping its own copy of the id.
 
 **Resume** is a disk read, not a process resume. A parked approval lives only in
 `Kernel.pending` in memory, so a restarted process does not resume the question; the person

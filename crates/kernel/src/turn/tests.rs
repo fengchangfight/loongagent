@@ -4495,6 +4495,21 @@ fn recall_returns_an_evidence_excerpt_in_one_call() {
     );
 }
 
+/// Purpose: The alias line is an index, not memory, so the summary body a model reads never shows it.
+#[test]
+fn aliases_are_not_rendered_into_the_summary_text() {
+    let body = "L2 · 修复配置层叠\n请求：修一下层叠失效\n状态：done\n别名：overlay；merge 顺序；合并优先级\n";
+    let shown = super::recall::summary_body(body);
+    assert!(
+        !shown.contains("别名："),
+        "an alias line is an index, not the summary: {shown}"
+    );
+    assert!(
+        shown.contains("修复配置层叠"),
+        "the summary itself is still there: {shown}"
+    );
+}
+
 /// Purpose: A recall answer that compaction later clears can be recalled again, so forgetting keeps a way back.
 #[test]
 fn a_cleared_recall_result_can_be_recalled_again() {

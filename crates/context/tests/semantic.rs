@@ -10,7 +10,7 @@
 
 use loong_context::summarizer::{Summarizer, SummarizerError, Synthesis};
 use loong_context::worker::IdleForeground;
-use loong_context::{Store, SyncOutcome, WindowBudget};
+use loong_context::{SearchQuery, Store, SyncOutcome, WindowBudget};
 use loong_eventlog::SessionLog;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -213,6 +213,7 @@ fn a_models_answer_is_added_and_computed_fields_are_left_alone() {
         why: vec!["层叠顺序不能依赖调用序".into()],
         open_questions: vec!["是否要加一个回归测试".into()],
         conclusion: Some("改为按层号排序后合并".into()),
+        ..Default::default()
     });
     let enriched = store.synthesize(&mut model, 4).unwrap();
     assert_eq!(enriched, 1);
@@ -312,6 +313,30 @@ fn an_empty_answer_is_recorded_as_asked_and_not_asked_again() {
     // A second pass does not re-ask: the producer marker says it was answered.
     assert_eq!(store.synthesize(&mut model, 4).unwrap(), 0);
     assert_eq!(*calls.lock().unwrap(), 1);
+}
+
+/// Purpose: An alias lets a different wording find the same summary, which is what makes "forgot, search again" work in a person's own words.
+#[test]
+fn an_alias_makes_a_different_wording_find_the_summary() {
+    let tmp = TempLog::new();
+    append_task(tmp.path(), 1, "src/config/merge.rs");
+    let mut store = digested(tmp.path());
+    // Before enrichment the other wording finds nothing: this is the failure the
+    // alias exists to fix, and what `record` mode still looks like.
+    assert!(store.recall(&SearchQuery::new(["overlay"])).unwrap().is_empty());
+
+    let (mut model, _) = Scripted::saying(Synthesis {
+        aliases: vec!["overlay".into(), "合并优先级".into(), "merge 顺序".into()],
+        ..Default::default()
+    });
+    store.synthesize(&mut model, 4).unwrap();
+
+    let hits = store.recall(&SearchQuery::new(["overlay"])).unwrap();
+    assert_eq!(hits.len(), 1, "the alias found the episode: {hits:?}");
+    assert!(
+        hits[0].content.contains("层叠"),
+        "and it is the same episode, not another one"
+    );
 }
 
 /// Purpose: Pin that one failed call degrades only its own episode, leaves every digest in place and does not stop the pass.

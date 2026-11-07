@@ -112,6 +112,8 @@ impl DigestInput {
              1. why：最终采用的做法为什么可行，或这个问题的根因是什么。\n\
              2. open_questions：还没解决的问题；没有就填空数组。\n\
              3. conclusion：一句话结论。\n\
+             4. aliases：另外给 3-6 个别名——同一件事的其它说法、英文叫法、涉及的模块或工具名、\
+             用户当时用的词。只给词或短语，不要句子。\n\
              不要复述上面的事实，不要输出 JSON 以外的内容。",
         );
         out
@@ -134,7 +136,8 @@ impl DigestInput {
             "properties": {
                 "open_questions": {"type": "array", "items": {"type": "string"}},
                 "why": {"type": "string"},
-                "conclusion": {"type": "string"}
+                "conclusion": {"type": "string"},
+                "aliases": {"type": "array", "items": {"type": "string"}}
             },
             "required": ["why", "conclusion"]
         })
@@ -155,6 +158,14 @@ pub struct Synthesis {
     pub open_questions: Vec<String>,
     pub why: Vec<String>,
     pub conclusion: Option<String>,
+    /// Other names for the same episode: a synonym, the English term, the module
+    /// or tool involved, the words the person actually used.
+    ///
+    /// They are an **index**, not memory. They are appended to the summary's
+    /// `content` as a `别名：` line so a different wording matches it, and skipped
+    /// when the body is rendered. `#[serde(default)]`: an answer written before
+    /// this field existed still parses.
+    pub aliases: Vec<String>,
 }
 
 impl Synthesis {
@@ -169,6 +180,7 @@ impl Synthesis {
             && self.open_questions.is_empty()
             && self.why.is_empty()
             && self.conclusion.is_none()
+            && self.aliases.is_empty()
     }
 
     /// Purpose: The window cost of the fields a model is allowed to fill.
@@ -187,6 +199,7 @@ impl Synthesis {
             .chain(self.open_questions.iter())
             .chain(self.why.iter())
             .chain(self.conclusion.iter())
+            .chain(self.aliases.iter())
             .map(|s| crate::digest::estimate_tokens(s))
             .sum()
     }
@@ -234,6 +247,7 @@ impl Synthesis {
             open_questions: strings("open_questions"),
             why,
             conclusion,
+            aliases: strings("aliases"),
         };
         if synthesis.is_empty() && value.get("why").is_none() {
             return Err(SummarizerError::Malformed(

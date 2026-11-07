@@ -496,6 +496,7 @@ fn the_scorer_can_tell_faithful_from_fabricated() {
                 why,
                 open_questions: Vec::new(),
                 conclusion: Some("已修复".to_string()),
+                aliases: Vec::new(),
             }
         }),
     };
@@ -527,6 +528,7 @@ fn the_scorer_can_tell_faithful_from_fabricated() {
                 why,
                 open_questions: Vec::new(),
                 conclusion: Some("全部完成".to_string()),
+                aliases: Vec::new(),
             }
         }),
     };

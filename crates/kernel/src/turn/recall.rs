@@ -414,6 +414,21 @@ impl Kernel {
     }
 }
 
+/// Purpose: A summary's body without the `别名：` index line, so the model reads memory rather than a search index.
+///
+/// Serves: `别名` being an index, not a claim about what happened.
+/// Design: `docs/design/context-ledger.md` §5.
+/// Up: `render_expansion`.
+/// Down: no callee; it filters lines.
+/// Verify: `cargo test -p loong-kernel turn::tests::aliases_are_not_rendered_into_the_summary_text`.
+pub(super) fn summary_body(content: &str) -> String {
+    content
+        .lines()
+        .filter(|line| !line.starts_with("别名："))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Purpose: Render one summary together with the original events it cites.
 ///
 /// Serves: expansion returning evidence, not just a derived claim.
@@ -432,7 +447,7 @@ fn render_expansion(expansion: &loong_context::Expansion) -> String {
         expansion.summary.level,
         expansion.summary.title,
         expansion.summary.status,
-        expansion.summary.content
+        summary_body(&expansion.summary.content)
     ));
     if expansion.evidence.is_empty() {
         out.push_str("(this summary cites no events)\n");

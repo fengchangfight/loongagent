@@ -613,6 +613,15 @@ pub fn merge_synthesis(content: &str, synthesis: &crate::summarizer::Synthesis) 
     if let Some(conclusion) = &synthesis.conclusion {
         out.push_str(&format!("模型结论：{conclusion}\n"));
     }
+    // The aliases are the search index, in the same `content` column the search
+    // already scans. A column of their own would mean a schema version bump, and a
+    // version mismatch makes `Store::open` refuse the sidecar — every old session
+    // would lose its memory to gain a few words. One text line buys zero migration;
+    // the renderer skips lines that start with `别名：` so the model never reads an
+    // index as if it were the record.
+    if !synthesis.aliases.is_empty() {
+        out.push_str(&format!("别名：{}\n", synthesis.aliases.join("；")));
+    }
     out
 }
 

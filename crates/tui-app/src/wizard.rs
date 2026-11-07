@@ -174,6 +174,9 @@ pub enum Outcome {
     Stopped,
     /// It ended in an error.
     Failed,
+    /// It ran out of steps before the task was done — a louder warning than "完成", because
+    /// the work on screen is not finished and a green tick would say it was.
+    StepLimit,
 }
 
 /// Purpose: The last turn's ending and its duration, held on the prompt box until the next task starts.
@@ -208,6 +211,9 @@ impl Finished {
             Outcome::Done => format!("✓ 完成{took}"),
             Outcome::Stopped => format!("⏹ 已停止{took}"),
             Outcome::Failed => format!("✗ 失败{took}"),
+            // The icon and the word both refuse to read as success: the agent stopped
+            // because it ran out of steps, not because the task was done.
+            Outcome::StepLimit => format!("⚠ 步数用尽·未完成{took}"),
         }
     }
 
@@ -225,6 +231,13 @@ impl Finished {
                 .add_modifier(Modifier::BOLD),
             Outcome::Stopped => Style::default().fg(Color::Yellow),
             Outcome::Failed => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            // A warning that must not be scrolled past: bold, on a loud background, in a
+            // colour that is never the green of "完成". The work stopped mid-task; the bar
+            // has to say so at a glance.
+            Outcome::StepLimit => Style::default()
+                .fg(Color::White)
+                .bg(Color::LightRed)
+                .add_modifier(Modifier::BOLD),
         }
     }
 }

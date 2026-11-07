@@ -397,6 +397,14 @@ const MARK_INK: Color = Color::Cyan;
 const MARK_ACCENT: Color = Color::Magenta;
 /// The sayings: the terminal's own foreground, dimmed. Present, not shouting.
 const MARK_QUIET: Style = Style::new().fg(Color::Reset).add_modifier(Modifier::DIM);
+/// The prompt band's background, shared by the band's own drawing and the selection's
+/// painting so the two never drift: a deep blue the ink still reads on, distinct from any
+/// of the transcript's foreground voices.
+const PROMPT_BG: Color = Color::Rgb(30, 58, 95);
+/// The fixed phrase the kernel's step-limit note carries. The note arrives as an ordinary
+/// assistant line, so the surface has to recognise it by this phrase — the same words the
+/// kernel writes in `crates/kernel/src/turn/loop.rs` when it stops for the step limit.
+const STEP_LIMIT_NOTE: &str = "without finishing (step limit)";
 /// Whatever the terminal uses for ordinary text. Bold, so it stands out without
 /// inventing a colour that may vanish into the background.
 const MARK_TEXT: Style = Style::new().fg(Color::Reset).add_modifier(Modifier::BOLD);
@@ -630,20 +638,40 @@ pub struct OpenFold {
     pub scroll: usize,
 }
 
-/// Purpose: A mouse selection over the conversation: where the drag started and where it is now, in body rows and display columns.
+/// Purpose: A mouse selection over the page or the prompt: where the drag started, where it is now, and which region it belongs to.
 /// Serves: `App::handle_mouse`, `App::selection_text` and `App::draw`.
 /// Design: `docs/design/tui-selection.md` §1.
 /// Up: `App::handle_mouse` builds it; `draw` paints it.
-/// Down: no call; it is two anchors and a drag flag.
+/// Down: no call; it is two anchors, a region and a drag flag.
 /// Verify: `cargo test -p loong-tui-app`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Selection {
-    /// The body row and display column where the drag started.
+    /// The row and display column where the drag started, in its region's coordinates.
     anchor: (usize, u16),
-    /// The body row and display column under the pointer now.
+    /// The row and display column under the pointer now.
     head: (usize, u16),
     /// True between the press and the release, so a wheel event knows not to move the page.
     dragging: bool,
+    /// Which region the drag began on. A drag never crosses from the conversation into
+    /// the prompt or back: the two hold different text (the record vs. the draft), and
+    /// a range that spanned both would have no honest text to copy.
+    area: SelectionArea,
+}
+
+/// Purpose: Which part of the screen a mouse selection is over, so a drag in the prompt never reads the conversation's rows.
+/// Serves: `App::handle_mouse`, `App::selection_text`, `App::paint_selection`.
+/// Design: `docs/design/tui-selection.md` §1–2.
+/// Up: `Selection` carries it; `App::cell_at` and `App::clamp_cell` decide it.
+/// Down: `App::selection_text` and `App::paint_selection` branch on it.
+/// Verify: `cargo test -p loong-tui-app`.
+/// The region a selection belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelectionArea {
+    /// The conversation page: the transcript, an open fold or the live answer.
+    Page,
+    /// The prompt: the draft being typed. Its highlight survives the copy and drops on
+    /// the next click inside the box — that click is the "done, put it away" gesture.
+    Input,
 }
 
 /// Purpose: What the last frame drew: the page's rectangle, where its body starts, and the plain text of each body row.
@@ -662,6 +690,37 @@ struct PageMap {
     body_base: usize,
     /// The plain text of every body row on screen, top to bottom.
     body: Vec<String>,
+    /// Which body rows carry the prompt band, so `paint_selection` can keep the band under
+    /// the selection's reverse video. Same coordinates as `body`: the band is about where
+    /// a row sits, and scrolling the row away scrolls the band away.
+    band: Vec<bool>,
+    /// The prompt's own map, or `None` before the first frame. Empty `rows` (an empty
+    /// draft) mean there is nothing to select.
+    input: Option<InputMap>,
+}
+
+/// Purpose: The prompt's geometry and plain text for one frame, so the mouse can select and copy what is being typed.
+/// Serves: `App::handle_mouse`, `App::selection_text`, `App::paint_selection`.
+/// Design: `docs/design/tui-selection.md` §1–2.
+/// Up: `App::draw` records it from the same `input_lines` result it renders.
+/// Down: `App::input_cell` maps a screen cell through it.
+/// Verify: `cargo test -p loong-tui-app`.
+/// The prompt box as drawn: where its content rows are, and what each one says. The
+/// border and the panel rows above are not part of it; neither is the empty tail of a
+/// content row, which is why every row carries its own width.
+#[derive(Debug, Clone)]
+struct InputMap {
+    /// The box's full rect, border included: a click anywhere in it is "in the prompt".
+    area: ratatui::layout::Rect,
+    /// One plain-text row per wrapped content row, in screen order.
+    rows: Vec<String>,
+    /// The screen row of the first content row: the border row is `top - 1`.
+    top: u16,
+    /// The column where the text begins: the box's left border plus `PROMPT_MARK`.
+    text_x: u16,
+    /// How wide every content row was wrapped at: the copyable range of a row ends at
+    /// `text_x + that row's own length` and never crosses into the border.
+    width: u16,
 }
 
 /// Purpose: The whole screen state: transcript, input, folds, models, the pending decision and the last turn's outcome.
@@ -720,6 +779,10 @@ pub struct App {
     /// Set when the person asked for the turn to stop, so its end can be labelled
     /// honestly instead of as a completion.
     stopping: bool,
+    /// Set when the agent's own parting word this turn was the step-limit note — the line
+    /// that says it ran out of steps mid-task. Read when the turn ends so the tick says
+    /// "未完成", not "✓ 完成".
+    step_limited: bool,
     pub error: Option<String>,
     /// The answer so far, while it is being written.
     /// The `@` file picker, when the caret is inside a reference.
@@ -818,6 +881,7 @@ impl App {
             busy: false,
             finished: None,
             stopping: false,
+            step_limited: false,
             error: None,
             yolo: false,
             approval: None,
@@ -872,6 +936,8 @@ impl App {
         // A new task makes the last tick stale, and a tick that outlives its turn is a
         // tick that lies about the work on screen.
         self.finished = None;
+        // And the last turn's step-limit mark with it: this turn starts clean.
+        self.step_limited = false;
         self.input.clear();
         self.cursor = 0;
         // Sending is a return to the prompt, so the keyboard's place among the folds is
@@ -2166,12 +2232,26 @@ impl App {
             .unwrap_or(self.input.len())
     }
 
-    /// Purpose: Insert text at the caret, advance it and refresh the picker.
-    /// Contract: called by `handle_key`'s character arm; calls `byte_at` and `refresh_picker`.
+    /// Purpose: Insert text at the caret, advance it, drop a stale prompt selection and refresh the picker.
+    /// Serves: `App::handle_key`'s character arm.
+    /// Design: `docs/design/tui-selection.md` §1.
+    /// Up: `App::handle_key`.
+    /// Down: `App::byte_at`, `App::refresh_picker`.
+    /// Verify: `cargo test -p loong-tui-app`.
     fn insert(&mut self, text: &str) {
         let at = self.byte_at(self.cursor);
         self.input.insert_str(at, text);
         self.cursor += text.chars().count();
+        // A changed draft no longer matches what the highlight spans, so put the highlight
+        // away: lit cells over text that is not what was copied would be a lie. Only the
+        // prompt's selection is affected; the conversation's belongs to text that did not move.
+        if self
+            .select
+            .as_ref()
+            .is_some_and(|select| select.area == SelectionArea::Input)
+        {
+            self.select = None;
+        }
         self.refresh_picker();
     }
 
@@ -2599,6 +2679,12 @@ impl App {
                     // bar that lies is worse than no status bar.
                     for line in &lines {
                         self.follow_model_change(line);
+                        // The kernel's step-limit note is how the agent says it stopped
+                        // because it ran out of steps. Mark the turn so the ending tick
+                        // warns instead of claiming "完成".
+                        if line.contains(STEP_LIMIT_NOTE) {
+                            self.step_limited = true;
+                        }
                     }
                     self.push_lines(lines);
                 }
@@ -2618,10 +2704,15 @@ impl App {
                         // that restarted afterwards would be timing something else.
                         let outcome = if self.stopping {
                             Outcome::Stopped
+                        } else if self.step_limited {
+                            // The agent stopped because it ran out of steps, mid-task: the
+                            // tick has to warn, not claim the work is done.
+                            Outcome::StepLimit
                         } else {
                             Outcome::Done
                         };
                         self.stopping = false;
+                        self.step_limited = false;
                         let seconds = self
                             .busy_since
                             .take()
@@ -3178,10 +3269,11 @@ impl App {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.select = self
                     .cell_at(event.column, event.row)
-                    .map(|(at, column)| Selection {
+                    .map(|(at, column, area)| Selection {
                         anchor: (at, column),
                         head: (at, column),
                         dragging: true,
+                        area,
                     });
             }
             // Right-click is the copy gesture a terminal reader already has. It copies
@@ -3217,6 +3309,10 @@ impl App {
                     self.select = None;
                     return Action::None;
                 }
+                // The highlight survives the copy, in the prompt as in the conversation: it
+                // is the receipt that says "this is what was taken". It drops on the next
+                // click (a click in the prompt is the "done, put it away" gesture) or when
+                // the draft changes under it.
                 return Action::CopyText(text);
             }
             _ => {}
@@ -3224,10 +3320,27 @@ impl App {
         Action::None
     }
 
-    /// Purpose: The body row and display column under a mouse cell, or `None` when the cell is outside the conversation page.
-    /// Contract: called by `handle_mouse`'s Down arm; reads the last frame's `PageMap`.
-    fn cell_at(&self, column: u16, row: u16) -> Option<(usize, u16)> {
+    /// Purpose: The body row and display column under a mouse cell, or `None` outside both the conversation and the prompt.
+    /// Serves: `App::handle_mouse`'s Down arm.
+    /// Design: `docs/design/tui-selection.md` §2.
+    /// Up: `App::handle_mouse`.
+    /// Down: `App::input_cell` for a cell inside the prompt; reads the last frame's `PageMap`.
+    /// Verify: `cargo test -p loong-tui-app`.
+    fn cell_at(&self, column: u16, row: u16) -> Option<(usize, u16, SelectionArea)> {
         let page = self.page.as_ref()?;
+        // The prompt sits below the page; check it first so a drag starting in it is the
+        // prompt's, and a drag starting above stays the page's.
+        if let Some(input) = page.input.as_ref() {
+            if input.area.y <= row
+                && row < input.area.y + input.area.height
+                && input.area.x <= column
+                && column < input.area.x + input.area.width
+            {
+                return self
+                    .input_cell(input, column, row)
+                    .map(|(at, col)| (at, col, SelectionArea::Input));
+            }
+        }
         let offset = row.checked_sub(page.area.y)?;
         let index = offset.checked_sub(page.body_top)? as usize;
         if index >= page.body.len() {
@@ -3236,13 +3349,26 @@ impl App {
         let column = column
             .saturating_sub(page.area.x)
             .min(page.area.width.saturating_sub(1));
-        Some((page.body_base + index, column))
+        Some((page.body_base + index, column, SelectionArea::Page))
     }
 
-    /// Purpose: The body row and display column a drag ends on, clamped to the page so a drag outside it still selects.
-    /// Contract: called by `handle_mouse`'s Drag arm; reads the last frame's `PageMap`.
+    /// Purpose: The selectable cell a drag ends on, clamped into its own region so a drag outside still selects without crossing into the other region.
+    /// Serves: `App::handle_mouse`'s Drag arm.
+    /// Design: `docs/design/tui-selection.md` §2.
+    /// Up: `App::handle_mouse`.
+    /// Down: `App::input_clamp` for the prompt; reads the last frame's `PageMap` and the open selection's region.
+    /// Verify: `cargo test -p loong-tui-app`.
     fn clamp_cell(&self, column: u16, row: u16) -> Option<(usize, u16)> {
         let page = self.page.as_ref()?;
+        // A drag stays in the region it began in: the prompt's drag never reaches the
+        // conversation above it, and the conversation's drag never reaches the prompt.
+        if self
+            .select
+            .as_ref()
+            .is_some_and(|select| select.area == SelectionArea::Input)
+        {
+            return self.input_clamp(page.input.as_ref()?, column, row);
+        }
         if page.body.is_empty() {
             return None;
         }
@@ -3252,6 +3378,43 @@ impl App {
         let last = page.body_top + page.body.len() as u16 - 1;
         let offset = row.saturating_sub(page.area.y).clamp(page.body_top, last);
         Some((page.body_base + (offset - page.body_top) as usize, column))
+    }
+
+    /// Purpose: The prompt content cell under a mouse cell, or `None` when it falls on the border, a blank row or the empty tail.
+    /// Contract: called by `cell_at` once the cell is known to sit inside the box.
+    fn input_cell(&self, input: &InputMap, column: u16, row: u16) -> Option<(usize, u16)> {
+        let at = row.checked_sub(input.top)? as usize;
+        let text = input.rows.get(at)?;
+        // The box's left border is one column; the text begins right after it.
+        let column = column.checked_sub(input.text_x)?;
+        let width = unicode_width::UnicodeWidthStr::width(text.as_str()) as u16;
+        if width == 0 || column >= width {
+            return None;
+        }
+        Some((at, column))
+    }
+
+    /// Purpose: The prompt content cell a drag ends on, clamped to the box's text so a drag off the box still selects inside it.
+    /// Serves: `App::clamp_cell` while the open selection is the prompt's.
+    /// Design: `docs/design/tui-selection.md` §2.
+    /// Up: `App::clamp_cell`.
+    /// Down: no call; it reads an `InputMap` and clamps.
+    /// Verify: `cargo test -p loong-tui-app`.
+    fn input_clamp(&self, input: &InputMap, column: u16, row: u16) -> Option<(usize, u16)> {
+        if input.rows.is_empty() {
+            return None;
+        }
+        let last = input.top + input.rows.len() as u16 - 1;
+        let at = row.clamp(input.top, last) - input.top;
+        let text = &input.rows[at as usize];
+        let width = unicode_width::UnicodeWidthStr::width(text.as_str()) as u16;
+        // Clamp into the row's own text; a row shorter than the drag reaches only as far
+        // as it has characters. An empty row has no copyable range, so it cannot be a head.
+        if width == 0 {
+            return None;
+        }
+        let column = column.saturating_sub(input.text_x).min(width - 1);
+        Some((at as usize, column))
     }
 
     /// Purpose: The selected text in reading order, lines joined by `\n` and clipped to the page's width.
@@ -3269,19 +3432,41 @@ impl App {
         } else {
             (select.head, select.anchor)
         };
+        // A wrap in the prompt is a soft break — the reader never typed a newline there —
+        // so its rows join without one. The conversation's rows are real lines and keep
+        // their `\n`.
+        let joiner = if select.area == SelectionArea::Input {
+            ""
+        } else {
+            "\n"
+        };
         let mut rows = Vec::new();
         for at in start.0..=end.0 {
-            let Some(index) = at.checked_sub(page.body_base) else {
-                continue;
-            };
-            let Some(text) = page.body.get(index) else {
-                continue;
-            };
             let from = if at == start.0 { start.1 } else { 0 };
             let to = if at == end.0 { end.1 } else { u16::MAX };
-            rows.push(slice_cells(text, from, to, page.area.width));
+            let row = match select.area {
+                SelectionArea::Input => {
+                    let Some(input) = page.input.as_ref() else {
+                        continue;
+                    };
+                    let Some(text) = input.rows.get(at) else {
+                        continue;
+                    };
+                    slice_cells(text, from, to, input.width)
+                }
+                SelectionArea::Page => {
+                    let Some(index) = at.checked_sub(page.body_base) else {
+                        continue;
+                    };
+                    let Some(text) = page.body.get(index) else {
+                        continue;
+                    };
+                    slice_cells(text, from, to, page.area.width)
+                }
+            };
+            rows.push(row);
         }
-        rows.join("\n")
+        rows.join(joiner)
     }
 
     /// Purpose: Reverse the selected cells after the page is drawn, so a selection is visible without touching the transcript.
@@ -3290,10 +3475,48 @@ impl App {
     /// Up: `App::draw`.
     /// Down: the last frame's `PageMap` and the selection.
     /// Verify: `cargo test -p loong-tui-app`.
+    /// Purpose: Paint the prompt band on the transcript's prompt rows, as a background so it reads as one band to the eye.
+    /// Serves: `App::draw`, called after the page paragraph so it colours the cells the paragraph just painted.
+    /// Design: `docs/design/tui-selection.md` §2.
+    /// Up: `App::draw`.
+    /// Down: `PageMap::band` and `PROMPT_BG`.
+    /// Verify: `cargo test -p loong-tui-app`.
+    fn paint_band(&self, frame: &mut Frame, view: ratatui::layout::Rect) {
+        let Some(page) = self.page.as_ref() else {
+            return;
+        };
+        // The band runs the full width of the row — the eye reads a band, not a highlight
+        // that stops where the words do. Only rows marked in `band` get it, so scrolling a
+        // prompt away takes its band with it.
+        for (index, is_prompt) in page.band.iter().enumerate() {
+            if !is_prompt {
+                continue;
+            }
+            let y = page.area.y + page.body_top + index as u16;
+            for column in 0..page.area.width {
+                let x = page.area.x + column;
+                if let Some(cell) = frame.buffer_mut().cell_mut((x, y)) {
+                    let style = cell.style().bg(PROMPT_BG);
+                    cell.set_style(style);
+                }
+            }
+        }
+        let _ = view;
+    }
+
+    /// Purpose: Paint the selection's reverse video over the conversation's rows.
+    /// Serves: `App::draw`, called after the band so a selected prompt row keeps its band under the highlight.
+    /// Design: `docs/design/tui-selection.md` §2.
+    /// Up: `App::draw`.
+    /// Down: `PageMap::body` and `PageMap::band`.
+    /// Verify: `cargo test -p loong-tui-app`.
     fn paint_selection(&self, frame: &mut Frame) {
         let (Some(page), Some(select)) = (self.page.as_ref(), self.select.as_ref()) else {
             return;
         };
+        if select.area != SelectionArea::Page {
+            return;
+        }
         let (start, end) = if select.anchor <= select.head {
             (select.anchor, select.head)
         } else {
@@ -3311,8 +3534,84 @@ impl App {
                 continue;
             }
             let y = page.area.y + page.body_top + index as u16;
+            let banded = page.band.get(index).copied().unwrap_or(false);
             for column in from..to {
                 let x = page.area.x + column;
+                if let Some(cell) = frame.buffer_mut().cell_mut((x, y)) {
+                    // A selected cell on a prompt row keeps the band: the reverse video
+                    // marks the selection, the band still says the row is a prompt.
+                    let mut style = cell.style().add_modifier(Modifier::REVERSED);
+                    if banded {
+                        style = style.bg(PROMPT_BG);
+                    }
+                    cell.set_style(style);
+                }
+            }
+        }
+    }
+
+    /// Purpose: The prompt's map for the mouse: the box's rect and its text rows, from the same layout the bottom stack used.
+    /// Serves: `App::draw`, which stores it on `PageMap::input`.
+    /// Design: `docs/design/tui-selection.md` §1.
+    /// Up: `App::draw`.
+    /// Down: `App::wrapped_input`.
+    /// Verify: `cargo test -p loong-tui-app`.
+    fn input_map(
+        &self,
+        bottom: ratatui::layout::Rect,
+        decision_height: u16,
+        menu_height: u16,
+        picker_height: u16,
+    ) -> InputMap {
+        // The prompt box is the row band right below the question and the menus. Its top
+        // rule is one border row; the text rows follow. The text begins one column in, past
+        // the box's left border — the box carries no `❯` mark, so there is no prefix to skip.
+        let top = bottom.y + decision_height + menu_height + picker_height;
+        let inner_width = bottom.width.saturating_sub(2);
+        let (rows, _) = self.wrapped_input(inner_width);
+        InputMap {
+            area: bottom,
+            rows,
+            top: top + 1,
+            text_x: bottom.x + 1,
+            width: inner_width,
+        }
+    }
+
+    /// Purpose: Paint the prompt's selection over its text, after the bottom paragraph so the highlight is not painted over.
+    /// Serves: `App::draw`, called after the bottom stack is rendered.
+    /// Design: `docs/design/tui-selection.md` §1.
+    /// Up: `App::draw`.
+    /// Down: `PageMap::input`.
+    /// Verify: `cargo test -p loong-tui-app`.
+    fn paint_input_selection(&self, frame: &mut Frame) {
+        let (Some(page), Some(select)) = (self.page.as_ref(), self.select.as_ref()) else {
+            return;
+        };
+        if select.area != SelectionArea::Input {
+            return;
+        }
+        let Some(input) = page.input.as_ref() else {
+            return;
+        };
+        let (start, end) = if select.anchor <= select.head {
+            (select.anchor, select.head)
+        } else {
+            (select.head, select.anchor)
+        };
+        for (at, text) in input.rows.iter().enumerate() {
+            if at < start.0 || at > end.0 {
+                continue;
+            }
+            let width = unicode_width::UnicodeWidthStr::width(text.as_str()) as u16;
+            let from = if at == start.0 { start.1 } else { 0 }.min(width);
+            let to = if at == end.0 { end.1 } else { u16::MAX }.min(width);
+            if from >= to {
+                continue;
+            }
+            let y = input.top + at as u16;
+            for column in from..to {
+                let x = input.text_x + column;
                 if let Some(cell) = frame.buffer_mut().cell_mut((x, y)) {
                     let style = cell.style().add_modifier(Modifier::REVERSED);
                     cell.set_style(style);
@@ -3688,13 +3987,26 @@ impl App {
             .iter()
             .map(|line| line_text(line))
             .collect();
+        // The prompt band rides the same `PageMap` the selection reads, so the two never
+        // disagree about which row is a prompt: it is true exactly where `classify` said
+        // `LineKind::Prompt`, and scrolling a row away scrolls its band away with it.
+        let band: Vec<bool> = body
+            .iter()
+            .map(|text| matches!(classify(text), LineKind::User))
+            .collect();
         self.page = Some(PageMap {
             area: view,
             body_top: (body_from - first) as u16,
             body_base: body_from.saturating_sub(body_start),
             body,
+            band,
+            input: None,
         });
         frame.render_widget(Paragraph::new(page), view);
+        // The prompt band is a background on rows the paragraph just painted, so it is
+        // drawn after it — and before the selection's reverse video, so a selected prompt
+        // row still reads as a band.
+        self.paint_band(frame, view);
         self.paint_selection(frame);
 
         // The bottom stack: the question, then the menus, then the prompt, then the usage
@@ -3707,6 +4019,16 @@ impl App {
             tail.push(usage);
         }
         frame.render_widget(Paragraph::new(tail), bottom);
+
+        // The prompt's map, recorded after the bottom stack is laid out. It is pure
+        // geometry — where the box's text rows landed — so the mouse can select the draft.
+        let input_map = self.input_map(bottom, decision_height, menu_height, picker_height);
+        if let Some(page) = self.page.as_mut() {
+            page.input = Some(input_map);
+        }
+        // The conversation's selection was painted before the page; the prompt's has to be
+        // painted after the bottom paragraph, or the paragraph would paint over it.
+        self.paint_input_selection(frame);
 
         // The prompt does not scroll, so the caret is wherever the prompt is.
         if self.pending.is_none() {

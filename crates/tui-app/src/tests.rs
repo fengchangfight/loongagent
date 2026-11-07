@@ -1861,6 +1861,7 @@ fn the_wheel_scrolls_the_conversation() {
         anchor: (0, 0),
         head: (0, 2),
         dragging: false,
+        area: SelectionArea::Page,
     });
     assert_eq!(
         app.handle_mouse(mouse_at(MouseEventKind::ScrollUp, 0, 2)),
@@ -2270,6 +2271,79 @@ fn a_running_turn_under_yolo_still_shows_that_it_is_working() {
     );
 }
 
+/// Purpose: A turn stopped by the step limit is not "✓ 完成": the tick must say the work ran out of steps, loudly, so it is never mistaken for a success.
+#[test]
+fn a_turn_that_hit_the_step_limit_is_not_called_finished() {
+    use ratatui::style::Color;
+    let mut app = App::new("s", "v");
+    app.logo = false;
+    app.busy = true;
+    app.busy_since = Some(std::time::Instant::now());
+
+    // The kernel's parting word arrives like any assistant line: the step-limit note. It
+    // is what the agent says when it ran out of steps mid-task, and it must not be greeted
+    // with the green tick that means the work is done.
+    fed(
+        &mut app,
+        FromWorker::Lines(vec![
+            "stopped after 50 steps without finishing (step limit) — reply to continue, or raise max_steps".to_string(),
+        ]),
+    );
+    fed(&mut app, FromWorker::State { pending: None });
+
+    // The tick is its own outcome, not Done.
+    let finished = app.finished.expect("the turn ended, so there is an ending");
+    assert_eq!(
+        finished.outcome,
+        Outcome::StepLimit,
+        "a step-limited turn is its own outcome, not Done"
+    );
+    assert!(
+        !finished.line().starts_with("✓"),
+        "the tick must not claim the work finished: {:?}",
+        finished.line()
+    );
+    // It is loud — bold, and not the green of success.
+    let style = finished.style();
+    assert!(
+        style.add_modifier.contains(Modifier::BOLD),
+        "the step-limit tick is loud, not a quiet line that scrolls away"
+    );
+    assert_ne!(
+        style.fg,
+        Some(Color::Green),
+        "green reads as success; a step limit is not success"
+    );
+
+    // And the prompt box carries the warning, not "完成".
+    let screen = draw(&mut app, 110, 24);
+    let titles = box_titles(&screen);
+    assert!(
+        !titles.contains(&despaced("✓ 完成")),
+        "the prompt box must not say the work finished:\n{screen}"
+    );
+    assert!(
+        titles.contains(&despaced("步数")) || titles.contains(&despaced("未完成")),
+        "the prompt box says it ran out of steps:\n{screen}"
+    );
+}
+
+/// Purpose: A normal turn that ends on its own is still "✓ 完成" — the step-limit mark never fires on a success.
+#[test]
+fn a_turn_that_ends_on_its_own_is_still_called_finished() {
+    let mut app = App::new("s", "v");
+    app.logo = false;
+    app.busy = true;
+    app.busy_since = Some(std::time::Instant::now());
+    fed(&mut app, FromWorker::Lines(vec!["done".to_string()]));
+    fed(&mut app, FromWorker::State { pending: None });
+    assert_eq!(
+        app.finished.expect("an ending").outcome,
+        Outcome::Done,
+        "a turn with no step-limit note is still Done"
+    );
+}
+
 /// Purpose: A finished turn under YOLO still says it finished; the warning is a mark, not a replacement for the status.
 #[test]
 fn a_finished_turn_under_yolo_still_says_it_finished() {
@@ -2619,6 +2693,224 @@ fn a_selection_maps_through_the_scroll_offset() {
         app.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), x + 4, y)),
         Action::CopyText("line".to_string())
     );
+}
+
+/// Purpose: A left-drag across the prompt's text copies exactly the cells it covered, like a drag over the conversation does.
+#[test]
+fn a_drag_over_the_prompt_copies_the_typed_text() {
+    let mut app = App::new("s", "v");
+    app.logo = false;
+    type_text(&mut app, "cargo test please");
+    let buffer = drawn_buffer(&mut app, 40, 12);
+    let (x, y) = cell_of(&buffer, "cargo");
+
+    assert_eq!(
+        app.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), x, y)),
+        Action::None
+    );
+    assert_eq!(
+        app.handle_mouse(mouse_at(MouseEventKind::Drag(MouseButton::Left), x + 5, y)),
+        Action::None
+    );
+    assert_eq!(
+        app.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), x + 5, y)),
+        // The head column is exclusive (slice_cells takes column < to), so a drag to the
+        // cell after "cargo" copies "cargo" — the trailing space at column 5 is not in it.
+        Action::CopyText("cargo".to_string()),
+        "columns 0..=4 hold 'cargo'; the head is exclusive"
+    );
+}
+
+/// Purpose: A prompt copied by the mouse stays highlighted; the next click anywhere in the prompt drops the highlight, and a click elsewhere leaves it.
+#[test]
+fn a_prompt_selection_stays_lit_until_a_click_in_the_prompt() {
+    let mut app = App::new("s", "v");
+    app.logo = false;
+    app.push_lines(vec!["a reply".to_string()]);
+    type_text(&mut app, "hello");
+    let buffer = drawn_buffer(&mut app, 40, 12);
+    let (x, y) = cell_of(&buffer, "hello");
+
+    app.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), x, y));
+    app.handle_mouse(mouse_at(MouseEventKind::Drag(MouseButton::Left), x + 2, y));
+    app.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), x + 2, y));
+
+    // After the copy the cells are still reversed: the highlight is the receipt.
+    let buffer = drawn_buffer(&mut app, 40, 12);
+    assert!(
+        buffer[(x, y)]
+            .style()
+            .add_modifier
+            .contains(Modifier::REVERSED),
+        "the copied prompt cells stay highlighted"
+    );
+
+    // A click inside the prompt — even on a different cell — puts the highlight away.
+    app.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), x + 4, y));
+    app.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), x + 4, y));
+    let buffer = drawn_buffer(&mut app, 40, 12);
+    assert!(
+        !buffer[(x, y)]
+            .style()
+            .add_modifier
+            .contains(Modifier::REVERSED),
+        "a click in the prompt clears the prompt highlight"
+    );
+
+    // Selecting again, then clicking up in the conversation: that click is the "done, put
+    // it away" gesture, and it drops the prompt's highlight too.
+    app.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), x, y));
+    app.handle_mouse(mouse_at(MouseEventKind::Drag(MouseButton::Left), x + 2, y));
+    app.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), x + 2, y));
+    let (reply_x, reply_y) = cell_of(&drawn_buffer(&mut app, 40, 12), "a reply");
+    app.handle_mouse(mouse_at(
+        MouseEventKind::Down(MouseButton::Left),
+        reply_x,
+        reply_y,
+    ));
+    let buffer = drawn_buffer(&mut app, 40, 12);
+    assert!(
+        !buffer[(x, y)]
+            .style()
+            .add_modifier
+            .contains(Modifier::REVERSED),
+        "a click anywhere — the prompt or the conversation — puts the prompt's highlight away"
+    );
+}
+
+/// Purpose: Typing more does not smear the stale highlight: once the draft changes, nothing is lit.
+#[test]
+fn editing_the_draft_drops_its_highlight() {
+    let mut app = App::new("s", "v");
+    app.logo = false;
+    type_text(&mut app, "hello");
+    let buffer = drawn_buffer(&mut app, 40, 12);
+    let (x, y) = cell_of(&buffer, "hello");
+
+    app.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), x, y));
+    app.handle_mouse(mouse_at(MouseEventKind::Drag(MouseButton::Left), x + 2, y));
+    app.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), x + 2, y));
+
+    type_text(&mut app, "p");
+    let buffer = drawn_buffer(&mut app, 40, 12);
+    for dx in 0..3 {
+        assert!(
+            !buffer[(x + dx, y)]
+                .style()
+                .add_modifier
+                .contains(Modifier::REVERSED),
+            "a changed draft carries no stale highlight (cell {dx})"
+        );
+    }
+}
+
+/// Purpose: A long prompt is selected by its wrapped rows and copied as one piece of text, without the screen's padding.
+#[test]
+fn a_drag_copies_a_wrapped_prompt_as_one_string() {
+    let mut app = App::new("s", "v");
+    app.logo = false;
+    // 46 columns of text in a box 38 cells wide: the draft wraps onto a second row.
+    type_text(&mut app, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabbbbbbbb");
+    let buffer = drawn_buffer(&mut app, 40, 14);
+    let (ax, ay) = cell_of(&buffer, "aaaaaaaa");
+    let (bx, by) = cell_of(&buffer, "bbbbbbbb");
+    assert_eq!(ay + 1, by, "the b-row sits right under the a-row");
+
+    app.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), ax, ay));
+    app.handle_mouse(mouse_at(
+        MouseEventKind::Drag(MouseButton::Left),
+        bx + 1,
+        by,
+    ));
+    assert_eq!(
+        app.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), bx + 1, by)),
+        // The head column is exclusive, so a head one column into "bbbbbbbb" copies one
+        // b; and the wrap is a soft break, so the rows join with no newline.
+        Action::CopyText(format!("{}b", "a".repeat(38))),
+        "a wrap is a soft break: the copy joins the rows without a newline"
+    );
+}
+
+/// Purpose: A drag that leaves the prompt stays inside it, and never reaches into the conversation above.
+#[test]
+fn a_drag_from_the_prompt_does_not_reach_the_conversation() {
+    let mut app = App::new("s", "v");
+    app.logo = false;
+    app.push_lines(vec!["some answer".to_string()]);
+    type_text(&mut app, "hello");
+    let buffer = drawn_buffer(&mut app, 40, 12);
+    let (x, y) = cell_of(&buffer, "hello");
+
+    app.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), x, y));
+    // Dragging up out of the box clamps to the box's first content row.
+    app.handle_mouse(mouse_at(
+        MouseEventKind::Drag(MouseButton::Left),
+        x + 2,
+        y - 3,
+    ));
+    assert_eq!(
+        app.handle_mouse(mouse_at(
+            MouseEventKind::Up(MouseButton::Left),
+            x + 2,
+            y - 3
+        )),
+        // The head column is exclusive: a head at column 2 copies "he", and the clamp kept
+        // the drag inside the prompt even though the pointer left it for the conversation.
+        Action::CopyText("he".to_string())
+    );
+}
+
+/// Purpose: A prompt line carries its background across the whole row, so it reads as one band; an answer line keeps no background.
+#[test]
+fn a_prompt_row_is_a_band_and_an_answer_is_not() {
+    use ratatui::style::Color;
+    let mut app = App::new("s", "v");
+    app.logo = false;
+    app.push_lines(vec!["你：fix the bug".to_string(), "done it".to_string()]);
+    let buffer = drawn_buffer(&mut app, 40, 12);
+    let (x, y) = cell_of(&buffer, "fix the bug");
+    let band = Color::Rgb(30, 58, 95);
+
+    assert_eq!(buffer[(0, y)].bg, band, "the band starts at the left edge");
+    assert_eq!(buffer[(39, y)].bg, band, "and runs to the right edge");
+    assert_eq!(
+        buffer[(x, y)].bg,
+        band,
+        "the prompt's own words sit on the same band"
+    );
+
+    let (_, answer_y) = cell_of(&buffer, "done it");
+    assert_eq!(
+        buffer[(0, answer_y)].bg,
+        Color::Reset,
+        "no band on an answer"
+    );
+    assert_eq!(buffer[(39, answer_y)].bg, Color::Reset);
+}
+
+/// Purpose: A mouse selection on a prompt row keeps the band under it: the reverse video marks the range, the band still says the row is a prompt.
+#[test]
+fn a_selection_on_a_prompt_row_keeps_the_band_under_it() {
+    use ratatui::style::Color;
+    let band = Color::Rgb(30, 58, 95);
+    let mut app = App::new("s", "v");
+    app.logo = false;
+    app.push_lines(vec!["你：remember this".to_string()]);
+    let buffer = drawn_buffer(&mut app, 40, 12);
+    let (x, y) = cell_of(&buffer, "remember");
+
+    // Before any selection the row carries its band; after selecting, the band is still
+    // there under the reverse video — the highlight wins for the range, not for the row.
+    assert_eq!(buffer[(0, y)].bg, band, "the band before the selection");
+    app.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), x, y));
+    app.handle_mouse(mouse_at(MouseEventKind::Drag(MouseButton::Left), x + 2, y));
+    let buffer = drawn_buffer(&mut app, 40, 12);
+    let cell = buffer[(x, y)].clone();
+    assert!(
+        cell.style().add_modifier.contains(Modifier::REVERSED),
+        "the selection's reverse video reads over the band"
+    );
+    assert_eq!(cell.bg, band, "and the band stays under it");
 }
 
 /// Purpose: A mouse event before the first frame has no page to map, and does nothing instead of panicking.

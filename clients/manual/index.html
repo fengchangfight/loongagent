@@ -268,8 +268,71 @@ model    = "qwen2.5:7b-instruct"</code></pre>
 <code>~/.loongagent/</code> 下的派生库里，可以随时删掉重建（<code>loong context rebuild</code>），
 会话原文不受影响。目前只支持 ollama 作摘要后端。</div>
 
-<!-- ════════════════════ 6. VS Code 插件 ════════════════════ -->
-<h2>6. （可选）装 VS Code 插件</h2>
+<!-- ════════════════════ 6. 配置 MCP ════════════════════ -->
+<h2>6. （可选）配置 MCP：给 agent 接外部工具</h2>
+
+<p>MCP（Model Context Protocol）让 loongagent 调用外部工具 server——数据库查询、内部 API、
+浏览器自动化，都算。配置在项目根的 <code>.loongagent/mcp.toml</code> 里，
+<strong>第一次用前必须人工信任</strong>，改一个字节都会重新问。</p>
+
+<p>一个最小的 stdio server（本地命令）：</p>
+
+<pre><code># .loongagent/mcp.toml
+[[server]]
+name = "fs"                      # 工具名前缀，不能带空格或 __
+command = "npx"                  # 要跑的程序
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+env = { DEBUG = "1" }            # 可选，传给子进程的环境变量</code></pre>
+
+<p>一个 http server（远程工具）：</p>
+
+<pre><code>[[server]]
+name = "internal"
+url = "https://mcp.internal.example.com/tools"   # 必须 https；http 只放行本机
+[server.headers]
+Authorization = "Bearer ${INTERNAL_TOKEN}"       # 从环境变量读，不写死</code></pre>
+
+<div class="tip">密钥用 <code>${VAR}</code> 从环境变量插值，<strong>永远不要写进 mcp.toml</strong>——
+它可能被提交进 git。变量没设置会在启动时报错，并指明缺的是哪个变量。</div>
+
+<p><strong>信任它，然后就能用了</strong>：</p>
+
+<pre><code>loongagent mcp list      # 看看都配了什么、信任状态如何
+loongagent mcp trust     # 人工信任当前这份 mcp.toml（每个仓库一次）
+loongagent               # 启动会话，server 的工具就挂上了</code></pre>
+
+<div class="warn">改动 <code>mcp.toml</code> 的任何内容都会让信任失效，下次启动重新问。
+这是故意的——防止有人在仓库里塞一个恶意 server 而你没察觉。</div>
+
+<p><strong>server 一多，schema 会不会撑爆上下文？</strong>不会。工具多的 server 默认走懒加载：
+启动时只挂名字，模型用 <code>tool_search</code> 找到谁，才临时取谁的完整 schema。
+想强制某个 server 全量加载或全量懒加载，加一行 <code>defer = "never"</code>（或
+<code>"always"</code>），默认 <code>"auto"</code>（自动判断）。</p>
+
+<table>
+  <tr><th>字段</th><th>作用</th><th>默认</th></tr>
+  <tr><td><code>action_class</code></td>
+      <td>这个 server 的工具算哪类：<code>investigate</code>（只读）/ <code>write_workspace</code> / <code>out_of_bounds</code>（未知，每次都问）</td>
+      <td><code>out_of_bounds</code></td></tr>
+  <tr><td><code>[server.tools]</code></td>
+      <td>给单个工具覆盖上面的类别，如 <code>write_file = "out_of_bounds"</code></td>
+      <td>继承 server 默认</td></tr>
+  <tr><td><code>timeout_ms</code></td>
+      <td>单次调用超时（毫秒，上限 600000）</td>
+      <td><code>30000</code></td></tr>
+  <tr><td><code>required</code></td>
+      <td><code>false</code> 时 server 起不来只是警告，不阻断会话</td>
+      <td><code>true</code></td></tr>
+  <tr><td><code>defer</code></td>
+      <td><code>auto</code> / <code>always</code> / <code>never</code>：是否懒加载工具 schema</td>
+      <td><code>auto</code></td></tr>
+</table>
+
+<div class="warn">目前不支持 OAuth 授权流、Resources 订阅、Sampling 等 MCP 高级功能。
+远程 server 只认静态 <code>Authorization: Bearer</code> header；需要浏览器登录的暂时接不了。</div>
+
+<!-- ════════════════════ 7. VS Code 插件 ════════════════════ -->
+<h2>7. （可选）装 VS Code 插件</h2>
 
 <p>文件夹里还有一个 <code>.vsix</code> 文件，是同一个 agent 的 VS Code 聊天面板：</p>
 
@@ -280,8 +343,8 @@ model    = "qwen2.5:7b-instruct"</code></pre>
 位置不一样就在设置里搜 <code>loongagent.path</code> 填上完整路径，或运行命令
 <code>loongagent: Locate the binary</code>。</p>
 
-<!-- ════════════════════ 7. 出问题去哪看 ════════════════════ -->
-<h2>7. 常用速查</h2>
+<!-- ════════════════════ 8. 出问题去哪看 ════════════════════ -->
+<h2>8. 常用速查</h2>
 
 <table>
   <tr><th>我想…</th><th>敲这个</th></tr>
@@ -292,6 +355,7 @@ model    = "qwen2.5:7b-instruct"</code></pre>
   <tr><td>看每个设置最终生效的值</td><td><code>loongagent config show</code></td></tr>
   <tr><td>验证沙箱真的在生效</td><td><code>loongagent sandbox self-test</code></td></tr>
   <tr><td>列出所有历史会话 / 接着聊</td><td><code>loongagent sessions</code> / <code>loongagent resume</code></td></tr>
+  <tr><td>看 / 信任 MCP server 配置</td><td><code>loongagent mcp list</code> / <code>loongagent mcp trust</code></td></tr>
   <tr><td>在浏览器里用</td><td><code>loongagent web</code>（只监听本机）</td></tr>
 </table>
 

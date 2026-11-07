@@ -4329,7 +4329,7 @@ fn recall_says_so_when_it_finds_nothing_rather_than_failing() {
         .iter()
         .flatten()
         .find_map(|m| match m {
-            ChatMessage::Tool { output, .. } if output.contains("nothing in this session") => {
+            ChatMessage::Tool { output, .. } if output.contains("no match for") => {
                 Some(output.clone())
             }
             _ => None,
@@ -4447,6 +4447,110 @@ fn a_recall_answer_is_capped_and_says_it_was_capped() {
             }
         }
     }
+}
+
+/// Purpose: One `recall` call carries the original fragment around the matched word, so the model need not expand to see it.
+#[test]
+fn recall_returns_an_evidence_excerpt_in_one_call() {
+    // The matched words sit past the 200-character preview and past the start of the
+    // message: a hit that only says "this matched" would make the model guess what it
+    // said, which is the two-hop cost this task removes.
+    let t = Temp::new();
+    let filler = "无关的填充文字".repeat(60);
+    let long = format!("开头标记{filler}配置层叠失效{filler}结尾标记");
+    let (model, seen) = RecordingModel::new(vec![
+        response(vec![], Some("记下了")),
+        response(vec![call("c9", "recall", json!({"query": "层叠"}))], None),
+        response(vec![], Some("我查到了")),
+    ]);
+    let mut config = KernelConfig::new(&t.dir);
+    config.context_engine = Some(crate::context_engine::ContextEngineConfig::new(
+        t.dir.join("session.context.db"),
+        t.log.clone(),
+    ));
+    let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+    k.submit(&long).unwrap();
+    k.submit("刚才说的那个失效是什么？").unwrap();
+
+    let seen = seen.lock().unwrap();
+    let output = seen
+        .iter()
+        .flatten()
+        .find_map(|m| match m {
+            ChatMessage::Tool { output, .. } if output.contains("memory") => Some(output.clone()),
+            _ => None,
+        })
+        .expect("recall returned something");
+    assert!(
+        output.contains("配置层叠失效"),
+        "the matched words came back in the same call: {output}"
+    );
+    assert!(
+        !output.contains("结尾标记"),
+        "the excerpt is a window on the match, not the whole message: {output}"
+    );
+    assert!(
+        output.contains('…'),
+        "a cut excerpt says it was cut: {output}"
+    );
+}
+
+/// Purpose: A recall answer that compaction later clears can be recalled again, so forgetting keeps a way back.
+#[test]
+fn a_cleared_recall_result_can_be_recalled_again() {
+    let t = Temp::new();
+    big_file(&t.dir, "big.txt", 400);
+    let filler = "无关的填充文字".repeat(60);
+    let long = format!("开头标记{filler}配置层叠失效{filler}结尾标记");
+    let (model, _seen) = RecordingModel::new(vec![
+        // Turn 1 records the statement the later turns ask about.
+        response(vec![], Some("记下了")),
+        // Turn 2 recalls it.
+        response(vec![call("c1", "recall", json!({"query": "层叠"}))], None),
+        response(vec![], Some("查到了")),
+        // Turn 3 reads enough to cross the ceiling, which clears the oldest tool
+        // output — the recall answer from turn 2.
+        response(vec![call("c2", "read_file", json!({"path": "big.txt"}))], None),
+        response(vec![call("c3", "read_file", json!({"path": "big.txt"}))], None),
+        response(vec![], Some("读完了")),
+        // Turn 4 asks the same question again: the answer must still be there.
+        response(vec![call("c4", "recall", json!({"query": "层叠"}))], None),
+        response(vec![], Some("仍在")),
+    ]);
+    let mut config = KernelConfig::new(&t.dir);
+    config.budget_tokens = Some(3_000);
+    config.keep_newest_tokens = 800;
+    config.context_engine = Some(crate::context_engine::ContextEngineConfig::new(
+        t.dir.join("session.context.db"),
+        t.log.clone(),
+    ));
+    let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+    k.submit(&long).unwrap();
+    k.submit("刚才那个是什么来着？").unwrap();
+    k.submit("继续").unwrap();
+    k.submit("再查一次").unwrap();
+
+    let events = loong_eventlog::replay(&t.log).unwrap().events;
+    let cleared = events
+        .iter()
+        .filter(|e| e.kind == ev::COMPACTION_APPLIED)
+        .filter_map(|e| e.data["cleared_tool_outputs"].as_u64())
+        .sum::<u64>();
+    assert!(
+        cleared >= 1,
+        "the recall answer must actually be cleared for this test to prove anything"
+    );
+    let recalled: Vec<&str> = events
+        .iter()
+        .filter(|e| e.kind == ev::TOOL_RESULT)
+        .filter_map(|e| e.data["output"].as_str())
+        .filter(|output| output.contains("evidence [seq") && output.contains("配置层叠失效"))
+        .collect();
+    assert_eq!(
+        recalled.len(),
+        2,
+        "both recalls must return the excerpt, including the one after clearing"
+    );
 }
 
 /// Purpose: The L4 map is a pinned system message after the system prompt, refreshed in one ledger entry rather than one per step.

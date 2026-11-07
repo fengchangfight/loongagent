@@ -61,6 +61,13 @@ impl Kernel {
             .and_then(|v| v.as_u64())
             .unwrap_or(8)
             .clamp(1, 32) as usize;
+        // One call carries evidence, so the model does not spend a second call (and a
+        // second step) on `expand` just to see the words it matched.
+        let excerpt_chars = args
+            .get("excerpt_chars")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(DEFAULT_EXCERPT_CHARS as u64)
+            .clamp(1, MAX_EXCERPT_CHARS as u64) as usize;
 
         // A bare `entity` or `tool` with no words is a legitimate way to ask "what
         // touched src/config?" — it is not an error, so it is not reported as one.
@@ -72,7 +79,7 @@ impl Kernel {
         }
 
         let search = loong_context::SearchQuery {
-            terms,
+            terms: terms.clone(),
             limit,
             ..Default::default()
         };
@@ -98,15 +105,50 @@ impl Kernel {
         };
 
         if summaries.is_empty() && events.is_empty() {
+            let asked = terms.join(" ");
             return (
                 true,
-                "nothing in this session's memory matches. That is a real answer, not an \
-                 error: do not conclude from it that nothing happened — try different words."
-                    .to_string(),
+                format!(
+                    "no match for: {asked}. That is a real answer, not an error: do not \
+                     conclude from it that nothing happened — try different words, or expand \
+                     an `ep` range directly."
+                ),
             );
         }
-        let rendered = render_recall(&summaries, &events);
+        let rendered = self.render_recall(&summaries, &events, &terms, excerpt_chars);
         (true, cap_chars(&rendered, RECALL_MAX_CHARS))
+    }
+
+    /// Purpose: The best excerpt for a summary: the newest cited atom that contains a term.
+    ///
+    /// Serves: `Kernel::render_recall`, so a summary line carries the words it matched
+    /// instead of a preview that starts before them.
+    /// Design: `docs/design/context-ledger.md` §5.
+    /// Up: `Kernel::render_recall`.
+    /// Down: `ContextEngine::store`, `Store::atom_views` and `excerpt_around`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::recall_returns_an_evidence_excerpt_in_one_call`.
+    fn summary_excerpt(
+        &self,
+        summary: &loong_context::Summary,
+        terms: &[String],
+        width: usize,
+    ) -> Option<(u64, String)> {
+        let store = self.context_engine.as_ref()?.store();
+        let mut best: Option<(u64, String)> = None;
+        for (from, to) in &summary.citations {
+            let Ok(atoms) = store.atom_views(*from, *to) else {
+                continue;
+            };
+            for atom in atoms {
+                let Some(text) = excerpt_around(&atom.text, terms, width) else {
+                    continue;
+                };
+                if best.as_ref().is_none_or(|(seq, _)| atom.seq > *seq) {
+                    best = Some((atom.seq, text));
+                }
+            }
+        }
+        best
     }
 }
 
@@ -117,7 +159,7 @@ pub(super) const RECALL_TOOL: &str = "recall";
 /// The description the model reads. Written as an instruction because that is what
 /// it is: the design's discipline ("recall before answering about the past, cite
 /// evidence") only works if the tool tells the model how it is meant to be used.
-pub(super) const RECALL_DESCRIPTION: &str = "Search this session's memory for earlier work. Returns summaries with citations ([seq]) into the raw record. Pass \"expand\" with a summary id to get the summary together with the original events it rests on — do that before asserting that something was verified or fixed. Summaries are a derived index, not the record: when they disagree with the evidence, the evidence is right.";
+pub(super) const RECALL_DESCRIPTION: &str = "Search this session's memory for earlier work. One call returns the original fragment around each match, with its [seq] citation — read it before asserting what was decided, verified or fixed. Pass \"expand\" with a summary id only when you want the whole summary together with the events it rests on. Summaries are a derived index, not the record: when they disagree with the evidence, the evidence is right.";
 
 /// Purpose: The JSON schema the model is offered for `recall`.
 ///
@@ -133,7 +175,7 @@ pub(super) fn recall_parameters() -> Json {
         "properties": {
             "query": {
                 "type": "string",
-                "description": "Words to look for. All of them must appear (AND). Chinese words of two characters work."
+                "description": "Words to look for. Chinese words of two characters work."
             },
             "entity": {
                 "type": "string",
@@ -148,15 +190,31 @@ pub(super) fn recall_parameters() -> Json {
                 "type": "string",
                 "description": "A summary id from a previous recall; returns it with the original events it cites."
             },
+            "excerpt_chars": {
+                "type": "integer",
+                "description": "How many characters of the original text to show around a match (default 240, capped at 800)."
+            },
             "limit": {"type": "integer", "description": "Maximum results (default 8, capped at 32)."}
         }
     })
 }
 
+/// How many characters of the original text one hit shows around its match by default.
+///
+/// One sentence of a decision, or one clause of a constraint, is the unit a later turn
+/// needs; a longer window would spend the context retrieval exists to save.
+pub(super) const DEFAULT_EXCERPT_CHARS: usize = 240;
+
+/// The most a caller may widen that window to.
+pub(super) const MAX_EXCERPT_CHARS: usize = 800;
+
 /// How many characters of retrieved memory one `recall` may put in front of the
 /// model. The whole point of the thin foreground is that retrieval competes for
 /// budget like everything else, so this is a ceiling rather than a hope.
-pub(super) const RECALL_MAX_CHARS: usize = 4_800;
+///
+/// When the ceiling is reached the renderer drops whole hits instead of cutting each
+/// one: a cheap call must not become expensive because it matched a lot.
+pub(super) const RECALL_MAX_CHARS: usize = 4_000;
 
 /// Purpose: Split a query into search terms, keeping two-character Chinese words.
 ///
@@ -211,66 +269,149 @@ fn cap_chars(text: &str, max: usize) -> String {
     format!("{kept}\n…[truncated — narrow the query for the rest]")
 }
 
-/// Purpose: Render summaries with seq citations, or raw events when summaries did not match.
+/// Purpose: The slice of one atom's text around the first query term, cut and marked.
 ///
-/// Serves: a reply the model can trace, with the record distinguished from the index.
+/// Serves: the one-hop answer: the words the model matched, in their original sentence.
 /// Design: `docs/design/context-ledger.md` §5.
-/// Up: `Kernel::recall_tool`.
-/// Down: `Summary`, `Hit` and their citations; no other callee.
-/// Verify: `cargo test -p loong-kernel turn::tests::recall_finds_earlier_work_and_cites_it`.
-/// Render summaries as an index the model can jump from. The citation is part of
-/// every line on purpose: a summary the model cannot trace is a claim, not memory.
-fn render_recall(summaries: &[loong_context::Summary], events: &[loong_context::Hit]) -> String {
+/// Up: `Kernel::render_recall` and `Kernel::summary_excerpt`.
+/// Down: `char::to_lowercase` matching over `str::find`; no other callee.
+/// Verify: `cargo test -p loong-kernel turn::tests::recall_returns_an_evidence_excerpt_in_one_call`.
+/// A window on the match, not the whole message. `None` when no term occurs, so a caller
+/// can fall back instead of showing an arbitrary slice.
+fn excerpt_around(text: &str, terms: &[String], width: usize) -> Option<String> {
+    let lower = text.to_lowercase();
+    let mut at: Option<usize> = None;
+    for term in terms {
+        let needle = term.trim().to_lowercase();
+        if needle.is_empty() {
+            continue;
+        }
+        if let Some(byte) = lower.find(&needle) {
+            let ch = lower[..byte].chars().count();
+            at = Some(at.map_or(ch, |best| best.min(ch)));
+        }
+    }
+    let at = at?;
+    let chars: Vec<char> = text.chars().collect();
+    let width = width.max(1);
+    let start = at.saturating_sub(width / 2);
+    let end = (start + width).min(chars.len());
+    let start = end.saturating_sub(width);
     let mut out = String::new();
-    if !summaries.is_empty() {
-        out.push_str("memory (summaries; expand one before relying on it):\n");
-        for summary in summaries {
-            let ranges: Vec<String> = summary
-                .citations
-                .iter()
-                .map(|(from, to)| {
-                    if from == to {
-                        format!("{from}")
-                    } else {
-                        format!("{from}-{to}")
+    if start > 0 {
+        out.push('…');
+    }
+    out.extend(&chars[start..end]);
+    if end < chars.len() {
+        out.push('…');
+    }
+    Some(out)
+}
+
+impl Kernel {
+    /// Purpose: Render hits with a seq citation and the fragment around the match, within one budget.
+    ///
+    /// Serves: a reply the model can trace and read in one call, with the record distinguished from the index.
+    /// Design: `docs/design/context-ledger.md` §5.
+    /// Up: `Kernel::recall_tool`.
+    /// Down: `Summary`, `Hit`, `Kernel::summary_excerpt`, `Store::atom_views` and `excerpt_around`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::recall_returns_an_evidence_excerpt_in_one_call` · `cargo test -p loong-kernel turn::tests::a_cleared_recall_result_can_be_recalled_again`.
+    ///
+    /// Render hits as an index the model can jump from. The citation is part of every line
+    /// on purpose: a summary the model cannot trace is a claim, not memory.
+    ///
+    /// The budget is spent on whole hits, in order. When the next hit would cross it, the
+    /// rest are counted instead of cut: a result that is cheap to ask for must not become
+    /// expensive because the query matched often.
+    fn render_recall(
+        &self,
+        summaries: &[loong_context::Summary],
+        events: &[loong_context::Hit],
+        terms: &[String],
+        excerpt_chars: usize,
+    ) -> String {
+        let mut entries: Vec<String> = Vec::new();
+        if !summaries.is_empty() {
+            entries.push("memory (summaries; expand one before relying on it):\n".to_string());
+            for summary in summaries {
+                let ranges: Vec<String> = summary
+                    .citations
+                    .iter()
+                    .map(|(from, to)| {
+                        if from == to {
+                            format!("{from}")
+                        } else {
+                            format!("{from}-{to}")
+                        }
+                    })
+                    .collect();
+                let mut entry = format!(
+                    "- [{}] L{} {} ({}) seq[{}]\n",
+                    summary.id,
+                    summary.level,
+                    summary.title,
+                    summary.status,
+                    ranges.join(",")
+                );
+                match self.summary_excerpt(summary, terms, excerpt_chars) {
+                    Some((seq, text)) => {
+                        entry.push_str(&format!("  evidence [seq {seq}]: {text}\n"))
                     }
-                })
-                .collect();
-            let preview: String = summary
-                .content
-                .lines()
-                .take(6)
-                .collect::<Vec<_>>()
-                .join(" | ");
+                    None => {
+                        // No cited event contains the words (a digest can carry them itself).
+                        // Show the window on the summary, and say which of the two this is.
+                        let text = excerpt_around(&summary.content, terms, excerpt_chars)
+                            .unwrap_or_else(|| {
+                                summary.content.chars().take(excerpt_chars).collect()
+                            });
+                        entry.push_str(&format!("  summary text: {text}\n"));
+                    }
+                }
+                entries.push(entry);
+            }
+        }
+        if !events.is_empty() {
+            entries.push("memory (raw events; these are the record):\n".to_string());
+            for hit in events {
+                let who = hit
+                    .tool
+                    .clone()
+                    .or_else(|| hit.role.clone())
+                    .unwrap_or_else(|| hit.kind.clone());
+                let text = self
+                    .context_engine
+                    .as_ref()
+                    .and_then(|engine| engine.store().atom_views(hit.seq, hit.seq).ok())
+                    .and_then(|atoms| {
+                        atoms
+                            .into_iter()
+                            .find_map(|atom| excerpt_around(&atom.text, terms, excerpt_chars))
+                    })
+                    .unwrap_or_else(|| hit.preview.replace('\n', " "));
+                entries.push(format!("- [{}] {} {}: {}\n", hit.seq, hit.kind, who, text));
+            }
+        }
+
+        let budget = RECALL_MAX_CHARS.saturating_sub(80);
+        let mut out = String::new();
+        let mut used = 0usize;
+        let mut omitted = 0usize;
+        for entry in entries {
+            let width = entry.chars().count();
+            if used + width > budget {
+                omitted += 1;
+                continue;
+            }
+            used += width;
+            out.push_str(&entry);
+        }
+        if omitted > 0 {
             out.push_str(&format!(
-                "- [{}] L{} {} ({}) seq[{}]\n  {}\n",
-                summary.id,
-                summary.level,
-                summary.title,
-                summary.status,
-                ranges.join(","),
-                preview
+                "…[{omitted} more result(s) did not fit; narrow the query for the rest]\n"
             ));
         }
+        out
     }
-    if !events.is_empty() {
-        out.push_str("memory (raw events; these are the record):\n");
-        for hit in events {
-            let who = hit
-                .tool
-                .clone()
-                .or_else(|| hit.role.clone())
-                .unwrap_or_else(|| hit.kind.clone());
-            out.push_str(&format!(
-                "- [{}] {} {}: {}\n",
-                hit.seq,
-                hit.kind,
-                who,
-                hit.preview.replace('\n', " ")
-            ));
-        }
-    }
-    out
 }
 
 /// Purpose: Render one summary together with the original events it cites.

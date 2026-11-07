@@ -1,7 +1,7 @@
 # 交接：有限内存、无限对话（施工状态）
 
 给接手的 agent 看的。设计理由在
-[spec](2026-11-07-finite-memory-unbounded-conversation-design.md)，逐条步骤在
+[spec](../specs/2026-11-07-finite-memory-unbounded-conversation-design.md)，逐条步骤在
 [plan](2026-11-07-finite-memory-unbounded-conversation.md)。本文只写**现在在哪、下一步做什么、哪里有坑**。
 
 ## 目标（一句话）

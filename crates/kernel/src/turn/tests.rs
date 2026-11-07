@@ -4785,6 +4785,7 @@ fn the_task_card_survives_every_compaction_pass() {
     let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
     k.submit(&format!("修好 a.txt 的读取，不要动 b.txt {filler}"))
         .unwrap();
+    // A bare "continue" is not a new task: the card must keep the goal it had.
     k.submit(&format!("继续 {filler}")).unwrap();
     k.submit(&format!("继续 {filler}")).unwrap();
 
@@ -4804,6 +4805,42 @@ fn the_task_card_survives_every_compaction_pass() {
     assert!(
         card.contains("不要动 b.txt"),
         "and so is the constraint the person stated: {card}"
+    );
+}
+
+/// Purpose: A session that starts a new task updates the card's goal instead of keeping the first one forever.
+#[test]
+fn the_task_card_takes_a_new_goal_when_the_person_states_one() {
+    let t = Temp::new();
+    let (model, seen) = RecordingModel::new(vec![
+        response(vec![], Some("第一轮完成")),
+        response(vec![], Some("第二轮完成")),
+    ]);
+    let mut config = KernelConfig::new(&t.dir);
+    config.context_engine = Some(crate::context_engine::ContextEngineConfig::new(
+        t.dir.join("session.context.db"),
+        t.log.clone(),
+    ));
+    let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+    k.submit("修好 a.txt，不要动 b.txt").unwrap();
+    k.submit("换一件事：修好 c.txt，不要动 a.txt").unwrap();
+
+    let seen = seen.lock().unwrap();
+    let last = seen.last().unwrap();
+    let card = last
+        .iter()
+        .find_map(|m| match m {
+            ChatMessage::System { text } if text.contains("任务卡") => Some(text.clone()),
+            _ => None,
+        })
+        .expect("the task card is seated");
+    assert!(
+        card.contains("修好 c.txt"),
+        "the card moved to the new task: {card}"
+    );
+    assert!(
+        !card.contains("目标：修好 a.txt"),
+        "and stopped calling the old one the goal: {card}"
     );
 }
 

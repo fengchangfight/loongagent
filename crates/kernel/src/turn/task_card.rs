@@ -262,13 +262,22 @@ impl Kernel {
             .iter()
             .take_while(|m| matches!(m, ChatMessage::System { .. }))
             .count();
+        // The goal is the newest request that states one. "继续" is not a new
+        // task, and re-deriving the goal from it would quietly replace the task
+        // with the word "continue".
+        let newest = self.messages[start..].iter().rev().find_map(|m| match m {
+            ChatMessage::User { text } => Some(text),
+            _ => None,
+        });
+        if let Some(text) = newest {
+            if !text.trim().is_empty() && !is_continuation(text) {
+                self.card_goal = Some(first_sentence(text));
+            }
+        }
         for message in &self.messages[start..] {
             let ChatMessage::User { text } = message else {
                 continue;
             };
-            if self.card_goal.is_none() && !text.trim().is_empty() {
-                self.card_goal = Some(first_sentence(text));
-            }
             for sentence in text.split(['\n', '。', '；', ';', '.', '！', '!']) {
                 let sentence = sentence.trim();
                 if sentence.is_empty() || !statement_is_a_constraint(sentence) {
@@ -300,6 +309,33 @@ fn statement_is_a_constraint(sentence: &str) -> bool {
     ];
     let lower = sentence.to_lowercase();
     MARKERS.iter().any(|marker| lower.contains(marker))
+}
+
+/// Purpose: Whether a prompt is "keep going" rather than a new task.
+///
+/// Serves: `Kernel::learn_card_facts`, so a renewal or a "continue" turn does not
+/// replace the goal with the word that was typed to resume it.
+/// Design: `docs/superpowers/specs/2026-11-07-finite-memory-unbounded-conversation-design.md` §4.
+/// Up: `Kernel::learn_card_facts`.
+/// Down: no callee; it compares short marker words.
+/// Verify: `cargo test -p loong-kernel turn::tests::the_task_card_survives_every_compaction_pass`.
+fn is_continuation(text: &str) -> bool {
+    const MARKERS: [&str; 8] = [
+        "继续",
+        "接着",
+        "往下",
+        "go on",
+        "continue",
+        "keep going",
+        "ok",
+        "好的",
+    ];
+    let text = text.trim().to_lowercase();
+    MARKERS.iter().any(|marker| {
+        text == *marker
+            || text.starts_with(&format!("{marker}，"))
+            || text.starts_with(&format!("{marker} "))
+    })
 }
 
 /// Purpose: The first sentence-ish run of one message, trimmed.

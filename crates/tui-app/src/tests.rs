@@ -454,6 +454,7 @@ fn the_usage_row_sits_under_the_prompt_while_a_turn_runs() {
     assert!(shows(rows[usage], "入 1,000"), "{screen}");
     assert!(shows(rows[usage], "出 100"), "{screen}");
     assert!(shows(rows[usage], "缓存 80%"), "{screen}");
+    assert!(shows(rows[usage], "调用 1"), "{screen}");
     assert!(
         !box_titles(&screen).contains("入 1,000"),
         "the prompt title stays a status: {screen}"
@@ -2869,7 +2870,7 @@ fn a_prompt_row_is_a_band_and_an_answer_is_not() {
     app.push_lines(vec!["你：fix the bug".to_string(), "done it".to_string()]);
     let buffer = drawn_buffer(&mut app, 40, 12);
     let (x, y) = cell_of(&buffer, "fix the bug");
-    let band = Color::Rgb(30, 58, 95);
+    let band = Color::Rgb(255, 255, 204);
 
     assert_eq!(buffer[(0, y)].bg, band, "the band starts at the left edge");
     assert_eq!(buffer[(39, y)].bg, band, "and runs to the right edge");
@@ -2892,7 +2893,7 @@ fn a_prompt_row_is_a_band_and_an_answer_is_not() {
 #[test]
 fn a_selection_on_a_prompt_row_keeps_the_band_under_it() {
     use ratatui::style::Color;
-    let band = Color::Rgb(30, 58, 95);
+    let band = Color::Rgb(255, 255, 204);
     let mut app = App::new("s", "v");
     app.logo = false;
     app.push_lines(vec!["你：remember this".to_string()]);

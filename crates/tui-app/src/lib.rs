@@ -398,9 +398,10 @@ const MARK_ACCENT: Color = Color::Magenta;
 /// The sayings: the terminal's own foreground, dimmed. Present, not shouting.
 const MARK_QUIET: Style = Style::new().fg(Color::Reset).add_modifier(Modifier::DIM);
 /// The prompt band's background, shared by the band's own drawing and the selection's
-/// painting so the two never drift: a deep blue the ink still reads on, distinct from any
-/// of the transcript's foreground voices.
-const PROMPT_BG: Color = Color::Rgb(30, 58, 95);
+/// painting so the two never drift: a pale yellow that keeps the terminal's own ink
+/// (dark on a light theme, light on a dark one) readable, distinct from any of the
+/// transcript's foreground voices.
+const PROMPT_BG: Color = Color::Rgb(255, 255, 204);
 /// The fixed phrase the kernel's step-limit note carries. The note arrives as an ordinary
 /// assistant line, so the surface has to recognise it by this phrase — the same words the
 /// kernel writes in `crates/kernel/src/turn/loop.rs` when it stops for the step limit.

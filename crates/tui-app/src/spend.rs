@@ -219,7 +219,7 @@ impl Spend {
             .then(|| self.cache_hit as f64 * 100.0 / self.cache_checked_in as f64)
     }
 
-    /// Purpose: The fixed usage row's text: tokens in/out, the cache rate and the context share, or nothing before the first call.
+    /// Purpose: The fixed usage row's text: tokens in/out, the session's call count, the cache rate and the context share, or nothing before the first call.
     ///
     /// Serves: `App::draw`, so the session's usage is visible without typing `/cost`.
     /// Design: `docs/design/cost-accounting.md` §4; `docs/superpowers/specs/2026-10-28-token-efficiency-design.md` §4.4; `docs/superpowers/specs/2026-11-03-context-visibility-and-compaction-thrash-design.md` §4.1.
@@ -231,9 +231,10 @@ impl Spend {
             return None;
         }
         let mut line = format!(
-            "入 {} · 出 {}",
+            "入 {} · 出 {} · 调用 {}",
             format_tokens(self.tokens_in),
-            format_tokens(self.tokens_out)
+            format_tokens(self.tokens_out),
+            self.calls
         );
         if let Some(rate) = self.cache_rate() {
             line.push_str(&format!(" · 缓存 {rate:.0}%"));
@@ -345,6 +346,17 @@ mod tests {
         let line = spend.usage_line(None).expect("a row after one call");
         assert!(line.contains("入"), "{line}");
         assert!(line.contains("缓存 70%"), "{line}");
+        assert!(line.contains("调用 1"), "{line}");
+    }
+
+    /// Purpose: Pin that the usage row's call count grows with the session's calls.
+    #[test]
+    fn the_usage_line_counts_the_sessions_calls() {
+        let mut spend = Spend::default();
+        spend.add(CostEntry::from_event(&cost_event("k3", "unknown", Some(700), 0)).unwrap());
+        spend.add(CostEntry::from_event(&cost_event("k3", "unknown", Some(200), 0)).unwrap());
+        let line = spend.usage_line(None).expect("a row after two calls");
+        assert!(line.contains("调用 2"), "{line}");
     }
 
     /// Purpose: The usage row reports the last request's share of the budget, and plain tokens without one.

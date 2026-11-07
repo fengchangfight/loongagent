@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>loongagent 快速上手</title>
+<style>
+  :root {
+    --fg: #1f2328;
+    --muted: #59636e;
+    --accent: #8b5cf6;
+    --accent-dark: #6d28d9;
+    --code-bg: #f6f8fa;
+    --border: #d1d9e0;
+    --kbd-bg: #eaeef2;
+  }
+  * { box-sizing: border-box; }
+  body {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 32px 20px 80px;
+    font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    color: var(--fg);
+    line-height: 1.7;
+  }
+  h1 { font-size: 1.9em; border-bottom: 2px solid var(--accent); padding-bottom: .3em; }
+  h1 .tag {
+    font-size: .45em; font-weight: 500; color: var(--accent-dark);
+    border: 1px solid var(--accent); border-radius: 4px; padding: 2px 8px;
+    vertical-align: middle; margin-left: 10px;
+  }
+  h2 {
+    font-size: 1.35em; margin-top: 2.2em;
+    border-left: 4px solid var(--accent); padding-left: .5em;
+  }
+  p, li { font-size: .98em; }
+  code {
+    background: var(--code-bg); border: 1px solid var(--border);
+    border-radius: 4px; padding: 1px 5px; font-size: .9em;
+    font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border);
+    border-radius: 8px; padding: 14px 16px; overflow-x: auto;
+  }
+  pre code { background: none; border: none; padding: 0; }
+  kbd {
+    background: var(--kbd-bg); border: 1px solid var(--border);
+    border-bottom-width: 2px; border-radius: 4px;
+    padding: 1px 6px; font-size: .85em;
+    font-family: ui-monospace, Consolas, monospace;
+    white-space: nowrap;
+  }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+  th, td { border: 1px solid var(--border); padding: 7px 10px; text-align: left; font-size: .93em; }
+  th { background: var(--code-bg); }
+  .tip {
+    background: #f5f3ff; border: 1px solid #ddd6fe; border-radius: 8px;
+    padding: 10px 16px; margin: 14px 0;
+  }
+  .tip::before { content: "💡 "; }
+  .warn {
+    background: #fff8f0; border: 1px solid #fed7aa; border-radius: 8px;
+    padding: 10px 16px; margin: 14px 0;
+  }
+  .warn::before { content: "⚠️ "; }
+  figure { margin: 20px 0; text-align: center; }
+  figure svg, figure img { max-width: 100%; border: 1px solid var(--border); border-radius: 8px; }
+  figcaption { color: var(--muted); font-size: .86em; margin-top: 6px; }
+  .mono { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; }
+  footer { margin-top: 60px; color: var(--muted); font-size: .84em; text-align: center; }
+</style>
+</head>
+<body>
+
+<h1>loongagent 快速上手 <span class="tag">本地版</span></h1>
+
+<p>loongagent 是一个装在你自己机器上的编码 agent：单个二进制，模型、记忆、会话全部留在本机。
+这份手册只教四件事：<strong>装好、加模型、切模型、给项目配 skills</strong>。五分钟后你就能用起来。</p>
+
+<!-- ════════════════════ 1. 安装 ════════════════════ -->
+<h2>1. 安装：把 loongagent 放进 PATH</h2>
+
+<p>你会得到一个二进制文件（Linux/macOS 是 <code>loongagent</code>，Windows 是
+<code>loongagent.exe</code>）。它不需要安装器，放进一个目录、让这个目录进 PATH 即可。</p>
+
+<p><strong>Linux / macOS</strong>：</p>
+<pre><code>mkdir -p ~/.local/bin
+cp loongagent ~/.local/bin/
+chmod +x ~/.local/bin/loongagent
+
+# 让 ~/.local/bin 进 PATH（bash 用户；zsh 改成 ~/.zshrc）
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+
+loongagent --version   # 能打印版本号就装好了</code></pre>
+
+<p><strong>Windows</strong>（PowerShell）：</p>
+<pre><code># 1. 建一个目录，把 loongagent.exe 放进去，例如：
+#    C:\tools\loongagent\loongagent.exe
+# 2. 把这个目录加进用户 PATH：
+setx PATH "%PATH%;C:\tools\loongagent"
+# 3. 关掉重开一个 PowerShell 窗口，然后：
+loongagent --version</code></pre>
+
+<div class="tip">装好后，在你的项目目录里直接敲 <code>loongagent</code> 就进入交互界面（TUI）。
+第一次启动且没配过任何模型时，会自动弹出配置向导，跟着走即可。</div>
+
+<figure>
+<svg viewBox="0 0 640 150" xmlns="http://www.w3.org/2000/svg" font-family="ui-monospace, Consolas, monospace">
+  <rect x="0" y="0" width="640" height="150" rx="10" fill="#0d1117"/>
+  <text x="24" y="42" font-size="15" fill="#7ee787">$ loongagent --version</text>
+  <text x="24" y="72" font-size="15" fill="#c9d1d9">loongagent 0.0.1</text>
+  <text x="24" y="112" font-size="15" fill="#7ee787">$ loongagent</text>
+  <text x="160" y="112" font-size="15" fill="#8b949e">← 在项目目录里敲这个，进入 TUI</text>
+</svg>
+<figcaption>验证安装：能打印版本号，然后在项目目录里启动</figcaption>
+</figure>
+
+<!-- ════════════════════ 2. 添加模型 ════════════════════ -->
+<h2>2. 添加模型</h2>
+
+<p>模型可以是云端 API（你自己的 key），也可以是本机 ollama。用向导添加最省事：</p>
+
+<pre><code>loongagent local add            # 列出服务商（本机 ollama 排第一），粘 key，现场探测
+loongagent local add ollama     # 直接指定某一个服务商
+loongagent local                # 查看已配置的模型和槽位顺序
+loongagent local ping           # 每个模型真打一次，确认能通</code></pre>
+
+<div class="tip">向导会现场探测：能列出模型的就列出来给你选，key 不对会直接告诉你。
+密钥按约定名（如 <code>LOONG_DEEPSEEK_KEY</code>）从 <code>~/.loongagent/env</code> 或环境变量读取，
+<strong>永远不会写进配置文件</strong>。</div>
+
+<p><strong>本机 ollama</strong>（不花钱、数据不出机器）：</p>
+<pre><code>ollama pull qwen2.5:7b-instruct     # 先拉一个模型
+loongagent local add ollama         # 再把它加进来</code></pre>
+
+<p>配好的模型存在 <code>~/.loongagent/local.toml</code>，顺序就是状态栏上的槽位号，
+第一个是启动默认模型：</p>
+
+<pre><code>mode = "local"
+
+[[models]]
+name = "qwen2.5:7b-instruct"
+provider = "ollama/qwen2.5:7b-instruct"   # 槽位 1：本机 ollama
+
+[[models]]
+name = "deepseek-flash"
+provider = "deepseek/deepseek-flash"      # 槽位 2：云端</code></pre>
+
+<p><strong>删除模型</strong>也只需要一条命令——可以按状态栏序号、名字或服务商来指定：</p>
+
+<pre><code>loongagent local                    # 先看一眼序号和名字
+loongagent local delete 2           # 按序号删（删 2 号槽位）
+loongagent local delete deepseek-flash   # 按名字删
+loongagent local delete ollama      # 按服务商删（删掉这家配的全部）</code></pre>
+
+<div class="tip">删错了也不要紧：配置只是 <code>~/.loongagent/local.toml</code> 里的几行文字，
+再用 <code>loongagent local add</code> 加回来即可。密钥不在配置文件里，删除不会动你的 key。</div>
+
+<figure>
+<svg viewBox="0 0 640 132" xmlns="http://www.w3.org/2000/svg" font-family="ui-monospace, Consolas, monospace">
+  <rect x="0" y="0" width="640" height="132" rx="10" fill="#0d1117"/>
+  <rect x="0" y="0" width="640" height="34" rx="10" fill="#161b22"/>
+  <text x="16" y="22" font-size="13" fill="#8b949e">loongagent TUI — 底部状态栏</text>
+  <rect x="0" y="98" width="640" height="34" fill="#1c2128"/>
+  <text x="16" y="120" font-size="14" fill="#58a6ff">[1] qwen2.5:7b-instruct</text>
+  <text x="220" y="120" font-size="14" fill="#8b949e">[2] deepseek-flash</text>
+  <text x="400" y="120" font-size="14" fill="#8b949e">[3] k3</text>
+  <text x="16" y="56" font-size="14" fill="#c9d1d9">你正在和当前模型对话… alt+1..3 一键切换</text>
+</svg>
+<figcaption>状态栏：云端和本机模型并排，编号就是快捷键</figcaption>
+</figure>
+
+<!-- ════════════════════ 3. 切换模型 ════════════════════ -->
+<h2>3. 快捷键切换模型</h2>
+
+<p>会话中随时换模型，不用重启：</p>
+
+<table>
+  <tr><th>按键 / 命令</th><th>作用</th></tr>
+  <tr><td><kbd>alt</kbd>+<kbd>1</kbd> … <kbd>alt</kbd>+<kbd>9</kbd></td>
+      <td>直接跳到第 N 个槽位（最常用）</td></tr>
+  <tr><td><code>/1</code> … <code>/9</code></td>
+      <td>同上；给会吞掉 Alt 的终端（tmux、部分 Windows 终端）兜底</td></tr>
+  <tr><td><kbd>ctrl</kbd>+<kbd>n</kbd> / <kbd>ctrl</kbd>+<kbd>p</kbd></td>
+      <td>下一个 / 上一个模型，循环</td></tr>
+  <tr><td><kbd>alt</kbd>+<kbd>r</kbd> 或 <code>/r</code></td>
+      <td>用当前选中的模型<strong>重发</strong>上一条 prompt</td></tr>
+</table>
+
+<div class="tip">想让某个模型变成以后每次启动的默认模型？把它排到槽位 1：
+按 <kbd>ctrl</kbd>+<kbd>←</kbd> / <kbd>ctrl</kbd>+<kbd>→</kbd> 调整顺序（local 模式直接写回配置文件），
+或者干脆编辑 <code>~/.loongagent/local.toml</code> 调整 <code>[[models]]</code> 顺序。</div>
+
+<!-- ════════════════════ 4. 项目级 skills ════════════════════ -->
+<h2>4. 配置项目级 skills</h2>
+
+<p>skill 就是一个 Markdown 文件，教 agent 一套工作流程（比如"本仓库提交前必跑哪些检查"）。
+在会话里输入 <code>/名字</code> 就能调用。把它们放进项目目录，整个团队共用：</p>
+
+<pre><code>你的项目/
+├── .agents/
+│   └── skills/
+│       └── review/            ← 一个 skill 一个目录
+│           └── SKILL.md       ← 文件正文就是这个 skill 的说明书
+└── .loongagent/
+    └── commands/
+        └── deploy.md          ← 单个命令也可以这样放</code></pre>
+
+<p>一个最小的 <code>SKILL.md</code> 长这样：</p>
+
+<pre><code>---
+name: review
+description: 提交前自查：编译、测试、检查未提交文件
+---
+
+依次执行：
+1. cargo build --release，有错就修
+2. cargo test，全绿才算过
+3. git status，列出还没提交的文件给我确认</code></pre>
+
+<p>然后在项目里启动 loongagent，输入 <code>/review</code> 就会按这套流程走。
+按 <code>/help</code> 可以看到当前会话里所有可用的 skill 和命令。</p>
+
+<div class="tip">想直接用别人写好的 skills？一条命令装插件：
+<code>loongagent plugin add superpowers</code>（默认装到用户级，加 <code>--project</code> 装到本项目），
+<code>loongagent plugin list</code> 查看已装插件。</div>
+
+<!-- ════════════════════ 5. 语义记忆模式 ════════════════════ -->
+<h2>5. （可选）开启语义记忆模式</h2>
+
+<p>loongagent 默认把会话原样记下来（record 模式，不花任何模型调用）。
+<strong>语义（semantic）模式</strong>在此之上，用本机 ollama 里的一个小模型，
+趁你不在打字的空闲时间把旧对话归纳成摘要。它记得的是"当时为什么这么改"，
+长会话、跨天接着干活时差别最明显。不开也完全能用。</p>
+
+<p>前置条件只有一个：<strong>装好 ollama 并拉一个摘要模型</strong>（摘要模型就是普通模型，小一点就够）：</p>
+
+<pre><code>ollama pull qwen2.5:7b-instruct     # 默认摘要模型；0.6B/3B 也能跑，质量打折</code></pre>
+
+<p>然后一条命令开、一条命令关：</p>
+
+<pre><code>loongagent local semantic on                 # 打开，用默认模型 qwen2.5:7b-instruct
+loongagent local semantic on qwen2.5:0.6b    # 打开，自己选摘要模型
+loongagent local semantic                    # 查看：开/关、模型、是否已 pull
+loongagent local semantic on --record        # 只做确定性摘要，完全不调模型
+loongagent local semantic off                # 关闭，已有的记忆保留</code></pre>
+
+<div class="tip">开好后不用管：归纳在后台空闲窗口里做，不占你打字的响应时间。
+会话中按 <kbd>F2</kbd> 能看到记忆状态（record/semantic、各层条数、后台 worker）；
+模型连不上时会自动退回 record 模式，状态栏显示 <code>mem ⚠ degraded</code>，
+<strong>不会丢记忆、也不会卡住</strong>。</div>
+
+<p>这几条命令只是替你编辑 <code>~/.loongagent/local.toml</code>。手写配置长这样（受管部署时用）：</p>
+
+<pre><code>[context_engine]
+enabled = true
+mode    = "semantic"        # 关掉就写 "record"
+
+[summarizer]
+enabled  = true
+kind     = "ollama"
+base_url = "http://127.0.0.1:11434"
+model    = "qwen2.5:7b-instruct"</code></pre>
+
+<div class="warn">摘要模型就是<strong>本机</strong> ollama，对话内容不出机器；摘要存在
+<code>~/.loongagent/</code> 下的派生库里，可以随时删掉重建（<code>loong context rebuild</code>），
+会话原文不受影响。目前只支持 ollama 作摘要后端。</div>
+
+<!-- ════════════════════ 6. VS Code 插件 ════════════════════ -->
+<h2>6. （可选）装 VS Code 插件</h2>
+
+<p>文件夹里还有一个 <code>.vsix</code> 文件，是同一个 agent 的 VS Code 聊天面板：</p>
+
+<pre><code>code --install-extension loongagent-vscode-0.1.0.vsix</code></pre>
+
+<p>或者在 VS Code 里：扩展面板 → 右上角 <code>···</code> → <code>Install from VSIX…</code> 选中文件。
+装好后点编辑器右上角的 loongagent 图标打开聊天面板。插件默认从 PATH 找二进制；
+位置不一样就在设置里搜 <code>loongagent.path</code> 填上完整路径，或运行命令
+<code>loongagent: Locate the binary</code>。</p>
+
+<!-- ════════════════════ 7. 出问题去哪看 ════════════════════ -->
+<h2>7. 常用速查</h2>
+
+<table>
+  <tr><th>我想…</th><th>敲这个</th></tr>
+  <tr><td>看看都配了什么模型</td><td><code>loongagent local</code></td></tr>
+  <tr><td>删掉一个模型</td><td><code>loongagent local delete 序号或名字</code></td></tr>
+  <tr><td>测一遍模型能不能通</td><td><code>loongagent local ping</code></td></tr>
+  <tr><td>开/关语义记忆、看记忆状态</td><td><code>loongagent local semantic on</code> / <code>off</code> / 不带参数看状态</td></tr>
+  <tr><td>看每个设置最终生效的值</td><td><code>loongagent config show</code></td></tr>
+  <tr><td>验证沙箱真的在生效</td><td><code>loongagent sandbox self-test</code></td></tr>
+  <tr><td>列出所有历史会话 / 接着聊</td><td><code>loongagent sessions</code> / <code>loongagent resume</code></td></tr>
+  <tr><td>在浏览器里用</td><td><code>loongagent web</code>（只监听本机）</td></tr>
+</table>
+
+<div class="warn">所有配置和会话都在 <code>~/.loongagent/</code> 下（Windows 是
+<code class="mono">%USERPROFILE%\.loongagent\</code>）。会话原文是 JSONL 日志，一行一个事件——
+这就是全部真相，删掉它记忆就没了。</div>
+
+<footer>loongagent 快速上手 · 单文件手册，随发行包分发</footer>
+
+</body>
+</html>

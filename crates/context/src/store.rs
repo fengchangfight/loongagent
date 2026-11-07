@@ -166,8 +166,9 @@ pub enum SyncOutcome {
 /// model, through a tool) supplies words and optional deterministic filters.
 #[derive(Debug, Clone, Default)]
 pub struct SearchQuery {
-    /// Words to look for. All of them must appear (implicit AND), each matched
-    /// independently — see [`Store::search`] for why that matters in Chinese.
+    /// Words to look for. Any of them may match; a record is ranked by how many
+    /// it matched. Each term is matched independently — see [`Store::search`] for
+    /// why that matters in Chinese.
     pub terms: Vec<String>,
     /// Restrict to an entity by `kind:name` or a bare name (any kind).
     pub entity: Option<String>,
@@ -880,34 +881,41 @@ impl Store {
         self.ingest(log)
     }
 
-    /// Purpose: Search the retrieval layer with implicit AND over terms.
+    /// Purpose: Search the retrieval layer, ranking records by how many query words they match.
     /// Serves: the raw-event fallback of `recall`, with no FTS5 cliff under a two-character Chinese word.
     /// Design: `docs/context/recall.md` §7.2.
     /// Up: `loong-kernel`'s `turn/recall.rs` and the retrieval tests.
     /// Down: `Store::entities_of`, `row_to_hit`, `truncate` and the SQL it builds.
-    /// Verify: `cargo test -p loong-context --test retrieval a_two_character_chinese_word_is_findable`.
+    /// Verify: `cargo test -p loong-context --test retrieval one_unknown_term_does_not_zero_the_query`.
+    ///
     /// Search the retrieval layer.
     ///
-    /// Every term becomes its own `LIKE` predicate and all of them must match
-    /// (implicit AND). Terms are matched *independently on purpose*: SQLite's
-    /// FTS5 treats a multi-word query as a phrase set, and a single term shorter
-    /// than the trigram width makes the entire query return nothing, silently.
-    /// A `LIKE` scan has no such cliff — it simply finds Chinese two-character
-    /// words, which is the common case here. The measured cost (5 ms over 20k
-    /// rows) and the plan for changing it are in the design note §5.3.
+    /// Every term becomes a scored `LIKE` predicate and the predicates are OR-ed:
+    /// **any** term matching returns the record, ranked by how many terms it matched
+    /// and then by recency. A wrongly guessed word therefore narrows nothing, which
+    /// is the difference between "the record is gone" and "one word was different".
+    /// Terms are matched *independently on purpose*: SQLite's FTS5 treats a
+    /// multi-word query as a phrase set, and a single term shorter than the trigram
+    /// width makes the entire query return nothing, silently. A `LIKE` scan has no
+    /// such cliff — it simply finds Chinese two-character words, which is the common
+    /// case here. The measured cost (5 ms over 20k rows) and the plan for changing
+    /// it are in the design note §5.3.
     pub fn search(&self, query: &SearchQuery) -> Result<Vec<Hit>, StoreError> {
         let mut where_parts: Vec<String> = Vec::new();
         let mut values: Vec<rusqlite::types::Value> = Vec::new();
+        let mut score_parts: Vec<String> = Vec::new();
 
         for term in &query.terms {
             let term = term.trim();
             if term.is_empty() {
                 continue;
             }
-            where_parts.push(
-                "(atom.text LIKE ?1 OR atom.kind LIKE ?1 OR IFNULL(atom.tool,'') LIKE ?1)"
-                    .replace("?1", &format!("?{}", values.len() + 1)),
-            );
+            let n = values.len() + 1;
+            score_parts.push(format!(
+                "(CASE WHEN atom.text LIKE ?{n} THEN 1 ELSE 0 END \
+                 + CASE WHEN atom.kind LIKE ?{n} THEN 1 ELSE 0 END \
+                 + CASE WHEN IFNULL(atom.tool,'') LIKE ?{n} THEN 1 ELSE 0 END)"
+            ));
             values.push(rusqlite::types::Value::Text(format!("%{term}%")));
         }
         if let Some(entity) = query.entity.as_deref().filter(|e| !e.is_empty()) {
@@ -947,11 +955,31 @@ impl Store {
             values.push(rusqlite::types::Value::Integer(seq_from as i64));
         }
 
-        // Newest first: for a grep-like tool over a session, recency is the most
-        // useful default ordering. The design note explains why bm25 is not used
-        // for ranking here (its document-length normalisation is script-dependent).
+        // A query with no words and no filters asks for nothing, not for everything:
+        // an accidental full scan is a cost the caller never asked to pay.
+        if score_parts.is_empty() && where_parts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let score = if score_parts.is_empty() {
+            "0".to_string()
+        } else {
+            score_parts.join(" + ")
+        };
+        if !score_parts.is_empty() {
+            where_parts.push(format!("({score}) > 0"));
+        }
+
+        // Ranked by how many of the asked words the record carries, then newest first:
+        // a person's recall rarely uses the record's exact words, so one wrong guess
+        // must not drop the hit — it must only rank below a better one.
+        let order = if score_parts.is_empty() {
+            "seq DESC".to_string()
+        } else {
+            format!("({score}) DESC, seq DESC")
+        };
         let sql = format!(
-            "SELECT seq, id, time_ms, kind, role, tool, ok, text FROM atom {} ORDER BY seq DESC LIMIT ?{}",
+            "SELECT seq, id, time_ms, kind, role, tool, ok, text FROM atom {} \
+             ORDER BY {order} LIMIT ?{}",
             if where_parts.is_empty() {
                 String::new()
             } else {

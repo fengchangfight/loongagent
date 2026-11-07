@@ -200,21 +200,61 @@ fn a_two_character_chinese_word_is_findable() {
     assert!(!hits.is_empty(), "two-character Chinese must match");
 }
 
-/// Purpose: Pin implicit AND: every term must match, and an absent term excludes rather than zeroing the others.
+/// Purpose: One word that matches nothing does not zero the whole query, because a person's recall rarely uses the same words the record does.
 #[test]
-fn several_terms_narrow_rather_than_zero_out() {
+fn one_unknown_term_does_not_zero_the_query() {
     let tmp = TempLog::new();
     config_layering_session(tmp.path());
     let store = build(tmp.path()).unwrap();
 
-    // Implicit AND, per term — one term never poisons the others.
+    // OR, per term. A wrong guess narrows nothing; it must not hide the hit.
     let both = store.search(&SearchQuery::new(["层叠", "配置"])).unwrap();
     assert!(!both.is_empty());
 
-    let impossible = store
+    let one_wrong = store
         .search(&SearchQuery::new(["层叠", "不存在的词"]))
         .unwrap();
-    assert!(impossible.is_empty(), "a term that is absent must exclude");
+    assert!(
+        !one_wrong.is_empty(),
+        "a word that matches nothing must not zero the rest"
+    );
+    assert!(one_wrong.iter().any(|h| h.preview.contains("层叠")));
+}
+
+/// Purpose: A record that matches more of the query ranks first, even when it is older, so relevance beats recency.
+#[test]
+fn results_are_ranked_by_how_many_terms_they_match() {
+    let tmp = TempLog::new();
+    config_layering_session(tmp.path());
+    let store = build(tmp.path()).unwrap();
+
+    // The failing run matches both words; the passing run that came after it
+    // matches only one. Recency alone would put the weaker hit first.
+    let hits = store
+        .search(&SearchQuery::new(["layer_merge", "FAILED"]).limit(10))
+        .unwrap();
+    let failed = hits
+        .iter()
+        .position(|h| h.preview.contains("FAILED"))
+        .expect("the failing run is a hit");
+    let passed = hits
+        .iter()
+        .position(|h| h.preview.contains("1 passed"))
+        .expect("the passing run is a hit");
+    assert_eq!(failed, 0, "the two-word hit ranks first: {hits:?}");
+    assert!(failed < passed, "relevance outranks recency");
+}
+
+/// Purpose: A query with no words and no filters returns nothing instead of scanning the whole session.
+#[test]
+fn a_query_with_no_terms_and_no_filters_returns_nothing() {
+    let tmp = TempLog::new();
+    config_layering_session(tmp.path());
+    let store = build(tmp.path()).unwrap();
+    assert!(
+        store.search(&SearchQuery::default()).unwrap().is_empty(),
+        "an empty query is not a request for everything"
+    );
 }
 
 /// Purpose: Pin newest-first ordering and that a hit carries its entities.

@@ -351,6 +351,23 @@ fn a_two_character_chinese_word_is_findable_in_summaries() {
         .is_empty());
 }
 
+/// Purpose: An unknown word does not zero a summary query, so a different wording still finds the episode.
+#[test]
+fn an_unknown_word_does_not_zero_a_summary_query() {
+    let tmp = TempLog::new();
+    two_episodes(tmp.path());
+    let store = digested(tmp.path());
+
+    let hits = store
+        .recall_at(Some(2), &SearchQuery::new(["层叠", "根本不存在的词"]))
+        .unwrap();
+    assert_eq!(
+        hits.len(),
+        1,
+        "the matching word still returns the episode: {hits:?}"
+    );
+}
+
 /// Purpose: Pin that recall can be restricted to a level and an empty level returns nothing.
 #[test]
 fn recall_can_be_restricted_to_a_level() {

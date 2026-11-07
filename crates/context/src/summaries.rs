@@ -948,13 +948,12 @@ impl Store {
         self.recall_at(None, query)
     }
 
-    /// Purpose: Search summaries restricted to one level.
+    /// Purpose: Search summaries restricted to one level, ranked by how many query words the title and content carry.
     /// Serves: `recall`'s `level` argument and the tests that pin it.
     /// Design: `docs/context/recall.md` §7.2.
     /// Up: `loong-kernel`'s `turn/recall.rs` and `Store::recall`.
     /// Down: `row_to_summary`, `Store::citations_of` and `Store::inputs_of`.
-    /// Verify: `cargo test -p loong-context --test summaries recall_can_be_restricted_to_a_level`.
-    /// The same, restricted to one level (2, 3 or 4).
+    /// Verify: `cargo test -p loong-context --test summaries an_unknown_word_does_not_zero_a_summary_query`.
     pub fn recall_at(
         &self,
         level: Option<u32>,
@@ -962,14 +961,19 @@ impl Store {
     ) -> Result<Vec<Summary>, StoreError> {
         let mut where_parts: Vec<String> = Vec::new();
         let mut values: Vec<rusqlite::types::Value> = Vec::new();
+        let mut score_parts: Vec<String> = Vec::new();
         for term in &query.terms {
             let term = term.trim();
             if term.is_empty() {
                 continue;
             }
-            where_parts.push(format!(
-                "(s.title LIKE ?{n} OR s.content LIKE ?{n})",
-                n = values.len() + 1
+            let n = values.len() + 1;
+            // The title is the subject and the content is the detail: a word in the
+            // title says more about what the episode was than the same word buried
+            // in its body.
+            score_parts.push(format!(
+                "(CASE WHEN s.title LIKE ?{n} THEN 2 ELSE 0 END \
+                 + CASE WHEN s.content LIKE ?{n} THEN 1 ELSE 0 END)"
             ));
             values.push(rusqlite::types::Value::Text(format!("%{term}%")));
         }
@@ -977,11 +981,29 @@ impl Store {
             where_parts.push(format!("s.level = ?{}", values.len() + 1));
             values.push(rusqlite::types::Value::Integer(level as i64));
         }
+        // No words and no level is not a request for every summary; a level alone
+        // still means "list that layer", which the map needs.
+        if score_parts.is_empty() && where_parts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let score = if score_parts.is_empty() {
+            "0".to_string()
+        } else {
+            score_parts.join(" + ")
+        };
+        if !score_parts.is_empty() {
+            where_parts.push(format!("({score}) > 0"));
+        }
         values.push(rusqlite::types::Value::Integer(query.limit.max(1) as i64));
+        let order = if score_parts.is_empty() {
+            "s.seq_to DESC".to_string()
+        } else {
+            format!("({score}) DESC, s.seq_to DESC")
+        };
         let sql = format!(
             "SELECT s.id, s.level, s.scope, s.title, s.content, s.status, s.producer, s.schema_ver,
                     s.seq_from, s.seq_to, s.superseded_by, s.domain, s.tokens, s.created_at, s.updated_at
-             FROM summary s {where_clause} ORDER BY s.seq_to DESC LIMIT ?{limit}",
+             FROM summary s {where_clause} ORDER BY {order} LIMIT ?{limit}",
             where_clause = if where_parts.is_empty() {
                 String::new()
             } else {

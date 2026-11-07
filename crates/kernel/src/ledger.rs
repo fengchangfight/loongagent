@@ -129,10 +129,12 @@ pub struct Entry {
     /// interval in the log, so a stub can name the record it stands in for.
     /// `None` for a block that is not a conversation message, or one replayed
     /// from an ancestor's log (whose `seq` values do not belong to this one).
+    #[serde(default)]
     pub seq: Option<(u64, u64)>,
     /// Words that lead back to this block: the person's own words first, then the
     /// tool and file names it touched. A stub keeps them so "search again" starts
     /// from what someone would actually say.
+    #[serde(default)]
     pub clues: Vec<String>,
 }
 

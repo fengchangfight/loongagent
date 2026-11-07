@@ -4715,6 +4715,56 @@ fn with_the_engine_on_a_long_session_never_drops_an_exchange() {
     );
 }
 
+/// Purpose: A long turn whose every step carries a big output runs to its answer, which is the failure this work exists to remove.
+#[test]
+fn a_long_turn_with_big_outputs_runs_to_its_answer() {
+    // The reported shape: one turn, a hundred model calls, a large output each.
+    // It used to end in "stopped after 4 steps (compaction thrash)" because
+    // clearing could not keep up and nothing else was allowed to move.
+    let t = Temp::new();
+    let body = "line of a large file\n".repeat(200);
+    for n in 0..100 {
+        std::fs::write(t.dir.join(format!("a{n}.txt")), &body).unwrap();
+    }
+    let script: Vec<_> = (0..100)
+        .map(|n| {
+            response(
+                vec![call(
+                    &format!("c{n}"),
+                    "read_file",
+                    json!({"path": format!("a{n}.txt")}),
+                )],
+                None,
+            )
+        })
+        .chain(std::iter::once(response(vec![], Some("全部读完"))))
+        .collect();
+    let model = ScriptedModel::new(script);
+    let mut config = KernelConfig::new(&t.dir);
+    config.budget_tokens = Some(40_000);
+    config.keep_newest_tokens = 2_000;
+    config.context_engine = Some(crate::context_engine::ContextEngineConfig::new(
+        t.dir.join("session.context.db"),
+        t.log.clone(),
+    ));
+    let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+    let out = k.submit("把 a0 到 a99 都读一遍").unwrap();
+    assert_eq!(
+        out.final_text.as_deref(),
+        Some("全部读完"),
+        "the turn reached its answer: {out:?}"
+    );
+    assert_eq!(out.steps, 101);
+
+    let events = loong_eventlog::replay(&t.log).unwrap().events;
+    let note = events
+        .iter()
+        .filter(|e| e.kind == ev::MESSAGE_APPENDED)
+        .filter_map(|e| e.data["text"].as_str())
+        .find(|text| text.contains("stopped"));
+    assert!(note.is_none(), "the log records no stop: {note:?}");
+}
+
 /// Purpose: The task card is pinned, so the goal and the words the person used survive every compaction pass.
 #[test]
 fn the_task_card_survives_every_compaction_pass() {

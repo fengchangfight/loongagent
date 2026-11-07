@@ -203,10 +203,10 @@ impl std::error::Error for ModelError {}
 impl ModelError {
     /// Purpose: Say whether this failure means "the request is too big", the one signal the kernel may degrade on.
     ///
-    /// Serves: `Kernel::request_with_ladder`, so an oversized request costs a
+    /// Serves: `Kernel::complete_with_ladder`, so an oversized request costs a
     /// compaction pass instead of the whole task.
     /// Design: `docs/superpowers/specs/2026-11-07-finite-memory-unbounded-conversation-design.md` §5.
-    /// Up: `Kernel::request_with_ladder`'s error branch.
+    /// Up: `Kernel::complete_with_ladder`'s error branch.
     /// Down: no callee; substring match over the rendered provider message.
     /// Verify: `cargo test -p loong-providers context_overflow_is_recognised_across_providers`.
     ///

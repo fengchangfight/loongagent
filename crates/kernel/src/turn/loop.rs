@@ -577,7 +577,13 @@ impl Kernel {
                                         .to_string()
                                 }
                             };
+                            // The correction is a message the ledger does not account for —
+                            // it is the harness talking, not the person — but it still owns a
+                            // slot in `entry_of`. Without this slot every later index is off
+                            // by one, and a stubbing pass then reads the wrong entry or slices
+                            // past the end.
                             self.messages.push(ChatMessage::User { text: correction });
+                            self.entry_of.push(None);
                             // Not recorded as a message event: this is the harness
                             // course-correcting, not something the person said. The retry's
                             // assistant message is what the log will show, which is the answer
@@ -792,8 +798,18 @@ impl Kernel {
     /// Down: `Kernel::drop_oldest_exchange` and `Ledger::forget`.
     /// Verify: `cargo test -p loong-kernel turn::tests::an_overflowing_request_is_compacted_and_retried_instead_of_failing`.
     fn shed_to_minimal(&mut self) {
-        // `drop_oldest_exchange` stops by itself at the last exchange: the prompt being
-        // answered is never the thing it drops.
+        // With the engine on, the last rung keeps the promise every other rung keeps:
+        // an exchange is stubbed, never dropped. Dropping here would delete the only
+        // copy of an address at the exact moment the person most needs one — and it
+        // would do it silently, with `dropped_messages` still reporting 0.
+        if self.context_engine.is_some() {
+            while self.stub_old_exchanges(1) > 0 {}
+            self.merge_adjacent_stubs();
+            return;
+        }
+        // Engine off is the rollback path, byte for byte: drop the oldest exchanges.
+        // `drop_oldest_exchange` stops by itself at the last exchange, so the prompt
+        // being answered is never the thing it drops.
         while self.drop_oldest_exchange() > 0 {}
     }
 

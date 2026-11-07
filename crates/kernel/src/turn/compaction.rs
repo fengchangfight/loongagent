@@ -61,6 +61,11 @@ pub(super) const STUB_MAX_CLUES: usize = 12;
 /// How much of the request a stub keeps as its title.
 pub(super) const STUB_TITLE_CHARS: usize = 60;
 
+/// How long one clue may be. `split_terms` splits on whitespace and a few
+/// punctuation marks, so a URL, a log line or a base64 blob arrives as one "word";
+/// without this a stub can be as large as the exchange it replaced.
+pub(super) const STUB_CLUE_CHARS: usize = 24;
+
 /// How many changed files a stub names, newest first.
 pub(super) const STUB_MAX_FILES: usize = 4;
 
@@ -422,6 +427,10 @@ impl Kernel {
         events: &mut Vec<u64>,
         forced_ceiling: Option<u64>,
     ) -> Result<Option<(u64, u64)>, KernelError> {
+        // Every pass indexes messages and ledger entries together; a mismatch here
+        // means some writer forgot its slot, and the slices below would be wrong or
+        // out of range rather than merely imprecise.
+        debug_assert_eq!(self.messages.len(), self.entry_of.len());
         let ceiling = match forced_ceiling {
             Some(ceiling) => ceiling,
             None => match self.input_ceiling() {
@@ -548,6 +557,7 @@ impl Kernel {
     /// to stub. The newest `keep_rounds` exchanges are never touched: that is the turn
     /// being answered, and it is the one thing a stub cannot stand in for.
     pub(super) fn stub_old_exchanges(&mut self, keep_rounds: usize) -> usize {
+        debug_assert_eq!(self.messages.len(), self.entry_of.len());
         let start = self
             .messages
             .iter()
@@ -625,13 +635,25 @@ impl Kernel {
             }
             let span = match (self.entry_seq(left), self.entry_seq(right)) {
                 (Some((lf, _)), Some((_, rt))) => Some((lf, rt)),
-                (span, _) => span,
+                (Some(span), None) | (None, Some(span)) => Some(span),
+                (None, None) => None,
             };
+            // The title is re-extracted from the rendered line, so a merged stub must
+            // not carry its own "（并段）" into the next merge — that is how a one-line
+            // stub grows one annotation per pass.
             let title = match &self.messages[index] {
                 ChatMessage::System { text } => text
                     .lines()
                     .next()
                     .and_then(|line| line.split_once("] ").map(|(_, rest)| rest.to_string()))
+                    .map(|rest| {
+                        rest.split('（')
+                            .next()
+                            .unwrap_or(rest.as_str())
+                            .trim()
+                            .to_string()
+                    })
+                    .filter(|rest| !rest.is_empty())
                     .unwrap_or_else(|| "earlier work".to_string()),
                 _ => "earlier work".to_string(),
             };
@@ -811,7 +833,10 @@ impl Kernel {
 /// the person's own words, the changed files and the commands from the model's calls,
 /// the verdict from the matching tool output. Nothing is inferred — a field with no
 /// evidence is left out rather than guessed.
-fn stub_text(messages: &[ChatMessage], span: Option<(u64, u64)>) -> (String, Vec<String>) {
+pub(super) fn stub_text(
+    messages: &[ChatMessage],
+    span: Option<(u64, u64)>,
+) -> (String, Vec<String>) {
     let mut title = String::new();
     let mut steps = 0usize;
     let mut files: Vec<String> = Vec::new();
@@ -858,18 +883,25 @@ fn stub_text(messages: &[ChatMessage], span: Option<(u64, u64)>) -> (String, Vec
                     }
                     if call.tool == "run_command" {
                         if let Some(command) = call.args.get("command").and_then(|v| v.as_str()) {
-                            if commands.len() < STUB_MAX_COMMANDS {
-                                // A failed verification is recorded as failed: a
-                                // re-run can reproduce a success, not a decision.
-                                let ok = outputs
-                                    .get(&call.call_id)
-                                    .map(|output| {
-                                        !(output.contains("FAILED")
-                                            || output.contains("error[")
-                                            || output.contains("error:"))
-                                    })
-                                    .unwrap_or(true);
-                                commands.push((command.to_string(), ok));
+                            // Only a command whose result actually came back gets a
+                            // verdict. A call still pending, skipped after a parked
+                            // approval ("not run: …") or denied has no outcome, and
+                            // writing "通过" for it would put a false verification in
+                            // the one line the model is told to read before redoing
+                            // the work.
+                            let verdict = outputs.get(&call.call_id).and_then(|output| {
+                                let denied = output.starts_with("denied by the user")
+                                    || output.starts_with("not run");
+                                (!denied).then(|| {
+                                    !(output.contains("FAILED")
+                                        || output.contains("error[")
+                                        || output.contains("error:"))
+                                })
+                            });
+                            if let Some(ok) = verdict {
+                                if commands.len() < STUB_MAX_COMMANDS {
+                                    commands.push((command.to_string(), ok));
+                                }
                             }
                         }
                     }
@@ -977,7 +1009,7 @@ fn format_stub(
 ///
 /// Contract: `turn/compaction.rs` stub layer.
 fn push_clue(clues: &mut Vec<String>, clue: String) {
-    let clue = clue.trim().to_string();
+    let clue: String = clue.trim().chars().take(STUB_CLUE_CHARS).collect();
     if clue.is_empty() || clues.len() == STUB_MAX_CLUES {
         return;
     }

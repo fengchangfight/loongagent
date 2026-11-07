@@ -26,8 +26,10 @@ const GOAL_CHARS: usize = 200;
 /// How many constraints the card tries to keep.
 const MAX_CONSTRAINTS: usize = 8;
 
-/// How many completed items the card shows before trimming them first.
-const MAX_DONE: usize = 4;
+/// How long one constraint may be. A pasted paragraph that happens to contain
+/// 不要/必须 is still one line of intent, not a page: pinned content is paid for on
+/// every request and cannot be compacted away.
+const CONSTRAINT_CHARS: usize = 400;
 
 /// Purpose: The deterministic facts a card is made of.
 ///
@@ -38,14 +40,17 @@ const MAX_DONE: usize = 4;
 /// Down: `render_card` and the turn tests.
 /// Verify: `cargo test -p loong-kernel turn::tests::an_overflowing_task_card_is_merged_not_evicted`.
 pub(super) struct CardFacts {
-    /// The person's opening request: what the session is for.
+    /// The person's current request: what the session is for.
     pub goal: Option<String>,
     /// Sentences where the person said what not to do.
+    ///
+    /// Deliberately the only content besides the goal. "Recently completed" and "the
+    /// last verification command" were here and were removed: they change almost
+    /// every turn, and the card sits *before* the conversation, so rewriting them
+    /// invalidated the provider's whole prefix cache once per turn to restate what
+    /// the conversation already says. Intent changes rarely; that is what earns a
+    /// pinned block.
     pub constraints: Vec<String>,
-    /// What recent calls completed, newest last.
-    pub done: Vec<String>,
-    /// The last command that verified something.
-    pub verification: Option<String>,
 }
 
 /// Purpose: Render the card from facts, trimming detail before intent.
@@ -65,10 +70,16 @@ pub(super) fn render_card(facts: &CardFacts) -> String {
         .as_deref()
         .map(|goal| goal.chars().take(GOAL_CHARS).collect::<String>())
         .unwrap_or_else(|| "(the person has not stated a goal yet)".to_string());
-    let constraints: Vec<&String> = facts.constraints.iter().take(MAX_CONSTRAINTS).collect();
-    let done: Vec<&String> = facts.done.iter().rev().take(MAX_DONE).collect();
+    // Each constraint is capped at its own length before it can reach the card, so
+    // one pasted paragraph cannot make the pinned block unbounded.
+    let constraints: Vec<String> = facts
+        .constraints
+        .iter()
+        .take(MAX_CONSTRAINTS)
+        .map(|constraint| constraint.chars().take(CONSTRAINT_CHARS).collect())
+        .collect();
 
-    let render = |constraints: &[&String], done: &[&String], verification: Option<&str>| {
+    let render = |constraints: &[String]| {
         let mut out = format!("任务卡（常驻，不参与压缩）\n目标：{goal}\n");
         if constraints.is_empty() {
             out.push_str("约束：尚未明说\n");
@@ -78,43 +89,27 @@ pub(super) fn render_card(facts: &CardFacts) -> String {
                 out.push_str(&format!("- {constraint}\n"));
             }
         }
-        if !done.is_empty() {
-            out.push_str("最近完成：\n");
-            for item in done {
-                out.push_str(&format!("- {item}\n"));
-            }
-        }
-        if let Some(verification) = verification {
-            out.push_str(&format!("最近验证：{verification}\n"));
-        }
         out.push_str("更早的细节不在卡上：存根里有 seq 区间，用 recall 查。\n");
         out
     };
 
     let over = |text: &str| crate::ledger::estimate_tokens(text) > TASK_CARD_MAX_TOKENS;
-    let mut text = render(&constraints, &done, facts.verification.as_deref());
-    // 1. Completed detail is the first thing that goes: it is reproducible by doing
-    //    the work again, unlike a stated preference.
-    let mut trimmed = done.clone();
-    while over(&text) && !trimmed.is_empty() {
-        trimmed.pop();
-        text = render(&constraints, &trimmed, facts.verification.as_deref());
-    }
-    // 2. Then the verification line, which the log already records.
-    if over(&text) {
-        text = render(&constraints, &[], None);
-    }
-    // 3. Only now are constraints folded: the first one stays, the rest become a
-    //    reference. The goal is still never cut.
+    let mut text = render(&constraints);
+    // Constraints fold rather than being evicted: the first one stays whole, the rest
+    // become a reference the model can follow. The goal is never cut.
     if over(&text) && constraints.len() > 1 {
-        let first: Vec<&String> = constraints.iter().take(1).copied().collect();
-        let mut folded = render(&first, &[], None);
+        let first: Vec<String> = constraints.iter().take(1).cloned().collect();
+        let mut folded = render(&first);
         folded.push_str(&format!(
             "其余 {} 条约束已并成引用：用 recall 查「不要 / 必须 / 禁止」的原文。\n",
             constraints.len() - 1
         ));
         text = folded;
     }
+    // The per-constraint cap plus the fold above bound the card structurally: at most
+    // `MAX_CONSTRAINTS × CONSTRAINT_CHARS` characters, and one constraint (the first)
+    // once the fold runs. Nothing else can make it larger, so no second trimmer is
+    // needed — a branch that can never run is a branch that never gets tested.
     text
 }
 
@@ -153,40 +148,9 @@ impl Kernel {
                 }
             }
         }
-        let mut tools: std::collections::BTreeMap<String, String> =
-            std::collections::BTreeMap::new();
-        let mut done: Vec<String> = Vec::new();
-        let mut verification: Option<String> = None;
-        for message in &self.messages[start..] {
-            match message {
-                ChatMessage::Assistant { tool_calls, .. } => {
-                    for call in tool_calls {
-                        tools.insert(call.call_id.clone(), call.tool.clone());
-                        if call.tool == "run_command" {
-                            if let Some(command) = call.args.get("command").and_then(|v| v.as_str())
-                            {
-                                verification = Some(command.to_string());
-                            }
-                        }
-                    }
-                }
-                ChatMessage::Tool { call_id, output } => {
-                    let tool = tools.get(call_id).cloned().unwrap_or_default();
-                    if tool.is_empty() || is_failed_output(output) {
-                        continue;
-                    }
-                    let what = output.lines().next().unwrap_or_default();
-                    let what: String = what.chars().take(60).collect();
-                    done.push(format!("{tool}: {what}"));
-                }
-                _ => {}
-            }
-        }
         CardFacts {
             goal: self.card_goal.clone(),
             constraints,
-            done,
-            verification,
         }
     }
 
@@ -345,11 +309,4 @@ fn first_sentence(text: &str) -> String {
     let text = text.trim();
     let cut = text.find(['\n', '。', '；', ';']).unwrap_or(text.len());
     text[..cut].trim().to_string()
-}
-
-/// Purpose: Whether a tool output reads as a failure, so it is not counted as completed work.
-///
-/// Contract: `turn/task_card.rs` text helpers.
-fn is_failed_output(output: &str) -> bool {
-    output.contains("FAILED") || output.contains("error[") || output.contains("error:")
 }

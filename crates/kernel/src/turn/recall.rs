@@ -13,6 +13,36 @@
 
 use super::*;
 
+/// Purpose: The window on a summary's body around a match, with the alias index removed.
+///
+/// Serves: an alias-only match showing the memory, not the index line that carried it.
+/// Design: `docs/context/recall.md` §7.2.1.
+/// Up: `Kernel::render_recall`'s summary fallback.
+/// Down: `summary_body`, `excerpt_around` and `head_of`.
+/// Verify: `cargo test -p loong-kernel turn::tests::an_alias_only_match_never_shows_the_alias_line`.
+pub(super) fn summary_text_excerpt(content: &str, terms: &[String], width: usize) -> String {
+    let body = summary_body(content);
+    excerpt_around(&body, terms, width).unwrap_or_else(|| head_of(&body, width))
+}
+
+/// Purpose: The first `max` characters of a text, marked when something was cut.
+///
+/// Serves: `Kernel::render_recall` answering an address query, where the useful part
+/// is the text itself rather than a window around a word.
+/// Design: `docs/design/context-ledger.md` §5.
+/// Up: `Kernel::render_recall`.
+/// Down: `char` iteration; no other callee.
+/// Verify: `cargo test -p loong-kernel turn::tests::an_address_read_returns_the_original_not_a_preview`.
+fn head_of(text: &str, max: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max {
+        return text.to_string();
+    }
+    let mut out: String = chars[..max].iter().collect();
+    out.push('…');
+    out
+}
+
 impl Kernel {
     /// Purpose: Answer a `recall` call: expand one summary, or search the memory and cite the record.
     ///
@@ -84,11 +114,14 @@ impl Kernel {
             );
         }
 
+        // An address is read like a transcript: oldest first, so the beginning of the
+        // exchange is not the part that falls off the end.
+        let address = seq_from.is_some() || seq_to.is_some();
         let search = loong_context::SearchQuery {
             terms: terms.clone(),
             seq_from,
             seq_to,
-            limit,
+            limit: if address { limit.max(32) } else { limit },
             ..Default::default()
         };
         // Summaries first: they are the concentrated answer. Raw events are the
@@ -111,7 +144,14 @@ impl Kernel {
             search.entity = entity.map(|e| e.to_string());
             search.tool = tool.map(|t| t.to_string());
             match engine.store().search(&search) {
-                Ok(found) => found,
+                Ok(mut found) => {
+                    if address {
+                        // `Store::search` is newest-first; a range read wants the record
+                        // in the order it happened.
+                        found.reverse();
+                    }
+                    found
+                }
                 Err(e) => return (false, format!("searching events failed: {e}")),
             }
         } else {
@@ -381,12 +421,11 @@ impl Kernel {
                         entry.push_str(&format!("  evidence [seq {seq}]: {text}\n"))
                     }
                     None => {
-                        // No cited event contains the words (a digest can carry them itself).
-                        // Show the window on the summary, and say which of the two this is.
-                        let text = excerpt_around(&summary.content, terms, excerpt_chars)
-                            .unwrap_or_else(|| {
-                                summary.content.chars().take(excerpt_chars).collect()
-                            });
+                        // No cited event contains the words (a digest can carry them
+                        // itself, or an alias matched). Show the window on the summary
+                        // *body*: the `别名：` line is the index, and an index presented
+                        // as memory is what the alias rule forbids.
+                        let text = summary_text_excerpt(&summary.content, terms, excerpt_chars);
                         entry.push_str(&format!("  summary text: {text}\n"));
                     }
                 }
@@ -406,9 +445,14 @@ impl Kernel {
                     .as_ref()
                     .and_then(|engine| engine.store().atom_views(hit.seq, hit.seq).ok())
                     .and_then(|atoms| {
-                        atoms
-                            .into_iter()
-                            .find_map(|atom| excerpt_around(&atom.text, terms, excerpt_chars))
+                        atoms.into_iter().find_map(|atom| {
+                            // An address query has no word to centre on, so the atom's
+                            // own text is the answer — not `Hit.preview`, which search
+                            // cut to 200 characters. A stub promises "原文", and a
+                            // preview is not the original.
+                            excerpt_around(&atom.text, terms, excerpt_chars)
+                                .or_else(|| Some(head_of(&atom.text, excerpt_chars)))
+                        })
                     })
                     .unwrap_or_else(|| hit.preview.replace('\n', " "));
                 entries.push(format!("- [{}] {} {}: {}\n", hit.seq, hit.kind, who, text));

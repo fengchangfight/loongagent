@@ -156,9 +156,12 @@ pass: the L4 map (`Category::CognitiveMap`) and the **task card**
 (`Category::Rules`, source `task-card`, pinned). The card holds the goal and the
 constraints the person stated, read by `statement_is_a_constraint`'s marker list
 and never inferred; it is seated only when there is a constraint to hold, and
-rewritten only when its text changes. At `TASK_CARD_MAX_TOKENS` (800) it drops
-completed detail, then the verification line, then folds constraints into a
-reference — the goal is never cut.
+rewritten only when its text changes. It holds nothing volatile — "recently
+done" and "the last command" were removed because they change every turn and the
+card sits before the conversation, so rewriting them broke the provider's prefix
+cache to restate what the conversation already says. At
+`TASK_CARD_MAX_TOKENS` (800) each constraint is capped (`CONSTRAINT_CHARS`, 400)
+and the list folds into a reference — the goal is never cut.
 
 ## 5. `recall`: the retrieval tool
 

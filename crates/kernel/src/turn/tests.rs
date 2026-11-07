@@ -1132,8 +1132,8 @@ fn no_window_fits_when_the_history_alone_reaches_the_ceiling() {
 /// Verify: `cargo test -p loong-kernel turn::tests::an_overflowing_request_is_compacted_and_retried_instead_of_failing`.
 struct RefusingModel {
     inner: ScriptedModel,
-    /// 1-based call number to refuse as too big; `None` refuses nothing that way.
-    refuse_on: Option<usize>,
+    /// 1-based call numbers to refuse as too big; empty refuses nothing that way.
+    refuse_on: Vec<usize>,
     /// When set, every call fails with this message — a fault that must stay fatal.
     fault: Option<&'static str>,
     calls: usize,
@@ -1148,7 +1148,7 @@ impl RefusingModel {
     fn always(inner: ScriptedModel, fault: &'static str) -> Self {
         Self {
             inner,
-            refuse_on: None,
+            refuse_on: Vec::new(),
             fault: Some(fault),
             calls: 0,
             sizes: Arc::new(Mutex::new(Vec::new())),
@@ -1174,7 +1174,7 @@ impl Model for RefusingModel {
         if let Some(fault) = self.fault {
             return Err(loong_providers::ModelError::Transport(fault.to_string()));
         }
-        if self.refuse_on == Some(self.calls) {
+        if self.refuse_on.contains(&self.calls) {
             return Err(loong_providers::ModelError::Transport(
                 "HTTP 400 from https://api.x/v1: {\"error\":{\"code\":\"context_length_exceeded\"}}"
                     .to_string(),
@@ -1209,7 +1209,7 @@ fn an_overflowing_request_is_compacted_and_retried_instead_of_failing() {
             ),
             response(vec![], Some("second done")),
         ]),
-        refuse_on: Some(4),
+        refuse_on: vec![4],
         fault: None,
         calls: 0,
         sizes: Arc::clone(&sizes),
@@ -1244,6 +1244,81 @@ fn an_overflowing_request_is_compacted_and_retried_instead_of_failing() {
         .collect();
     assert!(!degraded.is_empty(), "the ladder must leave a trace");
     assert_eq!(degraded[0].data["ladder"], "overflow-retry", "{degraded:?}");
+}
+
+/// Purpose: The ladder's last rung keeps the engine-on promise: it stubs the older exchanges instead of dropping them.
+#[test]
+fn the_minimal_rung_stubs_rather_than_dropping_when_the_engine_is_on() {
+    // A size refusal that survives the forced compaction retry is the worst moment
+    // in the whole design: the provider will not take the request, and the tempting
+    // fix is to throw history away. With the engine on, that would delete the only
+    // copy of an address. The rung must stub instead, and say so.
+    let t = Temp::new();
+    big_file(&t.dir, "big1.txt", 400);
+    big_file(&t.dir, "big2.txt", 400);
+    let inner = ScriptedModel::new(vec![
+        response(
+            vec![call("c1", "read_file", json!({"path": "big1.txt"}))],
+            None,
+        ),
+        response(vec![], Some("first done")),
+        response(
+            vec![call("c2", "read_file", json!({"path": "big2.txt"}))],
+            None,
+        ),
+        response(vec![], Some("second done")),
+    ]);
+    let model = RefusingModel {
+        inner,
+        // Calls 4 and 5: the answer after the read, and the retry after the forced
+        // compaction. The third attempt (the minimal rung) is allowed through.
+        refuse_on: vec![4, 5],
+        fault: None,
+        calls: 0,
+        sizes: Arc::new(Mutex::new(Vec::new())),
+    };
+    let mut config = KernelConfig::new(&t.dir);
+    config.budget_tokens = Some(8_000);
+    config.max_steps = 12;
+    config.context_engine = Some(crate::context_engine::ContextEngineConfig::new(
+        t.dir.join("session.context.db"),
+        t.log.clone(),
+    ));
+    let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+    let first = k.submit("read big1").unwrap();
+    assert_eq!(first.final_text.as_deref(), Some("first done"));
+    let second = k
+        .submit("read big2")
+        .expect("a refusal must not fail the task");
+    assert_eq!(second.final_text.as_deref(), Some("second done"));
+
+    let events = loong_eventlog::replay(&t.log).unwrap().events;
+    let degraded: Vec<_> = events
+        .iter()
+        .filter(|e| e.kind == ev::CONTEXT_DEGRADED)
+        .collect();
+    assert!(
+        degraded.iter().any(|e| e.data["ladder"] == "minimal"),
+        "the last rung was reached and named: {degraded:?}"
+    );
+    let dropped: u64 = events
+        .iter()
+        .filter(|e| e.kind == ev::COMPACTION_APPLIED)
+        .map(|e| e.data["dropped_messages"].as_u64().unwrap_or(0))
+        .sum();
+    assert_eq!(
+        dropped, 0,
+        "with the engine on, the last rung stubs instead of dropping"
+    );
+
+    assert!(
+        k.messages().iter().any(|m| matches!(
+            m,
+            ChatMessage::System { text } if text.contains("[stub ") && text.contains("read big1")
+        )),
+        "the first turn left as a stub with its address: {:?}",
+        k.messages()
+    );
 }
 
 /// Purpose: A server fault is not a size problem, so it still fails the turn instead of being hidden by a compaction pass.
@@ -4544,6 +4619,57 @@ fn aliases_are_not_rendered_into_the_summary_text() {
     );
 }
 
+/// Purpose: A match that only an alias explains shows the summary body, never the `别名：` index line.
+#[test]
+fn an_alias_only_match_never_shows_the_alias_line() {
+    let content =
+        "L2 · 修复配置层叠\n请求：修一下配置层叠\n状态：done\n别名：overlay；merge 顺序\n";
+    let shown = super::recall::summary_text_excerpt(content, &["overlay".to_string()], 240);
+    assert!(
+        !shown.contains("别名："),
+        "an alias is an index, not memory: {shown}"
+    );
+    assert!(
+        shown.contains("修复配置层叠"),
+        "and the body it points at is what the model reads: {shown}"
+    );
+}
+
+/// Purpose: An address read returns the atom's own text, not the 200-character preview search kept.
+#[test]
+fn an_address_read_returns_the_original_not_a_preview() {
+    let t = Temp::new();
+    let tail = format!("{}末尾标记", "x".repeat(400));
+    let (model, _seen) = RecordingModel::new(vec![
+        response(vec![], Some("记下了")),
+        response(
+            vec![call(
+                "c9",
+                "recall",
+                json!({"seq_from": 2, "seq_to": 9, "excerpt_chars": 800}),
+            )],
+            None,
+        ),
+        response(vec![], Some("查到了")),
+    ]);
+    let mut config = KernelConfig::new(&t.dir);
+    config.context_engine = Some(crate::context_engine::ContextEngineConfig::new(
+        t.dir.join("session.context.db"),
+        t.log.clone(),
+    ));
+    let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+    k.submit(&format!("背景说明 {tail}")).unwrap();
+    k.submit("把刚才那段读回来").unwrap();
+
+    let output = k
+        .recall_tool(&json!({"seq_from": 2, "seq_to": 9, "excerpt_chars": 800}))
+        .1;
+    assert!(
+        output.contains("末尾标记"),
+        "the original text is what the address promises: {output}"
+    );
+}
+
 /// Purpose: A recall answer that compaction later clears can be recalled again, so forgetting keeps a way back.
 #[test]
 fn a_cleared_recall_result_can_be_recalled_again() {
@@ -4715,6 +4841,74 @@ fn with_the_engine_on_a_long_session_never_drops_an_exchange() {
     );
 }
 
+/// Purpose: A nudge correction keeps the message/entry lockstep, so a later stubbing pass reads the right entry instead of panicking.
+#[test]
+fn a_nudge_before_a_stubbing_pass_keeps_the_ledger_in_step() {
+    let t = Temp::new();
+    let filler = "x".repeat(2_000);
+    let (model, _seen) = RecordingModel::new(vec![
+        // The model prints a tool call as text: the loop objects once, and that
+        // correction is a message with no recorded event. It must still occupy a
+        // slot in the ledger's per-message index.
+        response(
+            vec![],
+            Some("{\"name\": \"read_file\", \"arguments\": {\"path\": \"a.txt\"}}"),
+        ),
+        response(
+            vec![call("c1", "read_file", json!({"path": "a.txt"}))],
+            None,
+        ),
+        response(vec![], Some("第一轮完成")),
+        response(vec![], Some("第二轮完成")),
+        response(vec![], Some("第三轮完成")),
+    ]);
+    std::fs::write(t.dir.join("a.txt"), "content").unwrap();
+    let mut config = KernelConfig::new(&t.dir);
+    config.budget_tokens = Some(1_200);
+    config.keep_newest_tokens = 200;
+    config.context_engine = Some(crate::context_engine::ContextEngineConfig::new(
+        t.dir.join("session.context.db"),
+        t.log.clone(),
+    ));
+    let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+    k.submit(&format!("修一下 a.txt {filler}")).unwrap();
+    // The correction is the only message with no ledger entry — and it still has a
+    // slot in the per-message index, which is the invariant stubbing slices on.
+    assert_eq!(
+        k.messages().len() - k.ledger().len(),
+        1,
+        "the correction is the one unaccounted message"
+    );
+    // The second and third turns cross the ceiling, so the stubbing pass runs.
+    k.submit(&format!("第二个任务 {filler}")).unwrap();
+    k.submit(&format!("第三个任务 {filler}")).unwrap();
+    // The correction left with the exchange it belonged to, so the ledger and the
+    // conversation are back in exact lockstep.
+    assert_eq!(k.messages().len(), k.ledger().len());
+    let stub = k
+        .messages()
+        .iter()
+        .find_map(|m| match m {
+            ChatMessage::System { text } if text.contains("[stub ") => Some(text.clone()),
+            _ => None,
+        })
+        .expect("the pass still stubbed something after the correction");
+    // And the address it names is the exchange it actually replaced.
+    let range = stub
+        .split("recall seq ")
+        .nth(1)
+        .and_then(|rest| rest.split([' ', '\n', ']']).next())
+        .expect("the stub names a range");
+    let (from, to) = range.split_once('-').expect("a range is a-b");
+    let (from, to): (u64, u64) = (from.parse().unwrap(), to.parse().unwrap());
+    let (ok, found) = k.recall_tool(&json!({"seq_from": from, "seq_to": to}));
+    assert!(ok, "{found}");
+    assert!(
+        found.contains("修一下 a.txt"),
+        "the address reads back the exchange it replaced: {found}"
+    );
+}
+
 /// Purpose: A long turn whose every step carries a big output runs to its answer, which is the failure this work exists to remove.
 #[test]
 fn a_long_turn_with_big_outputs_runs_to_its_answer() {
@@ -4844,6 +5038,25 @@ fn the_task_card_takes_a_new_goal_when_the_person_states_one() {
     );
 }
 
+/// Purpose: One pasted paragraph that happens to state a constraint is capped, not pinned whole.
+#[test]
+fn one_huge_constraint_still_fits_the_card() {
+    let facts = super::task_card::CardFacts {
+        goal: Some("修好 a.txt".to_string()),
+        constraints: vec![format!("不要动 {}", "这一整段".repeat(2_000))],
+    };
+    let text = super::task_card::render_card(&facts);
+    assert!(
+        crate::ledger::estimate_tokens(&text) <= super::task_card::TASK_CARD_MAX_TOKENS,
+        "a pinned block is paid for every request, so one line cannot be unbounded: {} chars",
+        text.chars().count()
+    );
+    assert!(
+        text.contains("不要动"),
+        "and it is still the person's constraint: {text}"
+    );
+}
+
 /// Purpose: A card that does not fit loses detail, not the goal: pinned content is merged rather than evicted.
 #[test]
 fn an_overflowing_task_card_is_merged_not_evicted() {
@@ -4857,8 +5070,6 @@ fn an_overflowing_task_card_is_merged_not_evicted() {
                 )
             })
             .collect(),
-        done: (0..40).map(|n| format!("改了 src/file{n}.rs")).collect(),
-        verification: Some("cargo test -p loong-config".to_string()),
     };
     let text = super::task_card::render_card(&facts);
     assert!(!text.trim().is_empty(), "the card is never evicted");
@@ -4872,12 +5083,12 @@ fn an_overflowing_task_card_is_merged_not_evicted() {
         text.chars().count()
     );
     assert!(
-        !text.contains("src/file0.rs"),
-        "the completed-detail list is dropped before anything is taken from the goal: {text}"
-    );
-    assert!(
         text.contains("不要动第 0 个模块"),
         "the first stated constraint stays even when the rest fold into a reference: {text}"
+    );
+    assert!(
+        text.contains("并成引用"),
+        "the rest become a reference the model can follow: {text}"
     );
 }
 
@@ -4925,6 +5136,11 @@ fn old_exchanges_become_stubs_with_an_address() {
         text.contains("修一下"),
         "and carries the words it was asked with: {text}"
     );
+    assert!(
+        text.chars().count() < 600,
+        "a stub is a line, not the exchange it replaced ({} chars): {text}",
+        text.chars().count()
+    );
 
     // The address is real: reading it back returns the original words.
     let range = text
@@ -4950,6 +5166,89 @@ fn old_exchanges_become_stubs_with_an_address() {
     );
 }
 
+/// Purpose: A command with no verdict is not reported as verified: the stub never claims a pass it did not see.
+#[test]
+fn a_stub_does_not_claim_a_verification_it_did_not_see() {
+    let denied = vec![
+        ChatMessage::User {
+            text: "跑一下测试".to_string(),
+        },
+        ChatMessage::Assistant {
+            text: None,
+            tool_calls: vec![ToolCallRequest {
+                call_id: "c1".to_string(),
+                tool: "run_command".to_string(),
+                args: json!({"command": "cargo test"}),
+            }],
+        },
+        ChatMessage::Tool {
+            call_id: "c1".to_string(),
+            output: "denied by the user".to_string(),
+        },
+    ];
+    let (text, _) = super::compaction::stub_text(&denied, Some((1, 3)));
+    assert!(
+        !text.contains("通过"),
+        "a denied command is not a pass: {text}"
+    );
+
+    // And a result that never arrived says nothing either.
+    let pending = denied[..2].to_vec();
+    let (text, _) = super::compaction::stub_text(&pending, Some((1, 2)));
+    assert!(
+        !text.contains("通过"),
+        "a command with no result is not a pass: {text}"
+    );
+}
+
+/// Purpose: Merging stubs keeps one flat line and one address, however many passes run.
+#[test]
+fn a_merged_stub_keeps_one_line_and_one_address() {
+    let t = Temp::new();
+    let filler = "x".repeat(800);
+    let script: Vec<_> = (0..12)
+        .map(|n| response(vec![], Some(&format!("done {n}"))))
+        .collect();
+    let model = ScriptedModel::new(script);
+    let mut config = KernelConfig::new(&t.dir);
+    config.budget_tokens = Some(1_200);
+    config.keep_newest_tokens = 200;
+    config.context_engine = Some(crate::context_engine::ContextEngineConfig::new(
+        t.dir.join("session.context.db"),
+        t.log.clone(),
+    ));
+    let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+    for turn in 0..12 {
+        k.submit(&format!("任务 {turn} 处理一下 {filler}")).unwrap();
+    }
+    let stub = k
+        .messages()
+        .iter()
+        .find_map(|m| match m {
+            ChatMessage::System { text } if text.contains("[stub ") => Some(text.clone()),
+            _ => None,
+        })
+        .expect("a stub was made");
+    let first = stub.lines().next().expect("the stub has a first line");
+    assert!(
+        first.chars().count() < 200,
+        "one flat line, not an annotation per pass: {first}"
+    );
+    let range = stub
+        .split("recall seq ")
+        .nth(1)
+        .and_then(|rest| rest.split([' ', '\n', ']']).next())
+        .expect("the stub keeps its address");
+    let (from, to) = range.split_once('-').expect("a range is a-b");
+    let (from, to): (u64, u64) = (from.parse().unwrap(), to.parse().unwrap());
+    let (ok, found) = k.recall_tool(&json!({"seq_from": from, "seq_to": to, "excerpt_chars": 800}));
+    assert!(ok, "{found}");
+    assert!(
+        found.contains("任务 0"),
+        "the address still reads the oldest turn back: {found}"
+    );
+}
+
 /// Purpose: The foreground stops growing once stubs take over, because old text leaves as fast as new text arrives.
 #[test]
 fn the_foreground_stops_growing_once_stubs_take_over() {
@@ -4967,28 +5266,28 @@ fn the_foreground_stops_growing_once_stubs_take_over() {
         t.log.clone(),
     ));
     let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
-    // The foreground is a sawtooth: it fills to the ceiling and a pass drops it.
-    // What must not happen is the *peak* rising with the number of turns, so the
-    // comparison is between two windows, not between two instants.
-    let mut peak_40 = 0;
-    let mut peak_50 = 0;
+    // The foreground is a sawtooth: it fills to the ceiling and a pass drops it. The
+    // property is that its *envelope* stops rising — the peak reached after forty
+    // turns is no higher than the one already reached before them, and it stays under
+    // the budget. Comparing single instants would just measure the phase.
+    let mut peak_before_40 = 0;
+    let mut peak_after_40 = 0;
     for turn in 0..50 {
         k.submit(&format!("任务 {turn} 处理一下 {filler}")).unwrap();
         let tokens = k.ledger().total_tokens();
-        if (35..40).contains(&turn) {
-            peak_40 = peak_40.max(tokens);
-        }
-        if (45..50).contains(&turn) {
-            peak_50 = peak_50.max(tokens);
+        if turn < 40 {
+            peak_before_40 = peak_before_40.max(tokens);
+        } else {
+            peak_after_40 = peak_after_40.max(tokens);
         }
     }
     assert!(
-        peak_50 < peak_40 * 11 / 10 + 50,
-        "the foreground must stop growing: peak {peak_40} tokens in turns 36-40, {peak_50} in turns 46-50"
+        peak_after_40 < peak_before_40 * 11 / 10 + 50,
+        "the foreground must stop growing: peak {peak_before_40} tokens before turn 40, {peak_after_40} after"
     );
     assert!(
-        peak_50 <= 3_000,
-        "and stay under its own budget: {peak_50} tokens"
+        peak_after_40 <= 3_000,
+        "and stay under its own budget: {peak_after_40} tokens"
     );
 }
 

@@ -81,11 +81,12 @@
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc --noEmit",
     "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test test/*.test.ts",
-    "package:vsix": "npm run compile && npx @vscode/vsce package --skip-license"
+    "package:vsix": "npm run compile && vsce package --skip-license"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
     "@types/vscode": "1.138.0",
+    "@vscode/vsce": "^3.6.0",
     "esbuild": "^0.25.0",
     "typescript": "^5.6.0"
   },

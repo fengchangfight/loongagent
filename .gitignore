@@ -121,3 +121,6 @@ vendor/
 
 # Packaged VS Code extension artifacts
 *.vsix
+
+# One-command end-user packages from scripts/package.sh / scripts/package.ps1
+release/

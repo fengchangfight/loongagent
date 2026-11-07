@@ -114,7 +114,7 @@ the verdict in `policy.decided` is the stricter of the PDP's and the hooks'.
 ## 4. The step budget and the nudge
 
 A step is a model completion, not a tool call: read, edit, run, fix is four steps.
-`DEFAULT_MAX_STEPS` is 50. `KernelConfig.max_steps` is capped by the
+`DEFAULT_MAX_STEPS` is 100. `KernelConfig.max_steps` is capped by the
 configuration's `max_steps` with a plain `min` when the kernel is built, and
 `steps_or_unlimited` maps a configured `0` to `usize::MAX`, meaning no limit. The
 budget belongs to the **turn**: `Kernel.steps_taken` is reset by a new `submit`,

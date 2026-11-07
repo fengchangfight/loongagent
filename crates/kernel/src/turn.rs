@@ -193,11 +193,13 @@ pub struct TurnOutcome {
 ///
 /// The budget belongs to the **turn**, including the runs an approval resumes. At a
 /// steady-state request near 60k tokens, 100 steps is ≈ 6M input tokens even when every
-/// step is honest work, which is more than a per-turn backstop should allow; 50 keeps a
-/// page-sized task inside one turn and halves the worst case. A person who wants more
-/// replies, raises `max_steps`; a config layer may still narrow it (`max_steps`,
+/// step is honest work; that is the worst case the operator accepted in exchange for not
+/// dying mid-task — a 50-step limit kept tripping on ordinary edits ("stopped after 50
+/// steps without finishing") and read as a false failure. The limit is a backstop against
+/// a model that *spins*, not a task-size gate, so it sits at 100; the stall guard below is
+/// what actually stops a spinner. A config layer may still narrow it (`max_steps`,
 /// ADR-0008 §2).
-pub const DEFAULT_MAX_STEPS: usize = 50;
+pub const DEFAULT_MAX_STEPS: usize = 100;
 
 /// How many identical calls in a row mean the model is spinning.
 ///

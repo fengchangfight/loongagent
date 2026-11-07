@@ -30,10 +30,11 @@ clears a sliver, lands over, and the thrash guard stops the turn — and a fresh
 starts from the same context, so it stops again three passes later. Fitting the
 window to the room removes the cause. A session at 67,000 tokens of history under
 an 80,000 ceiling leaves 13,000 of room; halved, that is a 6,500-token window with
-about three steps of headroom per pass. When `room` is zero the pass is not made at
-all: no window can get under the ceiling, so clearing would rewrite the middle of
-the conversation, cost a full cache miss and still land over it. The context then
-stays as it is and the lever is a larger `budget_tokens` or a new session.
+about three steps of headroom per pass. When `room` is zero the clearing pass is not
+made at all: no window can get under the ceiling, so clearing would rewrite the
+middle of the conversation, cost a full cache miss and still land over it. The
+ladder then goes to L1 (§2), which can still move whole exchanges; only when that
+cannot free anything either is the lever a larger `budget_tokens` or a new session.
 
 **Aging runs before that, on its own line.** `age_tool_outputs` fires whenever the
 uncleared `tool:` entries pass `keep_newest_tokens`, ceiling or not. The line that

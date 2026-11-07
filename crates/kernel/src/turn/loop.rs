@@ -233,12 +233,16 @@ impl Kernel {
     /// approval resume keeps spending the current one.
     /// Design: `docs/superpowers/specs/2026-11-03-turn-budget-and-stall-guard-design.md` §4.1–§4.3.
     /// Up: `Kernel::submit_with`, before command expansion and the prompt hook.
-    /// Down: `Kernel.steps_taken`, `Kernel.map_seated`, `Kernel.recent_calls`,
+    /// Down: `Kernel.steps_taken`, `Kernel.segment_start`, `Kernel.succeeded`,
+    /// `Kernel.renewals`, `Kernel.map_seated`, `Kernel.recent_calls`,
     /// `Kernel.consecutive_failures`, `Kernel.scratch_writes` and
     /// `Kernel.compaction_steps`.
     /// Verify: `cargo test -p loong-kernel turn::tests::the_step_budget_survives_an_approval_resume`.
     fn begin_turn(&mut self) {
         self.steps_taken = 0;
+        self.segment_start = 0;
+        self.succeeded = 0;
+        self.renewals = 0;
         self.map_seated = false;
         self.recent_calls.clear();
         self.consecutive_failures = 0;
@@ -381,8 +385,11 @@ impl Kernel {
         let mut nudged = false;
         // The budget belongs to the turn, not to this run of the loop: an approval
         // resume re-enters here and must spend what is left, not a second budget.
-        let start = self.steps_taken;
-        let remaining = self.config.max_steps.saturating_sub(start);
+        // A segment is one run of the step budget. A productive segment renews the
+        // budget instead of handing the turn back with "reply to continue": the person
+        // asked for the task, not for a fixed number of model calls. Renewal is bounded
+        // by `max_continuations` and gated on progress, so a spinner still stops.
+        let mut segments = 0usize;
         // The L4 map is seated once, before the first request of the turn. Seating it
         // inside the loop rewrites a block that sits before the conversation, which
         // invalidates every provider cache entry after it (spec §4.3). An approval
@@ -392,69 +399,46 @@ impl Kernel {
             self.seat_map();
             self.map_seated = true;
         }
-        for offset in 1..=remaining {
-            let step = start + offset;
-            // A permissions change asked for from outside is applied here, before the
-            // step's model call and its tool decisions: the question this step would
-            // have asked must never be asked after the person already said yes.
-            self.apply_requested_permissions()?;
-            // A stop asked for between steps stops here: after the last tool finished,
-            // before the next model call. Nothing half-done is left behind.
-            if self.interrupted() {
-                events.push(self.append(
-                    gen::event::TURN_INTERRUPTED,
-                    &gen::TurnInterrupted {
-                        reason: "interrupted".to_string(),
-                    },
-                )?);
-                return Ok(TurnOutcome {
-                    steps: step - 1,
-                    final_text: None,
-                    pending_approval: None,
-                    refused: None,
-                    events,
-                    interrupted: true,
-                });
-            }
-            // A model that repeats a call, keeps failing, or churns throwaway scripts is
-            // not making progress. Stop and ask, rather than spending the rest of the
-            // budget on the same loop.
-            if let Some(reason) = self.stall_reason() {
-                let note = format!(
-                    "stopped after {} steps without progress (stall guard): {reason} — \
-                     tell me how you want to proceed",
-                    self.steps_taken
-                );
-                events.push(self.record_assistant(Some(&note), &[])?);
-                return Ok(TurnOutcome {
-                    steps: self.steps_taken,
-                    final_text: Some(note),
-                    pending_approval: None,
-                    refused: None,
-                    events,
-                    interrupted: false,
-                });
-            }
-            self.refresh_memory();
-            // Both passes report what they freed. If both fired in one step they are one
-            // pass for the thrash window: the earlier `before` and the later `after`.
-            let aged = self.age_tool_outputs(&mut events)?;
-            let compacted = self.compact_if_needed(&mut events, None)?;
-            let pass = match (aged, compacted) {
-                (Some((before, _)), Some((_, after))) => Some((before, after)),
-                (Some(pass), None) | (None, Some(pass)) => Some(pass),
-                (None, None) => None,
-            };
-            if let Some((before, after)) = pass {
-                // Three passes inside five steps are only thrash when they are not keeping
-                // up: each freed under five percent, or left the context over its ceiling.
-                // Legitimate aging at a busy step must not stop the turn.
-                self.note_compaction(step, before, after);
-                if let Some(reason) = self.compaction_thrash() {
+        loop {
+            let start = self.steps_taken;
+            let progress_before = self.progress_marker();
+            // Each segment gets the full budget; an approval resume keeps its place and
+            // therefore spends only what this segment has left.
+            let remaining = self
+                .config
+                .max_steps
+                .saturating_sub(start.saturating_sub(self.segment_start));
+            for offset in 1..=remaining {
+                let step = start + offset;
+                // A permissions change asked for from outside is applied here, before the
+                // step's model call and its tool decisions: the question this step would
+                // have asked must never be asked after the person already said yes.
+                self.apply_requested_permissions()?;
+                // A stop asked for between steps stops here: after the last tool finished,
+                // before the next model call. Nothing half-done is left behind.
+                if self.interrupted() {
+                    events.push(self.append(
+                        gen::event::TURN_INTERRUPTED,
+                        &gen::TurnInterrupted {
+                            reason: "interrupted".to_string(),
+                        },
+                    )?);
+                    return Ok(TurnOutcome {
+                        steps: step - 1,
+                        final_text: None,
+                        pending_approval: None,
+                        refused: None,
+                        events,
+                        interrupted: true,
+                    });
+                }
+                // A model that repeats a call, keeps failing, or churns throwaway scripts is
+                // not making progress. Stop and ask, rather than spending the rest of the
+                // budget on the same loop.
+                if let Some(reason) = self.stall_reason() {
                     let note = format!(
-                        "stopped after {} steps without progress (compaction thrash): {reason} — \
-                         the session's own history fills its budget; raise `budget_tokens` in the \
-                         configuration, or split the task into a fresh session",
+                        "stopped after {} steps without progress (stall guard): {reason} — \
+                     tell me how you want to proceed",
                         self.steps_taken
                     );
                     events.push(self.record_assistant(Some(&note), &[])?);
@@ -467,82 +451,114 @@ impl Kernel {
                         interrupted: false,
                     });
                 }
-                self.seat_map();
-            }
-            let mut request = CompletionRequest {
-                messages: self.messages.clone(),
-                tools: self.tool_specs(),
-            };
-            // Routing happens here, per call, from facts the session can explain —
-            // and a change of model is an event, not a hidden optimisation.
-            let facts = loong_config::Facts {
-                context_tokens: self.ledger.total_tokens(),
-                step: step as u64,
-            };
-            let (chosen, rule) = self.router.select(&facts);
-            let chosen = chosen
-                .filter(|name| self.models.contains_key(*name))
-                .unwrap_or(self.selected_model.as_str())
-                .to_string();
-            if chosen != self.selected_model {
-                events.push(self.record_model_selected(
-                    &chosen,
-                    rule.map(|r| r.condition.render()),
-                    &facts,
-                )?);
-            }
-            // The completion this step is about to take belongs to the turn's budget,
-            // whatever run of the loop it is in.
-            self.steps_taken = step;
-            let Some(response) =
-                self.complete_with_ladder(&chosen, &mut request, on_delta, &mut events)?
-            else {
-                // The provider refuses even the smallest request we can build. This is
-                // the ladder's last rung and it is not a failure: the log, the plan and
-                // the work so far are all still here, so the next sentence continues.
-                let note = format!(
-                    "stopped after {} steps: this turn could not be sent, the context is full \
+                self.refresh_memory();
+                // Both passes report what they freed. If both fired in one step they are one
+                // pass for the thrash window: the earlier `before` and the later `after`.
+                let aged = self.age_tool_outputs(&mut events)?;
+                let compacted = self.compact_if_needed(&mut events, None)?;
+                let pass = match (aged, compacted) {
+                    (Some((before, _)), Some((_, after))) => Some((before, after)),
+                    (Some(pass), None) | (None, Some(pass)) => Some(pass),
+                    (None, None) => None,
+                };
+                if let Some((before, after)) = pass {
+                    // Three passes inside five steps are only thrash when they are not keeping
+                    // up: each freed under five percent, or left the context over its ceiling.
+                    // Legitimate aging at a busy step must not stop the turn.
+                    self.note_compaction(step, before, after);
+                    if let Some(reason) = self.compaction_thrash() {
+                        let note = format!(
+                        "stopped after {} steps without progress (compaction thrash): {reason} — \
+                         the session's own history fills its budget; raise `budget_tokens` in the \
+                         configuration, or split the task into a fresh session",
+                        self.steps_taken
+                    );
+                        events.push(self.record_assistant(Some(&note), &[])?);
+                        return Ok(TurnOutcome {
+                            steps: self.steps_taken,
+                            final_text: Some(note),
+                            pending_approval: None,
+                            refused: None,
+                            events,
+                            interrupted: false,
+                        });
+                    }
+                    self.seat_map();
+                }
+                let mut request = CompletionRequest {
+                    messages: self.messages.clone(),
+                    tools: self.tool_specs(),
+                };
+                // Routing happens here, per call, from facts the session can explain —
+                // and a change of model is an event, not a hidden optimisation.
+                let facts = loong_config::Facts {
+                    context_tokens: self.ledger.total_tokens(),
+                    step: step as u64,
+                };
+                let (chosen, rule) = self.router.select(&facts);
+                let chosen = chosen
+                    .filter(|name| self.models.contains_key(*name))
+                    .unwrap_or(self.selected_model.as_str())
+                    .to_string();
+                if chosen != self.selected_model {
+                    events.push(self.record_model_selected(
+                        &chosen,
+                        rule.map(|r| r.condition.render()),
+                        &facts,
+                    )?);
+                }
+                // The completion this step is about to take belongs to the turn's budget,
+                // whatever run of the loop it is in.
+                self.steps_taken = step;
+                let Some(response) =
+                    self.complete_with_ladder(&chosen, &mut request, on_delta, &mut events)?
+                else {
+                    // The provider refuses even the smallest request we can build. This is
+                    // the ladder's last rung and it is not a failure: the log, the plan and
+                    // the work so far are all still here, so the next sentence continues.
+                    let note = format!(
+                        "stopped after {} steps: this turn could not be sent, the context is full \
                      even after shedding what could be shed — the work so far is saved; send a \
                      new message to continue, or raise `budget_tokens` in the configuration",
-                    self.steps_taken
-                );
-                events.push(self.record_assistant(Some(&note), &[])?);
-                return Ok(TurnOutcome {
-                    steps: self.steps_taken,
-                    final_text: Some(note),
-                    pending_approval: None,
-                    refused: None,
-                    events,
-                    interrupted: false,
-                });
-            };
-            events.push(self.record_cost(&response.usage)?);
-
-            if response.tool_calls.is_empty() {
-                let text = response.text.unwrap_or_default();
-                // A reply that pastes a file, or prints a tool call, and never *calls* a
-                // tool is not a finished task. Object once, in as many words, and give the
-                // model a turn to act; if it does it again, accept the answer and let the
-                // person see what happened rather than looping.
-                if !nudged {
-                    // Two shapes of the same failure, and they need different words. A
-                    // printed call (measured with `qwen2.5:7b-instruct` on Ollama's
-                    // OpenAI shim: `{"name":"write_file",…}` inside `content`) named the
-                    // tool it wanted, so the correction can name it too; a pasted file
-                    // names nothing and the correction has to say `write_file` itself.
-                    let printed = leaked_tool_call(&text).filter(|tool| {
-                        // Printing a call for a tool that already ran this turn is a
-                        // summary of what happened, not an attempt that failed.
-                        !ran.iter().any(|done| done == tool)
+                        self.steps_taken
+                    );
+                    events.push(self.record_assistant(Some(&note), &[])?);
+                    return Ok(TurnOutcome {
+                        steps: self.steps_taken,
+                        final_text: Some(note),
+                        pending_approval: None,
+                        refused: None,
+                        events,
+                        interrupted: false,
                     });
-                    // A pasted file is only suspect before anything has run: afterwards a
-                    // reply may quote code freely, which is the guard this keeps.
-                    let pasted =
-                        printed.is_none() && ran.is_empty() && looks_like_pasted_file(&text);
-                    if printed.is_some() || pasted {
-                        nudged = true;
-                        let correction = match &printed {
-                            Some(tool) => format!(
+                };
+                events.push(self.record_cost(&response.usage)?);
+
+                if response.tool_calls.is_empty() {
+                    let text = response.text.unwrap_or_default();
+                    // A reply that pastes a file, or prints a tool call, and never *calls* a
+                    // tool is not a finished task. Object once, in as many words, and give the
+                    // model a turn to act; if it does it again, accept the answer and let the
+                    // person see what happened rather than looping.
+                    if !nudged {
+                        // Two shapes of the same failure, and they need different words. A
+                        // printed call (measured with `qwen2.5:7b-instruct` on Ollama's
+                        // OpenAI shim: `{"name":"write_file",…}` inside `content`) named the
+                        // tool it wanted, so the correction can name it too; a pasted file
+                        // names nothing and the correction has to say `write_file` itself.
+                        let printed = leaked_tool_call(&text).filter(|tool| {
+                            // Printing a call for a tool that already ran this turn is a
+                            // summary of what happened, not an attempt that failed.
+                            !ran.iter().any(|done| done == tool)
+                        });
+                        // A pasted file is only suspect before anything has run: afterwards a
+                        // reply may quote code freely, which is the guard this keeps.
+                        let pasted =
+                            printed.is_none() && ran.is_empty() && looks_like_pasted_file(&text);
+                        if printed.is_some() || pasted {
+                            nudged = true;
+                            let correction = match &printed {
+                                Some(tool) => format!(
                                 "You wrote the `{tool}` call as text — a `<tool_call>` block or \
                                  JSON in your reply — instead of emitting a real tool call, so \
                                  nothing ran and the workspace is unchanged. Emit `{tool}` now \
@@ -550,75 +566,102 @@ impl Kernel {
                                  print the call and do not wrap it in `<tool_call>`: printing it \
                                  is what made it do nothing."
                             ),
-                            None => "You answered with the file's contents in chat and did not \
+                                None => {
+                                    "You answered with the file's contents in chat and did not \
                                      call a tool, so nothing was written to the workspace. Call \
                                      `write_file` now with the full content in the `content` \
                                      argument, then tell me the path you wrote."
-                                .to_string(),
-                        };
-                        self.messages.push(ChatMessage::User { text: correction });
-                        // Not recorded as a message event: this is the harness
-                        // course-correcting, not something the person said. The retry's
-                        // assistant message is what the log will show, which is the answer
-                        // that actually mattered.
-                        continue;
-                    }
-                }
-                events.push(self.record_assistant(Some(&text), &[])?);
-                return Ok(TurnOutcome {
-                    steps: step,
-                    final_text: Some(text),
-                    pending_approval: None,
-                    refused: None,
-                    events,
-                    interrupted: false,
-                });
-            }
-
-            for call in &response.tool_calls {
-                ran.push(call.tool.clone());
-            }
-            events.push(self.record_assistant(response.text.as_deref(), &response.tool_calls)?);
-            for (at, call) in response.tool_calls.iter().enumerate() {
-                match self.dispatch(call, &mut events)? {
-                    Dispatch::Done => {}
-                    Dispatch::Pending(pending) => {
-                        // The rest of this message was never dispatched, and the provider
-                        // requires an answer for **every** call it was told about: a request
-                        // carrying one assistant message with three calls and one result is
-                        // rejected outright, which is how a model that batches its calls — and
-                        // asks for permission on the first of them — breaks its own session.
-                        // Say they did not run; the model re-issues what it still wants.
-                        for skipped in &response.tool_calls[at + 1..] {
-                            events.push(self.record_skipped_result(
-                                &skipped.call_id,
-                                &format!(
-                                    "not run: the turn stopped to ask about {} first",
-                                    pending.request_id
-                                ),
-                            )?);
+                                        .to_string()
+                                }
+                            };
+                            self.messages.push(ChatMessage::User { text: correction });
+                            // Not recorded as a message event: this is the harness
+                            // course-correcting, not something the person said. The retry's
+                            // assistant message is what the log will show, which is the answer
+                            // that actually mattered.
+                            continue;
                         }
-                        self.pending = Some(pending.clone());
-                        return Ok(TurnOutcome {
-                            steps: step,
-                            final_text: None,
-                            pending_approval: Some(pending),
-                            refused: None,
-                            events,
-                            interrupted: false,
-                        });
+                    }
+                    events.push(self.record_assistant(Some(&text), &[])?);
+                    return Ok(TurnOutcome {
+                        steps: step,
+                        final_text: Some(text),
+                        pending_approval: None,
+                        refused: None,
+                        events,
+                        interrupted: false,
+                    });
+                }
+
+                for call in &response.tool_calls {
+                    ran.push(call.tool.clone());
+                }
+                events.push(self.record_assistant(response.text.as_deref(), &response.tool_calls)?);
+                for (at, call) in response.tool_calls.iter().enumerate() {
+                    match self.dispatch(call, &mut events)? {
+                        Dispatch::Done => {}
+                        Dispatch::Pending(pending) => {
+                            // The rest of this message was never dispatched, and the provider
+                            // requires an answer for **every** call it was told about: a request
+                            // carrying one assistant message with three calls and one result is
+                            // rejected outright, which is how a model that batches its calls — and
+                            // asks for permission on the first of them — breaks its own session.
+                            // Say they did not run; the model re-issues what it still wants.
+                            for skipped in &response.tool_calls[at + 1..] {
+                                events.push(self.record_skipped_result(
+                                    &skipped.call_id,
+                                    &format!(
+                                        "not run: the turn stopped to ask about {} first",
+                                        pending.request_id
+                                    ),
+                                )?);
+                            }
+                            self.pending = Some(pending.clone());
+                            return Ok(TurnOutcome {
+                                steps: step,
+                                final_text: None,
+                                pending_approval: Some(pending),
+                                refused: None,
+                                events,
+                                interrupted: false,
+                            });
+                        }
                     }
                 }
             }
+            // The segment ran out of budget. Renew only when it got something done: a
+            // segment of failures or repeats must not buy itself another segment, which
+            // is what would let a spinner outlive the stall guard.
+            if self.progress_marker() == progress_before {
+                break;
+            }
+            if segments >= self.config.max_continuations {
+                break;
+            }
+            segments += 1;
+            self.renewals += 1;
+            self.segment_start = self.steps_taken;
         }
-        let note = format!(
-            "stopped after {} steps without finishing (step limit) — reply to continue, or \
-             raise `max_steps` in the configuration",
-            self.config.max_steps
-        );
+        // The stop says which rule stopped it: a spent budget, or a cap on how often a
+        // working turn may extend it. "renewed" is the word that makes the difference
+        // visible instead of leaving the person to guess why a productive turn ended.
+        let note = if self.renewals == 0 {
+            format!(
+                "stopped after {} steps without finishing (step limit) — reply to continue, or \
+                 raise `max_steps` in the configuration",
+                self.config.max_steps
+            )
+        } else {
+            format!(
+                "stopped after {} steps without finishing: renewed the step budget {} time(s) \
+                 and still did not finish — reply to continue, or raise `max_steps` in the \
+                 configuration",
+                self.steps_taken, self.renewals
+            )
+        };
         events.push(self.record_assistant(Some(&note), &[])?);
         Ok(TurnOutcome {
-            steps: self.config.max_steps,
+            steps: self.steps_taken,
             final_text: Some(note),
             pending_approval: None,
             refused: None,
@@ -797,9 +840,22 @@ impl Kernel {
     pub(super) fn note_tool_result(&mut self, ok: bool) {
         if ok {
             self.consecutive_failures = 0;
+            self.succeeded += 1;
         } else {
             self.consecutive_failures += 1;
         }
+    }
+
+    /// Purpose: How much this turn has actually achieved, for the budget-renewal rule.
+    ///
+    /// Serves: the renewal decision, so a segment that got nothing done cannot buy itself
+    /// more steps while a segment that finished real work is not cut off mid-task.
+    /// Design: `docs/superpowers/specs/2026-11-07-finite-memory-unbounded-conversation-design.md` §5.
+    /// Up: `Kernel::run_inner`, at the start and the end of every segment.
+    /// Down: `Kernel.succeeded`, which `Kernel::note_tool_result` already keeps.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_turn_with_progress_continues_past_the_step_budget`.
+    fn progress_marker(&self) -> usize {
+        self.succeeded
     }
 
     /// Purpose: Why this turn should stop for lack of progress, if it should.

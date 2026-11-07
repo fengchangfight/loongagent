@@ -201,6 +201,14 @@ pub struct TurnOutcome {
 /// ADR-0008 §2).
 pub const DEFAULT_MAX_STEPS: usize = 100;
 
+/// How many times a productive turn may renew its step budget before it hands control back.
+///
+/// The budget stops a model that *spins*, not a task that is large. A turn that keeps
+/// finishing real work therefore gets another segment of the same budget instead of the
+/// "reply to continue" note; three segments is enough for any honest task to either
+/// finish or prove it is not converging, and `0` restores the old behaviour.
+pub const DEFAULT_MAX_CONTINUATIONS: usize = 3;
+
 /// How many identical calls in a row mean the model is spinning.
 ///
 /// The guard compares one call with the one before it, not with the whole turn: a model
@@ -340,6 +348,13 @@ pub struct KernelConfig {
     /// Compact once context passes this fraction of the budget (80%).
     pub compact_at_percent: u64,
     pub max_steps: usize,
+    /// How many more segments of `max_steps` a turn that is still getting work done may
+    /// run. `0` restores the old behaviour: stop the moment the budget is spent.
+    ///
+    /// A segment renews only when it achieved something (`Kernel::progress_marker`), so
+    /// this cannot paper over a spin — the stall guard and the no-progress rule still end
+    /// a turn that goes nowhere.
+    pub max_continuations: usize,
     /// Tokens held back for the model's answer: compaction fires while the room left in the
     /// model's window is smaller than this. See [`DEFAULT_RESERVED_CONTEXT`].
     pub reserved_context_size: u64,
@@ -387,6 +402,7 @@ impl KernelConfig {
             compact_at_percent: 80,
             settings: Profile::default(),
             max_steps: DEFAULT_MAX_STEPS,
+            max_continuations: DEFAULT_MAX_CONTINUATIONS,
             reserved_context_size: DEFAULT_RESERVED_CONTEXT,
             context_engine: None,
             bootstrap_skills: Vec::new(),
@@ -555,6 +571,16 @@ pub struct Kernel {
     /// resumes. Reset only by `Kernel::begin_turn`; `run_inner` starts its loop here, so
     /// an approval cannot hand the model a second budget.
     steps_taken: usize,
+    /// The step count at which the current segment of the budget began. A renewal moves
+    /// it to the current step, so `max_steps` bounds each segment rather than the turn;
+    /// an approval resume keeps it, so the resume still spends what the turn has left.
+    segment_start: usize,
+    /// Tool calls that finished successfully this turn. It is the progress marker the
+    /// renewal rule reads: a segment that changed this number got something done, while
+    /// a segment of failures or repeats did not.
+    succeeded: usize,
+    /// How many times this turn has already renewed its budget, for the honest stop note.
+    renewals: usize,
     /// True once the L4 map has been seated for this turn. An approval resume must not
     /// reseat it: the map sits before the conversation, so rewriting it discards every
     /// provider cache entry after it.

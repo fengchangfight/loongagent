@@ -559,10 +559,132 @@ fn the_step_limit_stops_a_spinning_model() {
     let model = ScriptedModel::new((0..10).map(spin).collect());
     let mut config = KernelConfig::new(&t.dir);
     config.max_steps = 3;
+    // This test is about the budget, not about renewal: a spinning model would now get a
+    // second segment and stop on the repeat guard instead, which is a different rule.
+    config.max_continuations = 0;
     let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
     let out = k.submit("go").unwrap();
     assert_eq!(out.steps, 3);
     assert!(out.final_text.unwrap().contains("step limit"));
+}
+
+/// Purpose: A turn that is still getting work done continues past its step budget instead of asking the person to type "continue".
+#[test]
+fn a_turn_with_progress_continues_past_the_step_budget() {
+    // Five distinct reads, then the answer. Two steps are not enough for the task,
+    // but the person asked for the task, not for two steps: each step that finished
+    // a call successfully is progress, so the turn renews its own budget.
+    let t = Temp::new();
+    for n in 1..=5 {
+        std::fs::write(t.dir.join(format!("a{n}.txt")), format!("body {n}")).unwrap();
+    }
+    let script: Vec<_> = (1..=5)
+        .map(|n| response(vec![call(&format!("c{n}"), "read_file", json!({"path": format!("a{n}.txt")}))], None))
+        .chain(std::iter::once(response(vec![], Some("all five read"))))
+        .collect();
+    let model = ScriptedModel::new(script);
+    let mut config = KernelConfig::new(&t.dir);
+    config.max_steps = 2;
+    let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+    let out = k.submit("read all five").unwrap();
+    assert_eq!(
+        out.steps, 6,
+        "five reads and the answer, not two steps: {out:?}"
+    );
+    assert_eq!(out.final_text.as_deref(), Some("all five read"));
+    assert!(
+        !out.final_text.unwrap().contains("step limit"),
+        "the person was asked to continue a turn that was working"
+    );
+}
+
+/// Purpose: A segment that got nothing done does not renew the budget, so a turn going nowhere still stops and asks.
+#[test]
+fn a_turn_without_progress_still_stops_at_the_budget() {
+    // Every call fails, but four failures are the stall threshold and only two steps
+    // run here, so the stop has to come from the budget: nothing was achieved, so
+    // continuing would only spend more on the same nothing.
+    let t = Temp::new();
+    let script: Vec<_> = (1..=5)
+        .map(|n| {
+            response(
+                vec![call(&format!("c{n}"), "read_file", json!({"path": "missing.txt"}))],
+                None,
+            )
+        })
+        .collect();
+    let model = ScriptedModel::new(script);
+    let mut config = KernelConfig::new(&t.dir);
+    config.max_steps = 2;
+    let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+    let out = k.submit("read the missing file forever").unwrap();
+    assert_eq!(out.steps, 2, "the budget was renewed with nothing to show: {out:?}");
+    assert!(
+        out.final_text.unwrap().contains("step limit"),
+        "the stop must name the budget"
+    );
+}
+
+/// Purpose: A model repeating the same call keeps its own guard: the repeat trigger stops it, not an endless renewal.
+#[test]
+fn a_spinning_model_stops_at_the_repeat_guard() {
+    let t = Temp::new();
+    std::fs::write(t.dir.join("a.txt"), "x").unwrap();
+    let spin = |_: usize| response(vec![call("c", "read_file", json!({"path": "a.txt"}))], None);
+    let model = ScriptedModel::new((0..12).map(spin).collect());
+    let mut config = KernelConfig::new(&t.dir);
+    config.max_steps = 3;
+    let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+    let out = k.submit("go").unwrap();
+    assert_eq!(
+        out.steps, 3,
+        "the fourth step never ran: the repeat guard fired: {out:?}"
+    );
+    let note = out.final_text.expect("the guard says why");
+    assert!(note.contains("stall guard"), "{note}");
+    assert!(note.contains("ran 3 times in a row"), "{note}");
+}
+
+/// Purpose: With renewal switched off, the budget itself still stops the turn and says so.
+#[test]
+fn a_turn_that_may_not_renew_stops_at_the_step_limit() {
+    let t = Temp::new();
+    for n in 1..=5 {
+        std::fs::write(t.dir.join(format!("a{n}.txt")), format!("body {n}")).unwrap();
+    }
+    let script: Vec<_> = (1..=5)
+        .map(|n| response(vec![call(&format!("c{n}"), "read_file", json!({"path": format!("a{n}.txt")}))], None))
+        .collect();
+    let model = ScriptedModel::new(script);
+    let mut config = KernelConfig::new(&t.dir);
+    config.max_steps = 2;
+    config.max_continuations = 0;
+    let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+    let out = k.submit("read them").unwrap();
+    assert_eq!(out.steps, 2, "renewal is off: {out:?}");
+    assert!(out.final_text.unwrap().contains("step limit"));
+}
+
+/// Purpose: The number of renewals is capped, so a task that never ends still hands control back.
+#[test]
+fn the_renewals_are_capped() {
+    let t = Temp::new();
+    for n in 1..=10 {
+        std::fs::write(t.dir.join(format!("a{n}.txt")), format!("body {n}")).unwrap();
+    }
+    // Ten reads with a two-step budget and one renewal allowed: 2 + 2 steps, then stop.
+    let script: Vec<_> = (1..=10)
+        .map(|n| response(vec![call(&format!("c{n}"), "read_file", json!({"path": format!("a{n}.txt")}))], None))
+        .collect();
+    let model = ScriptedModel::new(script);
+    let mut config = KernelConfig::new(&t.dir);
+    config.max_steps = 2;
+    config.max_continuations = 1;
+    let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+    let out = k.submit("read all ten").unwrap();
+    assert_eq!(out.steps, 4, "one renewal is two more steps: {out:?}");
+    let note = out.final_text.expect("the cap says why");
+    assert!(note.contains("renewed"), "{note}");
 }
 
 /// Purpose: One step budget covers a turn across an approval resume, so a parked call cannot double it.
@@ -587,6 +709,9 @@ fn the_step_budget_survives_an_approval_resume() {
     ]);
     let mut config = KernelConfig::new(&t.dir);
     config.max_steps = 3;
+    // What this test proves is that the resume spends the same budget. Renewal is a
+    // separate rule and would hand the resumed segment a fresh one, so it is off here.
+    config.max_continuations = 0;
     let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
 
     let asked = k.submit("go").unwrap();
@@ -3349,6 +3474,9 @@ fn narrow_only_numbers_are_the_strictest_of_the_two() {
     let mut config = KernelConfig::new(&t.dir);
     config.budget_tokens = Some(50_000);
     config.max_steps = 8;
+    // `max_steps` bounds one segment, so renewal is off here: this test is about a
+    // layer's ceiling winning, not about how many segments a working turn may run.
+    config.max_continuations = 0;
     config.settings = settings_from(
         &t.dir,
         "budget_tokens = 1000\nmax_steps = 1\nkeep_newest_tokens = 100\n",

@@ -37,6 +37,14 @@ pub enum Category {
     McpTools,
     Retrieval,
     History,
+    /// An old exchange, moved out of the foreground but leaving its address and
+    /// its clues behind (`docs/superpowers/specs/2026-11-07-finite-memory-unbounded-conversation-design.md` §6).
+    ///
+    /// It is a *summary of where the original is*, not a claim about what it said,
+    /// so it is the cheapest thing after stale tool output to lose, and it sits
+    /// behind `History` in the eviction order because a stub is the only copy of
+    /// its own address.
+    Stub,
 }
 
 impl Category {
@@ -57,6 +65,7 @@ impl Category {
             Category::McpTools => "mcp_tools",
             Category::Retrieval => "retrieval",
             Category::History => "history",
+            Category::Stub => "stub",
         }
     }
 
@@ -72,6 +81,8 @@ impl Category {
     pub fn eviction_priority(self) -> u8 {
         match self {
             Category::History => 100,
+            // Behind history: a stub carries an address nothing else holds.
+            Category::Stub => 90,
             Category::Retrieval => 80,
             Category::McpTools => 70,
             Category::Memory => 50,
@@ -114,6 +125,15 @@ pub struct Entry {
     pub pinned: bool,
     /// Its content was replaced by a marker to free context (ADR-0006 §4).
     pub cleared: bool,
+    /// The events this block was recorded from: `from` and `to` are its `seq`
+    /// interval in the log, so a stub can name the record it stands in for.
+    /// `None` for a block that is not a conversation message, or one replayed
+    /// from an ancestor's log (whose `seq` values do not belong to this one).
+    pub seq: Option<(u64, u64)>,
+    /// Words that lead back to this block: the person's own words first, then the
+    /// tool and file names it touched. A stub keeps them so "search again" starts
+    /// from what someone would actually say.
+    pub clues: Vec<String>,
 }
 
 /// Purpose: One row of the explain query: entry id, category, source, tokens and pin.
@@ -241,8 +261,51 @@ impl Ledger {
             lifetime,
             pinned,
             cleared: false,
+            seq: None,
+            clues: Vec::new(),
         });
         id
+    }
+
+    /// Purpose: Record which events a block came from, so a stub can name the record it stands in for.
+    ///
+    /// Serves: the address half of "forgotten, but one recall away".
+    /// Design: `docs/design/context-ledger.md` §4.
+    /// Up: `Kernel::record_user`, `record_assistant`, `append_tool_result` and the replay helpers.
+    /// Down: `Entry.seq`; the compaction stubbing reads it.
+    /// Verify: `cargo test -p loong-kernel turn::tests::old_exchanges_become_stubs_with_an_address`.
+    pub fn locate(&mut self, id: u64, from: u64, to: u64) {
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
+            entry.seq = Some((from, to));
+        }
+    }
+
+    /// Purpose: Attach the words that lead back to a block, so a stub can carry them.
+    ///
+    /// Serves: a stub that is searchable with the person's own words.
+    /// Design: `docs/design/context-ledger.md` §4.
+    /// Up: `Kernel::stub_old_exchanges` and `Kernel::merge_adjacent_stubs`.
+    /// Down: `Entry.clues`; the merge reads them to take a union.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_rejected_plan_survives_as_a_stub`.
+    pub fn set_clues(&mut self, id: u64, clues: Vec<String>) {
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
+            entry.clues = clues;
+        }
+    }
+
+    /// Purpose: The substring of clues that lead back to one block, for a stub to carry.
+    ///
+    /// Serves: `Kernel::stub_old_exchanges` reading what it is about to replace.
+    /// Design: `docs/design/context-ledger.md` §4.
+    /// Up: `Kernel::stub_old_exchanges`.
+    /// Down: `Entry.clues`; no other callee.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_rejected_plan_survives_as_a_stub`.
+    pub fn clues(&self, id: u64) -> &[String] {
+        self.entries
+            .iter()
+            .find(|entry| entry.id == id)
+            .map(|entry| entry.clues.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Purpose: Every entry, in insertion order.

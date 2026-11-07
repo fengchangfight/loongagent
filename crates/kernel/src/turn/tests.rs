@@ -4659,13 +4659,154 @@ fn with_the_engine_on_a_long_session_never_drops_an_exchange() {
         "with the engine on, no exchange is ever dropped"
     );
 
-    // The oldest prompt is still in the request, which is the point.
+    // The oldest prompt is still reachable, which is the point. It left the
+    // foreground as a stub that names its address, not as a dropped message
+    // (`old_exchanges_become_stubs_with_an_address` proves the address reads back).
     let seen = seen.lock().unwrap();
     let last = seen.last().unwrap();
+    let still_there = last.iter().any(|m| match m {
+        ChatMessage::System { text } => text.contains("turn one") && text.contains("recall seq"),
+        ChatMessage::User { text } => text.contains("turn one"),
+        _ => false,
+    });
     assert!(
-        last.iter()
-            .any(|m| matches!(m, ChatMessage::User { text } if text.contains("turn one"))),
-        "the first turn is still reachable in the request"
+        still_there,
+        "the first turn is still reachable from the request: {last:?}"
+    );
+}
+
+/// Purpose: An old exchange leaves the prompt but keeps an address, so the original is one recall away instead of gone.
+#[test]
+fn old_exchanges_become_stubs_with_an_address() {
+    let t = Temp::new();
+    let filler = "x".repeat(2_000);
+    let (model, seen) = RecordingModel::new(vec![
+        response(vec![call("c1", "read_file", json!({"path": "a.txt"}))], None),
+        response(vec![], Some("第一轮完成")),
+        response(vec![], Some("第二轮完成")),
+        response(vec![], Some("第三轮完成")),
+    ]);
+    std::fs::write(t.dir.join("a.txt"), "content").unwrap();
+    let mut config = KernelConfig::new(&t.dir);
+    config.budget_tokens = Some(1_200);
+    config.keep_newest_tokens = 200;
+    config.context_engine = Some(crate::context_engine::ContextEngineConfig::new(
+        t.dir.join("session.context.db"),
+        t.log.clone(),
+    ));
+    let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+    k.submit(&format!("修一下 a.txt 的读取 {filler}")).unwrap();
+    k.submit(&format!("第二个任务 {filler}")).unwrap();
+    k.submit(&format!("第三个任务 {filler}")).unwrap();
+
+    let seen = seen.lock().unwrap();
+    let last = seen.last().expect("the third request was recorded");
+    let text = last
+        .iter()
+        .find_map(|m| match m {
+            ChatMessage::System { text } if text.contains("[stub ") => Some(text.clone()),
+            _ => None,
+        })
+        .expect("the oldest exchange is out of the prompt, replaced by a stub");
+    assert!(
+        text.contains("recall seq"),
+        "the stub says how to get the original back: {text}"
+    );
+    assert!(
+        text.contains("修一下"),
+        "and carries the words it was asked with: {text}"
+    );
+
+    // The address is real: reading it back returns the original words.
+    let range = text
+        .split("recall seq ")
+        .nth(1)
+        .and_then(|rest| rest.split([' ', '\n', ']']).next())
+        .expect("the stub names a range");
+    let (from, to) = range.split_once('-').expect("a range is a-b");
+    let (from, to): (u64, u64) = (from.parse().unwrap(), to.parse().unwrap());
+    let (ok, found) = k.recall_tool(&json!({"seq_from": from, "seq_to": to}));
+    assert!(ok, "{found}");
+    assert!(
+        found.contains("修一下"),
+        "the range the stub names returns the original: {found}"
+    );
+
+    // And nothing was dropped from the record itself.
+    let events = loong_eventlog::replay(&t.log).unwrap().events;
+    assert!(
+        events.iter().any(|e| e.kind == ev::MESSAGE_APPENDED
+            && e.data["text"].as_str().unwrap_or("").contains("修一下")),
+        "the original is still in the log"
+    );
+}
+
+/// Purpose: The foreground stops growing once stubs take over, because old text leaves as fast as new text arrives.
+#[test]
+fn the_foreground_stops_growing_once_stubs_take_over() {
+    let t = Temp::new();
+    let filler = "x".repeat(800);
+    let script: Vec<_> = (0..40)
+        .map(|n| response(vec![], Some(&format!("done {n}"))))
+        .collect();
+    let model = ScriptedModel::new(script);
+    let mut config = KernelConfig::new(&t.dir);
+    config.budget_tokens = Some(3_000);
+    config.keep_newest_tokens = 800;
+    config.context_engine = Some(crate::context_engine::ContextEngineConfig::new(
+        t.dir.join("session.context.db"),
+        t.log.clone(),
+    ));
+    let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+    let mut at_30 = 0;
+    for turn in 0..40 {
+        k.submit(&format!("任务 {turn} 处理一下 {filler}")).unwrap();
+        if turn == 29 {
+            at_30 = k.ledger().total_tokens();
+        }
+    }
+    let at_40 = k.ledger().total_tokens();
+    assert!(
+        at_40 < at_30 * 11 / 10 + 50,
+        "the foreground must stop growing: {at_30} tokens at turn 30, {at_40} at turn 40"
+    );
+}
+
+/// Purpose: A rejected plan survives as a stub's clue, because a veto is the one thing a re-run cannot reproduce.
+#[test]
+fn a_rejected_plan_survives_as_a_stub() {
+    let t = Temp::new();
+    let filler = "x".repeat(2_000);
+    let (model, seen) = RecordingModel::new(vec![
+        response(vec![], Some("好的，用方案 A 深拷贝后合并")),
+        response(vec![], Some("明白，改成方案 B")),
+        response(vec![], Some("第三轮完成")),
+    ]);
+    let mut config = KernelConfig::new(&t.dir);
+    config.budget_tokens = Some(1_200);
+    config.keep_newest_tokens = 200;
+    config.context_engine = Some(crate::context_engine::ContextEngineConfig::new(
+        t.dir.join("session.context.db"),
+        t.log.clone(),
+    ));
+    let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+    k.submit(&format!("不要用方案 A 深拷贝，太重了 {filler}")).unwrap();
+    k.submit(&format!("换成方案 B {filler}")).unwrap();
+    k.submit(&format!("继续 {filler}")).unwrap();
+
+    let seen = seen.lock().unwrap();
+    let last = seen.last().unwrap();
+    let text = last
+        .iter()
+        .filter_map(|m| match m {
+            ChatMessage::System { text } if text.contains("[stub ") => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        text.contains("不要用方案 A"),
+        "the veto survives in the stub's clues: {text}"
     );
 }
 

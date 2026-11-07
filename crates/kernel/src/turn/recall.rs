@@ -69,26 +69,40 @@ impl Kernel {
             .unwrap_or(DEFAULT_EXCERPT_CHARS as u64)
             .clamp(1, MAX_EXCERPT_CHARS as u64) as usize;
 
+        // A stub names the exact range it stands in for, so a `seq_from`/`seq_to`
+        // pair is a complete request on its own — this is the address half of the
+        // stubbing design, and it must work without guessing any words.
+        let seq_from = args.get("seq_from").and_then(|v| v.as_u64());
+        let seq_to = args.get("seq_to").and_then(|v| v.as_u64());
         // A bare `entity` or `tool` with no words is a legitimate way to ask "what
         // touched src/config?" — it is not an error, so it is not reported as one.
-        if terms.is_empty() && entity.is_none() && tool.is_none() {
+        if terms.is_empty() && entity.is_none() && tool.is_none() && seq_from.is_none() {
             return (
                 false,
-                "give a `query`, an `entity`, a `tool`, or an `expand` id".to_string(),
+                "give a `query`, an `entity`, a `tool`, a `seq_from` range, or an `expand` id"
+                    .to_string(),
             );
         }
 
         let search = loong_context::SearchQuery {
             terms: terms.clone(),
+            seq_from,
+            seq_to,
             limit,
             ..Default::default()
         };
         // Summaries first: they are the concentrated answer. Raw events are the
         // fallback, and they are what makes the memory complete rather than merely
         // convenient.
-        let summaries = match engine.store().recall_at(level, &search) {
-            Ok(found) => found,
-            Err(e) => return (false, format!("searching summaries failed: {e}")),
+        // An address (`seq_from`/`seq_to`) is a question about the record, not about
+        // the derived summaries, so it skips straight to the atoms.
+        let summaries = if seq_from.is_none() && seq_to.is_none() {
+            match engine.store().recall_at(level, &search) {
+                Ok(found) => found,
+                Err(e) => return (false, format!("searching summaries failed: {e}")),
+            }
+        } else {
+            Vec::new()
         };
         let events = if summaries.is_empty() {
             let mut search = search.clone();
@@ -105,7 +119,11 @@ impl Kernel {
         };
 
         if summaries.is_empty() && events.is_empty() {
-            let asked = terms.join(" ");
+            let asked = if terms.is_empty() {
+                format!("seq {}..{}", seq_from.unwrap_or(0), seq_to.unwrap_or(0))
+            } else {
+                terms.join(" ")
+            };
             return (
                 true,
                 format!(
@@ -190,6 +208,11 @@ pub(super) fn recall_parameters() -> Json {
                 "type": "string",
                 "description": "A summary id from a previous recall; returns it with the original events it cites."
             },
+            "seq_from": {
+                "type": "integer",
+                "description": "Read the record from this seq (inclusive). A stub's `recall seq a-b` names both ends."
+            },
+            "seq_to": {"type": "integer", "description": "Read the record up to this seq (inclusive)."},
             "excerpt_chars": {
                 "type": "integer",
                 "description": "How many characters of the original text to show around a match (default 240, capped at 800)."
@@ -226,7 +249,7 @@ pub(super) const RECALL_MAX_CHARS: usize = 4_000;
 /// Split a query into terms. Whitespace and the punctuation that would otherwise
 /// glue words together; the two-character Chinese word is preserved, which is the
 /// case a trigram index gets silently wrong.
-fn split_terms(query: &str) -> Vec<String> {
+pub(super) fn split_terms(query: &str) -> Vec<String> {
     query
         .split(|c: char| {
             c.is_whitespace()

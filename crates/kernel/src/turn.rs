@@ -687,6 +687,7 @@ impl Kernel {
         let entry = self
             .ledger
             .add(Category::History, "user", text, Lifetime::Session, false);
+        self.ledger.locate(entry, seq, seq);
         self.entry_of.push(Some(entry));
         Ok(seq)
     }
@@ -727,6 +728,7 @@ impl Kernel {
             Lifetime::Session,
             false,
         );
+        self.ledger.locate(entry, seq, seq);
         self.entry_of.push(Some(entry));
         self.messages.push(ChatMessage::Assistant {
             text: text.map(|t| t.to_string()),
@@ -797,6 +799,7 @@ impl Kernel {
             Lifetime::Turn,
             false,
         );
+        self.ledger.locate(entry, seq, seq);
         self.entry_of.push(Some(entry));
         self.messages.push(ChatMessage::Tool {
             call_id: call_id.to_string(),

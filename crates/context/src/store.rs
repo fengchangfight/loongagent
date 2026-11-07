@@ -178,8 +178,11 @@ pub struct SearchQuery {
     pub kind: Option<String>,
     /// Restrict to messages from one role.
     pub role: Option<String>,
-    /// Inclusive lower bound on `seq`, for "since we last looked".
+    /// Inclusive lower bound on `seq`, for "since we last looked" and for a stub's
+    /// address: `[from, to]` reads one exchange back.
     pub seq_from: Option<u64>,
+    /// Inclusive upper bound on `seq`, paired with `seq_from` to name a range.
+    pub seq_to: Option<u64>,
     pub limit: usize,
 }
 
@@ -250,6 +253,17 @@ impl SearchQuery {
     /// Verify: `cargo test -p loong-context --test retrieval`.
     pub fn seq_from(mut self, seq: u64) -> Self {
         self.seq_from = Some(seq);
+        self
+    }
+
+    /// Purpose: Bound a query to events at or before a `seq`.
+    /// Serves: a stub's address, which names both ends of the exchange it stands in for.
+    /// Design: `docs/context/recall.md` §7.2.
+    /// Up: `loong-kernel`'s `turn/recall.rs`.
+    /// Down: Mutates the query; no callee.
+    /// Verify: `cargo test -p loong-kernel turn::tests::old_exchanges_become_stubs_with_an_address`.
+    pub fn seq_to(mut self, seq: u64) -> Self {
+        self.seq_to = Some(seq);
         self
     }
 }
@@ -953,6 +967,10 @@ impl Store {
         if let Some(seq_from) = query.seq_from {
             where_parts.push(format!("atom.seq >= ?{}", values.len() + 1));
             values.push(rusqlite::types::Value::Integer(seq_from as i64));
+        }
+        if let Some(seq_to) = query.seq_to {
+            where_parts.push(format!("atom.seq <= ?{}", values.len() + 1));
+            values.push(rusqlite::types::Value::Integer(seq_to as i64));
         }
 
         // A query with no words and no filters asks for nothing, not for everything:

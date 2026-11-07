@@ -10,6 +10,7 @@
 //!   `ContextEngine::refresh` and `ContextEngine::map_text`.
 //! - **Verify:** `cargo test -p loong-kernel turn::tests::compaction_clears_stale_tool_output_before_dropping_anything` · `./scripts/check.sh`.
 
+use super::recall::split_terms;
 use super::*;
 
 /// Purpose: The budget a model gets when nobody set one: a quarter of its window, floored at 32k and capped at 100k.
@@ -52,6 +53,19 @@ pub(super) fn keep_window(
     }
     Some(configured.min(ceiling / 2).min(room / 2))
 }
+
+/// How many words a stub may carry. Enough to search with, few enough that the stub
+/// is still a fraction of the exchange it replaces.
+pub(super) const STUB_MAX_CLUES: usize = 12;
+
+/// How much of the request a stub keeps as its title.
+pub(super) const STUB_TITLE_CHARS: usize = 60;
+
+/// How many changed files a stub names, newest first.
+pub(super) const STUB_MAX_FILES: usize = 4;
+
+/// How many verification commands a stub names.
+pub(super) const STUB_MAX_COMMANDS: usize = 2;
 
 /// Purpose: The one marker text both clearing paths write into a cleared tool message.
 ///
@@ -442,6 +456,27 @@ impl Kernel {
             None => crate::ledger::ClearReport::default(),
         };
 
+        // Phase 1.5: with the layered engine on, old exchanges do not stay in the
+        // foreground and are not dropped either — each becomes a stub with an address,
+        // which is what stops the prompt from growing monotonically. This is the rung
+        // that the `compaction thrash` stop was really asking for: without it, clearing
+        // tool output is all a long session can do, and once every output is a marker,
+        // every further pass frees nothing.
+        let mut stubbed_messages = 0usize;
+        if self.context_engine.is_some() {
+            while self.ledger.total_tokens() > ceiling {
+                let keep = self.rounds_that_fit(self.config.keep_newest_tokens);
+                let moved = self.stub_old_exchanges(keep);
+                if moved == 0 {
+                    break;
+                }
+                stubbed_messages += moved;
+            }
+            if stubbed_messages > 0 {
+                self.merge_adjacent_stubs();
+            }
+        }
+
         // Phase 2: only if still over, drop the oldest whole exchanges — unless the
         // layered engine is on, in which case the exchange must survive: the whole
         // claim of ADR-0017 is that the original stays reachable, and a dropped
@@ -459,7 +494,7 @@ impl Kernel {
 
         // A compaction that could not free anything (a single long turn, nothing
         // stale) is not an event: `compaction.applied` means the context changed.
-        if cleared.cleared.is_empty() && dropped_messages == 0 {
+        if cleared.cleared.is_empty() && dropped_messages == 0 && stubbed_messages == 0 {
             return Ok(None);
         }
 
@@ -467,13 +502,18 @@ impl Kernel {
         // A pass that cleared nothing records the whole context as its window, so a
         // replay clears nothing either.
         let kept_tokens = keep.unwrap_or(before);
+        let stubbed = if stubbed_messages > 0 {
+            format!(", stubbed {stubbed_messages} message(s) into the stub layer")
+        } else {
+            String::new()
+        };
         let summary = match keep {
             Some(keep) => format!(
-                "cleared {} tool output(s) older than the newest {keep} tokens and dropped {dropped_messages} oldest message(s): {before} -> {after} tokens",
+                "cleared {} tool output(s) older than the newest {keep} tokens and dropped {dropped_messages} oldest message(s){stubbed}: {before} -> {after} tokens",
                 cleared.cleared.len()
             ),
             None => format!(
-                "cleared no tool output: the history alone fills the ceiling, so all {before} tokens were kept and {dropped_messages} oldest message(s) dropped: {before} -> {after} tokens"
+                "cleared no tool output: the history alone fills the ceiling, so all {before} tokens were kept and {dropped_messages} oldest message(s) dropped{stubbed}: {before} -> {after} tokens"
             ),
         };
         events.push(self.append(
@@ -488,6 +528,231 @@ impl Kernel {
             },
         )?);
         Ok(Some((before, after)))
+    }
+
+    /// Purpose: Replace the oldest whole exchanges with one stub that keeps their address and their clues.
+    ///
+    /// Serves: a foreground that stops growing while the original record stays reachable —
+    /// the change that makes a long session end as a degraded answer instead of a
+    /// `compaction thrash` stop.
+    /// Design: `docs/superpowers/specs/2026-11-07-finite-memory-unbounded-conversation-design.md` §4, §6.
+    /// Up: `Kernel::compact_if_needed`, after clearing tool output was not enough.
+    /// Down: `stub_text`, `Kernel::rounds_that_fit`, `Ledger::{forget, add, locate, set_clues}` and the `messages`/`entry_of` splices.
+    /// Verify: `cargo test -p loong-kernel turn::tests::old_exchanges_become_stubs_with_an_address`.
+    ///
+    /// Nothing here calls a model: degradation is the moment latency is least affordable,
+    /// and every field comes from a message this turn already holds. Deterministic
+    /// extraction can be mechanical; inventing is what is not allowed.
+    ///
+    /// Returns how many messages left the foreground, or `0` when there is nothing safe
+    /// to stub. The newest `keep_rounds` exchanges are never touched: that is the turn
+    /// being answered, and it is the one thing a stub cannot stand in for.
+    pub(super) fn stub_old_exchanges(&mut self, keep_rounds: usize) -> usize {
+        let start = self
+            .messages
+            .iter()
+            .take_while(|m| matches!(m, ChatMessage::System { .. }))
+            .count();
+        let rounds: Vec<usize> = (start..self.messages.len())
+            .filter(|index| matches!(self.messages[*index], ChatMessage::User { .. }))
+            .collect();
+        if rounds.len() <= keep_rounds {
+            return 0;
+        }
+        let cut = rounds[rounds.len() - keep_rounds];
+        if cut <= start {
+            return 0;
+        }
+
+        let span = self.span_of(start, cut);
+        let (text, clues) = stub_text(&self.messages[start..cut], span);
+        // The entries the stub stands in for are gone from the ledger: their text is
+        // no longer in the prompt, and pretending otherwise would double-count it.
+        let ids: Vec<u64> = self.entry_of[start..cut]
+            .iter()
+            .flatten()
+            .copied()
+            .collect();
+        self.ledger.forget(&ids);
+        let entry = self
+            .ledger
+            .add(Category::Stub, "stub", &text, Lifetime::Session, false);
+        if let Some((from, to)) = span {
+            self.ledger.locate(entry, from, to);
+        }
+        self.ledger.set_clues(entry, clues);
+        self.messages
+            .splice(start..cut, [ChatMessage::System { text }]);
+        self.entry_of.splice(start..cut, [Some(entry)]);
+        cut - start
+    }
+
+    /// Purpose: Fold adjacent stubs into one, so the stub layer is bounded as well.
+    ///
+    /// Serves: the "forgotten content can still be forgotten again" half of the design:
+    /// a second compaction pass must not leave a growing row of stubs in the foreground.
+    /// Design: `docs/superpowers/specs/2026-11-07-finite-memory-unbounded-conversation-design.md` §5.
+    /// Up: `Kernel::compact_if_needed`, after `stub_old_exchanges` moved something.
+    /// Down: `Ledger::{replace, set_clues, entries}` and the `messages`/`entry_of` vectors.
+    /// Verify: `cargo test -p loong-kernel turn::tests::the_foreground_stops_growing_once_stubs_take_over`.
+    ///
+    /// Two stubs are adjacent when nothing was kept between them. Their ranges union
+    /// and their clues union (capped at [`STUB_MAX_CLUES`]), so the merged stub is one
+    /// address that covers both. Returns how many merges it made.
+    pub(super) fn merge_adjacent_stubs(&mut self) -> usize {
+        let mut merges = 0usize;
+        let mut index = 0usize;
+        while index + 1 < self.messages.len() {
+            if !self.is_stub(index) || !self.is_stub(index + 1) {
+                index += 1;
+                continue;
+            }
+            let (left, right) = (self.stub_entry(index), self.stub_entry(index + 1));
+            let (Some(left), Some(right)) = (left, right) else {
+                index += 1;
+                continue;
+            };
+            let left_clues = self.ledger.clues(left).to_vec();
+            let right_clues = self.ledger.clues(right).to_vec();
+            let mut clues: Vec<String> = Vec::new();
+            for clue in left_clues.iter().chain(right_clues.iter()) {
+                if !clues.iter().any(|known: &String| known == clue) {
+                    clues.push(clue.clone());
+                }
+                if clues.len() == STUB_MAX_CLUES {
+                    break;
+                }
+            }
+            let span = match (self.entry_seq(left), self.entry_seq(right)) {
+                (Some((lf, _)), Some((_, rt))) => Some((lf, rt)),
+                (span, _) => span,
+            };
+            let title = match &self.messages[index] {
+                ChatMessage::System { text } => text
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_once("] ").map(|(_, rest)| rest.to_string()))
+                    .unwrap_or_else(|| "earlier work".to_string()),
+                _ => "earlier work".to_string(),
+            };
+            let text = format_stub(span, &title, 2, None, &[], &[], clues.clone(), 2);
+            self.messages[index] = ChatMessage::System { text: text.clone() };
+            self.ledger.replace(left, &text);
+            self.ledger.set_clues(left, clues);
+            if let Some((from, to)) = span {
+                self.ledger.locate(left, from, to);
+            }
+            // The right-hand stub and its entry leave together, so the lockstep holds.
+            self.messages.remove(index + 1);
+            self.entry_of.remove(index + 1);
+            let _ = self.ledger.forget(&[right]);
+            merges += 1;
+        }
+        merges
+    }
+
+    /// Purpose: Whether the message at one index is a stub, judged by its ledger entry.
+    ///
+    /// Serves: `Kernel::merge_adjacent_stubs` without parsing message text.
+    /// Contract: `turn/compaction.rs` stub layer.
+    fn is_stub(&self, index: usize) -> bool {
+        self.stub_entry(index).is_some()
+    }
+
+    /// Purpose: The ledger entry id of the stub at one index, if that message is one.
+    ///
+    /// Contract: `turn/compaction.rs` stub layer.
+    fn stub_entry(&self, index: usize) -> Option<u64> {
+        let id = self.entry_of.get(index).copied().flatten()?;
+        self.ledger
+            .entries()
+            .iter()
+            .find(|entry| entry.id == id)
+            .filter(|entry| entry.category == Category::Stub)
+            .map(|entry| entry.id)
+    }
+
+    /// Purpose: The `seq` interval one ledger entry recorded, if any.
+    ///
+    /// Contract: `turn/compaction.rs` stub layer.
+    fn entry_seq(&self, id: u64) -> Option<(u64, u64)> {
+        self.ledger
+            .entries()
+            .iter()
+            .find(|entry| entry.id == id)
+            .and_then(|entry| entry.seq)
+    }
+
+    /// Purpose: How many of the newest exchanges fit in the verbatim window.
+    ///
+    /// Serves: `stub_old_exchanges` choosing what to keep instead of a fixed count.
+    /// Design: `docs/superpowers/specs/2026-11-07-finite-memory-unbounded-conversation-design.md` §4.
+    /// Up: `Kernel::compact_if_needed`.
+    /// Down: `Kernel::entry_of` and the ledger's token counts.
+    /// Verify: `cargo test -p loong-kernel turn::tests::old_exchanges_become_stubs_with_an_address`.
+    ///
+    /// At least one exchange is always kept: the newest one is the turn being answered,
+    /// and stubbing it would answer a question with a note about itself.
+    pub(super) fn rounds_that_fit(&self, budget: u64) -> usize {
+        let start = self
+            .messages
+            .iter()
+            .take_while(|m| matches!(m, ChatMessage::System { .. }))
+            .count();
+        let rounds: Vec<usize> = (start..self.messages.len())
+            .filter(|index| matches!(self.messages[*index], ChatMessage::User { .. }))
+            .collect();
+        let tokens = |from: usize, to: usize| -> u64 {
+            (from..to)
+                .filter_map(|index| self.entry_of.get(index).copied().flatten())
+                .filter_map(|id| {
+                    self.ledger
+                        .entries()
+                        .iter()
+                        .find(|entry| entry.id == id)
+                        .map(|entry| entry.tokens)
+                })
+                .sum()
+        };
+        let mut seen = 0u64;
+        let mut keep = 0usize;
+        for (position, begin) in rounds.iter().enumerate().rev() {
+            let end = rounds
+                .get(position + 1)
+                .copied()
+                .unwrap_or(self.messages.len());
+            let cost = tokens(*begin, end);
+            if seen + cost > budget {
+                break;
+            }
+            seen += cost;
+            keep += 1;
+        }
+        keep.max(1).min(rounds.len())
+    }
+
+    /// Purpose: The `seq` interval the messages in one range were recorded from.
+    ///
+    /// Serves: a stub naming exactly the record it stands in for.
+    /// Design: `docs/superpowers/specs/2026-11-07-finite-memory-unbounded-conversation-design.md` §6.
+    /// Up: `Kernel::stub_old_exchanges`.
+    /// Down: `Kernel::entry_seq` and `Ledger::entries`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::old_exchanges_become_stubs_with_an_address`.
+    /// The low end is the oldest known `seq` and the high end the newest, so events
+    /// that recorded no message (a policy decision, a hook) still fall inside the
+    /// range a recall over it reads back.
+    fn span_of(&self, start: usize, cut: usize) -> Option<(u64, u64)> {
+        let mut span: Option<(u64, u64)> = None;
+        for entry in self.entry_of[start..cut].iter().flatten() {
+            let Some((from, to)) = self.entry_seq(*entry) else {
+                continue;
+            };
+            span = Some(match span {
+                Some((lo, hi)) => (lo.min(from), hi.max(to)),
+                None => (from, to),
+            });
+        }
+        span
     }
 
     /// Purpose: Drop the oldest exchange and forget its ledger entries, returning how many messages went.
@@ -528,5 +793,189 @@ impl Kernel {
         let ids: Vec<u64> = self.entry_of.drain(start..end).flatten().collect();
         let _ = self.ledger.forget(&ids);
         end - start
+    }
+}
+
+/// Purpose: Build one stub's text from the messages it replaces, deterministically.
+///
+/// Serves: an exchange leaving the foreground while its request, its changes, its
+/// verification and the words that lead back to it stay behind.
+/// Design: `docs/superpowers/specs/2026-11-07-finite-memory-unbounded-conversation-design.md` §6.
+/// Up: `Kernel::stub_old_exchanges`.
+/// Down: `split_terms`, `format_stub` and `ChatMessage`; no model call.
+/// Verify: `cargo test -p loong-kernel turn::tests::a_rejected_plan_survives_as_a_stub`.
+///
+/// Every field is read from a message already in the conversation: the request from
+/// the person's own words, the changed files and the commands from the model's calls,
+/// the verdict from the matching tool output. Nothing is inferred — a field with no
+/// evidence is left out rather than guessed.
+fn stub_text(messages: &[ChatMessage], span: Option<(u64, u64)>) -> (String, Vec<String>) {
+    let mut title = String::new();
+    let mut steps = 0usize;
+    let mut files: Vec<String> = Vec::new();
+    let mut commands: Vec<(String, bool)> = Vec::new();
+    let mut clues: Vec<String> = Vec::new();
+    let mut outputs: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    for message in messages {
+        if let ChatMessage::Tool { call_id, output } = message {
+            outputs.insert(call_id.clone(), output.clone());
+        }
+    }
+    let mut answered = false;
+    for message in messages {
+        match message {
+            ChatMessage::User { text } => {
+                if title.is_empty() {
+                    title = text.chars().take(STUB_TITLE_CHARS).collect();
+                }
+                for term in split_terms(text) {
+                    push_clue(&mut clues, term);
+                }
+            }
+            ChatMessage::Assistant { text, tool_calls } => {
+                steps += 1;
+                // A turn that ended with prose is a finished exchange; one that ended
+                // with a call was interrupted by the budget. Saying which is honest.
+                answered = tool_calls.is_empty()
+                    && text
+                        .as_deref()
+                        .map(|text| !text.trim().is_empty())
+                        .unwrap_or(false);
+                for call in tool_calls {
+                    push_clue(&mut clues, call.tool.clone());
+                    if matches!(call.tool.as_str(), "edit_file" | "write_file") {
+                        if let Some(path) = call.args.get("path").and_then(|v| v.as_str()) {
+                            if files.len() < STUB_MAX_FILES && !files.iter().any(|f| f == path) {
+                                files.push(path.to_string());
+                            }
+                        }
+                    }
+                    if call.tool == "run_command" {
+                        if let Some(command) = call.args.get("command").and_then(|v| v.as_str()) {
+                            if commands.len() < STUB_MAX_COMMANDS {
+                                // A failed verification is recorded as failed: a
+                                // re-run can reproduce a success, not a decision.
+                                let ok = outputs
+                                    .get(&call.call_id)
+                                    .map(|output| {
+                                        !(output.contains("FAILED")
+                                            || output.contains("error[")
+                                            || output.contains("error:"))
+                                    })
+                                    .unwrap_or(true);
+                                commands.push((command.to_string(), ok));
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let status = if answered { "完成" } else { "未完成" };
+    let text = format_stub(
+        span,
+        &title,
+        steps,
+        Some(status),
+        &files,
+        &commands,
+        clues.clone(),
+        1,
+    );
+    (text, clues)
+}
+
+/// Purpose: Render one stub line plus its clues and its address.
+///
+/// Serves: the fixed shape a model can read at a glance and a person can audit.
+/// Design: `docs/superpowers/specs/2026-11-07-finite-memory-unbounded-conversation-design.md` §6.
+/// Up: `stub_text` and `Kernel::merge_adjacent_stubs`.
+/// Down: no callee; it formats a string.
+/// Verify: `cargo test -p loong-kernel turn::tests::old_exchanges_become_stubs_with_an_address`.
+///
+/// The address is the part that makes forgetting reversible: `recall seq a-b`
+/// reads the record back in one call, and `merged` says how many earlier stubs
+/// this one now stands for.
+fn format_stub(
+    span: Option<(u64, u64)>,
+    title: &str,
+    steps: usize,
+    status: Option<&str>,
+    files: &[String],
+    commands: &[(String, bool)],
+    clues: Vec<String>,
+    merged: usize,
+) -> String {
+    let mut out = String::new();
+    match span {
+        Some((from, to)) => {
+            out.push_str(&format!("[stub {from}-{to}] {title}"));
+            let mut header: Vec<String> = Vec::new();
+            if steps > 0 {
+                header.push(format!("{steps} 步"));
+            }
+            if let Some(status) = status {
+                header.push(status.to_string());
+            }
+            if !header.is_empty() {
+                out.push_str(&format!("（{}）", header.join("，")));
+            }
+            if merged > 1 {
+                out.push_str(&format!("（并段 {merged}）"));
+            }
+            out.push('\n');
+            if !files.is_empty() {
+                out.push_str(&format!("  改动: {}\n", files.join(", ")));
+            }
+            if !commands.is_empty() {
+                let said: Vec<String> = commands
+                    .iter()
+                    .map(|(command, ok)| {
+                        if *ok {
+                            format!("{command} 通过")
+                        } else {
+                            format!("{command} 失败")
+                        }
+                    })
+                    .collect();
+                out.push_str(&format!("  验证: {}\n", said.join(" | ")));
+            }
+            if clues.is_empty() {
+                out.push_str(&format!("  原文: recall seq {from}-{to}\n"));
+            } else {
+                out.push_str(&format!(
+                    "  线索: {} | 原文: recall seq {from}-{to}\n",
+                    clues.join(" ")
+                ));
+            }
+        }
+        None => {
+            out.push_str(&format!("[stub] {title}"));
+            if steps > 0 {
+                out.push_str(&format!("（{steps} 步）"));
+            }
+            out.push('\n');
+            if !files.is_empty() {
+                out.push_str(&format!("  改动: {}\n", files.join(", ")));
+            }
+            if !clues.is_empty() {
+                out.push_str(&format!("  线索: {}\n", clues.join(" ")));
+            }
+        }
+    }
+    out
+}
+
+/// Purpose: Add one clue word, keeping the order and the cap.
+///
+/// Contract: `turn/compaction.rs` stub layer.
+fn push_clue(clues: &mut Vec<String>, clue: String) {
+    let clue = clue.trim().to_string();
+    if clue.is_empty() || clues.len() == STUB_MAX_CLUES {
+        return;
+    }
+    if !clues.iter().any(|known| known == &clue) {
+        clues.push(clue);
     }
 }

@@ -63,7 +63,8 @@ impl Kernel {
             type Pending = (
                 Option<String>,
                 Vec<loong_providers::ToolCallRequest>,
-                Vec<(String, String)>,
+                Vec<(String, String, u64)>,
+                u64,
             );
             let mut pending: Option<Pending> = None;
             for event in replay.events {
@@ -102,6 +103,11 @@ impl Kernel {
                                     Lifetime::Session,
                                     false,
                                 );
+                                // An ancestor's seq values belong to the ancestor's log,
+                                // so only this session's own records get an address.
+                                if from.is_none() {
+                                    self.ledger.locate(entry, event.seq, event.seq);
+                                }
                                 self.entry_of.push(Some(entry));
                             }
                             gen::Role::Assistant => {
@@ -109,6 +115,7 @@ impl Kernel {
                                     (!appended.text.is_empty()).then(|| appended.text.clone()),
                                     Vec::new(),
                                     Vec::new(),
+                                    event.seq,
                                 ));
                             }
                             // The log records only what the conversation holds: a user
@@ -135,7 +142,8 @@ impl Kernel {
                         // assistant message in front of it still happened — an older
                         // writer, or a hand-edited log — so it gets the turn it needs
                         // rather than making the session unopenable.
-                        let slot = pending.get_or_insert_with(|| (None, Vec::new(), Vec::new()));
+                        let slot = pending
+                            .get_or_insert_with(|| (None, Vec::new(), Vec::new(), event.seq));
                         // One call, one id. A `/yolo` turn used to write the relaxed call
                         // twice; keeping both would hand the provider a duplicated tool-call
                         // id, which it rejects, so a session written then could never be
@@ -161,7 +169,11 @@ impl Kernel {
                         // comes first in the conversation, and it must carry every call
                         // this turn made — not just the first.
                         if let Some(slot) = pending.as_mut() {
-                            slot.2.push((result.call_id.clone(), result.output.clone()));
+                            slot.2.push((
+                                result.call_id.clone(),
+                                result.output.clone(),
+                                event.seq,
+                            ));
                         }
                     }
                     gen::event::COMPACTION_APPLIED => {
@@ -200,13 +212,14 @@ impl Kernel {
         pending: &mut Option<(
             Option<String>,
             Vec<loong_providers::ToolCallRequest>,
-            Vec<(String, String)>,
+            Vec<(String, String, u64)>,
+            u64,
         )>,
     ) -> Result<(), KernelError> {
-        if let Some((text, calls, results)) = pending.take() {
-            self.push_assistant(None, text, &calls);
-            for (call_id, output) in results {
-                self.push_tool_result(None, &call_id, &output);
+        if let Some((text, calls, results, seq)) = pending.take() {
+            self.push_assistant(None, text, &calls, Some(seq));
+            for (call_id, output, seq) in results {
+                self.push_tool_result(None, &call_id, &output, Some(seq));
             }
         }
         Ok(())
@@ -226,6 +239,7 @@ impl Kernel {
         from: Option<&str>,
         text: Option<String>,
         calls: &[loong_providers::ToolCallRequest],
+        seq: Option<u64>,
     ) {
         let accounting = match (text.as_deref(), calls.first()) {
             (Some(t), None) => t.to_string(),
@@ -246,6 +260,9 @@ impl Kernel {
             Lifetime::Session,
             false,
         );
+        if let (Some(seq), None) = (seq, from) {
+            self.ledger.locate(entry, seq, seq);
+        }
         self.entry_of.push(Some(entry));
         self.messages.push(ChatMessage::Assistant {
             text,
@@ -260,7 +277,13 @@ impl Kernel {
     /// Up: `flush_pending`.
     /// Down: `Ledger::add` and the `messages`/`entry_of` vectors.
     /// Verify: `cargo test -p loong-kernel turn::tests::a_chain_of_children_is_stitched_oldest_first`.
-    fn push_tool_result(&mut self, from: Option<&str>, call_id: &str, output: &str) {
+    fn push_tool_result(
+        &mut self,
+        from: Option<&str>,
+        call_id: &str,
+        output: &str,
+        seq: Option<u64>,
+    ) {
         let source = match from {
             Some(ancestor) => format!("tool:{call_id} from {ancestor}"),
             None => format!("tool:{call_id}"),
@@ -268,6 +291,9 @@ impl Kernel {
         let entry = self
             .ledger
             .add(Category::History, &source, output, Lifetime::Turn, false);
+        if let (Some(seq), None) = (seq, from) {
+            self.ledger.locate(entry, seq, seq);
+        }
         self.entry_of.push(Some(entry));
         self.messages.push(ChatMessage::Tool {
             call_id: call_id.to_string(),

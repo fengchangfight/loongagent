@@ -43,10 +43,13 @@ callback.
 engine (`ContextEngine::set_foreground_busy`), calls `Kernel::run_inner`, and
 clears the flag on every return path. `Kernel::run_inner` is the loop itself.
 
-One iteration is **one model completion**. The budget is the turn's, not the
-run's: `Kernel.steps_taken` is reset by `Kernel::begin_turn` (a new `submit`) and
-preserved by `respond_to_approval` (the same turn), so the loop counts
-`steps_taken + 1 ..= max_steps`:
+One iteration is **one model completion**. The loop runs in **segments**: a
+segment spends up to `max_steps` completions, and a segment that achieved
+something (`Kernel::progress_marker`, the count of successful tool results)
+renews the budget instead of returning "reply to continue". A segment with no
+progress ends the turn, so a spinner still stops, and `max_continuations`
+(default 3, `0` = old behaviour) caps renewals. `Kernel.segment_start` moves at
+each renewal, so an approval resume still spends what the turn has left:
 
 1. **Stop check.** If `Kernel::interrupted` is set, append `turn.interrupted` and
    return at once. The check is at the step boundary, not inside a tool, so a tool
@@ -56,13 +59,13 @@ preserved by `respond_to_approval` (the same turn), so the loop counts
    throwaway files written under a temp directory. When it fires the loop appends
    one assistant note and returns; §4 owns the rule.
 3. **Context preparation.** `Kernel::refresh_memory` refreshes the layered
-   memory's deterministic layers when the engine is on; `Kernel::age_tool_outputs`
-   clears stale tool output and `Kernel::compact_if_needed` drops exchanges (only
-   with the engine off). Either clearing path appends `compaction.applied` when it
-   changed something, and then `Kernel::seat_map` puts the L4 map back. Without a
-   clearing pass the map is seated once per turn, before the first request: the
-   block sits before the conversation, so moving it would invalidate the
-   provider's whole cache.
+   memory's deterministic layers; `Kernel::age_tool_outputs` clears stale tool
+   output, and `Kernel::compact_if_needed` runs the ladder in
+   [flows/context-compaction.md](flows/context-compaction.md) §2 — clear, stub,
+   merge, and drop only with the engine off. A pass that changed something
+   appends `compaction.applied` and reseats the map. Without a pass the map and
+   the task card are seated once per turn, before the first request: they sit
+   before the conversation, so moving them would invalidate the provider's cache.
 4. **Request.** `CompletionRequest { messages: self.messages.clone(), tools:
    self.tool_specs() }`. `Kernel::tool_specs` adds `recall` only when there is a
    memory behind it.
@@ -70,10 +73,13 @@ preserved by `respond_to_approval` (the same turn), so the loop counts
    self.ledger.total_tokens(), step }`. A rule may choose a model; a name this
    session does not have falls back to `selected_model`. A change appends
    `model.selected` through `Kernel::record_model_selected`.
-6. **Model call.** `Model::complete_streaming(&request, on_delta)`. A provider
-   error becomes `KernelError::Model` and ends the turn. On success,
-   `Kernel::record_cost` appends `cost.recorded`; the provider's cache counts and
-   the price fields are owned by [cost-accounting.md](cost-accounting.md).
+6. **Model call.** `Kernel::complete_with_ladder` calls
+   `Model::complete_streaming(&request, on_delta)`. A size refusal
+   (`ModelError::is_context_overflow`) retries inside the turn — a forced pass at
+   half the context, then the minimal request, then an honest stop with
+   `context.degraded` — and any other error becomes `KernelError::Model`. On
+   success `Kernel::record_cost` appends `cost.recorded`; cache counts and prices
+   are owned by [cost-accounting.md](cost-accounting.md).
 7. **No tool calls.** If the reply is text only, the loop first offers one nudge
    (§4). Otherwise `Kernel::record_assistant` appends `message.appended` and the
    turn returns the text.
@@ -83,9 +89,9 @@ preserved by `respond_to_approval` (the same turn), so the loop counts
    `tool.result` events saying they did not run, because a provider requires one
    result for every call it was shown.
 
-If the loop completes every step without an answer, it appends one assistant
-`message.appended` with a "stopped after N steps" note and returns with
-`steps = max_steps`. That is the step-limit ending, not a stop.
+If a segment runs out and the turn may not (or cannot usefully) renew, it
+appends one assistant `message.appended` with a "stopped after N steps" note and
+returns with `steps = steps_taken`. That is the step-limit ending, not a stop.
 
 ## 3. Where the four writes happen
 
@@ -122,12 +128,11 @@ not by an approval resume, so a turn that asks twice still spends one budget. Th
 step limit is a guard against a model that spins; it is not the cost limit —
 compaction and the token budget are.
 
-Spinning is also caught earlier, by `Kernel::stall_reason`: three identical calls
-in a row, four consecutive failed results, or five distinct throwaway files
-written under a temp directory record one assistant `message.appended` ("stopped
-after N steps without progress (stall guard): …") and end the turn. The triggers
-are constants in `turn.rs`; none of them is a configuration key, because each is a
-symptom with no legitimate use at volume.
+**Renewal.** A productive segment (any successful tool result) gets another
+segment, up to `max_continuations`; `Kernel.renewals` is reported in the stop
+note ("renewed the step budget N time(s)"), so the person can tell a spent budget
+from a cap. Renewal cannot mask a spin: the stall guard is checked at each step
+and a segment that produced no successful tool result does not renew.
 
 A clearing pass can loop without repeating a call: it frees a little, the next
 step refills it, and the pass fires again. `Kernel.compaction_steps` records the
@@ -136,7 +141,8 @@ each freed under 5% or left the context over its ceiling** end the turn with a
 *compaction thrash* note instead of paying for the same clear-then-refill again.
 A pass that frees real room is ordinary aging, even three times in a row. The note
 names `budget_tokens`; it does not name `keep_newest_tokens`, which cannot help — a
-larger window keeps more verbatim and frees less.
+larger window keeps more verbatim and frees less. With the stub rung in place the
+stop should be rare: it now means even stubbing cannot free anything.
 
 The leading `System` messages — the operator's prompt, the instruction files and
 the L4 map — are not exchanges. `Kernel::drop_oldest_exchange` skips every one of
@@ -216,7 +222,7 @@ turn. The end-to-end flow is [turn-lifecycle.md](flows/turn-lifecycle.md)
 | **Stopped** | `turn.interrupted` | `interrupted: true`, no `final_text`, `steps` = calls already finished |
 | **Stalled** | An assistant `message.appended` with the stall-guard note | `final_text` = the note, `steps` = the calls already taken |
 | **Compaction thrash** | An assistant `message.appended` with the thrash note, after three `compaction.applied` events inside five steps | `final_text` = the note, `steps` = the calls already taken |
-| **Step limit** | An assistant `message.appended` with the limit note | `final_text` = the note, `steps` = `max_steps` |
+| **Step limit** | An assistant `message.appended` with the limit note | `final_text` = the note, `steps` = `steps_taken` |
 | **Refused before the loop** | `skill.invoked` with an `error`, or a tightening `hook.fired` from `user_prompt_submit` | `refused`, `steps` = 0 |
 | **Error** | The events written before the failure are still in the log | `Err(KernelError)`: `Model`, `Log`, `Encode`, or `OutOfOrder` |
 

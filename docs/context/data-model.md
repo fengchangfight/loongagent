@@ -174,3 +174,25 @@ char-unigram 派生列（总量约 1.8 倍，且对 `LIKE` 语义无损、无字
 **诚实注记（2026-10-14）**：上面"让脏集合能精确计算"这句话，只在"归属是确定性规则"
 这个意义上成立；**脏集合本身没有实现** —— 当前 `digest_domains()` 每轮遍历全部 domain
 比较内容（[pipeline.md](pipeline.md) §6.4、[status.md](status.md) §11.1），不是 O(增量)。
+
+### 5.5 摘要正文里的 `别名：` 一行（已实现，**不加列、不升 schema**）
+
+富化（`semantic` 模式）时，`Synthesis` 多一个 `aliases` 字段：同义说法、英文叫法、
+涉及的模块或工具名、用户当时用的词，3–6 个。`digest::merge_synthesis` 把它追加到
+`summary.content` 的**尾部一行**：
+
+```
+别名：合并优先级；merge 顺序；overlay
+```
+
+为什么是一行文本而不是一列：加列要升 `SCHEMA_VERSION`，而 `Store::open` 在版本不
+匹配时是**打开失败**（不是迁移提示），旧会话会直接失去全部记忆。用一行文本换零迁移，
+代价是几十个 token —— 用"渲染正文时跳过以 `别名：` 开头的行"兜住（`summary_body`）。
+
+约定边界：
+
+- 搜索**仍扫整列 `content`**，所以别名可命中；它只是排序权重低的 `content` 命中
+  （`title` 算 2 分、`content` 算 1 分，见 [recall.md](recall.md) §7.2）。
+- 别名是**索引，不是记忆**：它不能替代原文，`expand` 仍强制给原文事件。
+- `record` 模式不做富化，因此没有别名，只有 OR 排序这一层。
+- 旧模型输出没有 `aliases` 字段时照样解析（`#[serde(default)]`）。

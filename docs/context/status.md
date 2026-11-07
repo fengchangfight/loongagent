@@ -7,7 +7,7 @@ Language: zh
 - **Code:** `crates/context/src/store.rs`, `crates/context/src/worker.rs`, `crates/kernel/src/context_engine.rs`
 - **Verify:** `cargo test -p loong-context -p loong-kernel` · `./scripts/check.sh`
 
-## 11.1 缺口清单与已落地（2026-10-14 更新）
+## 11.1 缺口清单与已落地（2026-11-07 更新）
 
 诚实清单，避免"文档说完成了"被读成"都能用了"：
 
@@ -18,7 +18,13 @@ Language: zh
 | **TUI 没有记忆状态显示** | **✅ 已实现（2026-10-14）** | F2 面板显示引擎开/关、record/semantic、summarizer、L1–L4 条数与 token、worker 统计、降级原因；状态栏在降级时显示 `mem ⚠ degraded`。**"关着"与"刚开还没产出"必须显示不同**，靠的是如实字段而不是"账本里有没有 cognitive_map" |
 | **Web 面完全没动** | 仍缺 | 本会话明确不做；`ContextExplain` 的新字段已进协议，Web 侧暂不渲染 |
 | ~~默认模型~~ | **已改为 `qwen2.5:7b-instruct`（2026-10-14）** | 门槛实测：`why` 7/7、解释错对象 0、说不出原因 0 |
-| **`recall` 的 `expand` 只用摘要 id** | 仍缺 | 模型要两步（先 recall 拿 id，再 expand）。可用，但多一轮往返 |
+| ~~**`recall` 的 `expand` 只用摘要 id**~~ | **已实现（2026-11-07）** | `recall` 一次调用就带命中处的原文片段（`evidence [seq N]: …`，窗口 `excerpt_chars`，默认 240、上限 800），并支持 `seq_from`/`seq_to` 按地址读一段。`expand` 保留给"要全文摘要 + 全部证据" |
+| **换词查不到就清零** | **已实现（2026-11-07）** | `Store::search` / `Store::recall_at` 改成 OR + 命中数排序（`title` 权重 2、`content` 1），错一个词只是排序靠后；空 `terms` 不再退化成全表扫描 |
+| **摘要没有别名** | **已实现（2026-11-07，仅 `semantic`）** | `Synthesis.aliases` → `content` 尾部一行 `别名：…`，不加列、不升 schema（[data-model.md](data-model.md) §5.5）。`record` 模式没有这一层，只有 OR 排序 |
+| **长会话前台只增不减** | **已实现（2026-11-07）** | 旧轮次压成存根（`Category::Stub`），带 `seq` 区间、线索词与 `recall seq a-b`；相邻存根并段。`dropped_messages` 仍为 0（不丢原文）。see [context-ledger.md](../design/context-ledger.md) §4 |
+| **目标与约束会被压掉** | **已实现（2026-11-07）** | 任务卡：pinned `Category::Rules`（`source = task-card`），只放目标与人明说过的约束，人没说过时不落座，溢出先丢已完成明细、永不裁目标 |
+| **存根不能由事件重放出来** | 已知取舍 | `compaction.applied` 记的是清了多少、丢了多少，存根数只在 `summary` 里。重开会话时从日志重建全部原文，下一次压缩再生成存根——比记录更保守，不会更少。要让它可重放需要给事件加字段（升协议） |
+| **状态行还没显示降级档位** | 仍缺 | `context_explain` 已能报出 `stub` 分类的 token，但 `ctx 92% ↓stub` 这种档位文字要改 `crates/tui-app/src/surface.rs`；本次不碰那个文件 |
 | **一次性 headless 运行没有空闲窗口** | 已知取舍 | 前台"整轮 busy"信号最保守：一轮里后台绝不打模型，代价是 `loong run "…"` 这种一问即退的运行不会触发富化（digest 仍然完整，库仍可 `rebuild`）。要富化就多轮交互，或将来把窗口细到"工具等待" |
 | **`memory.*` 事件一个都没落地** | 仍缺（**2026-10-14 审计发现**） | [pipeline.md](pipeline.md) §9 的四类事件（`memory.l1.materialized` / `memory.summary.updated` / `memory.superseded` / `memory.worker.state`）在 `protocol.toml` 里不存在，引擎也从不写日志。摘要变更因此**不能从日志审计**，水位与 worker 统计只在 `meta`/进程内。ADR-0017 的 Consequences 曾把它写成已新增，现已在那边标注"尚未落地" |
 | **`superseded_by` 从未被写过** | 仍缺（**2026-10-14 审计发现**） | 列存在、读取路径存在，但 `replace_overlapping` 对过期摘要执行的是 `DELETE`，不是"标 `superseded_by` 保留"。ADR-0017 [§6](../decisions/0017-layered-context.md) 的"旧摘要标 superseded_by，不静默覆盖历史"**没有兑现**；当前语义是"重叠即重派生" |

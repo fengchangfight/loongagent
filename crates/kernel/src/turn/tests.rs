@@ -3385,6 +3385,50 @@ fn a_short_session_ages_nothing() {
     assert!(!events.iter().any(|e| e.kind == ev::COMPACTION_APPLIED));
 }
 
+/// Purpose: One aging pass clears well below the line that triggered it, so a session does not age on every step and re-read its whole cached prefix each time.
+#[test]
+fn aging_leaves_headroom_below_the_line_that_triggered_it() {
+    let t = Temp::new();
+    let reads = 12;
+    let mut responses = Vec::new();
+    for i in 0..reads {
+        // ~4000 chars ≈ 1000 tokens per read, a third of the 3k window.
+        big_file(&t.dir, &format!("part{i}.txt"), 160);
+        responses.push(response(
+            vec![call(
+                &format!("c{i}"),
+                "read_file",
+                json!({"path": format!("part{i}.txt")}),
+            )],
+            None,
+        ));
+    }
+    responses.push(response(vec![], Some("done")));
+    let (model, _seen) = RecordingModel::with_window(responses, Some(200_000));
+    let mut config = KernelConfig::new(&t.dir);
+    config.keep_newest_tokens = 3_000;
+    let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+    k.submit("read them all").unwrap();
+
+    let events = loong_eventlog::replay(&t.log).unwrap().events;
+    let aging = events
+        .iter()
+        .filter(|e| e.kind == ev::COMPACTION_APPLIED)
+        .count();
+    assert!(
+        aging > 0,
+        "12k of output passes a 3k window, so aging fires: {aging}"
+    );
+    // Without headroom a pass clears back to the 3k line and the next read crosses
+    // it again: one event per read once the window is full, nine of twelve here.
+    // Clearing to half the line leaves two reads per event, three of twelve.
+    assert!(
+        aging <= 5,
+        "aging fired {aging} times over {reads} reads: a pass cleared back to the \
+         line that triggered it instead of leaving headroom"
+    );
+}
+
 /// Purpose: Compaction clears old tool bodies first and drops no messages when clearing is enough, leaving a marker and the newest output verbatim.
 #[test]
 fn compaction_clears_stale_tool_output_before_dropping_anything() {

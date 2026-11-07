@@ -124,11 +124,15 @@ At every step boundary, before `compact_if_needed`:
 
 ```
 if ledger.tool_output_tokens() > keep_newest_tokens {
-    cleared = ledger.clear_tool_outputs(keep_newest_tokens, marker);
+    // Settle to half the trigger line, not to the line itself: clearing back to
+    // the line leaves no headroom, so the next read crosses it again and the
+    // pass — which rewrites messages mid-conversation and so discards the
+    // provider's prefix cache — runs once per read.
+    cleared = ledger.clear_tool_outputs(keep_newest_tokens / 2, marker);
     if !cleared.cleared.is_empty() {
         emit compaction.applied {
             tokens_before, tokens_after,
-            kept_tokens: keep_newest_tokens,
+            kept_tokens: keep_newest_tokens / 2,
             cleared_tool_outputs: n,
             dropped_messages: 0,
             summary: "aged N tool output(s) older than the newest K tokens: A -> B",
@@ -147,8 +151,9 @@ if ledger.tool_output_tokens() > keep_newest_tokens {
 - **Event:** `compaction.applied`, which already carries `cleared_tool_outputs`
   and is already replayed by `Kernel::replay_compaction`. No schema change.
 - **Default keep:** `keep_newest_tokens` is already 20,000 in
-  `KernelConfig::new`; the aging threshold is that same number, so one key
-  controls both the ceiling-triggered and the proactive path.
+  `KernelConfig::new`; the aging **trigger** is that number and the pass settles
+  at half of it, so one key controls both the ceiling-triggered and the proactive
+  path while the 2:1 trigger-to-target ratio is fixed in code.
 - **Why this and not a lower ceiling:** the ceiling triggers once and then stops
   growing; aging triggers repeatedly and keeps the steady state flat. On
   `e289jjjd` the tool output alone accounts for most of the 32k→61k growth in

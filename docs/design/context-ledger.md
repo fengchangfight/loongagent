@@ -130,12 +130,13 @@ the ceiling.
 
 **Aging, before either phase.** `Kernel::age_tool_outputs` does not wait for the
 ceiling. Whenever `Ledger::tool_output_tokens()` — the uncleared `History` entries
-whose source starts `tool:` — passes `keep_newest_tokens`, it clears the older ones
-with the same marker and writes the same `compaction.applied` event
-(`cleared_tool_outputs > 0`, `dropped_messages 0`). The ceiling is the backstop;
-aging keeps the steady state flat. When
-it does run it takes `keep = keep_newest_tokens.min(ceiling / 2)` (default
-20,000 tokens) and works in a fixed order.
+whose source starts `tool:` — passes `keep_newest_tokens`, it clears the older
+ones with the same marker and writes the same `compaction.applied` event
+(`cleared_tool_outputs > 0`, `dropped_messages 0`). A pass settles at **half** the
+line that triggered it, so the next reads have room before it is crossed again;
+the ceiling stays the backstop and aging keeps the steady state flat. Why the gap
+matters and where it stops helping are
+[flows/context-compaction.md](flows/context-compaction.md) §1.
 
 **Phase 1 — clear stale tool output.** `Ledger::clear_tool_outputs` walks
 backwards to find where the newest `keep` tokens begin, and clears only entries

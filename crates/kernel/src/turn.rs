@@ -332,6 +332,10 @@ pub struct KernelConfig {
     pub profile: String,
     pub budget_tokens: Option<u64>,
     /// The newest context left verbatim when compaction runs (ADR-0006 §4).
+    ///
+    /// Also the line that triggers proactive aging, which settles at half of it
+    /// so the next reads have room before it is crossed again
+    /// (`docs/design/context-ledger.md` §4).
     pub keep_newest_tokens: u64,
     /// Compact once context passes this fraction of the budget (80%).
     pub compact_at_percent: u64,

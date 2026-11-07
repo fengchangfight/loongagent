@@ -159,7 +159,7 @@ impl Kernel {
     /// Design: `docs/superpowers/specs/2026-10-28-token-efficiency-design.md` §4.2.
     /// Up: `Kernel::run_inner`, once per step before `compact_if_needed`.
     /// Down: `Ledger::tool_output_tokens`, `Ledger::clear_tool_outputs` and `Kernel::append`.
-    /// Verify: `cargo test -p loong-kernel turn::tests::tool_output_ages_before_any_ceiling_is_crossed`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::tool_output_ages_before_any_ceiling_is_crossed` · `cargo test -p loong-kernel turn::tests::aging_leaves_headroom_below_the_line_that_triggered_it`.
     pub(super) fn age_tool_outputs(
         &mut self,
         events: &mut Vec<u64>,
@@ -169,9 +169,21 @@ impl Kernel {
             return Ok(None);
         }
         let before = self.ledger.total_tokens();
+        // Clear to half the line that triggered this pass, never to the line
+        // itself. A pass that stops at the line leaves no headroom: the next tool
+        // result crosses it again, so one pass runs per read. That costs more than
+        // the tokens it frees, because a pass rewrites tool messages in the middle
+        // of the conversation, and the provider's cache is a prefix matching
+        // byte for byte — everything after the first rewritten message is re-read
+        // at full price. A recorded session shows the shape: eight passes, most of
+        // them clearing one or two outputs, and every request that followed one of
+        // them matched only the system prompt. Halving the target gives the next
+        // reads room before the line is crossed again, so the same history costs
+        // one cache miss per two reads instead of one per read.
+        let target = keep / 2;
         let cleared = self
             .ledger
-            .clear_tool_outputs(keep, marker_for_cleared_output);
+            .clear_tool_outputs(target, marker_for_cleared_output);
         if cleared.cleared.is_empty() {
             return Ok(None);
         }
@@ -182,11 +194,13 @@ impl Kernel {
             &gen::CompactionApplied {
                 tokens_before: before,
                 tokens_after: after,
-                kept_tokens: keep,
+                // The window this pass actually left verbatim, which is what a
+                // replay must reproduce; it is no longer the line it crossed.
+                kept_tokens: target,
                 cleared_tool_outputs: cleared.cleared.len() as u64,
                 dropped_messages: 0,
                 summary: format!(
-                    "aged {} tool output(s) older than the newest {keep} tokens: {before} -> {after} tokens",
+                    "aged {} tool output(s) older than the newest {target} tokens: {before} -> {after} tokens",
                     cleared.cleared.len()
                 ),
             },

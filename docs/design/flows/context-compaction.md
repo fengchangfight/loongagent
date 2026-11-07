@@ -21,6 +21,24 @@ keep_newest_tokens.min(ceiling / 2)` (20,000 tokens by default) is the newest wi
 kept verbatim. With no budget and no window there is no ceiling, so compaction never
 runs and the CLI says so at startup.
 
+**Aging runs before that, on its own line.** `age_tool_outputs` fires whenever the
+uncleared `tool:` entries pass `keep_newest_tokens`, ceiling or not. The line that
+**triggers** a pass and the line it **settles to** are different numbers, and the
+gap is the point: the trigger is `keep_newest_tokens`, the pass clears down to half
+of it, and `compaction.applied.kept_tokens` records the half. Settling at the
+trigger line leaves no headroom — the next tool result crosses it again, so one pass
+runs per read. That costs far more than the tokens it frees, because a pass rewrites
+tool messages *in the middle of* the conversation and a provider's prefix cache is a
+byte-for-byte match: every request after that point pays full price for the whole
+history again. A recorded session showed the shape — eight passes, most clearing one
+or two outputs, each followed by a request that matched only the system prompt.
+
+The gap has a floor: a pass never leaves less than the newest entry, which it must
+keep verbatim, so headroom is `keep_newest_tokens` minus that entry. When one output
+is a large fraction of the window — 10k against the 20k default is fine, 2.4k against
+a 3k window is not — the gap nearly vanishes and aging still fires per read. The
+lever there is raising `keep_newest_tokens`, not clearing the newest output.
+
 ## 2. Clear, then maybe drop
 
 `Ledger::clear_tool_outputs(keep, marker)` replaces stale tool bodies with the

@@ -4918,7 +4918,7 @@ fn old_exchanges_become_stubs_with_an_address() {
 fn the_foreground_stops_growing_once_stubs_take_over() {
     let t = Temp::new();
     let filler = "x".repeat(800);
-    let script: Vec<_> = (0..40)
+    let script: Vec<_> = (0..50)
         .map(|n| response(vec![], Some(&format!("done {n}"))))
         .collect();
     let model = ScriptedModel::new(script);
@@ -4930,17 +4930,28 @@ fn the_foreground_stops_growing_once_stubs_take_over() {
         t.log.clone(),
     ));
     let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
-    let mut at_30 = 0;
-    for turn in 0..40 {
+    // The foreground is a sawtooth: it fills to the ceiling and a pass drops it.
+    // What must not happen is the *peak* rising with the number of turns, so the
+    // comparison is between two windows, not between two instants.
+    let mut peak_40 = 0;
+    let mut peak_50 = 0;
+    for turn in 0..50 {
         k.submit(&format!("任务 {turn} 处理一下 {filler}")).unwrap();
-        if turn == 29 {
-            at_30 = k.ledger().total_tokens();
+        let tokens = k.ledger().total_tokens();
+        if (35..40).contains(&turn) {
+            peak_40 = peak_40.max(tokens);
+        }
+        if (45..50).contains(&turn) {
+            peak_50 = peak_50.max(tokens);
         }
     }
-    let at_40 = k.ledger().total_tokens();
     assert!(
-        at_40 < at_30 * 11 / 10 + 50,
-        "the foreground must stop growing: {at_30} tokens at turn 30, {at_40} at turn 40"
+        peak_50 < peak_40 * 11 / 10 + 50,
+        "the foreground must stop growing: peak {peak_40} tokens in turns 36-40, {peak_50} in turns 46-50"
+    );
+    assert!(
+        peak_50 <= 3_000,
+        "and stay under its own budget: {peak_50} tokens"
     );
 }
 

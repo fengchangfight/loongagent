@@ -832,6 +832,10 @@ fn compaction_thrash_stops_the_turn() {
     let note = out.final_text.expect("the guard says why");
     assert!(note.contains("compaction thrash"), "{note}");
     assert!(note.contains("over its ceiling"), "{note}");
+    // `keep_newest_tokens` cannot help: a larger window keeps more verbatim and
+    // frees less, and the newest entry is kept whatever it says.
+    assert!(!note.contains("keep_newest_tokens"), "{note}");
+    assert!(note.contains("budget_tokens"), "{note}");
 }
 
 /// Purpose: Three clears that free real room are ordinary aging, even when they land inside five steps.
@@ -864,6 +868,98 @@ fn a_compaction_that_frees_room_is_not_thrash() {
     let out = k.submit("read them").unwrap();
     assert_eq!(out.final_text.as_deref(), Some("done"), "{out:?}");
     assert_eq!(out.steps, 7, "every read ran: {out:?}");
+}
+
+/// Purpose: A history that fills most of the ceiling shrinks the window, so every pass lands under it instead of thrashing.
+#[test]
+fn a_history_that_fills_the_budget_shrinks_the_window() {
+    // The replayed session, scaled down: a prompt that is most of the ceiling and
+    // reads that are small against it. The old rule kept half the ceiling verbatim
+    // whatever the history cost, so the floor of clearing sat above the ceiling:
+    // each pass cleared one read, stayed over, and the third one stopped the turn.
+    let t = Temp::new();
+    for round in 1..=11 {
+        big_file(&t.dir, &format!("big{round}.txt"), 350); // ≈ 2k tokens each
+    }
+    let model = ScriptedModel::new(
+        (0..11)
+            .map(|round| {
+                response(
+                    vec![call(
+                        &format!("c{round}"),
+                        "read_file",
+                        json!({"path": format!("big{}.txt", round + 1)}),
+                    )],
+                    None,
+                )
+            })
+            .collect(),
+    );
+    let mut config = KernelConfig::new(&t.dir);
+    // Ceiling is 30,000 × 80% = 24,000; the 64,000-character prompt is 16,000 of
+    // it and no prompt is ever cleared, which leaves 8,000 of room.
+    config.budget_tokens = Some(30_000);
+    config.keep_newest_tokens = 20_000;
+    config.max_steps = 20;
+    let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+    let out = k.submit(&"x".repeat(64_000)).unwrap();
+    assert_eq!(out.final_text.as_deref(), Some("done"), "{out:?}");
+    assert_eq!(out.steps, 12, "every read ran: {out:?}");
+    let note = out.final_text.clone().unwrap_or_default();
+    assert!(
+        !note.contains("compaction thrash"),
+        "the turn stopped: {note}"
+    );
+
+    let applied: Vec<_> = loong_eventlog::replay(&t.log)
+        .unwrap()
+        .events
+        .into_iter()
+        .filter(|e| e.kind == ev::COMPACTION_APPLIED)
+        .collect();
+    assert!(applied.len() >= 2, "the turn needed clearing: {applied:?}");
+    for event in applied {
+        let after = event.data["tokens_after"].as_u64().unwrap_or(0);
+        assert!(
+            after <= 24_000,
+            "a pass left the context over its ceiling: {}",
+            event.data
+        );
+    }
+}
+
+/// Purpose: The configured window is kept when the history leaves room for it, so an ordinary session clears exactly as before.
+#[test]
+fn the_window_stays_at_the_configured_size_when_there_is_room() {
+    // 30,000 tokens of context, 10,000 of them clearable tool output, is 20,000 of
+    // history under an 80,000 ceiling: 60,000 of room, so the config decides.
+    assert_eq!(
+        crate::turn::compaction::keep_window(20_000, 80_000, 30_000, 10_000),
+        Some(20_000)
+    );
+}
+
+/// Purpose: The window shrinks to half the room the ceiling leaves, so a pass lands well under it and not on it.
+#[test]
+fn the_window_shrinks_to_half_the_room_the_history_leaves() {
+    // The replayed session: 87,000 tokens, 22,000 of them clearable tool output,
+    // is 65,000 of history under an 80,000 ceiling. That is 15,000 of room, halved
+    // to 7,500 instead of the 20,000 the config asked for.
+    assert_eq!(
+        crate::turn::compaction::keep_window(20_000, 80_000, 87_000, 22_000),
+        Some(7_500)
+    );
+}
+
+/// Purpose: With the history alone at the ceiling no window fits, so the pass is not made at all.
+#[test]
+fn no_window_fits_when_the_history_alone_reaches_the_ceiling() {
+    // 80,000 of history under an 80,000 ceiling: clearing every tool body would
+    // still land over, so it must not rewrite the conversation to do it.
+    assert_eq!(
+        crate::turn::compaction::keep_window(20_000, 80_000, 90_000, 10_000),
+        None
+    );
 }
 
 /// Purpose: When one call in a batched message asks, the rest still get `tool.result` saying they did not run, because a provider rejects two calls with one result.

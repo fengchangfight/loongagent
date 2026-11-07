@@ -418,9 +418,16 @@ impl Ledger {
             }
             let text = marker(entry);
             let before = entry.tokens;
-            entry.tokens = estimate_tokens(&text);
+            let after = estimate_tokens(&text);
+            // A marker longer than the body it would replace is not a clear: it
+            // would grow the context and rewrite the middle of the conversation,
+            // costing a full provider cache miss to do it.
+            if after >= before {
+                continue;
+            }
+            entry.tokens = after;
             entry.cleared = true;
-            report.tokens_freed += before.saturating_sub(entry.tokens);
+            report.tokens_freed += before - after;
             report.cleared.push(entry.clone());
         }
         report
@@ -631,5 +638,31 @@ mod tests {
         assert_eq!(report.removed.len(), 1);
         assert_eq!(report.removed[0].category, Category::Retrieval);
         assert_eq!(l.total_tokens(), 2);
+    }
+
+    /// Purpose: A marker that does not shorten a body frees nothing, so the body stays and the clear is not reported.
+    #[test]
+    fn a_marker_that_does_not_shrink_the_body_is_not_a_clear() {
+        // A one-word result is cheaper than the marker that would replace it.
+        // Rewriting it would grow the context and cost a full cache miss to do
+        // it, so the pass must leave it alone and report nothing.
+        let mut l = Ledger::new(None);
+        l.add(Category::History, "tool:tiny", "ok", Lifetime::Turn, false);
+        l.add(
+            Category::History,
+            "tool:big",
+            &"x".repeat(4_000),
+            Lifetime::Turn,
+            false,
+        );
+        let before = l.total_tokens();
+        let report = l.clear_tool_outputs(0, |entry| {
+            format!(
+                "[output of {} cleared to save context — re-run the command if you need it again]",
+                entry.source
+            )
+        });
+        assert!(report.cleared.is_empty(), "{report:?}");
+        assert_eq!(l.total_tokens(), before, "the pass grew the context");
     }
 }

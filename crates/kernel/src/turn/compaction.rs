@@ -23,6 +23,36 @@ pub(super) fn default_budget(window: u64) -> u64 {
     (window / 4).clamp(32_000, 100_000)
 }
 
+/// Purpose: How many of the newest tokens compaction keeps verbatim; `None` when no window can reach the ceiling.
+///
+/// Serves: `Kernel::compact_if_needed`, choosing a window a pass can actually land under.
+/// Design: `docs/design/flows/context-compaction.md` §1.
+/// Up: `Kernel::compact_if_needed` and the turn tests.
+/// Down: no callee; it returns a number.
+/// Verify: `cargo test -p loong-kernel turn::tests::the_window_shrinks_to_half_the_room_the_history_leaves`.
+///
+/// The configured `keep_newest_tokens` is a wish, not a right. A session whose
+/// prompt, assistant text and tool-call arguments already fill most of the ceiling
+/// has less than that to spend on verbatim tool output, and a window fixed above
+/// what is left puts the *floor* of clearing over the ceiling: every pass would
+/// clear a sliver, stay over, and the thrash guard would stop the turn three
+/// passes later — and a fresh turn starts from the same context. `room` is what
+/// the ceiling leaves above the history that cannot be cleared, and half of it is
+/// kept so a pass leaves headroom for the steps that follow. When the room is
+/// gone, no window fits and the caller must not clear at all.
+pub(super) fn keep_window(
+    configured: u64,
+    ceiling: u64,
+    total: u64,
+    clearable: u64,
+) -> Option<u64> {
+    let room = ceiling.saturating_sub(total.saturating_sub(clearable));
+    if room < 2 {
+        return None;
+    }
+    Some(configured.min(ceiling / 2).min(room / 2))
+}
+
 /// Purpose: The one marker text both clearing paths write into a cleared tool message.
 ///
 /// Serves: `Kernel::age_tool_outputs` and `Kernel::splice_cleared`, so message and ledger never disagree.
@@ -384,13 +414,28 @@ impl Kernel {
         if before <= ceiling {
             return Ok(None);
         }
-        let keep = self.config.keep_newest_tokens.min(ceiling / 2);
-
         // Phase 1: clear stale tool output, oldest first, outside the new window.
-        let cleared = self
-            .ledger
-            .clear_tool_outputs(keep, marker_for_cleared_output);
-        self.splice_cleared(&cleared);
+        // The window has to fit under the ceiling as well as the config: clearing
+        // cannot reach a ceiling the history alone already fills, and a pass that
+        // rewrote tool bodies to still land over it would cost a full cache miss
+        // and free nothing (`docs/design/flows/context-compaction.md` §1). Phase 2
+        // is still allowed to try — dropping an exchange is the one lever left.
+        let keep = keep_window(
+            self.config.keep_newest_tokens,
+            ceiling,
+            before,
+            self.ledger.tool_output_tokens(),
+        );
+        let cleared = match keep {
+            Some(keep) => {
+                let cleared = self
+                    .ledger
+                    .clear_tool_outputs(keep, marker_for_cleared_output);
+                self.splice_cleared(&cleared);
+                cleared
+            }
+            None => crate::ledger::ClearReport::default(),
+        };
 
         // Phase 2: only if still over, drop the oldest whole exchanges — unless the
         // layered engine is on, in which case the exchange must survive: the whole
@@ -414,18 +459,27 @@ impl Kernel {
         }
 
         let after = self.ledger.total_tokens();
+        // A pass that cleared nothing records the whole context as its window, so a
+        // replay clears nothing either.
+        let kept_tokens = keep.unwrap_or(before);
+        let summary = match keep {
+            Some(keep) => format!(
+                "cleared {} tool output(s) older than the newest {keep} tokens and dropped {dropped_messages} oldest message(s): {before} -> {after} tokens",
+                cleared.cleared.len()
+            ),
+            None => format!(
+                "cleared no tool output: the history alone fills the ceiling, so all {before} tokens were kept and {dropped_messages} oldest message(s) dropped: {before} -> {after} tokens"
+            ),
+        };
         events.push(self.append(
             gen::event::COMPACTION_APPLIED,
             &gen::CompactionApplied {
                 tokens_before: before,
                 tokens_after: after,
-                kept_tokens: keep,
+                kept_tokens,
                 cleared_tool_outputs: cleared.cleared.len() as u64,
                 dropped_messages: dropped_messages as u64,
-                summary: format!(
-                    "cleared {} tool output(s) older than the newest {keep} tokens and dropped                      {dropped_messages} oldest message(s): {before} -> {after} tokens",
-                    cleared.cleared.len()
-                ),
+                summary,
             },
         )?);
         Ok(Some((before, after)))

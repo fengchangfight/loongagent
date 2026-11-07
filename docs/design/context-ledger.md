@@ -131,39 +131,38 @@ the ceiling.
 **Aging, before either phase.** `Kernel::age_tool_outputs` does not wait for the
 ceiling. Whenever `Ledger::tool_output_tokens()` — the uncleared `History` entries
 whose source starts `tool:` — passes `keep_newest_tokens`, it clears the older
-ones with the same marker and writes the same `compaction.applied` event
-(`cleared_tool_outputs > 0`, `dropped_messages 0`). A pass settles at **half** the
-line that triggered it, so the next reads have room before it is crossed again;
-the ceiling stays the backstop and aging keeps the steady state flat. Why the gap
-matters and where it stops helping are
+ones with the same marker and event (`cleared_tool_outputs > 0`, `dropped_messages
+0`), settling at **half** the line that triggered it so the next reads have room
+before it is crossed again; the ceiling stays the backstop and aging keeps the
+steady state flat. Why the gap matters and where it stops helping are
 [flows/context-compaction.md](flows/context-compaction.md) §1.
 
 **Phase 1 — clear stale tool output.** `Ledger::clear_tool_outputs` walks
 backwards to find where the newest `keep` tokens begin, and clears only entries
 that are `Category::History`, whose source starts with `tool:`, are not pinned,
-not already cleared, and sit outside that window. It always keeps the most
-recent entry whatever the arithmetic says: one tool output larger than the whole
-window must not be cleared the moment it arrives. Nothing is removed — the
-message's body is replaced by
+not already cleared, sit outside that window, and would be shortened by the
+marker: a body the marker cannot shrink is left alone, because rewriting it costs
+a full cache miss and frees nothing. `keep` is the smallest of
+`keep_newest_tokens`, half the ceiling and half the room the history leaves under
+it; why that third term exists, and the no-room case, are in
+[flows/context-compaction.md](flows/context-compaction.md) §1. It always keeps the
+most recent entry whatever the arithmetic says, so one output larger than the
+window is not cleared the moment it arrives. Nothing is removed — the message's
+body is replaced by
 `[output of … cleared to save context — re-run the command if you need it again]`
-and `Entry.cleared` becomes true. That marker is what tells the model the output
-is recoverable rather than empty.
+and `Entry.cleared` becomes true: the marker tells the model the output is
+recoverable rather than empty.
 
 **Phase 2 — drop the oldest exchanges, only when the layered engine is off.**
 `Kernel::drop_oldest_exchange` drains messages from after the system prompt up
 to (not including) the next user message, and calls `Ledger::forget` on their
-entry ids. A conversation that has no next user message is a single turn;
-dropping it would throw away the prompt being answered, so the function returns
-0 and the loop stops. The condition is one line —
+entry ids; a conversation with no next user message is one turn, so the function
+returns 0 and the loop stops. The condition is one line —
 `let may_drop = self.context_engine.is_none();` — and it is the whole of
 ADR-0017's promise: with the engine on, an original stays reachable, so the
 exchange survives and only its stale tool bodies are cleared. A test pins each
 side: `with_the_engine_on_a_long_session_never_drops_an_exchange` and
 `with_the_engine_off_compaction_still_drops_exchanges`.
-
-The sequence at a step boundary is [flows/context-compaction.md](flows/context-compaction.md).
-`compaction.applied` is written only when something actually changed; a single
-long turn with nothing stale can leave the context over budget without an event.
 
 ## 5. `recall`: the retrieval tool
 

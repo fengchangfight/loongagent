@@ -135,7 +135,8 @@ step and the tokens each pass freed; three passes inside a five-step window **th
 each freed under 5% or left the context over its ceiling** end the turn with a
 *compaction thrash* note instead of paying for the same clear-then-refill again.
 A pass that frees real room is ordinary aging, even three times in a row. The note
-names the two keys to raise, `budget_tokens` and `keep_newest_tokens`.
+names `budget_tokens`; it does not name `keep_newest_tokens`, which cannot help — a
+larger window keeps more verbatim and frees less.
 
 The leading `System` messages — the operator's prompt, the instruction files and
 the L4 map — are not exchanges. `Kernel::drop_oldest_exchange` skips every one of

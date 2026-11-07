@@ -442,7 +442,8 @@ impl Kernel {
                 if let Some(reason) = self.compaction_thrash() {
                     let note = format!(
                         "stopped after {} steps without progress (compaction thrash): {reason} — \
-                         raise `budget_tokens` or `keep_newest_tokens`, or split the task",
+                         the session's own history fills its budget; raise `budget_tokens` in the \
+                         configuration, or split the task into a fresh session",
                         self.steps_taken
                     );
                     events.push(self.record_assistant(Some(&note), &[])?);

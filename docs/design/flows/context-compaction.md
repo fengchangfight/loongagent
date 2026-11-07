@@ -16,10 +16,24 @@ At every step boundary, after `refresh_memory` and `age_tool_outputs`, `compact_
 `ledger.total_tokens()` with `Kernel::input_ceiling()`: the stricter of the budget ×
 `compact_at_percent` / 100 (default 80%) and the selected model's window minus
 `reserved_context_size` (a reserve larger than half a window is capped at half).
-At or under the ceiling it returns without an event. Otherwise `keep =
-keep_newest_tokens.min(ceiling / 2)` (20,000 tokens by default) is the newest window
-kept verbatim. With no budget and no window there is no ceiling, so compaction never
-runs and the CLI says so at startup.
+At or under the ceiling it returns without an event. Otherwise the newest window
+kept verbatim is `keep = keep_newest_tokens.min(ceiling / 2).min(room / 2)`
+(20,000 tokens by default), where `room = ceiling − (total − tool_output_tokens())`
+is what the ceiling leaves above the history that cannot be cleared: the prompt,
+the assistant messages and the arguments of its tool calls. With no budget and no
+window there is no ceiling, so compaction never runs and the CLI says so at startup.
+
+The third term is what keeps a long session working. A window fixed at 20,000
+tokens is a wish, not a right: once the running history alone is most of the
+ceiling, that window puts the *floor* of clearing above the ceiling, so each pass
+clears a sliver, lands over, and the thrash guard stops the turn — and a fresh turn
+starts from the same context, so it stops again three passes later. Fitting the
+window to the room removes the cause. A session at 67,000 tokens of history under
+an 80,000 ceiling leaves 13,000 of room; halved, that is a 6,500-token window with
+about three steps of headroom per pass. When `room` is zero the pass is not made at
+all: no window can get under the ceiling, so clearing would rewrite the middle of
+the conversation, cost a full cache miss and still land over it. The context then
+stays as it is and the lever is a larger `budget_tokens` or a new session.
 
 **Aging runs before that, on its own line.** `age_tool_outputs` fires whenever the
 uncleared `tool:` entries pass `keep_newest_tokens`, ceiling or not. The line that
@@ -66,7 +80,11 @@ nothing stale can stay over budget without an event.
 
 Three passes inside five steps that each free under 5% or leave the context over its
 ceiling end the turn with a compaction-thrash note: repeating the pass only re-bills
-the provider. The note names `budget_tokens` and `keep_newest_tokens`.
+the provider. The note names `budget_tokens` and a fresh session. It does not name
+`keep_newest_tokens`, which cannot help *here*: the stop means the ceiling is at or
+below what cannot be cleared, and a larger window only keeps more verbatim. That key
+still sets the aging gap above, which is a different line — the cost of pass
+frequency, not the reason a turn ends.
 
 ## 5. What is reversible
 
@@ -81,8 +99,10 @@ The full reversibility table is context-ledger §7.
 flowchart TD
     A["step boundary: refresh_memory, then compact_if_needed"] --> B{"total_tokens > input_ceiling()?"}
     B -- no --> Z["nothing happens"]
-    B -- yes --> K["keep = keep_newest_tokens.min(ceiling / 2)"]
-    K --> C["clear_tool_outputs: History + tool: only, outside the newest keep tokens"]
+    B -- yes --> K["keep = keep_newest_tokens.min(ceiling/2).min(room/2),<br/>room = ceiling − (total − tool_output_tokens())"]
+    K --> N{"room < 2?"}
+    N -- yes --> Z3["clear nothing: no window fits"]
+    N -- no --> C["clear_tool_outputs: History + tool: only, outside the newest keep tokens"]
     C --> D{"engine on?"}
     D -- yes --> Y["no exchange is dropped;<br/>the worker enriches in idle windows"]
     D -- no --> E{"still over the ceiling?"}

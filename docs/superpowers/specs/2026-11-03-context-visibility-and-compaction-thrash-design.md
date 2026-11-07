@@ -78,8 +78,15 @@ call with:
 ```
 stopped after N steps without progress (compaction thrash): clearing fired 3 times
 within 4 steps, and each freed less than 5% or left the context over its ceiling —
-raise `budget_tokens` or `keep_newest_tokens`, or split the task
+the session's own history fills its budget; raise `budget_tokens` in the
+configuration, or split the task into a fresh session
 ```
+
+The note names only the lever that works. `keep_newest_tokens` cannot help: a
+larger window keeps more verbatim and frees less, and the newest entry is kept
+whatever the key says. A fresh turn starts from the same context, so a stop left
+unaddressed returns in the next turn — which is why the cause, not the note, was
+fixed in `compact_if_needed` (§2).
 
 The note goes through `record_assistant`, exactly like the step-limit note, so
 every surface already renders it. The compaction events that preceded it are
@@ -97,6 +104,7 @@ newest output alone is larger than it.
 |---|---|
 | Percentage with a budget, tokens without | `cargo test -p loong-tui-app spend::tests::the_usage_line_reports_the_context_share` |
 | Three ineffective passes in five steps stop; effective passes do not | `cargo test -p loong-kernel turn::tests::compaction_thrash_stops_the_turn` · `turn::tests::a_compaction_that_frees_room_is_not_thrash` |
+| A long history still lands under the ceiling, so the stop is not reached | `cargo test -p loong-kernel turn::tests::a_history_that_fills_the_budget_shrinks_the_window` |
 | The whole gate | `./scripts/check.sh` |
 
 ## 6. Risks
@@ -107,7 +115,15 @@ newest output alone is larger than it.
   added a large tool result shows it on the following cost event. This is the
   same lag Claude Code has and is cheaper than a request per step.
 - **A legitimate aggressive keep window trips the thrash stop.** Three passes
-  within five steps means each step's output exceeds the keep window; the note
-  names the two keys to raise, and one reply resumes with a fresh turn.
+  within five steps means each step's output exceeds the keep window. One reply
+  resumes with a fresh turn, but that turn starts from the same context, so it
+  stops again three passes later — a session that hit this once hit it every
+  time it was long. The note named two keys; only `budget_tokens` helps, because
+  a larger `keep_newest_tokens` keeps *more* verbatim and frees less. The cause
+  is now removed rather than documented: `compact_if_needed` fits its window to
+  the room the history leaves under the ceiling
+  ([flows/context-compaction.md](../../design/flows/context-compaction.md) §1),
+  so a pass lands under the ceiling instead of clearing a sliver and staying
+  over it.
 - **A budget of zero in `ContextExplain`** means no window and no budget; the row
   shows tokens rather than dividing by zero.

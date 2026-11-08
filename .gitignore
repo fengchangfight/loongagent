@@ -96,6 +96,10 @@ __pycache__/
 .venv/
 venv/
 vendor/
+# …except the reverse surface vendored on purpose (docs/design/reverse.md): it is compiled by
+# this workspace and shipped in the binary, so it must be tracked. The rule above keeps
+# third-party drop-ins out; this negation names the one tree that is part of our source.
+!crates/reverse/vendor/
 
 # Caches
 .cache/

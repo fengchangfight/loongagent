@@ -36,8 +36,10 @@ Exemptions are different from the baseline. A file that cannot carry a contract
 is listed in scripts/contract-exemptions.txt as `path | reason`; a single item
 may be exempted as `path#item | reason` or with a `// Contract-exempt: <reason>`
 line above it. The reason must be at least 10 characters, and a stale exemption
-fails. The file-level list is closed to generated code and the two crate-root
-Cargo build scripts; item-level exemptions are not limited by that set.
+fails. The file-level list is closed to generated code, the two crate-root Cargo
+build scripts and one vendored tree (`crates/reverse/vendor/`), which is upstream
+source kept verbatim so re-vendoring stays a copy; item-level exemptions are not
+limited by that set.
 
 The scanner masks line comments, nested block comments, string literals, char
 literals and raw strings before it looks for items, preserving newlines so the
@@ -82,6 +84,14 @@ ALLOWED_FILE_EXEMPTIONS = frozenset(
         "crates/control/build.rs",
     }
 )
+
+# A whole tree may be exempted as `<prefix>/ | reason`, and only these trees may:
+# upstream source vendored verbatim, where re-vendoring has to stay a copy.
+# Their design anchor is the document the entry names, and a file the vendor
+# procedure actually writes (the crate root, a shim) carries a real contract
+# like any other file. The prefix is exact, so a file outside the tree still
+# needs its own contract, and an entry whose tree holds no Rust file is stale.
+ALLOWED_FILE_CLASSES = frozenset({"crates/reverse/vendor/"})
 
 # Indentation, visibility, modifiers, the keyword and the name. The masked text
 # has already lost comments and strings, so a `fn` in either cannot match. `mod`
@@ -740,11 +750,11 @@ def read_exemptions(root: str) -> tuple[dict[str, str], dict[str, dict[str, str]
                     )
                     continue
                 item_level.setdefault(item_path, {})[item_name] = reason
-            elif key not in ALLOWED_FILE_EXEMPTIONS:
+            elif key not in ALLOWED_FILE_EXEMPTIONS and key not in ALLOWED_FILE_CLASSES:
                 problems.append(
                     f"{relative}:{number}: file exemption is not allowed: "
-                    f"{key} (the list is closed to the generated schema files "
-                    "and the two crate-root build scripts)"
+                    f"{key} (the list is closed to the generated schema files, "
+                    "the two crate-root build scripts and the vendored tree)"
                 )
             else:
                 file_level[key] = reason
@@ -897,6 +907,17 @@ def main() -> int:
         # names an item that must still be there. Either kind going stale means
         # the list has drifted from the tree, so it fails like a stale baseline.
         for relative in sorted(file_exemptions):
+            if relative.endswith("/"):
+                covered = any(
+                    name.startswith(relative) and name.endswith(".rs")
+                    for name in files
+                )
+                if not covered:
+                    problems.append(
+                        f"scripts/contract-exemptions.txt: stale exemption: "
+                        f"{relative} (no Rust file under it)"
+                    )
+                continue
             if not os.path.isfile(os.path.join(root, *relative.split("/"))):
                 problems.append(
                     f"scripts/contract-exemptions.txt: stale exemption: "
@@ -916,7 +937,11 @@ def main() -> int:
             raw_lines = source.split("\n")
             masked_lines = masked.split("\n")
             items = find_items(raw_lines, masked_lines, masked)
-            exempted = relative in file_exemptions
+            exempted = relative in file_exemptions or any(
+                relative.startswith(prefix)
+                for prefix in file_exemptions
+                if prefix.endswith("/")
+            )
             if exempted:
                 results.append((relative, [], items, True))
                 continue

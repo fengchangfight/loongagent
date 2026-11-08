@@ -236,8 +236,12 @@ mod tests {
     use crate::NoConfinement;
     use std::path::Path;
 
-    /// Purpose: A catalogue of three tools from two servers.
-    /// Contract: `crates/tools/src/deferred.rs`.
+    /// Purpose: a catalogue of three tools from two servers, for the tests below.
+    /// Serves: `docs/design/mcp-client.md` (deferred MCP tool loading).
+    /// Design: `docs/design/mcp-client.md`.
+    /// Up: the `#[test]` functions in this module.
+    /// Down: `DeferredTool` fixtures only; no production path.
+    /// Verify: `cargo test -p loong-tools deferred`.
     fn catalogue() -> Arc<Mutex<BTreeMap<String, DeferredTool>>> {
         let tools = vec![
             DeferredTool {

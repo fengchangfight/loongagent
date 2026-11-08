@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/*"]
+members = ["crates/cli", "crates/config", "crates/context", "crates/control", "crates/eventlog", "crates/hooks", "crates/http", "crates/index", "crates/kernel", "crates/manifest", "crates/mcp", "crates/pack", "crates/plugin", "crates/proc", "crates/protocol", "crates/providers", "crates/sandbox", "crates/schema", "crates/server", "crates/skills", "crates/tools", "crates/tui", "crates/tui-app", "crates/web", "crates/reverse/vendor/loong-reverse-analysis", "crates/reverse/vendor/loong-reverse-disasm", "crates/reverse/vendor/loong-reverse-engine", "crates/reverse/vendor/loong-reverse-evidence", "crates/reverse/vendor/loong-reverse-formats", "crates/reverse/vendor/loong-reverse-js", "crates/reverse/vendor/loong-reverse-mcp", "crates/reverse/vendor/loong-reverse-platform", "crates/reverse/vendor/loong-reverse-testkit"]
 
 [workspace.package]
 version = "0.0.1"
@@ -9,9 +9,50 @@ license = "Apache-2.0"
 rust-version = "1.80"
 description = "loongagent — a firm-internal coding agent (see docs/)"
 
+# Vendored reverse crates keep craft-anything's lint posture (docs/design/reverse.md).
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Vendored from Craft Anything (docs/superpowers/specs/2026-10-24-loongagent-reverse-design.md).
+loong-reverse-evidence = { path = "crates/reverse/vendor/loong-reverse-evidence" }
+loong-reverse-platform = { path = "crates/reverse/vendor/loong-reverse-platform" }
+loong-reverse-formats = { path = "crates/reverse/vendor/loong-reverse-formats" }
+loong-reverse-disasm = { path = "crates/reverse/vendor/loong-reverse-disasm" }
+loong-reverse-js = { path = "crates/reverse/vendor/loong-reverse-js" }
+loong-reverse-analysis = { path = "crates/reverse/vendor/loong-reverse-analysis" }
+loong-reverse-engine = { path = "crates/reverse/vendor/loong-reverse-engine" }
+loong-reverse-mcp = { path = "crates/reverse/vendor/loong-reverse-mcp" }
+loong-reverse-testkit = { path = "crates/reverse/vendor/loong-reverse-testkit" }
+
+# External deps of the vendored reverse crates (pinned to the craft-anything vendor set).
+thiserror = "2"
+serde_path_to_error = "0.1"
+sha2 = "0.10"
+hex = "0.4"
+bitflags = { version = "2", features = ["serde"] }
+schemars = "1"
+log = "0.4"
+object = { version = "0.36", default-features = false, features = ["read", "std"] }
+iced-x86 = { version = "1.21", default-features = false, features = ["std", "decoder", "intel", "instr_info"] }
+yaxpeax-arm = { version = "0.5", default-features = false, features = ["std", "alloc", "fmt"] }
+yaxpeax-arch = { version = "0.3", default-features = false, features = ["std", "alloc"] }
+rustc-demangle = "0.1"
+wasmparser = { version = "0.261", default-features = false, features = ["std", "validate", "features", "component-model", "simd"] }
+wasmprinter = { version = "0.261", default-features = false, features = ["component-model"] }
+miniz_oxide = "0.8"
+regex = "1"
+oxc_allocator = "0.153"
+oxc_ast = "0.153"
+oxc_ast_visit = "0.153"
+oxc_parser = "0.153"
+oxc_span = "0.153"
+oxc_syntax = "0.153"
+oxc_codegen = "0.153"
+oxc_semantic = "0.153"
 
 loong-pack = { path = "crates/pack" }
 loong-control = { path = "crates/control" }

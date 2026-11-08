@@ -1,0 +1,21 @@
+[package]
+name = "loong-reverse-mcp"
+description = "The Craft Anything MCP server"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+loong-reverse-evidence = { workspace = true }
+loong-reverse-engine = { workspace = true }
+loong-reverse-platform = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

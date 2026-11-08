@@ -29,6 +29,15 @@ listed is a violation. The middle column is each crate's own `//!` header.
 | `loong-proc` | Run a child process with bounded output, a hard timeout and teardown of its whole tree. | — |
 | `loong-protocol` | Define the JSON-RPC 2.0 envelopes and one-line framing that carry schema messages between surfaces and the server. | `loong-schema` |
 | `loong-providers` | Model providers behind one `Model` interface, so the kernel never learns which vendor answered (ADR-0004). | `loong-http`, `loong-schema` |
+| `loong-reverse-analysis` | The analyzers that turn a parsed target into findings, call graphs and values. | `loong-reverse-disasm`, `loong-reverse-evidence`, `loong-reverse-formats`, `loong-reverse-js` |
+| `loong-reverse-disasm` | Instruction decoding and the function-level view over it (x86, ARM, wasm). | `loong-reverse-formats` |
+| `loong-reverse-engine` | The reverse-engineering engine: sessions, targets, tools, projects and the tool registry. | `loong-reverse-analysis`, `loong-reverse-disasm`, `loong-reverse-evidence`, `loong-reverse-formats`, `loong-reverse-js`, `loong-reverse-platform` |
+| `loong-reverse-evidence` | The evidence record: what a tool observed, in what environment, with what limits. | — |
+| `loong-reverse-formats` | Parsers for the container formats a target ships in (ELF, Mach-O, PE, WASM, archives). | — |
+| `loong-reverse-js` | JavaScript bundle parsing: modules, sources, and recovery of original files. | — |
+| `loong-reverse-mcp` | The MCP server: JSON-RPC over stdio, its tool list, and the `loongagent-reverse` binary. | `loong-reverse-engine`, `loong-reverse-evidence`, `loong-reverse-platform` |
+| `loong-reverse-platform` | The operating-system layer: starting a program, reading and writing files, sync. | `loong-reverse-evidence` |
+| `loong-reverse-testkit` | Fixtures the vendored tests share: built binaries and bundles to analyse. | — |
 | `loong-sandbox` | The policy decision point: allow, ask or deny plus the rule that fired, and never a widening. | `loong-schema` |
 | `loong-schema` | Own the single source of truth for every message on the wire, generated once for Rust and TypeScript. | — |
 | `loong-server` | The local agent server: one session, JSON-RPC over stdio, every event streamed before the response. | `loong-eventlog`, `loong-kernel`, `loong-protocol`, `loong-schema` |

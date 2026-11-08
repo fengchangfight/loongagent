@@ -1,9 +1,9 @@
-Up: docs/README.md
-Authority: ADR-0009（one brain, many faces）；本文档拥有 reverse 功能的设计
-Code: crates/reverse/（新增）, crates/cli/src/reverse.rs（新增）, crates/cli/src/main.rs
-Verify: ./scripts/check.sh
-
 # loongagent reverse：逆向工程模式（最小版）
+
+- **Up:** [design/README.md](README.md) · [../04-system-overview.md](../04-system-overview.md)
+- **Authority:** [ADR-0009](../decisions/0009-surfaces.md)
+- **Code:** `crates/reverse/vendor/`（随源码 vendor 的逆向 crate）, `crates/reverse/vendor/loong-reverse-mcp/src/bin/loongagent-reverse.rs`（MCP server 入口）, `scripts/check-reverse.sh`
+- **Verify:** `./scripts/check.sh`（含 `scripts/check-reverse.sh`）
 
 ## 意图
 

@@ -1,0 +1,21 @@
+[package]
+name = "loong-reverse-analysis"
+description = "Analyzers that turn parsed targets into evidence for Craft Anything"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+loong-reverse-evidence = { workspace = true }
+loong-reverse-formats = { workspace = true }
+loong-reverse-disasm = { workspace = true }
+loong-reverse-js = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+loong-reverse-testkit = { workspace = true }

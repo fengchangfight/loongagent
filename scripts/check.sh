@@ -13,6 +13,9 @@
 #   code contracts  a Rust file with no design anchor, or an item with no doc block
 #   human-written   the human's notebook: an agent edit there is a failure, not a
 #                   formatting nit (AGENTS.md, scripts/check-human-written.sh)
+#   reverse surface the vendored reverse crates stop building, the tool list drifts
+#                   from docs/design/reverse.md, or the MCP transport stops
+#                   answering (scripts/check-reverse.sh)
 #   documents       a relative link that rotted, a document without its header,
 #                   one over its line budget, or one with no checked path back
 #                   to the design (the documents are also what nothing else in
@@ -39,6 +42,9 @@ python3 scripts/check-modules.py
 
 bold "the human's notebook is untouched"
 ./scripts/check-human-written.sh
+
+bold "the reverse surface is what the design says"
+./scripts/check-reverse.sh
 
 bold "documents"
 python3 scripts/check-docs.py

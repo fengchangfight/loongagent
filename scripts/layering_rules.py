@@ -51,6 +51,18 @@ ALLOWED = {
     "loong-tui": {"loong-schema", "loong-protocol"},
     "loong-tui-app": {"loong-schema", "loong-tui"},
     "loong-web": set(),
+    # the reverse-engineering surface vendored from Craft Anything
+    # (docs/design/reverse.md): a layer below the kernel, which reaches it through
+    # the `loong-mcp` edge, never the other way round.
+    "loong-reverse-evidence": set(),
+    "loong-reverse-platform": {"loong-reverse-evidence"},
+    "loong-reverse-formats": set(),
+    "loong-reverse-disasm": {"loong-reverse-formats"},
+    "loong-reverse-js": set(),
+    "loong-reverse-analysis": {"loong-reverse-evidence", "loong-reverse-formats", "loong-reverse-disasm", "loong-reverse-js"},
+    "loong-reverse-engine": {"loong-reverse-evidence", "loong-reverse-platform", "loong-reverse-formats", "loong-reverse-disasm", "loong-reverse-js", "loong-reverse-analysis"},
+    "loong-reverse-mcp": {"loong-reverse-evidence", "loong-reverse-engine", "loong-reverse-platform"},
+    "loong-reverse-testkit": set(),
     # the one binary that ties faces together
     "loongagent": {
         "loong-schema", "loong-protocol", "loong-eventlog", "loong-http", "loong-proc", "loong-manifest", "loong-providers",
@@ -62,6 +74,9 @@ ALLOWED = {
 # The package whose crate directory is not its own name minus the `loong-` prefix.
 # Every other package follows the mechanical rule.
 DIRECTORY_EXCEPTIONS = {"loongagent": "cli"}
+# The vendored reverse crates sit one level deeper (docs/design/reverse.md).
+for _name in ("evidence", "platform", "formats", "disasm", "js", "analysis", "engine", "mcp", "testkit"):
+    DIRECTORY_EXCEPTIONS[f"loong-reverse-{_name}"] = f"reverse/vendor/loong-reverse-{_name}"
 
 
 def crate_directory(name: str) -> str:
@@ -82,7 +97,9 @@ def header_line(root: str, name: str) -> str:
     The header is the narrative the hand-written crate table used to carry, so a
     crate without one is a hard failure: an empty cell would silently drop it.
     """
-    source = "main.rs" if name in DIRECTORY_EXCEPTIONS else "lib.rs"
+    # Only the CLI is a binary; every other package (including the vendored ones, whose
+    # directory is exceptional) opens with src/lib.rs.
+    source = "main.rs" if name == "loongagent" else "lib.rs"
     path = os.path.join(root, "crates", crate_directory(name), "src", source)
     try:
         with open(path, encoding="utf-8") as handle:

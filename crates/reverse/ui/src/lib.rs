@@ -97,7 +97,11 @@ pub enum TargetKind {
 
 impl TargetKind {
     /// Purpose: The word written on the first line of `.reverse/target-kind` and the page's tabs.
-    /// Contract: `crates/reverse/ui/src/lib.rs`.
+    /// Serves: `record_target`, which writes it, and the page, which draws one tab per word.
+    /// Design: `docs/design/reverse.md` §4.1.
+    /// Up: `record_target` and the page's tab strip.
+    /// Down: nothing; a constant per variant.
+    /// Verify: `cargo test -p loong-reverse-ui`.
     pub fn id(self) -> &'static str {
         match self {
             TargetKind::Binary => "binary",
@@ -107,7 +111,11 @@ impl TargetKind {
     }
 
     /// Purpose: Read back what `id` wrote; unknown text is not guessed.
-    /// Contract: `crates/reverse/ui/src/lib.rs`.
+    /// Serves: `read_target`, which trusts the recorded word only if it parses.
+    /// Design: `docs/design/reverse.md` §4.1.
+    /// Up: `read_target`.
+    /// Down: nothing; a match over the three words.
+    /// Verify: `cargo test -p loong-reverse-ui`.
     pub fn parse(text: &str) -> Option<TargetKind> {
         match text.trim() {
             "binary" => Some(TargetKind::Binary),
@@ -121,7 +129,11 @@ impl TargetKind {
     ///
     /// `http(s)://` is a URL; a `.apk` suffix is an APK; everything else is a program file.
     /// A guess, so `read_target` prefers the recorded kind when there is one.
-    /// Contract: `crates/reverse/ui/src/lib.rs`.
+    /// Serves: `read_target`, for a `.reverse/target` written before kinds existed.
+    /// Design: `docs/design/reverse.md` §4.1.
+    /// Up: `read_target` only.
+    /// Down: nothing; the value is inspected, not opened.
+    /// Verify: `cargo test -p loong-reverse-ui`.
     pub fn infer(value: &str) -> TargetKind {
         if value.starts_with("http://") || value.starts_with("https://") {
             TargetKind::Url
@@ -349,7 +361,11 @@ pub fn route(root: &Path, path: &str) -> Route {
 }
 
 /// Purpose: Decode `%XX` escapes and `+` from a query parameter.
-/// Contract: `crates/reverse/ui/src/lib.rs`.
+/// Serves: `route`, which reads `?path=` from `GET /reverse/tree`.
+/// Design: `docs/design/reverse.md` §4.
+/// Up: `query_param` only.
+/// Down: `u8::from_str_radix` and `String::from_utf8_lossy`.
+/// Verify: `cargo test -p loong-reverse-ui`.
 fn percent_decode(text: &str) -> String {
     let bytes = text.replace('+', " ").into_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -514,7 +530,11 @@ pub fn tree_json(root: &Path) -> String {
 }
 
 /// Purpose: Recursively collect relative paths under `root` into `out`.
-/// Contract: `crates/reverse/ui/src/lib.rs`.
+/// Serves: `tree_json`, which needs every file and folder of `.reverse/` in one pass.
+/// Design: `docs/design/reverse.md` §4.
+/// Up: `tree_json`, and itself for each subdirectory.
+/// Down: `std::fs::read_dir` only.
+/// Verify: `cargo test -p loong-reverse-ui`.
 fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, bool)>) {
     let Ok(read) = std::fs::read_dir(dir) else {
         return;
@@ -577,10 +597,12 @@ impl StudySurface {
 
 impl Router for StudySurface {
     /// Purpose: This surface owns `/reverse`.
+    /// Contract: `crates/reverse/ui/src/lib.rs`.
     fn prefix(&self) -> &str {
         "/reverse"
     }
     /// Purpose: Answer the request from the `.reverse/` directory.
+    /// Contract: `crates/reverse/ui/src/lib.rs`.
     fn answer(&self, head: &str, stream: &mut TcpStream) -> Result<(), String> {
         handle(&self.root, head, stream).map(|_| ())
     }

@@ -5,11 +5,10 @@
 - **Code:** `crates/cli/src/main.rs`, `crates/server/src/lib.rs`, `crates/tui/src/lib.rs`, `crates/tui-app/src/lib.rs`, `crates/tui-app/src/history.rs`, `crates/tui-app/src/mark.rs`, `crates/tui-app/src/commands.rs`, `crates/web/src/lib.rs`
 - **Verify:** `cargo test -p loongagent -p loong-server -p loong-tui -p loong-tui-app -p loong-web` · `./scripts/check.sh`
 
-The architecture is one local agent server and thin clients that render its event stream and
-send intents. The implementation is narrower than the decision in two places, and they are
-stated up front: the server speaks **stdio**, not the unix socket ADR-0001 describes, and a
-surface **spawns its own server child** rather than attaching to a shared per-user daemon. The
-TUI, web, line mode and headless run all speak the same JSON-RPC protocol over that child.
+The architecture is one local agent server and thin clients that render its event stream and send
+intents. The implementation is narrower than the decision in two places: the server speaks
+**stdio**, not the unix socket ADR-0001 describes, and a surface **spawns its own server child**
+instead of attaching to a per-user daemon — so TUI, web, line mode and headless all speak JSON-RPC.
 
 ## 1. The server owns the session while it runs
 
@@ -140,8 +139,11 @@ this size is one square of foreground — and the wordmark: five rows of block l
 gone with the first line; `/logo` puts both away, and under 52 columns by 26 rows there
 is no mark. The character is ANSI red and the frame ANSI magenta — never an absolute RGB.
 
-Scrolling is anchored to the page, not its end: away from the bottom, new output is
-appended below the window, so a long block stays selectable and the prompt's caret stays put.
+Scrolling is anchored to the page, not its end: away from the bottom, new output is appended
+below the window, so a long block stays selectable and the prompt's caret stays put. While the
+reader is away, a dimmed bar on the page's right edge shows where the transcript's window sits
+(`self.scroll` drives ratatui's `ScrollbarState`); it paints over the margin, it vanishes at the
+bottom, and an open fold has no bar, because the fold's rows are not the transcript's coordinates.
 
 ## 4. The web: a bridge, not a second agent
 
@@ -214,7 +216,6 @@ flowchart LR
     WEB -->|"bridges WebSocket ↔ stdio"| SERVER
     CLIWEB["loongagent web<br/>spawns the server child"] --> SERVER
     SERVER --> KERNEL["kernel · ledger · PDP · sandbox<br/>session JSONL + derived index"]
-    ACP["ACP adapter"] -.->|"decided, not built"| SERVER
 ```
 
 ## 8. Known limits

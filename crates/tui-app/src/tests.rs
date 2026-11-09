@@ -873,6 +873,66 @@ fn scrolling_back_cannot_push_the_newest_lines_off_the_end() {
     assert_eq!(app.scroll, 0, "and the count says what the screen says");
 }
 
+/// Purpose: A scrollbar on the right edge marks how far back the window sits, and only while the reader is away from the bottom.
+#[test]
+fn a_scrolled_page_draws_a_scrollbar_on_the_right_edge() {
+    let mut app = App::new("s", "v");
+    app.push_lines((1..=50).map(|i| format!("line {i}")));
+
+    let bottom = draw(&mut app, 40, 20);
+    assert!(
+        !bottom.contains('▲') && !bottom.contains('█'),
+        "at the newest line the track would be all thumb, so there is no bar:\n{bottom}"
+    );
+
+    app.handle_key(key(KeyCode::PageUp));
+    let scrolled = draw(&mut app, 40, 20);
+    assert!(
+        scrolled.contains('▲') || scrolled.contains('█'),
+        "away from the bottom the page's right edge carries the scrollbar:\n{scrolled}"
+    );
+
+    // The bar is drawn in the margin, not carved out of the text: the page keeps its
+    // full width, so nothing reflows when the bar appears or disappears.
+    let last = scrolled
+        .lines()
+        .filter(|line| line.contains('▲') || line.contains('█'))
+        .last()
+        .expect("the bar is there")
+        .to_string();
+    assert_eq!(
+        last.chars().count(),
+        40,
+        "the scrollbar paints over the margin; the text keeps the full width:\n{last:?}"
+    );
+
+    app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL));
+    let again = draw(&mut app, 40, 20);
+    assert!(
+        !again.contains('▲') && !again.contains('█'),
+        "back at the bottom the bar is gone again:\n{again}"
+    );
+}
+
+/// Purpose: An open fold shows no scrollbar — its rows are not the transcript's coordinate system, so the same offset would lie.
+#[test]
+fn an_open_fold_draws_no_scrollbar() {
+    let mut app = App::new("s", "v");
+    app.push_lines((1..=50).map(|i| format!("line {i}")));
+    // Standing in for a tool result: enough rows to scroll, read through the same
+    // `Opened` path `toggle_fold` fills from a real fold.
+    app.open = Some(OpenFold {
+        marker: 5,
+        lines: (1..=60).map(|i| format!("result row {i}")).collect(),
+        scroll: 10,
+    });
+    let screen = draw(&mut app, 40, 20);
+    assert!(
+        !screen.contains('▲') && !screen.contains('█'),
+        "the fold's rows are not the transcript's scroll space:\n{screen}"
+    );
+}
+
 /// Purpose: Bookkeeping lines use the terminal's dimmed foreground, not a colour that is the background.
 #[test]
 fn the_bookkeeping_lines_are_not_drawn_into_the_wall() {

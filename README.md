@@ -42,7 +42,7 @@
 
 ```bash
 cargo build --release --locked -p loongagent     # -> target/release/loongagent
-cargo install --path crates/cli --locked         # -> ~/.cargo/bin/loongagent
+cargo +stable install --path crates/cli --locked  # -> ~/.cargo/bin/loongagent
 export PATH="$HOME/.cargo/bin:$PATH"
 ```
 

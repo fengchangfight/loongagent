@@ -16,7 +16,7 @@ path = "src/main.rs"
 [dependencies]
 loong-reverse-engine = { workspace = true }
 loong-reverse-evidence = { workspace = true }
-loong-reverse-mcp-lib = { package = "loong-reverse-mcp", workspace = true }
+loong-reverse-mcp-lib = { workspace = true }
 loong-reverse-platform = { workspace = true }
 
 [dev-dependencies]

@@ -11,12 +11,17 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 export PATH="$HOME/.cargo/bin:$PATH"
-cargo install --path crates/cli --locked --force
-cargo install --path crates/control --locked --force
+# `cargo install` cannot inherit a toolchain file's override — rustup warns and falls back
+# to the default instead — so name the toolchain the file pins, explicitly. Read rather than
+# hard-code `stable`, so moving the pin in `rust-toolchain.toml` moves these commands too.
+toolchain="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml | head -n 1)"
+[ -n "$toolchain" ] || toolchain=stable
+cargo "+$toolchain" install --path crates/cli --locked --force
+cargo "+$toolchain" install --path crates/control --locked --force
 # `loongagent reverse` starts this server from PATH (its manifest names the bare
 # command), so a session without it opens the portal but has none of the reverse
 # tools. Install it here or the reverse surface is a page with no engine behind it.
-cargo install --path crates/reverse/mcp-server --locked --force
+cargo "+$toolchain" install --path crates/reverse/mcp-server --locked --force
 echo
 echo "installed:"
 "$HOME/.cargo/bin/loongagent" --version | sed 's/^/  /'

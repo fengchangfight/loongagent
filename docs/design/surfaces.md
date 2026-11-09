@@ -23,10 +23,9 @@ source of truth**, and the server opens it when it starts. A process that ends l
 behind — plus whatever derived index and memory it built — and the next surface reopens them.
 That is what makes "reopen a session" work even though there is no long-lived daemon.
 
-The consequence deserves its own sentence: two surfaces started at once each spawn their own
-server on the same log. There is no write token, no observer mode and no takeover event, so
-ADR-0009 §5's one-writer/many-observers rule is a decision the code has not implemented. Today
-the safe shape is one attached surface per session.
+The consequence: two surfaces started at once would open the same log, so the log takes a write
+lock and the second is refused with `LogError::Locked` (events-storage.md §3). There is no observer
+mode and no takeover event, so the safe shape stays one attached surface per session.
 
 ## 2. The CLI is the composition root and the command surface
 
@@ -221,8 +220,8 @@ flowchart LR
 ## 8. Known limits
 
 - **No unix socket and no shared daemon.** ADR-0001's per-user server and ADR-0009's
-  multi-surface attach are not implemented; the transport is stdio, and each surface starts its
-  own child. Two surfaces on one log are not coordinated.
+  multi-surface attach are not implemented; the transport is stdio and each surface starts its own
+  child, which the log's write lock refuses when the session is already open in another one.
 - **`session.attach` is a handshake, not a takeover.** It returns the session id, schema version
   and event count; it does not hand over a write token or register an observer.
 - **ACP is not built.** Only the schema's optional client label exists.

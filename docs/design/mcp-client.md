@@ -2,7 +2,7 @@
 
 - **Up:** [design/README.md](README.md) · [extension-model.md](extension-model.md)
 - **Authority:** [ADR-0004](../decisions/0004-microkernel-extension-model.md) · [ADR-0007](../decisions/0007-permission-sandbox-engine.md)
-- **Code:** `crates/mcp/src/`, `crates/tools/src/tool_search.rs`, `crates/kernel/src/turn/build.rs`, `crates/cli/src/mcp.rs`, `crates/http/src/lib.rs`
+- **Code:** `crates/mcp/src/`, `crates/tools/src/deferred.rs`, `crates/tools/src/lib.rs`, `crates/kernel/src/turn/build.rs`, `crates/cli/src/mcp.rs`, `crates/http/src/lib.rs`
 - **Verify:** `cargo test -p loong-mcp -p loong-tools -p loong-kernel` · `./scripts/check.sh`
 
 [extension-model.md](extension-model.md) §3 says where MCP sits in the extension model and why

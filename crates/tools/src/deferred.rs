@@ -237,7 +237,12 @@ mod tests {
     use std::path::Path;
 
     /// Purpose: A catalogue of three tools from two servers.
-    /// Contract: `crates/tools/src/deferred.rs`.
+    ///
+    /// Serves: the `tool_search` tests, which need more tools than a request would reveal.
+    /// Design: `docs/design/mcp-client.md` §6.
+    /// Up: the tests in this module.
+    /// Down: `DeferredTool` values only; no further call.
+    /// Verify: `cargo test -p loong-tools`.
     fn catalogue() -> Arc<Mutex<BTreeMap<String, DeferredTool>>> {
         let tools = vec![
             DeferredTool {

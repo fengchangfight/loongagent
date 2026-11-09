@@ -163,12 +163,33 @@ pub fn lock_path(path: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// Purpose: Take the log's write lock on its sidecar, or say this log already has a writer.
+/// Purpose: How many times `lock_writer` tries before it calls a lock a real second writer.
+///
+/// Serves: bridging the fork-to-exec window without hiding a genuine clash (events-storage.md §3).
+/// Design: `docs/design/events-storage.md` (ADR-0009).
+/// Up: `lock_writer` only.
+/// Down: nothing; a count.
+/// Verify: `cargo test -p loong-eventlog`.
+const LOCK_ATTEMPTS: u32 = 100;
+
+/// Purpose: How long `lock_writer` waits between attempts.
+///
+/// Serves: `LOCK_ATTEMPTS × LOCK_RETRY` = half a second, longer than any dynamic loader
+/// takes between fork and exec, and short enough that a real second writer is reported
+/// while the person is still looking at the terminal.
+/// Design: `docs/design/events-storage.md` (ADR-0009).
+/// Up: `lock_writer` only.
+/// Down: nothing; a duration.
+/// Verify: `cargo test -p loong-eventlog`.
+const LOCK_RETRY: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// Purpose: Take the log's write lock on its sidecar, waiting out a lock that a forked
+/// child still holds, or say this log already has a writer.
 ///
 /// Serves: ADR-0009 §5's one writer, enforced before the log is opened or replayed (events-storage.md §3).
 /// Design: `docs/design/events-storage.md` (ADR-0003, ADR-0009).
 /// Up: `SessionLog::create` and `SessionLog::open`.
-/// Down: `lock_path`, `File::try_lock` and `LogError::Locked`.
+/// Down: `lock_path`, `File::try_lock`, `LOCK_ATTEMPTS` and `LogError::Locked`.
 /// Verify: `cargo test -p loong-eventlog`.
 fn lock_writer(path: &Path) -> Result<File, LogError> {
     // Read and write, because a Windows handle that is only for append cannot be locked.
@@ -178,13 +199,22 @@ fn lock_writer(path: &Path) -> Result<File, LogError> {
         .create(true)
         .truncate(false)
         .open(lock_path(path))?;
-    match lock.try_lock() {
-        Ok(()) => Ok(lock),
-        Err(std::fs::TryLockError::WouldBlock) => Err(LogError::Locked {
-            path: path.to_path_buf(),
-        }),
-        Err(std::fs::TryLockError::Error(e)) => Err(LogError::Io(e)),
+    // A forked child inherits every open descriptor until it execs, so a lock this
+    // process has just released can still be held by a child another thread was
+    // spawning — and `try_lock` then fails on a log nobody is writing. Wait that
+    // copy out. A real second writer keeps the lock for as long as it runs, so the
+    // wait cannot turn a genuine clash into a silent second writer (ADR-0009 §5).
+    for attempt in 1..=LOCK_ATTEMPTS {
+        match lock.try_lock() {
+            Ok(()) => return Ok(lock),
+            Err(std::fs::TryLockError::WouldBlock) if attempt == LOCK_ATTEMPTS => break,
+            Err(std::fs::TryLockError::WouldBlock) => std::thread::sleep(LOCK_RETRY),
+            Err(std::fs::TryLockError::Error(e)) => return Err(LogError::Io(e)),
+        }
     }
+    Err(LogError::Locked {
+        path: path.to_path_buf(),
+    })
 }
 
 /// What a replay produced.
@@ -642,6 +672,34 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// Purpose: Pins that a lock a forked child still holds for a moment is waited out, so a
+    /// log nobody is writing is not refused as "another process is writing this session".
+    #[test]
+    fn a_lock_that_a_child_still_holds_briefly_is_waited_out() {
+        let t = Temp::new();
+        {
+            let mut log = SessionLog::create(t.path()).unwrap();
+            log.append("message.appended", json!({})).unwrap();
+        }
+        // A child forked between `fork` and `exec` inherits the sidecar's descriptor, so
+        // the lock outlives the release that dropped it. A duplicated descriptor handed to
+        // a short-lived thread reproduces exactly that: same lock, released a few ms later.
+        let inherited = {
+            let lock = lock_writer(t.path()).unwrap();
+            let copy = lock.try_clone().unwrap();
+            drop(lock);
+            copy
+        };
+        let holder = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            drop(inherited);
+        });
+        // Without the wait this fails: the descriptor the child would be holding is
+        // still open, and the log looks written when it is not.
+        SessionLog::open(t.path()).expect("the transient copy is waited out, not refused");
+        holder.join().unwrap();
     }
 
     /// Purpose: Pins that a second writer is refused while the first still holds the log.

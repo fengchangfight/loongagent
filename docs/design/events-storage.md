@@ -95,16 +95,16 @@ sequence gap and an envelope that contradicts the schema are errors. `SessionLog
 ### One writer, many readers
 
 `SessionLog::open` and `create` take an exclusive lock before replaying, and a second process is
-refused with `LogError::Locked` instead of writing behind the first writer's back — ADR-0009 §5's
-one writer at the file. Two writers each keep their own `next_seq`, so the loser writes a duplicate
-`seq` and the strict reader then rejects the whole session: that is how a session becomes
-unopenable, and a log with `seq 5618` written twice did stop opening.
+refused with `LogError::Locked` — ADR-0009 §5's one writer at the file. Two writers each keep their
+own `next_seq`, so the loser writes a duplicate `seq` and the strict reader then rejects the whole
+session: a log with `seq 5618` written twice did stop opening.
 
-The lock is a sidecar, `<log>.lock`, not the log, because a Windows lock is mandatory: locking the
-log would refuse every reader alive while the writer lives — `sessions` reads every log in the
-directory and a surface replay reads the live one, so both would quietly see an empty session. On
-the sidecar `replay` and `Index::fill` read a log a writer holds, and only another writer opens
-`<log>.lock`; it is opened read-write because an append-only Windows handle cannot be locked.
+The lock is a sidecar, `<log>.lock`, because a Windows lock is mandatory: locking the log would
+refuse every reader alive while the writer lives, and `sessions` and a surface replay both read the
+live one. On the sidecar they read a log a writer holds, and only another writer opens `<log>.lock`
+— read-write, because an append-only Windows handle cannot be locked. Taking it waits half a second
+before calling a clash: a forked child inherits every open descriptor until it execs, so a
+just-released lock can still be held by a child being spawned; a real writer never releases it.
 
 The lock dies with its process, so a crash leaves no stale lock and the empty file is harmless;
 `loongagent delete` removes it. `append` also compares the file's length with the bytes this writer

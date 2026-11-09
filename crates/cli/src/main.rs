@@ -48,6 +48,7 @@ mod local;
 mod mcp;
 mod plugin;
 mod repl;
+mod reverse;
 mod sandbox;
 mod server;
 mod session;
@@ -100,6 +101,9 @@ USAGE:
   loongagent delete ID      [--force] [--cwd DIR]                          its whole branch
   loongagent repl           [--session PATH] [--cwd DIR] [--model NAME]   line mode (any pipe)
   loongagent web            [--session PATH] [--cwd DIR] [--model NAME] [--port N] [--bind IP]
+  loongagent reverse <target>  [--cwd DIR] [--port N] [--bind IP]         a reverse-engineering study session:
+                            opens the file or URL, serves the browser surface with the
+                            vendored loong-reverse tools, keeps notes in .reverse/study/
   loongagent run \"PROMPT\"   [--session PATH] [--cwd DIR] [--model NAME] [--budget N] [--keep-newest N]
                             [--max-steps N]   a step is one model call; 0 means no limit
   --debug-model             append every raw model exchange to <session>.models.jsonl:
@@ -763,6 +767,14 @@ fn run() -> Result<(), String> {
         "sessions" => list_sessions(rest),
         "repl" => repl(Args::parse(rest)?),
         "web" => web(Args::parse(rest)?),
+        "reverse" => {
+            let args = Args::parse(rest)?;
+            let target =
+                args.positional.first().cloned().ok_or_else(|| {
+                    format!("reverse needs a target (a file or a URL)\n\n{USAGE}")
+                })?;
+            crate::reverse::run(&target, &args)
+        }
         "run" => {
             let args = Args::parse(rest)?;
             let prompt = args

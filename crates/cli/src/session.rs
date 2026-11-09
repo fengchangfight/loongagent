@@ -4,7 +4,7 @@
 //! - **Serves:** `tui`, `resume`, `sessions`, `fork` and `delete`, and `Args::finish_session`, which picks the session before any command runs.
 //! - **Design:** `docs/design/surfaces.md` §2; `docs/design/sessions-lineage.md` §1, §3–§5.
 //! - **Upstream:** `main.rs`'s session arms and `Args::finish_session` call in.
-//! - **Downstream:** `loong_eventlog` (`replay_lenient`, `SessionLog`), `loong_schema`'s `SessionForked` and the filesystem under the client's one root.
+//! - **Downstream:** `loong_eventlog` (`replay_lenient`, `SessionLog`, `lock_path`), `loong_schema`'s `SessionForked` and the filesystem under the client's one root.
 //! - **Verify:** `cargo test -p loongagent` · `./scripts/check.sh`
 
 use super::*;
@@ -871,7 +871,7 @@ fn writers_of(path: &Path) -> Vec<u32> {
 /// Serves: `loongagent delete ID [--force]`.
 /// Design: `docs/design/sessions-lineage.md` §4.
 /// Up: `main.rs`'s `delete` arm; no other caller.
-/// Down: `resolve_session`, `session_summaries_in`, `session_id_of`, `branch_of`, `writers_of` and `std::fs::remove_file`.
+/// Down: `resolve_session`, `session_summaries_in`, `session_id_of`, `branch_of`, `writers_of`, `loong_eventlog::lock_path` and `std::fs::remove_file`.
 /// Verify: `cargo test -p loongagent`.
 /// `loongagent delete ID [--force] [--cwd DIR]`
 ///
@@ -967,7 +967,11 @@ pub(crate) fn delete(rest: &[String]) -> Result<(), String> {
     let mut removed = 0usize;
     let mut freed = 0u64;
     for session in &doomed {
-        for path in [session.path.clone(), session.path.with_extension("sqlite")] {
+        for path in [
+            session.path.clone(),
+            session.path.with_extension("sqlite"),
+            loong_eventlog::lock_path(&session.path),
+        ] {
             if let Ok(meta) = std::fs::metadata(&path) {
                 freed += meta.len();
             }

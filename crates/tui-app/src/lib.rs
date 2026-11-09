@@ -30,7 +30,9 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
+};
 use ratatui::Frame;
 use spend::{CostEntry, Spend};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
@@ -4004,6 +4006,23 @@ impl App {
             input: None,
         });
         frame.render_widget(Paragraph::new(page), view);
+        // A scrollbar on the page's right edge appears only while the reader is away from
+        // the bottom: at the newest line the track would be all thumb and say nothing.
+        // The page keeps its full width — the bar paints over the margin, never narrows
+        // the text. An open fold has no bar: the fold's rows are not `self.scroll`'s
+        // coordinate system, so the same number would lie there.
+        if self.scroll > 0 && self.open.is_none() {
+            let mut state = ScrollbarState::new(scroll).position(scroll);
+            frame.render_stateful_widget(
+                Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                    .begin_symbol(None)
+                    .end_symbol(None)
+                    .track_symbol(Some("│"))
+                    .style(MARK_QUIET),
+                view,
+                &mut state,
+            );
+        }
         // The prompt band is a background on rows the paragraph just painted, so it is
         // drawn after it — and before the selection's reverse video, so a selected prompt
         // row still reads as a band.

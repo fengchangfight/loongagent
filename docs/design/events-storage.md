@@ -92,6 +92,24 @@ sequence gap and an envelope that contradicts the schema are errors. `SessionLog
 `Kernel::events_since` and `Index::fill` read strictly; `Kernel::replay_history` and
 `Kernel::lineage` read leniently, as does a surface replaying a session.
 
+### One writer, many readers
+
+`SessionLog::open` and `create` take an exclusive lock before replaying, and a second process is
+refused with `LogError::Locked` instead of writing behind the first writer's back — ADR-0009 §5's
+one writer at the file. Two writers each keep their own `next_seq`, so the loser writes a duplicate
+`seq` and the strict reader then rejects the whole session: that is how a session becomes
+unopenable, and a log with `seq 5618` written twice did stop opening.
+
+The lock is a sidecar, `<log>.lock`, not the log, because a Windows lock is mandatory: locking the
+log would refuse every reader alive while the writer lives — `sessions` reads every log in the
+directory and a surface replay reads the live one, so both would quietly see an empty session. On
+the sidecar `replay` and `Index::fill` read a log a writer holds, and only another writer opens
+`<log>.lock`; it is opened read-write because an append-only Windows handle cannot be locked.
+
+The lock dies with its process, so a crash leaves no stale lock and the empty file is harmless;
+`loongagent delete` removes it. `append` also compares the file's length with the bytes this writer
+wrote and refuses with `LogError::ForeignWrite` where the lock is not honoured.
+
 A session is a file, and its file name is its id: `session.jsonl` is the first session and
 answers to `default`; later sessions are `<id>.jsonl` under
 `~/.loongagent/projects/<project-slug>/`. The server owns the open log for the session it
@@ -213,6 +231,9 @@ other record to rebuild it from.
 - **A failed read can look like an empty session.** `session.replay` uses
   `replay_lenient(...).unwrap_or_default()`, so an unreadable log yields an empty event list
   over the wire instead of an error. `Index::rebuild` uses strict `replay` and does fail.
+- **No takeover.** ADR-0009 §5 makes the transfer of the writer explicit, but `LogError::Locked`
+  is the whole of it today: no event and no command moves a session from one window to another,
+  so a second window must wait for the first to close.
 - **Search is a substring.** `Index::search` is `LIKE '%needle%'`; the full-text search and
   statistics layer ADR-0003 imagines is not built. `Index::kinds` is the only aggregate.
 

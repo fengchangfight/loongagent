@@ -64,6 +64,16 @@ pub enum LogError {
         expected: Seq,
         found: Seq,
     },
+    /// Another process holds the write lock: one session has one writer.
+    Locked {
+        path: PathBuf,
+    },
+    /// The file grew behind this writer's back, so its `next_seq` would collide.
+    ForeignWrite {
+        path: PathBuf,
+        expected: u64,
+        found: u64,
+    },
 }
 
 impl std::fmt::Display for LogError {
@@ -91,6 +101,16 @@ impl std::fmt::Display for LogError {
             LogError::SeqOutOfOrder { line, expected, found } => {
                 write!(f, "line {line}: expected seq {expected}, found {found}")
             }
+            LogError::Locked { path } => write!(
+                f,
+                "{}: another process is writing this session — close it there first, one session has one writer",
+                path.display()
+            ),
+            LogError::ForeignWrite { path, expected, found } => write!(
+                f,
+                "{}: this writer wrote {expected} bytes but the file holds {found} — another writer appended to it",
+                path.display()
+            ),
         }
     }
 }
@@ -130,6 +150,43 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// Purpose: The sidecar file whose exclusive lock means "a writer owns this log".
+///
+/// Serves: one writer per session while every reader keeps reading the log itself (events-storage.md §3).
+/// Design: `docs/design/events-storage.md` (ADR-0003, ADR-0009).
+/// Up: `lock_writer`, and `loong-cli`'s delete, which removes the sidecar with the session.
+/// Down: the log's own path, with `.lock` appended.
+/// Verify: `cargo test -p loong-eventlog`.
+pub fn lock_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".lock");
+    PathBuf::from(name)
+}
+
+/// Purpose: Take the log's write lock on its sidecar, or say this log already has a writer.
+///
+/// Serves: ADR-0009 §5's one writer, enforced before the log is opened or replayed (events-storage.md §3).
+/// Design: `docs/design/events-storage.md` (ADR-0003, ADR-0009).
+/// Up: `SessionLog::create` and `SessionLog::open`.
+/// Down: `lock_path`, `File::try_lock` and `LogError::Locked`.
+/// Verify: `cargo test -p loong-eventlog`.
+fn lock_writer(path: &Path) -> Result<File, LogError> {
+    // Read and write, because a Windows handle that is only for append cannot be locked.
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path(path))?;
+    match lock.try_lock() {
+        Ok(()) => Ok(lock),
+        Err(std::fs::TryLockError::WouldBlock) => Err(LogError::Locked {
+            path: path.to_path_buf(),
+        }),
+        Err(std::fs::TryLockError::Error(e)) => Err(LogError::Io(e)),
+    }
+}
+
 /// What a replay produced.
 #[derive(Debug, Default)]
 /// Purpose: What one replay produced: the events it kept and the unknown ignorable ones it skipped.
@@ -156,23 +213,28 @@ pub struct Replay {
 pub struct SessionLog {
     path: PathBuf,
     file: File,
+    /// Held for as long as this writer lives: dropping it releases the lock. Never read.
+    _lock: File,
     next_seq: Seq,
     /// seq -> id, for parent lookups.
     ids: BTreeMap<Seq, String>,
+    /// Bytes this writer has put in the file, compared before every append.
+    written: u64,
 }
 
 impl SessionLog {
     /// Create a new log, failing if the path exists (never silently clobber a
-    /// session).
+    /// session). Takes the write lock on the log's sidecar first.
     /// Purpose: Create a new log with `create_new`, so an existing session is never clobbered.
     ///
     /// Serves: append-only truth: a second session cannot overwrite the first file (events-storage.md §3).
     /// Design: `docs/design/events-storage.md` (ADR-0003).
     /// Up: the session-creation path in the kernel.
-    /// Down: `OpenOptions::create_new` and the `SessionLog` fields.
+    /// Down: `lock_writer`, `OpenOptions::create_new` and the `SessionLog` fields.
     /// Verify: `cargo test -p loong-eventlog`.
     pub fn create(path: impl AsRef<Path>) -> Result<Self, LogError> {
         let path = path.as_ref().to_path_buf();
+        let lock = lock_writer(&path)?;
         let file = OpenOptions::new()
             .create_new(true)
             .append(true)
@@ -180,22 +242,26 @@ impl SessionLog {
         Ok(Self {
             path,
             file,
+            _lock: lock,
             next_seq: 1,
             ids: BTreeMap::new(),
+            written: 0,
         })
     }
 
-    /// Open an existing log for appending, replaying it first so the next
-    /// sequence number and the id table are correct.
-    /// Purpose: Open an existing log for appending after replaying it to recover the next sequence and ids.
+    /// Open an existing log for appending: take its sidecar's write lock, then replay it so
+    /// the next sequence number and the id table are correct.
+    /// Purpose: Lock an existing log for this writer, then replay it to recover the next sequence and ids.
     ///
-    /// Serves: sequence continuity across a restart (events-storage.md §3).
+    /// Serves: sequence continuity across a restart, and one writer per session (events-storage.md §3).
     /// Design: `docs/design/events-storage.md` (ADR-0003).
     /// Up: the kernel when a session is reopened.
-    /// Down: `replay` and the `SessionLog` fields.
+    /// Down: `lock_writer`, `replay` and the `SessionLog` fields.
     /// Verify: `cargo test -p loong-eventlog`.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, LogError> {
         let path = path.as_ref().to_path_buf();
+        let lock = lock_writer(&path)?;
+        let file = OpenOptions::new().append(true).open(&path)?;
         let replay = replay(&path)?;
         let next_seq = replay.events.last().map(|e| e.seq + 1).unwrap_or(1);
         let ids = replay
@@ -203,12 +269,14 @@ impl SessionLog {
             .iter()
             .map(|e| (e.seq, e.id.clone()))
             .collect();
-        let file = OpenOptions::new().append(true).open(&path)?;
+        let written = file.metadata()?.len();
         Ok(Self {
             path,
             file,
+            _lock: lock,
             next_seq,
             ids,
+            written,
         })
     }
 
@@ -262,6 +330,14 @@ impl SessionLog {
         data: Json,
         parent_id: Option<String>,
     ) -> Result<EventEnvelope, LogError> {
+        let found = self.file.metadata()?.len();
+        if found != self.written {
+            return Err(LogError::ForeignWrite {
+                path: self.path.clone(),
+                expected: self.written,
+                found,
+            });
+        }
         if let Some(p) = &parent_id {
             if !self.ids.values().any(|id| id == p) {
                 return Err(LogError::Malformed {
@@ -287,8 +363,10 @@ impl SessionLog {
             detail: e.to_string(),
         })?;
         line.push('\n');
-        self.file.write_all(line.as_bytes())?;
+        let bytes = line.as_bytes();
+        self.file.write_all(bytes)?;
         self.file.flush()?;
+        self.written += bytes.len() as u64;
         self.ids.insert(seq, env.id.clone());
         self.next_seq = seq + 1;
         Ok(env)
@@ -417,11 +495,12 @@ mod tests {
         }
     }
     impl Drop for Temp {
-        /// Purpose: Remove the temporary file when the fixture goes out of scope.
+        /// Purpose: Remove the temporary file and its lock sidecar when the fixture goes out of scope.
         ///
         /// Contract: `crates/eventlog/src/lib.rs`.
         fn drop(&mut self) {
             let _ = std::fs::remove_file(&self.0);
+            let _ = std::fs::remove_file(lock_path(&self.0));
         }
     }
 
@@ -562,6 +641,49 @@ mod tests {
                 found: 5,
                 ..
             })
+        ));
+    }
+
+    /// Purpose: Pins that a second writer is refused while the first still holds the log.
+    #[test]
+    fn a_second_writer_cannot_open_the_same_log() {
+        let t = Temp::new();
+        let log = SessionLog::create(t.path()).unwrap();
+        assert!(matches!(
+            SessionLog::open(t.path()),
+            Err(LogError::Locked { .. })
+        ));
+        drop(log);
+        assert!(SessionLog::open(t.path()).is_ok());
+    }
+
+    /// Purpose: Pins that the lock is a sidecar, so replaying a log a writer holds still works.
+    #[test]
+    fn a_locked_log_still_replays() {
+        let t = Temp::new();
+        let mut log = SessionLog::create(t.path()).unwrap();
+        log.append("message.appended", json!({})).unwrap();
+        assert!(
+            lock_path(t.path()).exists(),
+            "the lock lives beside the log"
+        );
+        assert_eq!(replay(t.path()).unwrap().events.len(), 1);
+        assert_eq!(replay_lenient(t.path()).unwrap().events.len(), 1);
+    }
+
+    /// Purpose: Pins that an append refuses when the file grew behind this writer's back.
+    #[test]
+    fn an_append_after_a_foreign_write_is_refused() {
+        let t = Temp::new();
+        let mut log = SessionLog::create(t.path()).unwrap();
+        log.append("message.appended", json!({})).unwrap();
+        append_raw(
+            t.path(),
+            json!({"seq": 2, "id": "e00000002", "kind": "message.appended", "ignorable": false, "time_ms": 0, "data": {}}),
+        );
+        assert!(matches!(
+            log.append("message.appended", json!({})),
+            Err(LogError::ForeignWrite { .. })
         ));
     }
 

@@ -705,7 +705,9 @@ impl Server {
     /// Contract: called by every `dispatch` arm that succeeds.
     /// `<T>`: stream the events this call produced, then the response.
     fn respond<T: serde::Serialize>(&mut self, id: Value, result: T, _method: &str) -> Vec<String> {
-        self.stream_drained();
+        if let Err(e) = self.stream_drained() {
+            return self.fail(id, e);
+        }
         match serde_json::to_value(&result) {
             Ok(value) => vec![Response::ok(id, value).to_line()],
             Err(e) => vec![Response::err(id, codes::INTERNAL_ERROR, e.to_string()).to_line()],
@@ -733,17 +735,22 @@ impl Server {
     }
 
     /// Purpose: Send the events recorded since the last one sent, to the connection or the pending list.
-    /// Contract: called by `respond` and `refuse`.
+    /// Contract: called by `respond`, `refuse` and `fail`.
     /// Events recorded since the last one sent go to the connection now: they are news,
     /// and news arrives when it happens (ADR-0009). A caller with no connection to write
     /// to — `handle_line` collects through an in-memory one — gets them in its list.
-    fn stream_drained(&mut self) {
-        for line in self.drain_events() {
+    ///
+    /// The failure comes back with the events: an answer that could not stream the work
+    /// it reports must not read as a success, which is how a log that broke mid-turn
+    /// stayed invisible until the *next* request.
+    fn stream_drained(&mut self) -> Result<(), KernelError> {
+        for line in self.drain_events()? {
             match &self.connection {
                 Some(out) => out.line(&line),
                 None => self.pending_lines.push(line),
             }
         }
+        Ok(())
     }
 
     /// Purpose: Answer in words for a failure that is not the kernel's.
@@ -754,7 +761,7 @@ impl Server {
     /// nothing to build another from" does not, and inventing a `KernelError` for it would
     /// put a lie in the type that the rest of the program reasons about.
     fn refuse(&mut self, id: Value, message: &str) -> Vec<String> {
-        self.stream_drained();
+        let _ = self.stream_drained();
         let mut lines: Vec<String> = std::mem::take(&mut self.pending_lines);
         lines.push(Response::err(id, codes::INTERNAL_ERROR, message.to_string()).to_line());
         lines
@@ -763,7 +770,8 @@ impl Server {
     /// Purpose: Answer a kernel failure with the JSON-RPC code its kind deserves.
     /// Contract: every `dispatch` arm that calls a kernel method.
     fn fail(&mut self, id: Value, error: KernelError) -> Vec<String> {
-        self.stream_drained();
+        // Best effort: this request is already an error, and the answer below is it.
+        let _ = self.stream_drained();
         let mut lines: Vec<String> = std::mem::take(&mut self.pending_lines);
         let code = match error {
             KernelError::OutOfOrder(_) => codes::INVALID_PARAMS,
@@ -817,11 +825,10 @@ impl Server {
     /// Up: `stream_drained`.
     /// Down: `Kernel::events_since` and `Notification::event`.
     /// Verify: `cargo test -p loong-server`.
-    /// Every event appended since the client last heard from us.
-    fn drain_events(&mut self) -> Vec<String> {
-        let Ok(events) = self.kernel.events_since(self.last_sent) else {
-            return Vec::new();
-        };
+    /// Every event appended since the client last heard from us. The log's failure
+    /// comes back as a failure: an empty list would be a lie about a log we cannot read.
+    fn drain_events(&mut self) -> Result<Vec<String>, KernelError> {
+        let events = self.kernel.events_since(self.last_sent)?;
         let mut out = Vec::with_capacity(events.len());
         for event in events {
             self.last_sent = self.last_sent.max(event.seq);
@@ -830,7 +837,7 @@ impl Server {
                 Err(_) => continue,
             }
         }
-        out
+        Ok(out)
     }
 
     /// Purpose: Point the kernel at the process-wide interrupt flag and install the handler.
@@ -1024,6 +1031,40 @@ mod tests {
             .into_iter()
             .map(|l| serde_json::from_str(&l).expect("every outbound line is JSON"))
             .collect()
+    }
+
+    /// Purpose: An answer whose events cannot be streamed is an error, not a success.
+    /// Serves: a log that broke mid-turn is visible in that turn's answer.
+    /// Design: `docs/design/events-storage.md` §3; `docs/design/surfaces.md` §7.
+    /// Up: nothing; it calls `respond` directly, the one path a request cannot reach on its own.
+    /// Down: `respond`, `stream_drained`, `drain_events` and `Kernel::events_since`.
+    /// Verify: `cargo test -p loong-server`.
+    #[test]
+    fn a_response_whose_events_cannot_be_read_is_an_error() {
+        let t = Temp::new();
+        let log = t.0.join("s.jsonl");
+        let kernel = Kernel::create(
+            log.clone(),
+            KernelConfig::new(&t.0),
+            Box::new(scripted(vec![], Some("hi"))),
+        )
+        .unwrap();
+        let mut server = Server::new(kernel, "s1");
+        // A duplicate sequence number, the row a second writer leaves behind.
+        let dup = json!({"seq": 99, "id": "e00000099", "kind": "message.appended",
+            "ignorable": false, "time_ms": 0, "data": {}});
+        let mut file = std::fs::OpenOptions::new().append(true).open(&log).unwrap();
+        std::io::Write::write_all(&mut file, format!("{dup}\n").as_bytes()).unwrap();
+        let out = server.respond(json!(7), json!({"ok": true}), "session.attach");
+        let response: Value = serde_json::from_str(out.last().unwrap()).unwrap();
+        assert_eq!(response["id"], 7);
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("expected seq"),
+            "expected the log failure in the answer, got {response}"
+        );
     }
 
     /// Purpose: `session.list` answers from the injected lister and clamps its limit.

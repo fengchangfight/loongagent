@@ -180,7 +180,14 @@ pub fn sniff(bytes: &[u8], name: &str) -> TargetKind {
         TargetKind::Dex
     } else if starts(b"PK\x03\x04") || starts(b"PK\x05\x06") {
         if lower.ends_with(".apk") || lower.ends_with(".aab") || lower.ends_with(".xapk") {
-            TargetKind::Apk
+            // The extension is only a hint: a real Android package always carries a dex,
+            // and a plain zip renamed to `.apk` must sniff as a zip, not produce a
+            // confident but empty package report.
+            if loong_reverse_formats::zip_has_entry(bytes, "classes.dex") {
+                TargetKind::Apk
+            } else {
+                TargetKind::Zip
+            }
         } else if lower.ends_with(".jar") || lower.ends_with(".war") {
             TargetKind::Jar
         } else if loong_reverse_formats::zip_has_entry(bytes, "AndroidManifest.xml") {
@@ -316,7 +323,8 @@ mod tests {
         assert_eq!(sniff(b"\x7fELF\x02\x01", "a"), TargetKind::Elf);
         assert_eq!(sniff(b"\0asm\x01\0\0\0", "m"), TargetKind::Wasm);
         assert_eq!(sniff(b"dex\n035\0", "classes.dex"), TargetKind::Dex);
-        assert_eq!(sniff(b"PK\x03\x04", "app.apk"), TargetKind::Apk);
+        // A zip named .apk without a classes.dex is a zip, not an apk.
+        assert_eq!(sniff(b"PK\x03\x04", "app.apk"), TargetKind::Zip);
         assert_eq!(sniff(b"bplist00", "Info.plist"), TargetKind::Plist);
         assert_eq!(
             sniff(b"SQLite format 3\0\x10\x00", "app.db"),

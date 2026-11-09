@@ -327,6 +327,18 @@ fn load_pkg(ctx: &Ctx<'_>, path: Option<&str>, want_dex: bool) -> Result<Pkg, To
                 Err(err) => pkg.warnings.push(format!("{}: {err}", e.name)),
             }
         }
+        if pkg.dexes.is_empty() {
+            // A real package always carries a dex; none means this zip is not an apk,
+            // whatever its extension says. Better an error than an empty report that
+            // reads as a confident finding.
+            return Err(ToolError::unsupported(format!(
+                "{} is a ZIP archive without a classes.dex at its root — not an Android package",
+                pkg.input.name
+            ))
+            .with_remediation(
+                "Pass a real .apk, or open it as an ordinary zip if that is what it is; run triage to see what this file is.",
+            ));
+        }
     }
     pkg.zip = Some(z);
     Ok(pkg)

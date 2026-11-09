@@ -3,7 +3,7 @@
 //! Purpose: Start `loong_reverse_mcp_lib::serve_stdio` over a `loong_reverse_engine::Engine`,
 //! with no pre-opened target: the session's first `core_target_open` chooses it.
 //! Serves: the `.reverse/mcp.toml` entry the reverse session writes (`docs/design/reverse.md` §3).
-//! Design: `docs/superpowers/specs/2026-10-24-loongagent-reverse-design.md` Task 3.
+//! Design: `docs/design/reverse.md` §3.
 //! Upstream: `loong-reverse-engine`, `loong-reverse-mcp-lib`, `loong-reverse-platform`.
 //! Downstream: loongagent's MCP client (`crates/kernel/src/turn/build.rs` `attach_mcp`).
 //! Verify: `cargo test -p loong-reverse-mcp-bin` and `scripts/check-reverse.sh`.
@@ -17,7 +17,7 @@ use loong_reverse_mcp_lib::{serve_stdio, ServerOptions};
 
 /// Purpose: Parse argv, build the engine, and serve JSON-RPC on stdio until the client hangs up.
 /// Serves: the process entry point.
-/// Design: `docs/superpowers/specs/2026-10-24-loongagent-reverse-design.md` Task 3 Step 3.
+/// Design: `docs/design/reverse.md` §3.
 /// Up: the OS launcher (loongagent's MCP client spawns this binary).
 /// Down: `run` and `usage`.
 /// Verify: `cargo test -p loong-reverse-mcp-bin`.
@@ -59,7 +59,7 @@ fn main() -> std::process::ExitCode {
 
 /// Purpose: Build the engine with the trimmed surface and serve stdio until disconnect.
 /// Serves: `main`.
-/// Design: `docs/superpowers/specs/2026-10-24-loongagent-reverse-design.md` Task 3 Step 3.
+/// Design: `docs/design/reverse.md` §3.
 /// Up: `main` only.
 /// Down: `Settings::load`, `Engine::shared`, `serve_stdio`.
 /// Verify: `cargo test -p loong-reverse-mcp-bin` (the stdio handshake test).

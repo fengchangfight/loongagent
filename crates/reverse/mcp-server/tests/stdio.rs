@@ -1,7 +1,7 @@
 //! Module contract: stdio end-to-end tests for the `loong-reverse-mcp` binary.
 //! Purpose: Prove the binary speaks MCP JSON-RPC over stdio and lists exactly the trimmed tool surface.
 //! Serves: `docs/design/reverse.md` §3 (the MCP server pair).
-//! Design: `docs/superpowers/specs/2026-10-24-loongagent-reverse-design.md` Task 3.
+//! Design: `docs/design/reverse.md` §3.
 //! Upstream: `crates/reverse/mcp-server/src/main.rs`.
 //! Downstream: nothing (a test target).
 //! Verify: `cargo test -p loong-reverse-mcp`.
@@ -13,6 +13,11 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 /// Purpose: A spawned server with its stdio ends, killed when dropped.
+/// Serves: the stdio handshake test below.
+/// Design: `docs/design/reverse.md` §3.
+/// Up: the test module's single test.
+/// Down: the `loong-reverse-mcp` binary under test.
+/// Verify: `cargo test -p loong-reverse-mcp-bin`.
 struct Server {
     child: Child,
     stdin: ChildStdin,
@@ -22,6 +27,11 @@ struct Server {
 
 impl Server {
     /// Purpose: Spawn the binary with `--workspace` in a temp directory.
+    /// Serves: the test module's tests.
+    /// Design: `docs/design/reverse.md` §3.
+    /// Up: `Server::spawn` callers in this module.
+    /// Down: the `loong-reverse-mcp` binary under test.
+    /// Verify: `cargo test -p loong-reverse-mcp-bin`.
     fn spawn(workspace: &std::path::Path) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_loong-reverse-mcp"))
             .arg("--workspace")
@@ -42,6 +52,11 @@ impl Server {
     }
 
     /// Purpose: Send one request and read until the matching id answers (the server may interleave).
+    /// Serves: the test module's tests.
+    /// Design: `docs/design/reverse.md` §3.
+    /// Up: `Server::call` callers in this module.
+    /// Down: the `loong-reverse-mcp` binary under test.
+    /// Verify: `cargo test -p loong-reverse-mcp-bin`.
     fn call(&mut self, method: &str, params: Value) -> Value {
         self.sent += 1;
         let id = self.sent;
@@ -70,6 +85,7 @@ impl Server {
 
 impl Drop for Server {
     /// Purpose: Never leave a server running past the test.
+    /// Contract: `crates/reverse/mcp-server/tests/stdio.rs`.
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();

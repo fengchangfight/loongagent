@@ -51,6 +51,9 @@ ALLOWED = {
     "loong-tui": {"loong-schema", "loong-protocol"},
     "loong-tui-app": {"loong-schema", "loong-tui"},
     "loong-web": set(),
+    # the study surface mounted inside the web portal (docs/design/reverse.md §4):
+    # it depends on the portal it is mounted in, never on the kernel directly.
+    "loong-reverse-ui": {"loong-web"},
     # the reverse-engineering surface vendored from Craft Anything
     # (docs/design/reverse.md): a layer below the kernel, which reaches it through
     # the `loong-mcp` edge, never the other way round.
@@ -68,7 +71,7 @@ ALLOWED = {
     # the one binary that ties faces together
     "loongagent": {
         "loong-schema", "loong-protocol", "loong-eventlog", "loong-http", "loong-proc", "loong-manifest", "loong-providers",
-        "loong-sandbox", "loong-tools", "loong-hooks", "loong-mcp", "loong-skills", "loong-plugin", "loong-config", "loong-index", "loong-context", "loong-kernel", "loong-server", "loong-tui", "loong-tui-app", "loong-web", "loong-control", "loong-pack",
+        "loong-sandbox", "loong-tools", "loong-hooks", "loong-mcp", "loong-skills", "loong-plugin", "loong-config", "loong-index", "loong-context", "loong-kernel", "loong-server", "loong-tui", "loong-tui-app", "loong-web", "loong-reverse-ui", "loong-control", "loong-pack",
     },
 }
 
@@ -81,6 +84,8 @@ for _name in ("evidence", "platform", "formats", "disasm", "js", "analysis", "en
     DIRECTORY_EXCEPTIONS[f"loong-reverse-{_name}"] = f"reverse/vendor/loong-reverse-{_name}"
 # The loongagent-owned server binary lives beside the vendor copy, not under it.
 DIRECTORY_EXCEPTIONS["loong-reverse-mcp-bin"] = "reverse/mcp-server"
+# The study surface for the web portal lives beside it, under crates/reverse/ui.
+DIRECTORY_EXCEPTIONS["loong-reverse-ui"] = "reverse/ui"
 
 
 def crate_directory(name: str) -> str:

@@ -90,6 +90,27 @@ pub fn bind(host: &str, port: u16) -> Result<(TcpListener, SocketAddr), String> 
     Ok((listener, addr))
 }
 
+/// A surface mounted inside the portal, answering its own URL prefix.
+///
+/// The portal is one listener and one token; a study surface like `reverse`
+/// registers a `Router` and gets the connections whose path starts with its
+/// prefix, while `/` (the chat page) and `/ws` (the socket) stay the portal's.
+/// Purpose: A surface mounted inside the portal, answering the connections for one URL prefix.
+///
+/// Serves: the reverse study tab and any later surface beside it (reverse.md §4).
+/// Design: `docs/design/reverse.md` §4 and `docs/design/surfaces.md` §4.
+/// Up: `serve_with` asks it first; `loong_reverse_ui` implements it.
+/// Down: `handle_routed`.
+/// Verify: `cargo test -p loong-web`.
+pub trait Router: Send + Sync {
+    /// The URL prefix this surface owns, e.g. `/reverse`. The portal keeps `/` and `/ws`.
+    /// Purpose: The URL prefix this surface owns.
+    fn prefix(&self) -> &str;
+    /// Answer one request on the connection; the request head is already read into `head`.
+    /// Purpose: Answer one request whose head is already read, or decline it.
+    fn answer(&self, head: &str, stream: &mut TcpStream) -> Result<(), String>;
+}
+
 /// Accept connections until the process ends. Each connection gets a thread; the
 /// session is behind a mutex, so two browsers cannot interleave one request.
 /// Purpose: Accept connections until the process ends, one thread each, one session behind a mutex.
@@ -100,42 +121,129 @@ pub fn bind(host: &str, port: u16) -> Result<(TcpListener, SocketAddr), String> 
 /// Down: `handle` and `std::thread::spawn`.
 /// Verify: `cargo test -p loong-web`.
 pub fn serve(session: Arc<Mutex<dyn Session>>, listener: TcpListener, token: String) {
+    serve_with(session, listener, token, None);
+}
+/// Like `serve`, but the connections under the mounted surface's prefix go to it
+/// first; the chat page and the socket stay the portal's either way.
+/// Purpose: Accept connections, giving a mounted surface the ones under its prefix before the portal.
+///
+/// Serves: a session that carries a study surface beside the chat tab (reverse.md §4).
+/// Design: `docs/design/reverse.md` §4.
+/// Up: `loongagent reverse` after `bind`.
+/// Down: `handle_routed` and `std::thread::spawn`.
+/// Verify: `cargo test -p loong-web`.
+pub fn serve_with(
+    session: Arc<Mutex<dyn Session>>,
+    listener: TcpListener,
+    token: String,
+    router: Option<Arc<dyn Router>>,
+) {
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
         let session = Arc::clone(&session);
         let token = token.clone();
+        let router = router.clone();
         std::thread::spawn(move || {
-            if let Err(e) = handle(stream, session, token) {
+            if let Err(e) = handle_routed(stream, session, token, router) {
                 eprintln!("[web] {e}");
             }
         });
     }
 }
 
-/// Purpose: Decide whether a connection is the page or a WebSocket and dispatch it.
+/// Purpose: Read the token from a request head — `x-loong-token` header or `token` query.
 ///
-/// Serves: one listener serves both the page and the protocol (surfaces.md §4).
-/// Design: `docs/design/surfaces.md` (ADR-0009).
-/// Up: `serve` for every accepted connection.
-/// Down: `static_page` and `websocket`.
+/// Serves: the portal gates every mounted surface's data routes (reverse.md §4.2).
+/// Design: `docs/design/reverse.md` §4.2.
+/// Up: `handle_routed`.
+/// Down: the head's lines and its request-line query.
 /// Verify: `cargo test -p loong-web`.
-fn handle(
-    stream: TcpStream,
+fn presented_token(head: &str) -> Option<String> {
+    let from_header = head.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        if name.trim().eq_ignore_ascii_case("x-loong-token") {
+            Some(value.trim().to_string())
+        } else {
+            None
+        }
+    });
+    if from_header.is_some() {
+        return from_header;
+    }
+    let target = head.lines().next()?.split_whitespace().nth(1)?;
+    let query = target.split_once('?')?.1;
+    query
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("token="))
+        .map(|token| token.to_string())
+}
+
+/// Purpose: Refuse a request whose token is missing or wrong.
+///
+/// Serves: a loopback surface is not authorisation on its own (reverse.md §4.2).
+/// Design: `docs/design/reverse.md` §4.2.
+/// Up: `handle_routed` for a mounted surface's data route.
+/// Down: the 401 write.
+/// Verify: `cargo test -p loong-web`.
+fn refuse_without_token(mut stream: TcpStream) -> Result<(), String> {
+    // Drain the request first: closing a socket with unread bytes makes the
+    // kernel answer RST, and the client then sees a reset instead of the 401.
+    let mut buffer = [0u8; 4096];
+    let _ = stream.read(&mut buffer);
+    let body = "missing or wrong token; open the URL printed by loongagent reverse";
+    let head = format!(
+        "HTTP/1.1 401 Unauthorized\r\nContent-Type: text/plain; charset=utf-8\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream
+        .write_all(head.as_bytes())
+        .and_then(|_| stream.flush())
+        .map_err(|e| e.to_string())
+}
+
+/// Purpose: Route one connection to the mounted surface, the socket, or the page.
+///
+/// Serves: a session with a study surface mounted beside the chat tab (reverse.md §4).
+/// Design: `docs/design/reverse.md` §4.
+/// Up: `serve` and `serve_with` for every accepted connection.
+/// Down: `Router::answer`, `websocket`, `static_page`.
+/// Verify: `cargo test -p loong-web`.
+fn handle_routed(
+    mut stream: TcpStream,
     session: Arc<Mutex<dyn Session>>,
     token: String,
+    router: Option<Arc<dyn Router>>,
 ) -> Result<(), String> {
     // Peek (not read): the WebSocket handshake must see the request itself, while
     // a static request is ours to answer.
     let mut peek = [0u8; 4096];
     let peeked = stream.peek(&mut peek).map_err(|e| e.to_string())?;
-    let head = String::from_utf8_lossy(&peek[..peeked]);
-    let request_line = head.lines().next().unwrap_or_default();
+    let head = String::from_utf8_lossy(&peek[..peeked]).to_string();
+    let request_line = head.lines().next().unwrap_or_default().to_string();
     let is_upgrade = head.to_ascii_lowercase().contains("upgrade: websocket");
     if request_line.contains("/ws") || is_upgrade {
-        websocket(stream, session, token)
-    } else {
-        static_page(stream)
+        return websocket(stream, session, token);
     }
+    if let Some(router) = router {
+        let path = request_line.split_whitespace().nth(1).unwrap_or("");
+        let prefix = router.prefix();
+        if path == prefix || path.starts_with(&format!("{prefix}/")) {
+            // The surface's own page carries no secret (like the chat page); its
+            // data routes do — one of them lists the filesystem (reverse.md §4.2).
+            let bare_path = path.split('?').next().unwrap_or(path);
+            let is_page = bare_path == prefix || bare_path == format!("{prefix}/");
+            if !is_page && presented_token(&head).as_deref() != Some(token.as_str()) {
+                return refuse_without_token(stream);
+            }
+            // The surface consumes the head itself: peek left it on the wire.
+            let mut sink = [0u8; 8192];
+            let read = stream.read(&mut sink).map_err(|e| e.to_string())?;
+            let request_head = String::from_utf8_lossy(&sink[..read]).to_string();
+            return router.answer(&request_head, &mut stream);
+        }
+    }
+    static_page(stream)
 }
 
 /// Purpose: Answer a plain GET with the embedded page.
@@ -492,5 +600,157 @@ mod tests {
         ] {
             assert!(INDEX.contains(needle), "the page handles {needle}");
         }
+    }
+
+    /// Purpose: A mounted surface's data routes need the token; its page does not.
+    #[test]
+    fn a_mounted_surface_needs_the_token_for_data_but_not_for_its_page() {
+        /// Purpose: A study-surface stub that echoes whatever it was handed.
+        ///
+        /// Serves: `a_mounted_surface_needs_the_token_for_data_but_not_for_its_page`.
+        /// Design: `docs/design/reverse.md` §4.2.
+        /// Up: that test only.
+        /// Down: `Router::answer`.
+        /// Verify: `cargo test -p loong-web`.
+        struct Stub;
+        impl Router for Stub {
+            /// Purpose: The stub owns `/study`.
+            /// Contract: `crates/web/src/lib.rs`.
+            fn prefix(&self) -> &str {
+                "/study"
+            }
+            /// Purpose: Answer with a fixed body, like a study page would.
+            /// Contract: `crates/web/src/lib.rs`.
+            fn answer(&self, head: &str, stream: &mut TcpStream) -> Result<(), String> {
+                let body = format!("stub answered: {}", head.lines().next().unwrap_or(""));
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .map_err(|e| e.to_string())
+            }
+        }
+
+        /// Purpose: One GET on a fresh connection, returning the whole response.
+        /// Contract: `crates/web/src/lib.rs`.
+        fn get(addr: SocketAddr, request: &str) -> String {
+            let mut stream = TcpStream::connect(addr).unwrap();
+            stream.write_all(request.as_bytes()).unwrap();
+            let mut body = String::new();
+            stream.read_to_string(&mut body).unwrap();
+            body
+        }
+
+        let session = Arc::new(Mutex::new(Echo(vec![])));
+        let (listener, addr) = bind("127.0.0.1", 0).unwrap();
+        let token = random_token().unwrap();
+        let for_server = token.clone();
+        std::thread::spawn(move || serve_with(session, listener, for_server, Some(Arc::new(Stub))));
+
+        // The surface's own page is public, like the chat page.
+        let body = get(
+            addr,
+            "GET /study HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert!(body.starts_with("HTTP/1.1 200 OK"), "the page: {body}");
+
+        // Its data routes are not: without the token, a refusal.
+        let body = get(
+            addr,
+            "GET /study/tree HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert!(
+            body.starts_with("HTTP/1.1 401"),
+            "no token, no data: {body}"
+        );
+
+        // The token opens them, as a header or as a query parameter.
+        let body = get(
+            addr,
+            &format!("GET /study/tree HTTP/1.1\r\nHost: x\r\nx-loong-token: {token}\r\nConnection: close\r\n\r\n"),
+        );
+        assert!(body.contains("stub answered"), "with the header: {body}");
+        let body = get(
+            addr,
+            &format!(
+                "GET /study/tree?token={token} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+            ),
+        );
+        assert!(body.contains("stub answered"), "with the query: {body}");
+
+        // A wrong token is refused, not merely ignored.
+        let body = get(
+            addr,
+            "GET /study/tree?token=deadbeef HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert!(body.starts_with("HTTP/1.1 401"), "wrong token: {body}");
+    }
+
+    /// Purpose: A mounted surface answers under its prefix while the portal keeps `/` and `/ws`.
+    #[test]
+    fn a_mounted_surface_answers_under_its_prefix() {
+        /// Purpose: A study-surface stub that answers its own prefix with plain text.
+        ///
+        /// Serves: `a_mounted_surface_answers_under_its_prefix`.
+        /// Design: `docs/design/reverse.md` §4.
+        /// Up: that test only.
+        /// Down: `Router::answer`.
+        /// Verify: `cargo test -p loong-web`.
+        struct Stub;
+        impl Router for Stub {
+            /// Purpose: The stub owns `/study`.
+            /// Contract: `crates/web/src/lib.rs`.
+            fn prefix(&self) -> &str {
+                "/study"
+            }
+            /// Purpose: Answer with a fixed body, like a study page would.
+            /// Contract: `crates/web/src/lib.rs`.
+            fn answer(&self, head: &str, stream: &mut TcpStream) -> Result<(), String> {
+                let body = format!("stub answered: {}", head.lines().next().unwrap_or(""));
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .map_err(|e| e.to_string())
+            }
+        }
+
+        let session = Arc::new(Mutex::new(Echo(vec![])));
+        let (listener, addr) = bind("127.0.0.1", 0).unwrap();
+        let token = random_token().unwrap();
+        let for_server = token.clone();
+        std::thread::spawn(move || serve_with(session, listener, for_server, Some(Arc::new(Stub))));
+
+        // The prefix goes to the surface (its data routes carry the token, §4.2).
+        let mut stream = TcpStream::connect(addr).unwrap();
+        let request = format!(
+            "GET /study/tree HTTP/1.1\r\nHost: x\r\nx-loong-token: {token}\r\nConnection: close\r\n\r\n"
+        );
+        stream.write_all(request.as_bytes()).unwrap();
+        let mut body = String::new();
+        stream.read_to_string(&mut body).unwrap();
+        assert!(body.contains("stub answered: GET /study/tree"), "{body}");
+
+        // The chat page stays the portal's.
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let mut body = String::new();
+        stream.read_to_string(&mut body).unwrap();
+        assert!(body.contains("loongagent"), "the portal page: {body}");
+
+        // And the socket is still the portal's, token and all.
+        let request = format!("ws://{addr}/ws?token={token}")
+            .into_client_request()
+            .unwrap();
+        let (mut socket, _) = tungstenite::connect(request).unwrap();
+        socket.send(Message::text("{}")).unwrap();
+        let answer = socket.read().unwrap().into_text().unwrap().to_string();
+        assert!(answer.contains("accepted"), "{answer}");
     }
 }

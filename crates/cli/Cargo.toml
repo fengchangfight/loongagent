@@ -27,6 +27,7 @@ loong-config.workspace = true
 loong-control.workspace = true
 loong-pack.workspace = true
 loong-web.workspace = true
+loong-reverse-ui.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true

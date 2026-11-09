@@ -39,6 +39,7 @@ listed is a violation. The middle column is each crate's own `//!` header.
 | `loong-reverse-mcp-bin` | `loong-reverse-mcp`: the reverse-engineering MCP stdio server loongagent launches. | `loong-reverse-engine`, `loong-reverse-evidence`, `loong-reverse-mcp`, `loong-reverse-platform` |
 | `loong-reverse-platform` | The operating-system layer: starting a program, reading and writing files, sync. | `loong-reverse-evidence` |
 | `loong-reverse-testkit` | Fixtures the vendored tests share: built binaries and bundles to analyse. | — |
+| `loong-reverse-ui` | Serve the reverse study tab — the `.reverse/` tree, previews and page — inside the portal. | `loong-web` |
 | `loong-sandbox` | The policy decision point: allow, ask or deny plus the rule that fired, and never a widening. | `loong-schema` |
 | `loong-schema` | Own the single source of truth for every message on the wire, generated once for Rust and TypeScript. | — |
 | `loong-server` | The local agent server: one session, JSON-RPC over stdio, every event streamed before the response. | `loong-eventlog`, `loong-kernel`, `loong-protocol`, `loong-schema` |
@@ -47,4 +48,4 @@ listed is a violation. The middle column is each crate's own `//!` header.
 | `loong-tui` | The terminal client: render the server's event stream and send intents, holding no agent logic. | `loong-protocol`, `loong-schema` |
 | `loong-tui-app` | The full-screen terminal surface: the state machine, layout and palette behind ratatui's screen. | `loong-schema`, `loong-tui` |
 | `loong-web` | Serve the embedded browser page and bridge WebSocket lines to the same JSON-RPC server. | — |
-| `loongagent` | The `loongagent` binary: parse the command line, resolve the one session and the one configuration, and dispatch. | `loong-config`, `loong-context`, `loong-control`, `loong-eventlog`, `loong-hooks`, `loong-http`, `loong-index`, `loong-kernel`, `loong-manifest`, `loong-mcp`, `loong-pack`, `loong-plugin`, `loong-proc`, `loong-protocol`, `loong-providers`, `loong-sandbox`, `loong-schema`, `loong-server`, `loong-skills`, `loong-tools`, `loong-tui`, `loong-tui-app`, `loong-web` |
+| `loongagent` | The `loongagent` binary: parse the command line, resolve the one session and the one configuration, and dispatch. | `loong-config`, `loong-context`, `loong-control`, `loong-eventlog`, `loong-hooks`, `loong-http`, `loong-index`, `loong-kernel`, `loong-manifest`, `loong-mcp`, `loong-pack`, `loong-plugin`, `loong-proc`, `loong-protocol`, `loong-providers`, `loong-reverse-ui`, `loong-sandbox`, `loong-schema`, `loong-server`, `loong-skills`, `loong-tools`, `loong-tui`, `loong-tui-app`, `loong-web` |

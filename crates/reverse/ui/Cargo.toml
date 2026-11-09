@@ -1,0 +1,16 @@
+[package]
+name = "loong-reverse-ui"
+description = "The reverse-engineering study surface: routes and the three-pane page"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+loong-web = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

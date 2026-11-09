@@ -13,9 +13,14 @@ cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$PATH"
 cargo install --path crates/cli --locked --force
 cargo install --path crates/control --locked --force
+# `loongagent reverse` starts this server from PATH (its manifest names the bare
+# command), so a session without it opens the portal but has none of the reverse
+# tools. Install it here or the reverse surface is a page with no engine behind it.
+cargo install --path crates/reverse/mcp-server --locked --force
 echo
 echo "installed:"
 "$HOME/.cargo/bin/loongagent" --version | sed 's/^/  /'
 "$HOME/.cargo/bin/loongagent-control" --version | sed 's/^/  /'
+ls -l "$HOME/.cargo/bin/loong-reverse-mcp" | sed 's/^/  /'
 echo
 echo "repository HEAD: $(git rev-parse --short HEAD)"

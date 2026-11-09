@@ -2238,6 +2238,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "loong-reverse-ui"
+version = "0.0.1"
+dependencies = [
+ "loong-web",
+ "tempfile",
+]
+
+[[package]]
 name = "loong-sandbox"
 version = "0.0.1"
 dependencies = [
@@ -2334,6 +2342,7 @@ dependencies = [
  "loong-pack",
  "loong-plugin",
  "loong-providers",
+ "loong-reverse-ui",
  "loong-sandbox",
  "loong-schema",
  "loong-server",

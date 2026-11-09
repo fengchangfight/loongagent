@@ -2,7 +2,7 @@
 
 - **Up:** [design/README.md](README.md) · [../04-system-overview.md](../04-system-overview.md)
 - **Authority:** [ADR-0009](../decisions/0009-surfaces.md)
-- **Code:** `crates/reverse/vendor/`（随源码 vendor 的逆向 crate）, `crates/reverse/vendor/loong-reverse-mcp/src/bin/loongagent-reverse.rs`（MCP server 入口）, `scripts/check-reverse.sh`
+- **Code:** `crates/reverse/vendor/`（随源码 vendor 的逆向 crate）, `crates/reverse/vendor/loong-reverse-mcp/src/bin/loongagent-reverse.rs`（MCP server 入口）, `crates/reverse/ui/`（门户里的 study 表面）, `crates/cli/src/reverse.rs`, `scripts/check-reverse.sh`
 - **Verify:** `./scripts/check.sh`（含 `scripts/check-reverse.sh`）
 
 ## 意图
@@ -42,10 +42,10 @@ crates/cli/src/reverse.rs
         │  1. 建 .reverse/ 目录骨架（含 .gitignore: *）
         │  2. 写 .reverse/mcp.toml（指向 loong-reverse-mcp 的 stdio 命令）
         │     并调用 trust 逻辑直接信任（这是程序自己写的，不是 repo 内容）
-        │  3. 起 HTTP+WebSocket 服务（复用 loong-web 的桥），bind 127.0.0.1 随机端口
-        │  4. 打印 URL，调默认浏览器打开
+        │  3. 起门户服务（loong_web::serve_with + 本研究表面），bind 127.0.0.1 随机端口
+        │  4. 打印 /reverse URL，调默认浏览器打开
         ▼
-浏览器页面（crates/reverse/ui/index.html，单文件无构建步骤）
+浏览器页面（门户：/ 是聊天 tab，/reverse 是 study tab；crates/reverse/ui/）
         │  WebSocket 携带 token，说 JSON-RPC（同 loong-web 的协议）
         ▼
 Session（kernel）── attach_mcp 挂上 loong-reverse-mcp
@@ -120,42 +120,75 @@ Session（kernel）── attach_mcp 挂上 loong-reverse-mcp
 
 **mcp.toml 与 trust**：`reverse` 命令写完 manifest 后直接调用 `loong_mcp` 的 trust 记录逻辑写 `mcp.trusted`。理由：这个 manifest 是 loongagent 自己生成的、指向自己装的二进制，不是 clone 下来的 repo 内容，绕过人工 trust 不破坏 `security-trust.md` 的边界（repo 内容的 trust gate 照旧）。这一点在实现时要在 `docs/design/security-trust.md` 加一节说明。
 
-### 4. Web 界面
+### 4. Web 界面：portal 里的一个 tab
 
-`crates/reverse/ui/index.html`，单文件、无构建步骤、无 CDN（沿用 loong-web 的约束），由 reverse 的 HTTP 服务内嵌提供。布局模仿 craft-anything 桌面版但简化：
+**门户统一（用户明确的决定）**：`loongagent reverse` 不再自带一套服务，而是**复用 `loongagent web` 的同一个门户**——一个监听、一个 token、一张页面。reverse 只是往门户里挂一个 tab：
 
 ```
-┌──────────────────────────────────────────────────┐
-│ target: /path/to/foo.elf        [Study] [Build]  │  ← 顶栏：阶段按钮
-├────────────────────┬─────────────────────────────┤
-│ .reverse/          │                             │
-│  study/            │        聊天区                │
-│   00-overview.md   │   （流式输出，工具调用可见）  │
-│   01-arch…md  ◄点击│                             │
-│  build/            │                             │
-│   src/main.rs      │                             │
-├────────────────────┴─────────────────────────────┤
-│ 文件预览（点左侧文件名在此显示）    │ [输入框] [发送] │
-└──────────────────────────────────────────────────┘
+http://127.0.0.1:<port>/#token=<token>       ← Chat tab（loong-web 原有页面）
+http://127.0.0.1:<port>/reverse#token=<token> ← Reverse study tab
+http://127.0.0.1:<port>/ws?token=<token>     ← 一个 WebSocket，两个 tab 共用
 ```
 
-- 左上是 `.reverse/` 的文件树，点击文件在左下预览（markdown 渲染）。
-- 右侧是聊天流，和 loong-web 一样走 WebSocket JSON-RPC，流式显示。
-- **Study 按钮**：向 session 注入一条固定提示词（见下），开始 study。可重复点（继续/补充 study）。
-- **Build 按钮**：不自动触发（用户要求）；点击后注入 build 提示词。Study 还没产出 overview 时按钮置灰并提示。
-- 文件树通过 HTTP 接口轮询（每 2 秒），不走 WebSocket。
+页面上的 tab 切换就是换路径：Chat tab 指向 `/`，Study tab 指向 `/reverse`，token 跟着 URL fragment 一起带过去。以后再有新表面（比如别的模式），照这个形状再加一个 tab 与一个前缀，不新增监听端口。
 
-**Study 提示词**（注入给用户不可见的 system 追加 + 可见的用户消息）要点：
-1. 用 `core_target_open` 打开 target；用 `core_target_triage` 判断类型，再按类型分流：二进制走 native 工具集（formats/disasm）；网站走 web 工具集；APK 走 `android_package_show` → `android_components_list` → 按需 `android_classes_find`/`android_method_show`/`android_resources_read`（APK 的字节码是 smali，没有 Java 级反编译，不要假装能给出 Java 源码）。
-2. 按需 `enable_toolset` 开 native/web/android 工具集深入。
-3. 边查边把结果写进 `.reverse/study/`：`00-overview.md`（是什么、怎么运行、技术栈）、`01-architecture.md`（结构拆解）、`02-findings.md`（关键发现，引用 evidence id）。用普通写文件工具写。
-4. 完成后在聊天里给一段不超过 10 行的中文总结。
+实现上 `loong-web` 有一个很小的扩展点：
+
+```rust
+pub trait Router: Send + Sync {
+    fn prefix(&self) -> &str;                               // 例："/reverse"
+    fn answer(&self, head: &str, stream: &mut TcpStream) -> Result<(), String>;
+}
+pub fn serve_with(session, listener, token, router: Option<Arc<dyn Router>>);
+```
+
+`serve_with` 先看请求路径：命中某个 `Router` 的前缀就交给它，`/ws` 走门户的 WebSocket（token 校验不变），其余回门户自己的聊天页。`serve()` 就是 `serve_with(..., None)`，`loongagent web` 的行为一个字节不变。这正是"一个门户、多个表面"：门户管监听、token、聊天；表面管自己那块 URL。
+
+**页面文件**：`crates/reverse/ui/`（包 `loong-reverse-ui`），两个文件——`lib.rs`（路由 + 文件树 JSON + 预览 + `StudySurface: Router`）、`page.html`（单文件、无构建步骤、无 CDN，沿用 loong-web 的约束）。
+
+**页面本身（布局、目标栏的三个标签、研究→重构那条工作流、各路由的报文格式）在 [reverse-ui.md](reverse-ui.md)**；本节只留引擎这一侧的约束，两条是硬的：
+
+- **界面中文，提示词英文**：给人看的字全用中文；注入给模型的提示词仍是英文，模型对英文指令更稳，这层翻译没有收益。
+- **重构不自动触发，由用户点「标记研究完成」确认**：不看 `.reverse/study/` 里有没有文件。模型可能只写了一半就落盘，自动点亮会让用户在没研究完时就开始重构。
+
+#### 4.1 目标是界面上设的，命令行不带
+
+`loongagent reverse` **不接受位置参数**，打命令就起门户，目标在页面顶栏里选。
+
+理由不是"少打字"，是 `reverse <target>` 这个参数原本就没接线：MCP server 启动时不接收 target（`crates/reverse/mcp-server/src/main.rs` 首行注释："with no pre-opened target: the session's first `core_target_open` chooses it"）。会话里的 target 只由模型调用 `core_target_open` 时决定。所以旧参数校验完路径就丢掉了，模型根本不知道你给了什么。
+
+**三种目标，三条入口，别混**：目标类型不是"界面上的分类"，它决定第一个工具调用是谁。
+
+| 类型 | 入口工具 | 说明 |
+|---|---|---|
+| 程序文件（ELF/PE/Mach-O） | `core_target_open(绝对路径)` | `TargetKind` 里的 `elf`/`pe`/`macho` 等 |
+| Android APK | `core_target_open(绝对路径)` | 同一个入口，`core_target_triage` 后走 android 工具集 |
+| 网站 | `web_site_open(http(s)://…)` | **不走 `core_target_open`**：`TargetKind` 里没有任何 URL 变体 |
+
+网站走的是另一条链路：`web_site_open` 起一个会话私有的浏览器（干净 profile、无历史无登录）打开页面，之后的 `web_pages_list`/`web_page_show`/`web_modules_trace`/`web_scripts_save` 都在这个页面上工作，`web_site_capture` 把整页截图、渲染后 HTML、设计令牌、断点与布局、素材清单、链接和表单轮廓落到一个文件夹，`web_site_close` 收尾。所以"网站目标"的产物和另外两种不在同一个地方——一个在浏览器里，一个在 `.reverse/` 里——study 笔记必须写清证据来自哪。
+
+网站链路依赖 Chromium（`Requires::Engine("chromium")`）。找不到浏览器时 `web_site_open` 返回明确的可用性错误，不影响另外两种目标。`locate.rs` 认的不只是 `chromium` 这个名字，`google-chrome` 等真实二进制也算（`loong-reverse-engine/src/locate.rs`）——实测本机只有 `/usr/bin/google-chrome` 也能用。
+
+目标怎么输入、怎么校验、报文长什么样，都在 [reverse-ui.md](reverse-ui.md)：那里是本页面的唯一权威。
+
+#### 4.2 表面数据路由一律要 token
+
+门户的 `/`（聊天页）与 `/reverse`（study 页）本身不含秘密，可以无 token 取；但**表面的数据路由**（`/reverse/tree`、`/reverse/file/…`、`/reverse/ls`、`/reverse/target`、`/reverse/phase`）必须校验 token，由 `serve_with` 统一把关：命中 surface 前缀且不是页面本身时，先查 `x-loong-token` 头或 `token` 查询参数，不对回 401，再交给 surface。页面从 URL fragment 拿到 token，用它发 fetch。
+
+这条是目录浏览器的前提：能列整个文件系统的接口不能裸奔在 loopback 上。
+
+**Study 提示词**（注入给用户不可见的 system 追加 + 可见的用户消息）要点，措辞用英文：
+1. 按目标类型分流，第一步就不同：程序文件和 APK 用 `core_target_open` 打开，再用 `core_target_triage` 判断类型；网站用 `web_site_open` 打开网址。**不要**对网址调 `core_target_open`（它只接受绝对路径）。
+2. 分流之后：二进制走 native 工具集（formats/disasm）；网站走 web 工具集，用 `web_site_capture` 落证据，`web_site_close` 收尾；APK 走 `android_package_show` → `android_components_list` → 按需 `android_classes_find`/`android_method_show`/`android_resources_read`（APK 的字节码是 smali，没有 Java 级反编译，不要假装能给出 Java 源码）。
+3. 按需 `enable_toolset` 开 native/web/android 工具集深入。
+4. 边查边把结果写进 `.reverse/study/`：`00-overview.md`（是什么、怎么运行、技术栈）、`01-architecture.md`（结构拆解）、`02-findings.md`（关键发现，引用 evidence id）。用普通写文件工具写。网站目标的笔记里要写清证据来自哪个 capture 文件夹。
+5. 完成后在聊天里给一段不超过 10 行的中文总结。**不要**自己宣布"研究完成"——那一步由用户在页面上点，见 reverse-ui.md。
 
 **Build 提示词**要点：读 `.reverse/study/` 全部文档，在 `.reverse/build/` 里重建一个功能等价的项目（技术栈让用户在点击时附言指定，未指定则由 agent 选合理默认），之后进入普通聊天迭代。
 
 ### 5. 会话与模型的复用
 
-reverse 的 session 就是普通 loongagent session：模型用 `~/.loongagent/` 里已配置的，记忆、权限、sandbox 全部照旧。区别只在三件事：工作目录下挂了 reverse 的 MCP server、页面布局不同、注入了 reverse 的系统提示。HTTP/WS 服务复用 `loong_web::{random_token, bind, serve}`，`crates/cli/src/web.rs` 里的 `WebSession` 桥（ChildTransport + cwd 填充）照抄一份改成 reverse 版。
+reverse 的 session 就是普通 loongagent session：模型用 `~/.loongagent/` 里已配置的，记忆、权限、sandbox 全部照旧。区别只在三件事：工作目录下挂了 reverse 的 MCP server、多一个 `/reverse` 表面、注入了 reverse 的系统提示。会话的构造就是 `crates/cli/src/web.rs` 里那一个 `make_session`（`web` 与 `reverse` 共用，不再复制第二份 `WebSession` 桥），HTTP/WS 服务用 `loong_web::{random_token, bind, serve_with}`。
 
 ## 约束
 
@@ -166,19 +199,21 @@ reverse 的 session 就是普通 loongagent session：模型用 `~/.loongagent/`
 
 ## 验收方式
 
-1. `cargo build` 后 `loongagent reverse /bin/ls` 能起服务、开浏览器。
+1. `cargo build` 后 `loongagent reverse`（不带参数）能起服务、开浏览器；目标在页面顶栏选定。
 2. 点 Study，聊天区流式输出，`.reverse/study/00-overview.md` 等文件出现并可在左侧预览。
 3. 点 Build，`.reverse/build/` 出现新项目骨架；之后发消息能多轮迭代。
-4. `loongagent reverse https://example.com` 同样走通（用网站检查工具）。
-5. `loongagent reverse app.apk` 走通：`android_package_show` 能给出包名/权限/组件清单，study 文档按 APK 路径产出。
+4. 目标栏三个标签都能用：程序文件和 APK 要求绝对路径（可浏览目录），网站要求 `http(s)://`；选定后写进 `.reverse/target` 与 `.reverse/target-kind`，重开页面时标签和值都回填。
+5. 目标是 APK 时走通：`android_package_show` 能给出包名/权限/组件清单，study 文档按 APK 路径产出。
 6. `git status` 不显示 `.reverse/` 内容。
 7. 项目已有自己的 `.loongagent/mcp.toml` 且已 trust 时：reverse 会话里两边的工具同时可用；reverse 退出后项目 manifest 字节未变、trust 仍有效，普通会话里没有逆向工具。
-8. `./scripts/check.sh` 全绿。
+8. `http://<addr>/#token=…`（Chat）与 `http://<addr>/reverse#token=…`（Reverse study）在同一个端口上都能打开，两个 tab 用同一个 WebSocket。
+9. `./scripts/check.sh` 全绿。
 
 ## 留给实现者的决定
 
 - 具体 copy 哪些工具文件、删哪些：以"二进制 + 网站 + APK 三类 target 的 core/native/web/js/android 工具集"为准，实现时按 `enable_toolset` 列表清点；`engine` 对 `craft-anything-engines` 的依赖整层剥掉。
-- 文件树轮询接口的具体形状（一个 `GET /api/tree` 返回 JSON 即可）。注意 `loong_web::serve` 目前只服务内嵌的 `INDEX` 和 WebSocket，reverse 版需要在自己的服务循环里加 `/api/tree`、`/api/file` 两个路由，可以 copy `serve` 改，不动 `loong-web` 本身。
+- 表面路由的形状：已定为 `loong_web::Router` + `serve_with`（见 §4），`GET /reverse/tree` 返回 JSON、`GET /reverse/file/<path>` 返回字节、`GET /reverse/ls` 列目录、`/reverse/target` 读写目标。以后新表面照此加一个前缀，不复制服务循环。
+- URL 目标：需要"下载/录屏进本地再 `core_target_open`"的一条链路，本版不做（见 §4.1）。
 - 普通会话是否也读 `.reverse/mcp.toml` 这个来源：二选一（reverse 启动路径才开启合并，或普通会话也读但靠退出删除保证为空），取对 `loong-mcp` 改动小的方案，写进 `mcp-client.md`。
 - vendor crate 的契约头批量补写方式。
 - Study/Build 提示词的措辞（按上面要点写，实现时可以调）。

@@ -147,26 +147,26 @@ appended below the window, so a long block stays selectable and the prompt's car
 ## 4. The web: a bridge, not a second agent
 
 `loongagent web` spawns the same server child, then `loong-web` serves one embedded page and
-bridges WebSocket messages to the child's stdio lines. The crate is deliberately ignorant of the
-protocol: it carries a line in and lines out, so the browser speaks exactly what the TUI speaks.
-The page has no routing, no ledger, no policy and no second loop.
-
-Two properties are local to this surface:
+bridges WebSocket messages to the child's stdio lines. It is deliberately ignorant of the
+protocol — a line in, lines out — so the browser speaks what the TUI speaks, with no routing,
+ledger, policy or second loop. Two properties are local:
 
 - **A token on the handshake.** A loopback bind is not authorisation on its own; any page can
-  open a WebSocket to `127.0.0.1`. The token is 16 bytes read from `/dev/urandom`, printed in the
-  URL fragment (which browsers do not send to a server), and presented as a query parameter on
-  the socket. A wrong token is refused.
-- **The bind address.** Loopback by default; `--bind` can change it, and then the token is the
-  only gate. There is no user identity behind it.
+  open a WebSocket to `127.0.0.1`. The token is 16 bytes from `/dev/urandom`, printed in the URL
+  fragment (never sent to a server) and presented as a query parameter on the socket. A wrong
+  token is refused.
+- **The bind address.** Loopback by default; `--bind` changes it and the token is the only gate.
 
-ADR-0009's "web via the firm control-plane URL, relaying to the user's local server" is not
-built. `loongagent web` is the localhost path only.
+**One portal, several surfaces.** `Router` (`prefix`, `answer`) plus `serve_with` send a
+connection under a mounted prefix to that surface, keep `/ws` the portal's token-checked socket,
+and answer the rest with the chat page; `serve` is `serve_with(..., None)`, so `web` is unchanged.
+The reverse study surface is the first tenant: `/` is chat, `/reverse` is its tab, one socket for
+both — a later mode adds a prefix and a tab, not a port ([reverse.md](reverse.md) §4).
 
 ## 5. ACP: decided, not built
 
 ADR-0002 makes ACP a dialect of this protocol over JSON-RPC; ADR-0009 places the adapter after
-the TUI and web. There is no `acp` command, crate or adapter in the tree. The only trace is the
+the TUI and web, and its control-plane URL is not built either. There is no `acp` command, crate or adapter in the tree. The only trace is the
 `"acp"` label the schema allows in `SessionAttachParams.client`. The VS Code panel is a
 separate Webview client: [vscode-surface.md](vscode-surface.md).
 

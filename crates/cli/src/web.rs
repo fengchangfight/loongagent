@@ -84,29 +84,7 @@ impl loong_web::Session for WebSession {
 /// Down: `Args::settings_with_pack`, `ChildTransport::spawn`, `loong_web::{random_token, bind, serve}`.
 /// Verify: `cargo test -p loongagent --test web_surface`.
 pub(crate) fn web(args: Args) -> Result<(), String> {
-    args.ensure_parent()?;
-    let (settings, pack) = args.settings_with_pack()?;
-    if let Some(state) = &pack {
-        eprintln!(
-            "[control] {} {} — profile: {}",
-            state.provenance.issuer,
-            state.provenance.version,
-            state.summary()
-        );
-    }
-    let (transport, notes, _control) = ChildTransport::spawn(&args, true)?;
-    if let Some(notes) = notes {
-        // The server's own diagnostics go to this terminal, where the operator is.
-        std::thread::spawn(move || {
-            while let Ok(line) = notes.recv() {
-                eprintln!("[server] {line}");
-            }
-        });
-    }
-    let session = std::sync::Arc::new(std::sync::Mutex::new(WebSession {
-        transport,
-        cwd: args.cwd.display().to_string(),
-    }));
+    let (session, settings) = make_session(&args)?;
     let token = loong_web::random_token()?;
     let (listener, addr) = loong_web::bind(&args.bind, args.port)?;
 
@@ -126,4 +104,47 @@ pub(crate) fn web(args: Args) -> Result<(), String> {
     println!("another page cannot open the socket without it. Bound to {addr}.");
     loong_web::serve(session, listener, token);
     Ok(())
+}
+
+/// Purpose: Build the kernel-backed `Session` shared by every socket, with the
+/// resolved settings for the caller to echo.
+/// Serves: `web` and the reverse session's portal (`crates/cli/src/reverse.rs`).
+/// Design: `docs/design/surfaces.md` §4.
+/// Up: `web`, `crate::reverse::run_portal`.
+/// Down: `ChildTransport::spawn`, `WebSession`.
+/// Verify: `cargo test -p loongagent` (the `web_surface.rs` integration tests).
+pub(crate) fn make_session(
+    args: &Args,
+) -> Result<
+    (
+        std::sync::Arc<std::sync::Mutex<dyn loong_web::Session>>,
+        loong_config::Profile,
+    ),
+    String,
+> {
+    args.ensure_parent()?;
+    let (settings, pack) = args.settings_with_pack()?;
+    if let Some(state) = &pack {
+        eprintln!(
+            "[control] {} {} — profile: {}",
+            state.provenance.issuer,
+            state.provenance.version,
+            state.summary()
+        );
+    }
+    let (transport, notes, _control) = ChildTransport::spawn(args, true)?;
+    if let Some(notes) = notes {
+        // The server's own diagnostics go to this terminal, where the operator is.
+        std::thread::spawn(move || {
+            while let Ok(line) = notes.recv() {
+                eprintln!("[server] {line}");
+            }
+        });
+    }
+    let session: std::sync::Arc<std::sync::Mutex<dyn loong_web::Session>> =
+        std::sync::Arc::new(std::sync::Mutex::new(WebSession {
+            transport,
+            cwd: args.cwd.display().to_string(),
+        }));
+    Ok((session, settings))
 }

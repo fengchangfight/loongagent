@@ -3,13 +3,12 @@
 //! smali-like bytecode listing, cross-DEX references, compiled resources per locale, and whether
 //! the optional external decoders (JADX for Java source, Apktool) are available.
 
-use super::artifact_tools::{fresh_temp_dir, rel_to};
 use super::native_common::{page, spec};
 use super::static_input::{self, Input, builder, format_err};
 use crate::tool::{Ctx, Effects, Requires, ToolOutput, ToolSpec, Toolset, parse_params, schema_of};
 use loong_reverse_evidence::{
     Authority, Confidence, Coverage, CoverageStatus, Environment, ErrorCode, EvidenceBuilder,
-    Limitation, Location, Subject, ToolError, sha256_hex,
+    Limitation, Location, ToolError, sha256_hex,
 };
 use loong_reverse_formats::{apk_sign, arsc, axml, der, dex, dex_ops, verify, zip};
 use schemars::JsonSchema;
@@ -17,7 +16,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 // Flutter/Dart snapshots and the JEB client live in submodules.
 pub mod flutter;
@@ -1037,12 +1035,15 @@ fn java_source_unavailable() -> (Value, Option<Limitation>) {
     )
 }
 
+// The JADX/Apktool tools that called this are not registered in this copy.
+#[allow(dead_code)]
 fn tail(s: &str) -> String {
     let n = s.chars().count();
     s.chars().skip(n.saturating_sub(2000)).collect()
 }
 
 /// Find a file by name below `dir` (no symlinks, bounded depth and breadth).
+#[allow(dead_code)]
 fn find_file(dir: &Path, name: &str, depth: usize) -> Option<PathBuf> {
     if depth > 32 {
         return None;

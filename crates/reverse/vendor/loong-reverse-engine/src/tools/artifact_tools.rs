@@ -359,16 +359,20 @@ pub(crate) fn create_absent_dir(p: &str) -> Result<PathBuf, ToolError> {
 
 /// Removes a folder from [`create_absent_dir`] when the tool stops before writing anything into
 /// it, so the same call can be retried (#234). Call `keep` once the tool has succeeded.
+// The `create_absent_dir` retry that used this is not in this copy (#234).
+#[allow(dead_code)]
 pub(crate) struct UnlessWritten<'a> {
     dir: &'a Path,
     keep: bool,
 }
 
 impl<'a> UnlessWritten<'a> {
+    #[allow(dead_code)]
     pub(crate) fn new(dir: &'a Path) -> Self {
         UnlessWritten { dir, keep: false }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn keep(mut self) {
         self.keep = true;
     }

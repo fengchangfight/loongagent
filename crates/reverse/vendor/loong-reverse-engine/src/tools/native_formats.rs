@@ -744,7 +744,7 @@ fn core_target_triage(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, To
                 .build()?
         }
         fallback => {
-            let (mut plain, mut toolsets, mut tools) = non_native_triage(&t);
+            let (mut plain, toolsets, mut tools) = non_native_triage(&t);
             let mut builder = builder;
             if let Err(error) = fallback
                 && native_kind
@@ -762,7 +762,7 @@ fn core_target_triage(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, To
                 )];
                 builder = builder.limitation(Limitation::new("native_parse_failed", error.message));
             }
-            let mut result = json!({
+            let result = json!({
                 "plain_english": plain,
                 "kind": t.kind,
                 "description": t.kind.plain(),

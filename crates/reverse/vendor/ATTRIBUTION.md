@@ -19,6 +19,10 @@ What changed in the copy (details in `docs/design/reverse.md` and
 - the Clean room / Deep mode distinction is gone: a reverse session always reads its
   target;
 - crates are pinned to `edition = "2024"` and formatted with this workspace's rustfmt;
+- code left dead by the bridges above carries `#[allow(dead_code)]` with the bridge named in a
+  comment, rather than being deleted, so a re-vendor diff stays small: `tail` and `find_file` in
+  `tools/android_tools.rs`, `UnlessWritten` in `tools/artifact_tools.rs`, `element_center` in
+  `tools/browser_tools.rs`;
 - each crate root carries a provenance header; upstream's own doc comments are kept.
 
 A re-vendor is a copy plus those edits, so the whole tree is exempt from the per-item

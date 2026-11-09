@@ -3301,6 +3301,8 @@ pub(crate) fn query_node(
     Ok(node)
 }
 
+// The CDP click that used this is not in this copy.
+#[allow(dead_code)]
 pub(crate) fn element_center(
     client: &mut CdpClient,
     selector: &str,

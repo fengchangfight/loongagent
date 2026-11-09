@@ -15,6 +15,10 @@ event the index holds, the loser is the one whose insert failed.
 Usage:
     python3 scripts/repair-dup-seq.py <log.jsonl>            # dry run: say what it would drop
     python3 scripts/repair-dup-seq.py <log.jsonl> --apply    # back up, then rewrite in place
+
+The copy to keep is decided by `<log>`'s own `.sqlite` index, which recorded one of the two.
+When that index is missing or disagrees, the script refuses and asks for `--keep=first` or
+`--keep=second` instead of guessing: a wrong guess deletes the message the person typed.
 """
 
 import json
@@ -123,8 +127,18 @@ def main(argv):
 
     first, second = rows[n - 2], rows[n - 1]
     base = log[: -len(".jsonl")] if log.endswith(".jsonl") else log
+    keep_flag = None
+    for arg in argv[2:]:
+        if arg.startswith("--keep="):
+            keep_flag = arg[len("--keep="):]
     held = index_row(base + ".sqlite", seq)
-    if held is not None:
+    if keep_flag is not None:
+        if keep_flag not in ("first", "second"):
+            print("refusing: --keep takes first or second, not %r" % keep_flag)
+            return 1
+        drop, keep = (second, first) if keep_flag == "first" else (first, second)
+        print("chosen:   --keep=%s, by hand" % keep_flag)
+    elif held is not None:
         a, b = json.loads(first), json.loads(second)
         if (a["kind"], a["time_ms"]) == tuple(held):
             drop, keep = second, first
@@ -135,8 +149,12 @@ def main(argv):
             return 1
         print("index:    seq %d holds %s, so that copy stays" % (seq, held))
     else:
-        drop, keep = second, first
-        print("index:    no row for seq %d (or no index), keeping the first copy" % seq)
+        # No index to ask means no evidence which copy the session actually recorded, and
+        # guessing "the first" would delete the message the person typed. Refuse instead.
+        print("refusing: no %s.sqlite row for seq %d, so nothing says which copy is real."
+              % (base.rsplit("/", 1)[-1], seq))
+        print("          Check the two, then name the one to keep: --keep=first or --keep=second")
+        return 1
 
     for label, row in (("drop", drop), ("keep", keep)):
         event = json.loads(row)

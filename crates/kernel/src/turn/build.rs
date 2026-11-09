@@ -90,8 +90,9 @@ struct AttachedMcp {
     note: String,
     clients: Vec<Arc<Mutex<McpClient>>>,
     prompt_skills: Vec<Skill>,
-    /// The specs behind those clients, so a `list_changed` refresh can re-register
-    /// with the same classes and the same defer rule.
+    /// The specs behind those clients, index for index, so a `list_changed` refresh
+    /// can re-register with the same classes and the same defer rule. A server that
+    /// failed to start has no client and so no entry here.
     specs: Vec<loong_mcp::McpServerSpec>,
 }
 
@@ -111,6 +112,7 @@ fn attach_mcp(workspace: &Path, tools: &mut Registry) -> Result<AttachedMcp, Ker
         note.push_str(&format!("; {failure}"));
     }
     let mut clients = Vec::new();
+    let mut specs = Vec::new();
     let mut prompt_skills = Vec::new();
     for spec in set.active() {
         let mut client = match McpClient::start(spec) {
@@ -202,6 +204,9 @@ fn attach_mcp(workspace: &Path, tools: &mut Registry) -> Result<AttachedMcp, Ker
             }
         }
         clients.push(client);
+        // Pushed together with the client, so `clients[i]` and `specs[i]` are the
+        // same server: the refresh pairs them by index.
+        specs.push(spec.clone());
         note.push_str(&format!(
             "; {} exposed {count} tool(s){}",
             spec.name,
@@ -223,7 +228,7 @@ fn attach_mcp(workspace: &Path, tools: &mut Registry) -> Result<AttachedMcp, Ker
         note,
         clients,
         prompt_skills,
-        specs: set.active().into_iter().cloned().collect(),
+        specs,
     })
 }
 impl Kernel {
@@ -592,6 +597,72 @@ impl Kernel {
     /// Verify: `cargo test -p loong-kernel turn::tests::an_untrusted_mcp_manifest_starts_nothing`.
     pub fn mcp_servers(&self) -> usize {
         self.mcp_clients.len()
+    }
+
+    /// Purpose: Re-list every server that announced a change, replacing that server's
+    /// tools wholesale, and warn in the note when a re-list fails.
+    ///
+    /// Serves: a server that adds or drops a tool mid-session, without the person
+    /// restarting the session. The request already sent cannot change, so the
+    /// replacement happens between turns, never inside one (`mcp-client.md` §6).
+    /// Design: `docs/design/mcp-client.md` §6.
+    /// Up: `Kernel::begin_turn`, before the request for the turn is built.
+    /// Down: `McpClient::take_dirty`, `McpClient::list_tools`,
+    /// `Registry::unregister_server`, `Registry::register`,
+    /// `Registry::register_deferred` and `Kernel.mcp_note`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_changed_tool_list_is_replaced_at_the_next_turn`.
+    pub(super) fn refresh_mcp(&mut self) {
+        for index in 0..self.mcp_clients.len() {
+            let client = Arc::clone(&self.mcp_clients[index]);
+            // A server that failed to start has no client, so its spec is not here
+            // either; nothing to refresh when the two do not pair up.
+            let Some(spec) = self.mcp_specs.get(index).cloned() else {
+                continue;
+            };
+            let listed = match client.lock() {
+                Ok(mut locked) => {
+                    if !locked.take_dirty() {
+                        continue;
+                    }
+                    locked.list_tools()
+                }
+                Err(_) => Err(loong_mcp::McpError(format!(
+                    "the {} client is poisoned",
+                    spec.name
+                ))),
+            };
+            let listed = match listed {
+                Ok(listed) => listed,
+                Err(e) => {
+                    // A refresh that fails must not kill a turn: the tools the
+                    // session already had still work, and the note says why the
+                    // list is what it is.
+                    self.mcp_note
+                        .push_str(&format!("; {} refresh failed: {e}", spec.name));
+                    continue;
+                }
+            };
+            self.tools.unregister_server(&spec.name);
+            let deferred = spec.defer.applies(loong_mcp::defer_by_default(&listed));
+            for info in listed {
+                let class = spec.class_for(&info.name);
+                let tool = McpTool::new(&spec.name, info, class, Arc::clone(&client));
+                if deferred {
+                    self.tools.register_deferred(tool, &spec.name);
+                } else {
+                    self.tools.register(tool);
+                }
+            }
+        }
+        // A refresh can be the first thing to defer a tool, and `tool_search` exists
+        // only when something is deferred (§6): without this, a tool that became too
+        // expensive to paste in would be unreachable for the rest of the session.
+        if !self.tools.deferred().is_empty() && !self.tools.names().contains(&"tool_search") {
+            let catalogue = self.tools.deferred_catalogue();
+            let active = self.tools.activation_set();
+            self.tools
+                .register(loong_tools::deferred::ToolSearch::new(catalogue, active));
+        }
     }
 
     /// Purpose: The skills and commands this workspace offers.

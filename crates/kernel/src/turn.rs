@@ -542,8 +542,9 @@ pub struct Kernel {
     /// kills them (the client's `Drop` tears down the process group).
     mcp_clients: Vec<Arc<Mutex<McpClient>>>,
     mcp_note: String,
-    /// The specs of those servers, kept so a `list_changed` refresh can re-register
-    /// tools with the same classes and the same defer rule (`mcp-client.md` §6).
+    /// The specs of those servers, index for index with `mcp_clients`: kept so a
+    /// `list_changed` refresh can re-register tools with the same classes and the
+    /// same defer rule (`mcp-client.md` §6).
     mcp_specs: Vec<loong_mcp::McpServerSpec>,
     /// Skills and commands: descriptions in context, bodies on invoke (T-18).
     skills: Arc<SkillSet>,

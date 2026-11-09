@@ -235,8 +235,8 @@ impl Kernel {
     /// Up: `Kernel::submit_with`, before command expansion and the prompt hook.
     /// Down: `Kernel.steps_taken`, `Kernel.segment_start`, `Kernel.succeeded`,
     /// `Kernel.renewals`, `Kernel.map_seated`, `Kernel.recent_calls`,
-    /// `Kernel.consecutive_failures`, `Kernel.scratch_writes` and
-    /// `Kernel.compaction_steps`.
+    /// `Kernel.consecutive_failures`, `Kernel.scratch_writes`,
+    /// `Kernel.compaction_steps` and `Kernel::refresh_mcp`.
     /// Verify: `cargo test -p loong-kernel turn::tests::the_step_budget_survives_an_approval_resume`.
     fn begin_turn(&mut self) {
         self.steps_taken = 0;
@@ -248,6 +248,10 @@ impl Kernel {
         self.consecutive_failures = 0;
         self.scratch_writes.clear();
         self.compaction_steps.clear();
+        // A server that announced a change since the last turn is re-listed here,
+        // before this turn's request is built: the request is the one thing a
+        // notification cannot retroactively change (`mcp-client.md` §6).
+        self.refresh_mcp();
     }
 
     /// Answer a pending approval; the decision is an event either way.

@@ -2103,6 +2103,61 @@ fn an_untrusted_mcp_manifest_starts_nothing() {
     assert!(!k.tools_mut().names().iter().any(|n| n.starts_with("mcp__")));
 }
 
+/// Purpose: A server that announces `tools/list_changed` has its tools replaced at the start of the next turn — the new tool appears, and the person did not restart anything.
+#[test]
+fn a_changed_tool_list_is_replaced_at_the_next_turn() {
+    let t = Temp::new();
+    if !install_mcp_mode(&t.dir, "investigate", true, "notify") {
+        eprintln!("skipping: no python3 or no fixture");
+        return;
+    }
+    let model = ScriptedModel::new(vec![
+        // The first turn calls a tool; the server answers by announcing that its
+        // list changed, and the next listing carries one more tool.
+        response(
+            vec![call("c1", "mcp__fake__ping", json!({"message": "hi"}))],
+            None,
+        ),
+        response(vec![], Some("done")),
+    ]);
+    let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+    // A snapshot rather than a closure: `tools_mut` borrows the kernel, and the
+    // test has to drive turns between the snapshots.
+    let names = |k: &mut Kernel| k.tools_mut().names().join(" ");
+    assert!(
+        names(&mut k).contains("mcp__fake__ping"),
+        "{}",
+        names(&mut k)
+    );
+    assert!(
+        !names(&mut k).contains("mcp__fake__pong_new"),
+        "{}",
+        names(&mut k)
+    );
+
+    k.submit("ping").unwrap();
+    // The turn that sent the request keeps the list it started with: the tool the
+    // server has not yet re-listed is not in the registry mid-turn…
+    assert!(
+        !names(&mut k).contains("mcp__fake__pong_new"),
+        "{}",
+        names(&mut k)
+    );
+
+    // …and the next turn opens with it, without the client being asked again.
+    k.submit("what changed?").unwrap();
+    assert!(
+        names(&mut k).contains("mcp__fake__ping"),
+        "{}",
+        names(&mut k)
+    );
+    assert!(
+        names(&mut k).contains("mcp__fake__pong_new"),
+        "{}",
+        names(&mut k)
+    );
+}
+
 /// Purpose: A required MCP server that cannot start fails the session with `KernelError::Mcp` rather than silently dropping a guard.
 #[test]
 fn a_required_server_that_cannot_start_is_fatal() {

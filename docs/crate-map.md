@@ -36,6 +36,7 @@ listed is a violation. The middle column is each crate's own `//!` header.
 | `loong-reverse-formats` | Parsers for the container formats a target ships in (ELF, Mach-O, PE, WASM, archives). | — |
 | `loong-reverse-js` | JavaScript bundle parsing: modules, sources, and recovery of original files. | — |
 | `loong-reverse-mcp` | The MCP server: JSON-RPC over stdio, its tool list, and the `loongagent-reverse` binary. | `loong-reverse-engine`, `loong-reverse-evidence`, `loong-reverse-platform` |
+| `loong-reverse-mcp-bin` | `loong-reverse-mcp`: the reverse-engineering MCP stdio server loongagent launches. | `loong-reverse-engine`, `loong-reverse-evidence`, `loong-reverse-mcp`, `loong-reverse-platform` |
 | `loong-reverse-platform` | The operating-system layer: starting a program, reading and writing files, sync. | `loong-reverse-evidence` |
 | `loong-reverse-testkit` | Fixtures the vendored tests share: built binaries and bundles to analyse. | — |
 | `loong-sandbox` | The policy decision point: allow, ask or deny plus the rule that fired, and never a widening. | `loong-schema` |

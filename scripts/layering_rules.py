@@ -63,6 +63,8 @@ ALLOWED = {
     "loong-reverse-engine": {"loong-reverse-evidence", "loong-reverse-platform", "loong-reverse-formats", "loong-reverse-disasm", "loong-reverse-js", "loong-reverse-analysis"},
     "loong-reverse-mcp": {"loong-reverse-evidence", "loong-reverse-engine", "loong-reverse-platform"},
     "loong-reverse-testkit": set(),
+    # the loongagent-owned stdio binary over the vendored library (docs/design/reverse.md §3)
+    "loong-reverse-mcp-bin": {"loong-reverse-evidence", "loong-reverse-engine", "loong-reverse-platform", "loong-reverse-mcp"},
     # the one binary that ties faces together
     "loongagent": {
         "loong-schema", "loong-protocol", "loong-eventlog", "loong-http", "loong-proc", "loong-manifest", "loong-providers",
@@ -77,6 +79,8 @@ DIRECTORY_EXCEPTIONS = {"loongagent": "cli"}
 # The vendored reverse crates sit one level deeper (docs/design/reverse.md).
 for _name in ("evidence", "platform", "formats", "disasm", "js", "analysis", "engine", "mcp", "testkit"):
     DIRECTORY_EXCEPTIONS[f"loong-reverse-{_name}"] = f"reverse/vendor/loong-reverse-{_name}"
+# The loongagent-owned server binary lives beside the vendor copy, not under it.
+DIRECTORY_EXCEPTIONS["loong-reverse-mcp-bin"] = "reverse/mcp-server"
 
 
 def crate_directory(name: str) -> str:
@@ -97,9 +101,10 @@ def header_line(root: str, name: str) -> str:
     The header is the narrative the hand-written crate table used to carry, so a
     crate without one is a hard failure: an empty cell would silently drop it.
     """
-    # Only the CLI is a binary; every other package (including the vendored ones, whose
-    # directory is exceptional) opens with src/lib.rs.
-    source = "main.rs" if name == "loongagent" else "lib.rs"
+    # The CLI and the loongagent-owned reverse server binary open with src/main.rs;
+    # every other package (including the vendored ones, whose directory is
+    # exceptional) opens with src/lib.rs.
+    source = "main.rs" if name in ("loongagent", "loong-reverse-mcp-bin") else "lib.rs"
     path = os.path.join(root, "crates", crate_directory(name), "src", source)
     try:
         with open(path, encoding="utf-8") as handle:

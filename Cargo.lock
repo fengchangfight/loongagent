@@ -2194,6 +2194,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "loong-reverse-mcp-bin"
+version = "0.0.1"
+dependencies = [
+ "loong-reverse-engine",
+ "loong-reverse-evidence",
+ "loong-reverse-mcp",
+ "loong-reverse-platform",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "loong-reverse-platform"
 version = "0.0.1"
 dependencies = [

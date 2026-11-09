@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/cli", "crates/config", "crates/context", "crates/control", "crates/eventlog", "crates/hooks", "crates/http", "crates/index", "crates/kernel", "crates/manifest", "crates/mcp", "crates/pack", "crates/plugin", "crates/proc", "crates/protocol", "crates/providers", "crates/sandbox", "crates/schema", "crates/server", "crates/skills", "crates/tools", "crates/tui", "crates/tui-app", "crates/web", "crates/reverse/vendor/loong-reverse-analysis", "crates/reverse/vendor/loong-reverse-disasm", "crates/reverse/vendor/loong-reverse-engine", "crates/reverse/vendor/loong-reverse-evidence", "crates/reverse/vendor/loong-reverse-formats", "crates/reverse/vendor/loong-reverse-js", "crates/reverse/vendor/loong-reverse-mcp", "crates/reverse/vendor/loong-reverse-platform", "crates/reverse/vendor/loong-reverse-testkit"]
+members = ["crates/cli", "crates/config", "crates/context", "crates/control", "crates/eventlog", "crates/hooks", "crates/http", "crates/index", "crates/kernel", "crates/manifest", "crates/mcp", "crates/pack", "crates/plugin", "crates/proc", "crates/protocol", "crates/providers", "crates/sandbox", "crates/schema", "crates/server", "crates/skills", "crates/tools", "crates/tui", "crates/tui-app", "crates/web", "crates/reverse/vendor/loong-reverse-analysis", "crates/reverse/vendor/loong-reverse-disasm", "crates/reverse/vendor/loong-reverse-engine", "crates/reverse/vendor/loong-reverse-evidence", "crates/reverse/vendor/loong-reverse-formats", "crates/reverse/vendor/loong-reverse-js", "crates/reverse/vendor/loong-reverse-mcp", "crates/reverse/vendor/loong-reverse-platform", "crates/reverse/vendor/loong-reverse-testkit", "crates/reverse/mcp-server"]
 
 [workspace.package]
 version = "0.0.1"
@@ -26,6 +26,7 @@ loong-reverse-js = { path = "crates/reverse/vendor/loong-reverse-js" }
 loong-reverse-analysis = { path = "crates/reverse/vendor/loong-reverse-analysis" }
 loong-reverse-engine = { path = "crates/reverse/vendor/loong-reverse-engine" }
 loong-reverse-mcp = { path = "crates/reverse/vendor/loong-reverse-mcp" }
+loong-reverse-mcp-lib = { package = "loong-reverse-mcp", path = "crates/reverse/vendor/loong-reverse-mcp" }
 loong-reverse-testkit = { path = "crates/reverse/vendor/loong-reverse-testkit" }
 
 # External deps of the vendored reverse crates (pinned to the craft-anything vendor set).

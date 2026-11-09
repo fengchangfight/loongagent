@@ -33,6 +33,43 @@ use std::time::Duration;
 pub const MCP_DIR: &str = ".loongagent";
 pub const MCP_FILE: &str = "mcp.toml";
 pub const MCP_TRUST_FILE: &str = "mcp.trusted";
+
+/// Purpose: Which manifest file a server entry came from.
+/// Serves: the merged `McpSet`, so `mcp list`, trust failures and error messages can name the source.
+/// Design: `docs/design/mcp-client.md` §1 and `docs/design/reverse.md` §3.
+/// Up: `McpSet::load` stamps one per server; no other writer.
+/// Down: `McpServerSpec::origin`; `crates/cli/src/mcp.rs` prints it.
+/// Verify: `cargo test -p loong-mcp`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManifestOrigin {
+    /// The workspace manifest: `<workspace>/.loongagent/mcp.toml`.
+    Workspace,
+    /// The reverse session's manifest: `<workspace>/.reverse/mcp.toml`.
+    Reverse,
+}
+
+impl ManifestOrigin {
+    /// Purpose: A short label for listings and summaries.
+    /// Serves: `McpSet::summary` and `mcp list`.
+    /// Design: `docs/design/mcp-client.md` §1.
+    /// Up: `crates/cli/src/mcp.rs`, `McpSet::summary`.
+    /// Down: nothing.
+    /// Verify: `cargo test -p loong-mcp`.
+    pub fn label(self) -> &'static str {
+        match self {
+            ManifestOrigin::Workspace => "workspace",
+            ManifestOrigin::Reverse => "reverse",
+        }
+    }
+}
+
+/// Purpose: The directory holding the reverse session's own manifest pair.
+/// Serves: `McpSet::load`, which merges the optional `.reverse/mcp.toml` as a second source.
+/// Design: `docs/design/reverse.md` §3.
+/// Up: `McpSet::load`; `crates/cli/src/reverse.rs` writes the pair.
+/// Down: `McpSet::{load, trust_now}`.
+/// Verify: `cargo test -p loong-mcp`.
+pub const REVERSE_DIR: &str = ".reverse";
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 const MAX_TIMEOUT_MS: u64 = 600_000;
 
@@ -96,6 +133,8 @@ pub struct McpServerSpec {
     /// refusal to start the session.
     pub required: bool,
     pub defer: Defer,
+    /// The manifest file this entry was parsed from.
+    pub origin: ManifestOrigin,
 }
 
 impl McpServerSpec {
@@ -179,6 +218,8 @@ pub struct McpSet {
     pub dir: PathBuf,
     pub servers: Vec<McpServerSpec>,
     pub trust: loong_manifest::TrustStatus,
+    /// Why the reverse manifest's servers are inert, when `.reverse/mcp.toml` failed its own trust check.
+    reverse_trust_failure: Option<String>,
 }
 
 impl McpSet {
@@ -192,112 +233,89 @@ impl McpSet {
         let workspace = workspace.as_ref().to_path_buf();
         let dir = workspace.join(MCP_DIR);
         let manifest = dir.join(MCP_FILE);
-        if !manifest.exists() {
-            return Ok(Self {
-                workspace,
-                dir,
-                servers: Vec::new(),
-                trust: loong_manifest::TrustStatus::Absent,
-            });
-        }
-        let text = std::fs::read_to_string(&manifest)
-            .map_err(|e| ConfigError::Io(format!("{}: {e}", manifest.display())))?;
-        let file: RawFile = toml::from_str(&text).map_err(|e| ConfigError::Parse(e.to_string()))?;
-
-        let mut servers = Vec::new();
-        let mut seen = std::collections::BTreeSet::new();
-        for (index, raw) in file.server.iter().enumerate() {
-            let where_ = raw
-                .name
-                .clone()
-                .unwrap_or_else(|| format!("#{}", index + 1));
-            let name = raw
-                .name
-                .clone()
-                .ok_or_else(|| ConfigError::Invalid(format!("{where_}: a server needs a name")))?;
-            if !seen.insert(name.clone()) {
-                return Err(ConfigError::Invalid(format!(
-                    "{name}: duplicate server name"
-                )));
-            }
-            if name.contains("__") || name.contains(' ') {
-                return Err(ConfigError::Invalid(format!(
-                    "{name}: a server name may not contain \"__\" or spaces (it namespaces tool names)"
-                )));
-            }
-            let command = raw
-                .command
-                .clone()
-                .filter(|c| !c.trim().is_empty())
-                .unwrap_or_default();
-            let url = raw
-                .url
-                .clone()
-                .filter(|u| !u.trim().is_empty())
-                .map(|url| check_url(&name, &url))
-                .transpose()?;
-            match (command.is_empty(), url.is_some()) {
-                (true, false) => {
-                    return Err(ConfigError::Invalid(format!(
-                        "{name}: a server needs a command or a url"
-                    )))
-                }
-                (false, true) => {
-                    return Err(ConfigError::Invalid(format!(
-                        "{name}: a server has a command and a url; name one transport"
-                    )))
-                }
-                _ => {}
-            }
-            let headers = match (&url, &raw.headers) {
-                (Some(_), Some(headers)) => expand_headers(&name, headers)?,
-                (Some(_), None) => BTreeMap::new(),
-                (None, Some(_)) => {
-                    return Err(ConfigError::Invalid(format!(
-                        "{name}: headers belong to a url transport; a command server has env"
-                    )))
-                }
-                (None, None) => BTreeMap::new(),
-            };
-
-            let action_class = parse_class(
-                &name,
-                raw.action_class.as_deref().unwrap_or("out_of_bounds"),
-            )?;
-            let mut tools = BTreeMap::new();
-            for (tool, class) in &raw.tools {
-                tools.insert(tool.clone(), parse_class(&name, class)?);
-            }
-            let timeout = Duration::from_millis(
-                raw.timeout_ms
-                    .unwrap_or(DEFAULT_TIMEOUT_MS)
-                    .min(MAX_TIMEOUT_MS),
-            );
-
-            servers.push(McpServerSpec {
-                name,
-                command,
-                args: raw.args.clone().unwrap_or_default(),
-                env: raw.env.clone().unwrap_or_default(),
-                url,
-                headers,
-                action_class,
-                tools,
-                timeout,
-                required: raw.required.unwrap_or(true),
-                defer: parse_defer(&where_, raw.defer.as_deref())?,
-            });
-        }
-
-        let sources = sources_of(&dir, &manifest, &servers);
-        let trust =
-            loong_manifest::check(&dir.join(MCP_TRUST_FILE), &sources).map_err(ConfigError::Io)?;
-        Ok(Self {
+        let reverse_manifest = workspace.join(REVERSE_DIR).join(MCP_FILE);
+        let mut set = Self {
             workspace,
-            dir,
-            servers,
-            trust,
-        })
+            dir: dir.clone(),
+            servers: Vec::new(),
+            trust: loong_manifest::TrustStatus::Absent,
+            reverse_trust_failure: None,
+        };
+
+        if manifest.exists() {
+            let file = read_manifest(&manifest)?;
+            let mut servers = parse_servers(&file, ManifestOrigin::Workspace)?;
+            let sources = sources_of(&manifest, &mut servers);
+            let trust = loong_manifest::check(&dir.join(MCP_TRUST_FILE), &sources)
+                .map_err(ConfigError::Io)?;
+            set.servers = servers;
+            set.trust = trust;
+        }
+
+        if reverse_manifest.exists() {
+            set.load_reverse(&reverse_manifest)?;
+        }
+
+        let mut seen = std::collections::BTreeSet::new();
+        for spec in &set.servers {
+            if !seen.insert(spec.name.clone()) {
+                return Err(ConfigError::Invalid(format!(
+                    "{name}: duplicate server name ({name} is already in {other}; rename one)",
+                    name = spec.name,
+                    other = match spec.origin {
+                        ManifestOrigin::Workspace => REVERSE_DIR,
+                        ManifestOrigin::Reverse => MCP_DIR,
+                    },
+                )));
+            }
+        }
+
+        if matches!(set.trust, loong_manifest::TrustStatus::Absent)
+            && !set.servers.is_empty()
+            && set.reverse_trust_failure.is_none()
+        {
+            // Only the reverse manifest is present, and it is trusted: nothing stays inert.
+            set.trust = loong_manifest::TrustStatus::Trusted;
+        }
+        Ok(set)
+    }
+
+    /// Purpose: Parse `.reverse/mcp.toml`, check its own trust record and merge its servers.
+    /// Serves: `McpSet::load`, the reverse session's second manifest source.
+    /// Design: `docs/design/reverse.md` §3 and `docs/design/mcp-client.md` §1.
+    /// Up: `McpSet::load` only.
+    /// Down: `read_manifest`, `parse_servers`, `loong_manifest::check`; sets `reverse_trust_failure`.
+    /// Verify: `cargo test -p loong-mcp reverse_manifest`.
+    fn load_reverse(&mut self, manifest: &Path) -> Result<(), ConfigError> {
+        let file = read_manifest(manifest)?;
+        let mut servers = parse_servers(&file, ManifestOrigin::Reverse)?;
+        let sources = sources_of(manifest, &mut servers);
+        let trust = loong_manifest::check(&manifest.with_file_name(MCP_TRUST_FILE), &sources)
+            .map_err(ConfigError::Io)?;
+        match trust {
+            loong_manifest::TrustStatus::Trusted => self.servers.extend(servers),
+            _ => {
+                let count = servers.len();
+                // An untrusted (or never-answered) reverse pair stays inert but visible:
+                // its entries land in `servers` so `mcp list` shows them, and this
+                // message names why nothing from `.reverse/` runs.
+                self.reverse_trust_failure = Some(format!(
+                    "{count} reverse server(s) inert — the manifest at {REVERSE_DIR}/{MCP_FILE} is not trusted (changed or never trusted); run `loongagent mcp trust` to re-review and accept"
+                ));
+                self.servers.extend(servers);
+            }
+        }
+        Ok(())
+    }
+
+    /// Purpose: The reason the reverse manifest's servers are inert, if they are.
+    /// Serves: the kernel's `attach_mcp` note and `summary`.
+    /// Design: `docs/design/reverse.md` §3.
+    /// Up: `crates/kernel/src/turn/build.rs`, `summary`.
+    /// Down: `reverse_trust_failure`, set by `load_reverse`.
+    /// Verify: `cargo test -p loong-mcp reverse_manifest`.
+    pub fn reverse_trust_failure(&self) -> Option<&str> {
+        self.reverse_trust_failure.as_deref()
     }
 
     /// The servers that may actually run: none until the bytes are trusted.
@@ -307,11 +325,14 @@ impl McpSet {
     /// Up: `crates/kernel/src/turn/build.rs`.
     /// Down: the `servers` field, gated by `trust`.
     /// Verify: `cargo test -p loong-mcp`.
-    pub fn active(&self) -> &[McpServerSpec] {
-        match self.trust {
-            loong_manifest::TrustStatus::Trusted => &self.servers,
-            _ => &[],
-        }
+    pub fn active(&self) -> Vec<&McpServerSpec> {
+        self.servers
+            .iter()
+            .filter(|s| match s.origin {
+                ManifestOrigin::Workspace => self.trust == loong_manifest::TrustStatus::Trusted,
+                ManifestOrigin::Reverse => self.reverse_trust_failure.is_none(),
+            })
+            .collect()
     }
 
     /// Purpose: Record the current manifest bytes as trusted.
@@ -321,8 +342,35 @@ impl McpSet {
     /// Down: `loong_manifest::record`.
     /// Verify: `cargo test -p loong-mcp`.
     pub fn trust_now(&self) -> Result<PathBuf, ConfigError> {
-        let sources = sources_of(&self.dir, &self.dir.join(MCP_FILE), &self.servers);
+        let manifest = self.dir.join(MCP_FILE);
+        let mut servers: Vec<McpServerSpec> = self
+            .servers
+            .iter()
+            .filter(|s| s.origin == ManifestOrigin::Workspace)
+            .cloned()
+            .collect();
+        let sources = sources_of(&manifest, &mut servers);
         let path = self.dir.join(MCP_TRUST_FILE);
+        loong_manifest::record(&path, &sources).map_err(ConfigError::Io)?;
+        Ok(path)
+    }
+
+    /// Purpose: Record the current `.reverse/mcp.toml` bytes as trusted.
+    /// Serves: `crates/cli/src/reverse.rs`, which writes and trusts its own manifest.
+    /// Design: `docs/design/reverse.md` §3.
+    /// Up: `crates/cli/src/reverse.rs` only; a human never runs this.
+    /// Down: `loong_manifest::record` on `.reverse/mcp.trusted`.
+    /// Verify: `cargo test -p loong-mcp reverse_manifest`.
+    pub fn trust_reverse_now(&self) -> Result<PathBuf, ConfigError> {
+        let manifest = self.workspace.join(REVERSE_DIR).join(MCP_FILE);
+        let mut servers: Vec<McpServerSpec> = self
+            .servers
+            .iter()
+            .filter(|s| s.origin == ManifestOrigin::Reverse)
+            .cloned()
+            .collect();
+        let sources = sources_of(&manifest, &mut servers);
+        let path = self.workspace.join(REVERSE_DIR).join(MCP_TRUST_FILE);
         loong_manifest::record(&path, &sources).map_err(ConfigError::Io)?;
         Ok(path)
     }
@@ -334,25 +382,145 @@ impl McpSet {
     /// Down: `trust` and `loong_manifest::inert_message`.
     /// Verify: `cargo test -p loong-mcp`.
     pub fn summary(&self) -> String {
-        match &self.trust {
+        let mut base = match &self.trust {
             loong_manifest::TrustStatus::Absent => "no MCP servers".to_string(),
             loong_manifest::TrustStatus::Trusted => {
-                format!("{} MCP server(s), trusted", self.servers.len())
+                let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+                for spec in &self.servers {
+                    *counts.entry(spec.origin.label()).or_default() += 1;
+                }
+                let parts: Vec<String> = counts
+                    .iter()
+                    .map(|(label, n)| format!("{label} {n}"))
+                    .collect();
+                format!(
+                    "{} MCP server(s) ({}), trusted",
+                    self.servers.len(),
+                    parts.join(", ")
+                )
             }
-            loong_manifest::TrustStatus::Untrusted { changed } => loong_manifest::inert_message(
-                &loong_manifest::Sources::new(),
-                changed,
-                "run `loongagent mcp trust`",
+            loong_manifest::TrustStatus::Untrusted { .. } => format!(
+                "INERT — the manifest at {MCP_DIR}/{MCP_FILE} is not trusted (changed or never trusted); run `loongagent mcp trust` to re-review and accept"
             ),
+        };
+        if let Some(failure) = &self.reverse_trust_failure {
+            base.push_str(&format!(
+                "; {REVERSE_DIR}/{MCP_FILE} INERT ({} reverse server(s) held back): {failure}",
+                self.servers
+                    .iter()
+                    .filter(|s| s.origin == ManifestOrigin::Reverse)
+                    .count()
+            ));
         }
+        base
     }
 }
 
-/// Purpose: The one file whose bytes this trust record covers: `mcp.toml`.
+/// Purpose: The one file whose bytes a trust record covers: one `mcp.toml`.
 /// Contract: `crates/mcp/src/config.rs`.
-fn sources_of(dir: &Path, manifest: &Path, servers: &[McpServerSpec]) -> loong_manifest::Sources {
-    let _ = (dir, servers);
+fn sources_of(manifest: &Path, servers: &mut [McpServerSpec]) -> loong_manifest::Sources {
+    let _ = servers;
     vec![(MCP_FILE.to_string(), manifest.to_path_buf())]
+}
+
+/// Purpose: Read and TOML-parse one manifest file, naming the file in errors.
+/// Contract: `crates/mcp/src/config.rs`.
+fn read_manifest(manifest: &Path) -> Result<RawFile, ConfigError> {
+    let text = std::fs::read_to_string(manifest)
+        .map_err(|e| ConfigError::Io(format!("{}: {e}", manifest.display())))?;
+    toml::from_str(&text).map_err(|e| ConfigError::Parse(format!("{}: {e}", manifest.display())))
+}
+
+/// Purpose: Validate one parsed manifest into server specs, stamped with its origin.
+/// Serves: `McpSet::load` and `McpSet::load_reverse`.
+/// Design: `docs/design/mcp-client.md` §1.
+/// Up: `McpSet::{load, load_reverse}` only.
+/// Down: `check_url`, `expand_headers`, `parse_class`, `parse_defer`.
+/// Verify: `cargo test -p loong-mcp`.
+fn parse_servers(
+    file: &RawFile,
+    origin: ManifestOrigin,
+) -> Result<Vec<McpServerSpec>, ConfigError> {
+    let mut servers = Vec::new();
+    for (index, raw) in file.server.iter().enumerate() {
+        let where_ = raw
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("#{}", index + 1));
+        let name = raw
+            .name
+            .clone()
+            .ok_or_else(|| ConfigError::Invalid(format!("{where_}: a server needs a name")))?;
+        if name.contains("__") || name.contains(' ') {
+            return Err(ConfigError::Invalid(format!(
+                "{name}: a server name may not contain \"__\" or spaces (it namespaces tool names)"
+            )));
+        }
+        let command = raw
+            .command
+            .clone()
+            .filter(|c| !c.trim().is_empty())
+            .unwrap_or_default();
+        let url = raw
+            .url
+            .clone()
+            .filter(|u| !u.trim().is_empty())
+            .map(|url| check_url(&name, &url))
+            .transpose()?;
+        match (command.is_empty(), url.is_some()) {
+            (true, false) => {
+                return Err(ConfigError::Invalid(format!(
+                    "{name}: a server needs a command or a url"
+                )))
+            }
+            (false, true) => {
+                return Err(ConfigError::Invalid(format!(
+                    "{name}: a server has a command and a url; name one transport"
+                )))
+            }
+            _ => {}
+        }
+        let headers = match (&url, &raw.headers) {
+            (Some(_), Some(headers)) => expand_headers(&name, headers)?,
+            (Some(_), None) => BTreeMap::new(),
+            (None, Some(_)) => {
+                return Err(ConfigError::Invalid(format!(
+                    "{name}: headers belong to a url transport; a command server has env"
+                )))
+            }
+            (None, None) => BTreeMap::new(),
+        };
+
+        let action_class = parse_class(
+            &name,
+            raw.action_class.as_deref().unwrap_or("out_of_bounds"),
+        )?;
+        let mut tools = BTreeMap::new();
+        for (tool, class) in &raw.tools {
+            tools.insert(tool.clone(), parse_class(&name, class)?);
+        }
+        let timeout = Duration::from_millis(
+            raw.timeout_ms
+                .unwrap_or(DEFAULT_TIMEOUT_MS)
+                .min(MAX_TIMEOUT_MS),
+        );
+
+        servers.push(McpServerSpec {
+            name,
+            command,
+            args: raw.args.clone().unwrap_or_default(),
+            env: raw.env.clone().unwrap_or_default(),
+            url,
+            headers,
+            action_class,
+            tools,
+            timeout,
+            required: raw.required.unwrap_or(true),
+            defer: parse_defer(&where_, raw.defer.as_deref())?,
+            origin,
+        });
+    }
+    Ok(servers)
 }
 
 /// Purpose: Accept `https://`, or plain `http://` for this machine only.
@@ -527,6 +695,14 @@ mod tests {
     /// Contract: `crates/mcp/src/config.rs`.
     fn write(ws: &Path, body: &str) {
         std::fs::write(ws.join(MCP_DIR).join(MCP_FILE), body).unwrap();
+    }
+
+    /// Purpose: Write a `.reverse/mcp.toml` body into a test workspace.
+    /// Contract: `crates/mcp/src/config.rs`.
+    fn write_reverse(ws: &Path, body: &str) {
+        let dir = ws.join(REVERSE_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(MCP_FILE), body).unwrap();
     }
 
     #[test]
@@ -780,5 +956,148 @@ mod tests {
             "[[server]]\nname = \"a\"\nurl = \"https://example.com/mcp\"\ndefer = \"always\"\n",
         );
         assert_eq!(McpSet::load(&ws).unwrap().servers[0].defer, Defer::Always);
+    }
+
+    #[test]
+    /// Purpose: Pin that `.reverse/mcp.toml` merges alongside the workspace manifest with the right origins.
+    fn reverse_manifest_merges_alongside_workspace_manifest() {
+        let ws = workspace();
+        write(&ws, "[[server]]\nname = \"fs\"\ncommand = \"node\"\n");
+        write_reverse(
+            &ws,
+            "[[server]]\nname = \"loong-reverse\"\ncommand = \"loong-reverse-mcp\"\n",
+        );
+        let set = McpSet::load(&ws).unwrap();
+        set.trust_now().unwrap();
+        let set = McpSet::load(&ws).unwrap();
+        let failure = set
+            .reverse_trust_failure()
+            .expect("an untrusted reverse pair holds its servers back");
+        assert_eq!(set.servers.len(), 2);
+        assert_eq!(set.servers[0].origin, ManifestOrigin::Workspace);
+        assert_eq!(set.servers[1].origin, ManifestOrigin::Reverse);
+        // The reverse pair is not trusted yet, so only the workspace server is active.
+        assert_eq!(set.active().len(), 1);
+        assert_eq!(set.active()[0].name, "fs");
+
+        set.trust_reverse_now().unwrap();
+        let set = McpSet::load(&ws).unwrap();
+        assert_eq!(set.active().len(), 2, "both trusted sources run");
+        assert!(
+            set.active().iter().any(|s| s.name == "loong-reverse"),
+            "the reverse server joined the active set"
+        );
+        assert!(
+            set.summary().contains("workspace 1"),
+            "summary: {}",
+            set.summary()
+        );
+        assert!(
+            set.summary().contains("reverse 1"),
+            "summary: {}",
+            set.summary()
+        );
+    }
+
+    #[test]
+    /// Purpose: Pin that an untrusted `.reverse/mcp.toml` alone fails closed while the trusted workspace server runs.
+    fn reverse_manifest_untrusted_alone_fails_closed() {
+        let ws = workspace();
+        write(&ws, "[[server]]\nname = \"fs\"\ncommand = \"node\"\n");
+        write_reverse(
+            &ws,
+            "[[server]]\nname = \"loong-reverse\"\ncommand = \"loong-reverse-mcp\"\n",
+        );
+        let set = McpSet::load(&ws).unwrap();
+        set.trust_now().unwrap();
+
+        let set = McpSet::load(&ws).unwrap();
+        assert_eq!(
+            set.trust,
+            loong_manifest::TrustStatus::Trusted,
+            "the workspace trust verdict is untouched by the reverse pair"
+        );
+        let failure = set
+            .reverse_trust_failure()
+            .expect("an untrusted reverse manifest must say why");
+        assert!(failure.contains(".reverse"), "{failure}");
+        let active = set.active();
+        assert_eq!(active.len(), 1, "only the trusted workspace server runs");
+        assert_eq!(active[0].name, "fs");
+        assert!(
+            set.summary().contains("INERT"),
+            "summary: {}",
+            set.summary()
+        );
+    }
+
+    #[test]
+    /// Purpose: Pin that writing or deleting the `.reverse/` pair never disturbs the workspace manifest's trust.
+    fn workspace_manifest_hash_untouched_by_reverse_pair() {
+        let ws = workspace();
+        write(&ws, "[[server]]\nname = \"fs\"\ncommand = \"node\"\n");
+        let set = McpSet::load(&ws).unwrap();
+        set.trust_now().unwrap();
+        let set = McpSet::load(&ws).unwrap();
+        assert_eq!(set.trust, loong_manifest::TrustStatus::Trusted);
+
+        // Write and trust the reverse pair: the workspace verdict does not move.
+        write_reverse(
+            &ws,
+            "[[server]]\nname = \"loong-reverse\"\ncommand = \"loong-reverse-mcp\"\n",
+        );
+        let set = McpSet::load(&ws).unwrap();
+        set.trust_reverse_now().unwrap();
+        let set = McpSet::load(&ws).unwrap();
+        assert_eq!(
+            set.trust,
+            loong_manifest::TrustStatus::Trusted,
+            "the workspace record still matches its own bytes"
+        );
+        assert_eq!(set.active().len(), 2);
+
+        // Delete the reverse pair (the reverse session's exit path): still trusted.
+        std::fs::remove_dir_all(ws.join(REVERSE_DIR)).unwrap();
+        let set = McpSet::load(&ws).unwrap();
+        assert_eq!(
+            set.trust,
+            loong_manifest::TrustStatus::Trusted,
+            "deleting the reverse pair does not re-arm the workspace question"
+        );
+        assert_eq!(set.servers.len(), 1);
+        assert_eq!(set.servers[0].origin, ManifestOrigin::Workspace);
+    }
+
+    #[test]
+    /// Purpose: Pin that a name collision across the two manifests is a loud error, not a silent overwrite.
+    fn a_reverse_server_name_clashing_with_the_workspace_is_refused() {
+        let ws = workspace();
+        write(
+            &ws,
+            "[[server]]\nname = \"loong-reverse\"\ncommand = \"node\"\n",
+        );
+        write_reverse(
+            &ws,
+            "[[server]]\nname = \"loong-reverse\"\ncommand = \"loong-reverse-mcp\"\n",
+        );
+        let err = McpSet::load(&ws).unwrap_err().to_string();
+        assert!(err.contains("duplicate server name"), "{err}");
+        assert!(err.contains("already in .loongagent"), "{err}");
+    }
+
+    #[test]
+    /// Purpose: Pin that a workspace with only a trusted `.reverse/mcp.toml` runs its server.
+    fn a_reverse_only_workspace_runs_its_trusted_server() {
+        let ws = workspace();
+        write_reverse(
+            &ws,
+            "[[server]]\nname = \"loong-reverse\"\ncommand = \"loong-reverse-mcp\"\n",
+        );
+        let set = McpSet::load(&ws).unwrap();
+        set.trust_reverse_now().unwrap();
+        let set = McpSet::load(&ws).unwrap();
+        assert_eq!(set.servers.len(), 1);
+        assert_eq!(set.active().len(), 1, "the trusted reverse server runs");
+        assert_eq!(set.active()[0].origin, ManifestOrigin::Reverse);
     }
 }

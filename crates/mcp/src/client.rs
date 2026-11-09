@@ -1221,6 +1221,7 @@ mod tests {
             timeout: Duration::from_secs(10),
             required: true,
             defer: Defer::Auto,
+            origin: crate::config::ManifestOrigin::Workspace,
         }
     }
 

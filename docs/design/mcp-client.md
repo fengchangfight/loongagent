@@ -12,7 +12,19 @@ the model, and what is deliberately missing.
 
 ## 1. A server is a manifest entry, behind one trust gate
 
-`McpSet::load` reads `<workspace>/.loongagent/mcp.toml`. One `[[server]]` table is one server,
+`McpSet::load` reads `<workspace>/.loongagent/mcp.toml`, and merges a second, optional source:
+`<workspace>/.reverse/mcp.toml`, written by the reverse session
+([reverse.md](reverse.md) §3). Both files parse through the same validation, and each entry is
+stamped with an origin (`workspace` / `reverse`) so `mcp list` can say where a server came from.
+A name shared by the two files is a loud duplicate error, not a silent overwrite.
+
+Trust is fail-closed per source: each manifest is checked against its own sibling record
+(`mcp.trusted` beside it), neither record covers the other file, and writing or deleting one
+pair never re-arms the other's question. A manifest whose bytes no longer match its record is
+inert — its servers are parsed and listed but not run — and the load surfaces a reason that
+names the path and the fix (`loongagent mcp trust`).
+
+One `[[server]]` table is one server,
 and it must name exactly one transport:
 
 | Field | Meaning |
@@ -26,8 +38,10 @@ and it must name exactly one transport:
 | `required` | `true` (default) makes an unusable server fatal; `false` turns it into a note. |
 | `defer` | `auto` (default), `always` or `never` — see §6. |
 
-A server entry is inert until `loongagent mcp trust` records it in `mcp.trusted`, and the record
-is a hash of `mcp.toml`'s bytes: editing one character, including a URL, revokes it. What trust
+Each manifest pair is inert until its bytes are recorded in its own `mcp.trusted` — the human
+runs `loongagent mcp trust` for the workspace pair; the reverse binary records its own pair when
+it writes it. The record is a hash of the manifest's bytes: editing one character, including a
+URL, revokes it. What trust
 does **not** cover is unchanged and stated in [extension-model.md](extension-model.md) §3 — the
 command, its PATH lookup and the files it reads are not hashed, and the process is outside the
 tool sandbox.

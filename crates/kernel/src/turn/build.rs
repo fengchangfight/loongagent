@@ -105,6 +105,11 @@ struct AttachedMcp {
 fn attach_mcp(workspace: &Path, tools: &mut Registry) -> Result<AttachedMcp, KernelError> {
     let set = McpSet::load(workspace).map_err(|e| KernelError::Mcp(e.to_string()))?;
     let mut note = set.summary();
+    // The reverse manifest is fail-closed per source: its servers stay inert when
+    // their own trust check fails, but the session still starts and is told.
+    if let Some(failure) = set.reverse_trust_failure() {
+        note.push_str(&format!("; {failure}"));
+    }
     let mut clients = Vec::new();
     let mut prompt_skills = Vec::new();
     for spec in set.active() {
@@ -218,7 +223,7 @@ fn attach_mcp(workspace: &Path, tools: &mut Registry) -> Result<AttachedMcp, Ker
         note,
         clients,
         prompt_skills,
-        specs: set.active().to_vec(),
+        specs: set.active().into_iter().cloned().collect(),
     })
 }
 impl Kernel {

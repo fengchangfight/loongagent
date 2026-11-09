@@ -32,5 +32,8 @@ pub use client::{
     defer_by_default, map_prompt_arguments, media_dir, McpCapabilities, McpClient, McpError,
     McpPromptArgument, McpPromptInfo, McpTool, McpToolInfo, PROTOCOL_VERSION,
 };
-pub use config::{ConfigError, Defer, McpServerSpec, McpSet, MCP_DIR, MCP_FILE, MCP_TRUST_FILE};
+pub use config::{
+    ConfigError, Defer, ManifestOrigin, McpServerSpec, McpSet, MCP_DIR, MCP_FILE, MCP_TRUST_FILE,
+    REVERSE_DIR,
+};
 pub use loong_manifest::TrustStatus;

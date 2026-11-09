@@ -19,6 +19,10 @@ use super::*;
 pub(crate) fn mcp_list(args: Args) -> Result<(), String> {
     let set = loong_mcp::McpSet::load(&args.cwd).map_err(|e| e.to_string())?;
     println!("manifest: {}", set.dir.join(loong_mcp::MCP_FILE).display());
+    let reverse_manifest = args.cwd.join(".reverse").join(loong_mcp::MCP_FILE);
+    if reverse_manifest.exists() {
+        println!("manifest: {}", reverse_manifest.display());
+    }
     println!("status:   {}", set.summary());
     for spec in &set.servers {
         println!();
@@ -28,6 +32,7 @@ pub(crate) fn mcp_list(args: Args) -> Result<(), String> {
             spec.transport(),
             spec.endpoint()
         );
+        println!("    origin:       {}", spec.origin.label());
         if spec.url.is_some() && !spec.headers.is_empty() {
             // Names only: a header value is a secret (an `Authorization`), so it is
             // never printed. `${VAR}` was expanded at load, so the value is real.
@@ -42,13 +47,18 @@ pub(crate) fn mcp_list(args: Args) -> Result<(), String> {
         println!("    required:     {}", spec.required);
         println!("    defer:        {:?}", spec.defer);
     }
-    if let loong_mcp::TrustStatus::Untrusted { changed } = &set.trust {
+    if let loong_mcp::TrustStatus::Untrusted { .. } = &set.trust {
         println!();
         println!(
-            "INERT until trusted — new or changed: {}",
-            changed.join(", ")
+            "INERT — the manifest at {} is not trusted (changed or never trusted).",
+            set.dir.join(loong_mcp::MCP_FILE).display()
         );
         println!("A server entry names a command to run or a URL to call, so read it first, then:");
+        println!("  loongagent mcp trust --cwd {}", args.cwd.display());
+    }
+    if let Some(failure) = set.reverse_trust_failure() {
+        println!();
+        println!("{failure}");
         println!("  loongagent mcp trust --cwd {}", args.cwd.display());
     }
     Ok(())
@@ -65,13 +75,36 @@ pub(crate) fn mcp_trust(args: Args) -> Result<(), String> {
     if set.servers.is_empty() {
         return Err("no mcp.toml in this workspace — nothing to trust".to_string());
     }
+    let workspace_count = set
+        .servers
+        .iter()
+        .filter(|s| s.origin == loong_mcp::ManifestOrigin::Workspace)
+        .count();
+    let reverse_count = set.servers.len() - workspace_count;
+    if workspace_count == 0 && reverse_count > 0 {
+        // No `.loongagent/mcp.toml`: only the reverse session's own pair exists,
+        // and that pair belongs to the reverse binary — the session writes and
+        // trusts it itself. A human answering this question for it would be
+        // answering blind.
+        return Err(format!(
+            "no .loongagent/mcp.toml — the {reverse_count} server(s) in .reverse/mcp.toml belong to the reverse session, which trusts its own manifest when it starts one"
+        ));
+    }
     let path = set.trust_now().map_err(|e| e.to_string())?;
     println!(
         "trusted {} server(s) in {}",
-        set.servers.len(),
+        workspace_count,
         args.cwd.display()
     );
     println!("recorded in {}", path.display());
-    println!("Editing mcp.toml re-arms the question on the next session.");
+    if set.reverse_trust_failure().is_some() && reverse_count > 0 {
+        let reverse_path = set.trust_reverse_now().map_err(|e| e.to_string())?;
+        println!(
+            "trusted {} reverse server(s); recorded in {}",
+            reverse_count,
+            reverse_path.display()
+        );
+    }
+    println!("Editing either mcp.toml re-arms its question on the next session.");
     Ok(())
 }

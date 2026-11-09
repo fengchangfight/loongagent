@@ -109,9 +109,9 @@ Session（kernel）── attach_mcp 挂上 loong-reverse-mcp
 
 **为什么不放 `.loongagent/mcp.toml`**：项目自己的 MCP 配置就在那里（一个 `[[server]]` 表一个 server，按 `name` 区分，多个共存），reverse 追加一个表本不冲突；但 trust 记录是**对整个 `mcp.toml` 字节的 hash**——改一个字，文件里所有 server（包括项目自己已 trust 的）全部失效，要重新 `loongagent mcp trust`。reverse 进进出出改这个文件会反复打翻项目自己的 trust，不可接受。所以 reverse 用 `.reverse/mcp.toml` 这一对独立文件，项目的 manifest 一个字节不碰。
 
-**加载合并**：`McpSet::load` 扩展为读两个来源——`.loongagent/mcp.toml`（照旧，人工 trust gate）和可选的 `.reverse/mcp.toml`（reverse 程序自写自 trust，信任理由见下）。两边 server 名不能撞：reverse 固定用 `loong-reverse`，若项目 manifest 里已有同名 server 则启动报错让用户改名。工具名命名空间规则不变。这个合并逻辑写在 `loong-mcp`，`attach_mcp` 与 `mcp list` 自然看到合并后的集合；`mcp list` 输出里标明每个 server 来自哪个文件。
+**加载合并**：`McpSet::load` 读两个来源——`.loongagent/mcp.toml`（照旧，人工 trust gate）和可选的 `.reverse/mcp.toml`（reverse 程序自写自 trust，信任理由见下）。每个 server 带 origin（`workspace` / `reverse`），`mcp list` 逐条标明。两边 server 名不能撞：撞名是响亮的 duplicate 错误，指出撞在哪个文件，不是静默覆盖。trust 判断**按源文件各自独立**：`.reverse/mcp.toml` 的字节对不上自己的记录时，只有 reverse 的 server 进入 inert，提示信息点名 `.reverse/mcp.toml`；项目 manifest 的判定纹丝不动，删除整个 `.reverse/` 目录（会话退出路径）也不会重翻项目的问题。合并逻辑写在 `loong-mcp`，`attach_mcp` 与 `mcp list` 自然看到合并后的集合。
 
-**trust**：reverse 写完 `.reverse/mcp.toml` 后直接对它的字节调 trust 记录逻辑写 `.reverse/mcp.trusted`。理由：这个 manifest 是 loongagent 自己生成的、指向自己装的二进制，不是 repo 内容，绕过人工 trust 不破坏 `security-trust.md` 的边界（repo 内容的 trust gate 照旧）。实现时在 `docs/design/security-trust.md` 加一节说明，并在 `docs/design/mcp-client.md` 补"第二个 manifest 来源"的段落。
+**trust**：reverse 写完 `.reverse/mcp.toml` 后直接对它的字节调 `McpSet::trust_reverse_now` 写 `.reverse/mcp.trusted`。理由：这个 manifest 是 loongagent 自己生成的、指向自己装的二进制，不是 repo 内容，绕过人工 trust 不破坏 `security-trust.md` 的边界（repo 内容的 trust gate 照旧）。`loongagent mcp trust` 信任项目 pair，并顺手刷新在场但 inert 的 reverse pair 的记录；若工作区里只有 reverse pair 而没有 `.loongagent/mcp.toml`，命令拒绝替会话的 pair 作答——那对文件属于 reverse 二进制，由它在写出时自行信任。实现时在 `docs/design/security-trust.md` 加一节说明（`.reverse/mcp.toml` 细节以本节为准），`docs/design/mcp-client.md` §1 已写明"第二个 manifest 来源"。
 
 **生命周期与隔离（用户明确要求）**：逆向工具只允许出现在 reverse 会话里，不得影响普通工作的工具选择。靠两条保证：
 

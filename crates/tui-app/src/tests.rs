@@ -501,7 +501,7 @@ fn a_prefix_narrows_the_menu_and_says_what_the_command_will_do() {
     let screen = draw(&mut app, 100, 24);
     assert!(screen.contains("/yolo"), "the match is offered: {screen}");
     assert!(
-        shows(&screen, "打开或关闭确认提示"),
+        shows(&screen, "关掉确认提示，删东西和外发仍然会问"),
         "and what it does is beside it: {screen}"
     );
     assert!(
@@ -511,7 +511,7 @@ fn a_prefix_narrows_the_menu_and_says_what_the_command_will_do() {
     // The prompt title carries the same sentence, because that is where the person
     // is looking when the menu is not in the way.
     assert!(
-        box_titles(&screen).contains(&despaced("打开或关闭确认提示")),
+        box_titles(&screen).contains(&despaced("关掉确认提示，删东西和外发仍然会问")),
         "{screen}"
     );
 }
@@ -529,7 +529,7 @@ fn the_command_menu_is_visible_while_a_turn_runs() {
         "the turn still says it is working: {screen}"
     );
     assert!(
-        screen.contains("/yolo") && shows(&screen, "打开或关闭确认提示"),
+        screen.contains("/yolo") && shows(&screen, "关掉确认提示，删东西和外发仍然会问"),
         "and the command being typed is still offered: {screen}"
     );
 }
@@ -1009,7 +1009,7 @@ fn tab_walks_the_folds_and_enter_shows_what_they_hide() {
     assert_eq!(app.handle_key(key(KeyCode::Tab)), Action::None);
     assert_eq!(app.fold, Some(7));
     let selected = app
-        .visible_lines(20)
+        .visible_lines(20, 72)
         .into_iter()
         .find(|line| {
             line.spans
@@ -2450,7 +2450,7 @@ fn a_command_under_yolo_keeps_its_hint() {
     let screen = draw(&mut app, 110, 24);
     let titles = box_titles(&screen);
     assert!(
-        titles.contains(&despaced("打开或关闭确认提示")),
+        titles.contains(&despaced("关掉确认提示，删东西和外发仍然会问")),
         "the hint is on the box: {screen}"
     );
     assert!(titles.contains("免确认"), "{screen}");
@@ -3004,6 +3004,171 @@ fn a_long_server_note_wraps_instead_of_being_clipped() {
     let screen = draw(&mut app, 40, 24);
     assert!(shows(&screen, "[skills] workspace:"), "{screen}");
     assert!(shows(&screen, "writing-skills"), "{screen}");
+}
+
+/// Purpose: The rows one line is drawn on at a page width, as plain text, through the same path the page uses.
+/// Contract: builds rows through `push_wrapped`; reads no screen state.
+fn wrapped_text(text: &str, width: u16) -> Vec<String> {
+    let mut rows = Vec::new();
+    push_wrapped(&mut rows, Line::from(text.to_string()), width, 0);
+    rows.iter().map(|row| line_text(&row.line)).collect()
+}
+
+/// Purpose: A line wider than the page is wrapped onto the next rows, so nothing is lost at the right edge.
+#[test]
+fn a_long_line_wraps_instead_of_being_cut_at_the_right_edge() {
+    let mut app = App::new("s", "v");
+    app.logo = false;
+    app.push_lines(vec!["x".repeat(100)]);
+    let screen = draw(&mut app, 40, 12);
+
+    let rows: Vec<&str> = screen.lines().collect();
+    assert!(
+        rows.iter().all(|row| row.chars().count() <= 40),
+        "no row is wider than the page: {screen}"
+    );
+    // Every character is on screen somewhere, in order: 100 x's over three rows.
+    let body: String = rows
+        .iter()
+        .filter(|row| row.chars().all(|ch| ch == 'x'))
+        .flat_map(|row| row.chars())
+        .collect();
+    assert_eq!(body, "x".repeat(100), "{screen}");
+}
+
+/// Purpose: A wrapped line breaks between words when it can, and only in the middle of a word when it must.
+#[test]
+fn a_wrapped_line_breaks_between_words_when_it_can() {
+    let text = wrapped_text("cargo test --workspace --all-targets", 20);
+    assert_eq!(text, vec!["cargo test ", "--workspace ", "--all-targets"]);
+
+    // A word too long for the page is still shown, in pieces, rather than cut.
+    let text = wrapped_text("aaaaaaaaaaaa", 5);
+    assert_eq!(text, vec!["aaaaa", "aaaaa", "aa"]);
+}
+
+/// Purpose: A wide glyph is never cut in half, because half of it is not a character.
+#[test]
+fn a_wrapped_wide_glyph_is_never_cut_in_half() {
+    let text = wrapped_text(&"中".repeat(20), 21);
+    assert_eq!(text, vec!["中".repeat(10), "中".repeat(10)]);
+
+    // A page one column wide still holds one glyph per row: it cannot hold less.
+    assert_eq!(wrapped_text("中中", 1).len(), 2);
+}
+
+/// Purpose: Every row of a wrapped prompt keeps the band, so the band says where the prompt ends.
+#[test]
+fn a_wrapped_prompt_keeps_its_band_on_every_row() {
+    use ratatui::style::Color;
+    let band = Color::Rgb(255, 255, 204);
+    let mut app = App::new("s", "v");
+    app.logo = false;
+    app.push_lines(vec!["你：remember this for the whole day".to_string()]);
+    let buffer = drawn_buffer(&mut app, 24, 12);
+
+    // "the whole day" spilled onto the second row; it is still part of the prompt.
+    let (_, y) = cell_of(&buffer, "whole");
+    assert_eq!(buffer[(0, y)].bg, band, "the band reaches the second row");
+    assert_eq!(buffer[(23, y)].bg, band, "and the whole width of it");
+}
+
+/// Purpose: Copying across a wrap joins the pieces of one line, and joins two lines with a newline.
+#[test]
+fn a_selection_over_a_wrapped_line_copies_the_line_not_the_wrap() {
+    let mut app = App::new("s", "v");
+    app.logo = false;
+    app.push_lines(vec![
+        "alpha beta gamma delta epsilon".to_string(),
+        "second line".to_string(),
+    ]);
+    let buffer = drawn_buffer(&mut app, 20, 12);
+    let (x, y) = cell_of(&buffer, "alpha");
+
+    // From the start of the line to the ninth column of the row the wrap put it on.
+    app.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), x, y));
+    app.handle_mouse(mouse_at(
+        MouseEventKind::Drag(MouseButton::Left),
+        x + 9,
+        y + 1,
+    ));
+    assert_eq!(
+        app.handle_mouse(mouse_at(
+            MouseEventKind::Up(MouseButton::Left),
+            x + 9,
+            y + 1
+        )),
+        Action::CopyText("alpha beta gamma delta eps".to_string()),
+        "one line, joined where the page wrapped it"
+    );
+
+    // Two record lines still copy as two lines.
+    let (x, y) = cell_of(&buffer, "alpha");
+    let (_, second) = cell_of(&buffer, "second");
+    app.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), x, y));
+    app.handle_mouse(mouse_at(
+        MouseEventKind::Drag(MouseButton::Left),
+        x + 2,
+        second,
+    ));
+    assert_eq!(
+        app.handle_mouse(mouse_at(
+            MouseEventKind::Up(MouseButton::Left),
+            x + 2,
+            second
+        )),
+        Action::CopyText("alpha beta gamma delta epsilon\nse".to_string()),
+        "a real line break is still a newline"
+    );
+}
+
+/// Purpose: The page scrolls in the rows it draws, so a wrapped line can be read from its start.
+#[test]
+fn the_scroll_counts_drawn_rows_not_record_lines() {
+    let mut app = App::new("s", "v");
+    app.logo = false;
+    app.push_lines(vec![format!("head{}", "y".repeat(100))]);
+    let _ = drawn_buffer(&mut app, 40, 12);
+    assert_eq!(
+        app.scroll_total, 3,
+        "one record line of 104 columns is three rows of 40"
+    );
+
+    // At the bottom the newest rows are shown; one row back shows the start of the line.
+    let bottom = app.visible_lines(2, 40);
+    assert!(
+        line_text(&bottom[0]).starts_with("yyyy"),
+        "the window starts below the head: {:?}",
+        line_text(&bottom[0])
+    );
+    app.scroll = 1;
+    let back = app.visible_lines(2, 40);
+    assert!(
+        line_text(&back[0]).starts_with("head"),
+        "scrolling back reaches the head: {:?}",
+        line_text(&back[0])
+    );
+}
+
+/// Purpose: An open fold wraps too — its output is the same page, only with one thing in it.
+#[test]
+fn an_open_fold_wraps_its_long_line_too() {
+    let mut app = App::new("s", "v");
+    app.logo = false;
+    app.push_lines(vec!["← ok".to_string()]);
+    app.open = Some(OpenFold {
+        marker: 0,
+        lines: vec![format!("start{}", "z".repeat(80))],
+        scroll: 0,
+    });
+    let screen = draw(&mut app, 40, 12);
+    assert!(shows(&screen, "start"), "{screen}");
+    let tail: String = screen.chars().filter(|ch| *ch == 'z').collect();
+    assert_eq!(
+        tail,
+        "z".repeat(80),
+        "the tail of the line is readable: {screen}"
+    );
 }
 
 /// Purpose: The character is drawn as red pixels, not as a font glyph on a coloured block.
@@ -6033,4 +6198,18 @@ fn up_with_no_history_leaves_the_line_and_the_page_alone() {
     app.handle_key(key(KeyCode::Down));
     assert_eq!(app.input, "draft");
     assert_eq!(app.scroll, 0);
+}
+
+/// Purpose: A record line a thousand rows wide wraps all of it, instead of overflowing the row arithmetic.
+#[test]
+fn a_line_a_thousand_rows_long_wraps_all_of_it() {
+    let mut app = App::new("s", "v");
+    app.logo = false;
+    app.push_lines(vec!["q".repeat(100_000)]);
+    let screen = draw(&mut app, 100, 30);
+    assert_eq!(app.scroll_total, 1000, "100000 columns in rows of 100");
+    assert!(
+        screen.lines().all(|row| row.chars().count() <= 100),
+        "and no row is wider than the page"
+    );
 }

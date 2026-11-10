@@ -33,12 +33,17 @@ reaches the screen.
 The page is a window over `lines`, or over an open fold, or over the live answer. Each draw
 records, for every conversation row on screen, its index in that body and its plain text. A
 mouse event looks up the row under the pointer and snaps to the glyph in that cell; the logo
-and banner rows above the body are not selectable. Columns are clipped to the page width,
-which is also how a long line is drawn: the page does not wrap.
+and banner rows above the body are not selectable.
+
+The page **wraps**: a line wider than the page is drawn on as many rows as it needs, breaking
+between words when it can and inside one when it must, and never inside a CJK glyph. So a
+conversation row on screen is a fragment of a transcript line, and the row count the scroll
+moves through is that of the fragments, not of the lines. The scrollbar and the `[first/total]`
+on the status bar count the same fragments.
 
 ## 3. Copy
 
-On release the selected text — lines joined with `\n`, with no padding — takes the same road
+On release the selected text — rows joined with `\n`, with no padding — takes the same road
 as `/copy`, and every road at once: the window system's clipboard when there is a display,
 OSC 52 for a terminal that honours it, and a session-named file that always works. The first
 is what makes copy work on GNOME Terminal, which silently discards OSC 52; the second is what
@@ -46,6 +51,11 @@ reaches a remote session; the file is the honest fallback. The highlight stays a
 release as the feedback that something was copied; a right-click copies the same text again
 and drops it, the "done" a terminal gives. Nothing is added to the transcript, because a row
 saying "copied" is one more line to scroll past. An empty selection copies nothing.
+
+A newline means the record has one. The rows the page wrapped join without one, so copying a
+wrapped paragraph gives back the paragraph as it was written rather than the shape of the
+window: a paste elsewhere does not inherit the terminal's width. The same holds for the
+prompt, which wraps its own text.
 
 ## 4. What it does not do
 

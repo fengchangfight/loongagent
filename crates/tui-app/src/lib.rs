@@ -296,20 +296,20 @@ fn line_text(line: &Line<'_>) -> String {
 /// Up: `App::selection_text`.
 /// Down: `unicode_width` for the column measurement.
 /// Verify: `cargo test -p loong-tui-app`.
-fn slice_cells(text: &str, from: u16, to: u16, width: u16) -> String {
+fn slice_cells(text: &str, from: usize, to: usize, width: usize) -> String {
     use unicode_width::UnicodeWidthChar;
     let to = to.min(width);
     if from >= to {
         return String::new();
     }
     let mut out = String::new();
-    let mut column = 0u16;
+    let mut column = 0usize;
     for ch in text.chars() {
         if column >= width || column >= to {
             break;
         }
-        let glyph = ch.width().unwrap_or(0) as u16;
-        let end = column.saturating_add(glyph);
+        let glyph = ch.width().unwrap_or(0);
+        let end = column + glyph;
         // A zero-width mark belongs to the glyph before it; either cell of a wide glyph
         // takes the whole of it.
         let hit = if glyph == 0 {
@@ -366,6 +366,135 @@ fn wrap_note(note: &str, width: usize) -> Vec<String> {
     }
     lines.push(format!("· {rest}"));
     lines
+}
+
+/// Purpose: The column range of each row a line is drawn on, breaking between words when it can and inside one when it must.
+/// Serves: `push_wrapped`.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `push_wrapped`.
+/// Down: `unicode_width` for the column measurement.
+/// Verify: `cargo test -p loong-tui-app`.
+/// Where one line breaks when the page is `width` columns wide.
+///
+/// Columns, not characters, and a wide character is never split: half of `中` is not a
+/// character, so a row that cannot hold the whole of it ends before it. The space a row
+/// breaks at stays on the row it ends — invisible, and it is what lets a copy of two
+/// wrapped rows read back as the one line that was written.
+fn wrap_columns(text: &str, width: usize) -> Vec<(usize, usize)> {
+    use unicode_width::UnicodeWidthChar;
+    let width = width.max(1);
+    // A character is never narrower than the bytes it is written in, so a line of at most
+    // `width` bytes cannot be wider than the page. That is the common case — a line that
+    // fits — and it needs no measuring at all. `usize::MAX` as the end is the whole line;
+    // the one range it returns is never sliced.
+    if text.len() <= width && !text.contains('\n') {
+        return vec![(0, usize::MAX)];
+    }
+    let mut rows = Vec::new();
+    // Where this row starts in the line, and how much of the width it has used.
+    let mut start = 0usize;
+    let mut column = 0usize;
+    // The used width at the last space in this row: the preferred place to break.
+    let mut space: Option<usize> = None;
+    for ch in text.chars() {
+        let glyph = ch.width().unwrap_or(0);
+        if ch == '\n' {
+            rows.push((start, start + column));
+            start += column;
+            column = 0;
+            space = None;
+            continue;
+        }
+        if glyph > 0 && column + glyph > width {
+            let cut = space.filter(|used| *used > 0).unwrap_or(column);
+            if cut == 0 {
+                // One glyph wider than the whole row: it goes on a row of its own rather
+                // than being cut, because half a character is not a character.
+                rows.push((start, start + glyph));
+                start += glyph;
+                space = None;
+                continue;
+            }
+            rows.push((start, start + cut));
+            start += cut;
+            column -= cut;
+            space = None;
+        }
+        column += glyph;
+        if ch == ' ' {
+            space = Some(column);
+        }
+    }
+    // A row that ended by taking one over-wide glyph has nothing left in it: the page
+    // would show an empty row between every pair of characters.
+    if column > 0 || rows.is_empty() {
+        rows.push((start, start + column));
+    }
+    rows
+}
+
+/// Purpose: The part of one styled line between two display columns, so a wrapped row keeps the colours of the line it came from.
+/// Serves: `push_wrapped`.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `push_wrapped`.
+/// Down: `slice_cells` and `unicode_width` for the column measurement.
+/// Verify: `cargo test -p loong-tui-app`.
+fn slice_line(line: &Line<'static>, from: usize, to: usize) -> Line<'static> {
+    use unicode_width::UnicodeWidthStr;
+    let mut spans = Vec::new();
+    let mut column = 0usize;
+    for span in &line.spans {
+        let width = span.content.as_ref().width();
+        let (start, end) = (column, column + width);
+        column = end;
+        if end <= from || start >= to {
+            continue;
+        }
+        let text = slice_cells(
+            span.content.as_ref(),
+            from.saturating_sub(start),
+            to.min(end).saturating_sub(start),
+            width,
+        );
+        if !text.is_empty() {
+            spans.push(Span::styled(text, span.style));
+        }
+    }
+    let mut out = Line::from(spans);
+    out.style = line.style;
+    out.alignment = line.alignment;
+    out
+}
+
+/// Purpose: Put one line's rows on the page, carrying the prompt's band and the record line they came from.
+/// Serves: `App::body_rows`.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `App::body_rows`.
+/// Down: `wrap_columns`, `slice_line`, `line_text` and `classify`.
+/// Verify: `cargo test -p loong-tui-app`.
+fn push_wrapped(rows: &mut Vec<BodyRow>, line: Line<'static>, width: u16, from_line: usize) {
+    let text = line_text(&line);
+    // The band is decided once, from the line as it was written: a wrapped fragment of a
+    // prompt does not begin with `你：`, and reading the fragment would lose the band.
+    let band = matches!(classify(&text), LineKind::User);
+    let ranges = wrap_columns(&text, width as usize);
+    if ranges.len() <= 1 {
+        rows.push(BodyRow {
+            line,
+            band,
+            soft: false,
+            from_line,
+        });
+        return;
+    }
+    for (at, (from, to)) in ranges.into_iter().enumerate() {
+        rows.push(BodyRow {
+            line: slice_line(&line, from, to),
+            band,
+            soft: at > 0,
+            from_line,
+        });
+    }
 }
 
 /// Purpose: One pending approval as the screen needs it: the request id, action class, reason, tool and arguments.
@@ -689,7 +818,8 @@ struct PageMap {
     area: ratatui::layout::Rect,
     /// The first body row's offset from the page's top.
     body_top: u16,
-    /// The body index of the first body row, so a scrolled page still maps to the right line.
+    /// The body index of the first body row, so a scrolled page still maps to the right row.
+    /// A body index counts drawn rows, which is what `App::body_rows` makes of the record.
     body_base: usize,
     /// The plain text of every body row on screen, top to bottom.
     body: Vec<String>,
@@ -697,9 +827,34 @@ struct PageMap {
     /// the selection's reverse video. Same coordinates as `body`: the band is about where
     /// a row sits, and scrolling the row away scrolls the band away.
     band: Vec<bool>,
+    /// Which body rows are the page's own wrapping of the row above, not a new line in the
+    /// record. A copy joins those without a newline, because the reader never typed one.
+    soft: Vec<bool>,
     /// The prompt's own map, or `None` before the first frame. Empty `rows` (an empty
     /// draft) mean there is nothing to select.
     input: Option<InputMap>,
+}
+
+/// Purpose: One row the page draws: a fragment of one record line, with the band and the wrap it belongs to.
+/// Serves: `App::body_rows`, `App::draw` and `App::visible_lines`.
+/// Design: `docs/design/surfaces.md` §3; `docs/design/tui-selection.md` §2.
+/// Up: `App::body_rows` builds them.
+/// Down: `App::draw` reads its line, band and wrap; `App::visible_lines` reads `line` and `from_line`.
+/// Verify: `cargo test -p loong-tui-app`.
+#[derive(Debug, Clone)]
+struct BodyRow {
+    /// The row as it is drawn, styling included. The plain text a selection copies is
+    /// read back from it when the row reaches the screen, not kept beside it: a long
+    /// transcript is mostly rows nobody is looking at.
+    line: Line<'static>,
+    /// Whether the row is part of a prompt, and so carries the band.
+    band: bool,
+    /// Whether this row is a continuation of the one above: the page wrapped the line
+    /// there, so a copy joins the two without a newline.
+    soft: bool,
+    /// The record line this row came from — an index into the transcript, or into an open
+    /// fold's lines — so a window can find the row a line starts on.
+    from_line: usize,
 }
 
 /// Purpose: The prompt's geometry and plain text for one frame, so the mouse can select and copy what is being typed.
@@ -3420,11 +3575,11 @@ impl App {
         Some((at as usize, column))
     }
 
-    /// Purpose: The selected text in reading order, lines joined by `\n` and clipped to the page's width.
+    /// Purpose: The selected text in reading order, a newline only where the record has one, clipped to the page's width.
     /// Serves: `handle_mouse`'s Up arm.
     /// Design: `docs/design/tui-selection.md` §3.
     /// Up: `App::handle_mouse`.
-    /// Down: `slice_cells`.
+    /// Down: `slice_cells` and `PageMap::soft`.
     /// Verify: `cargo test -p loong-tui-app`.
     fn selection_text(&self) -> String {
         let (Some(select), Some(page)) = (self.select.as_ref(), self.page.as_ref()) else {
@@ -3435,19 +3590,16 @@ impl App {
         } else {
             (select.head, select.anchor)
         };
-        // A wrap in the prompt is a soft break — the reader never typed a newline there —
-        // so its rows join without one. The conversation's rows are real lines and keep
-        // their `\n`.
-        let joiner = if select.area == SelectionArea::Input {
-            ""
-        } else {
-            "\n"
-        };
-        let mut rows = Vec::new();
+        // A wrap is a soft break — the reader never typed a newline there — so those rows
+        // join without one. That is true of the prompt, which wraps its own text, and of
+        // the conversation's rows the page wrapped; a row that begins a record line keeps
+        // its `\n`.
+        let mut out = String::new();
+        let mut first = true;
         for at in start.0..=end.0 {
             let from = if at == start.0 { start.1 } else { 0 };
             let to = if at == end.0 { end.1 } else { u16::MAX };
-            let row = match select.area {
+            let (row, soft) = match select.area {
                 SelectionArea::Input => {
                     let Some(input) = page.input.as_ref() else {
                         continue;
@@ -3455,7 +3607,10 @@ impl App {
                     let Some(text) = input.rows.get(at) else {
                         continue;
                     };
-                    slice_cells(text, from, to, input.width)
+                    (
+                        slice_cells(text, from as usize, to as usize, input.width as usize),
+                        true,
+                    )
                 }
                 SelectionArea::Page => {
                     let Some(index) = at.checked_sub(page.body_base) else {
@@ -3464,12 +3619,21 @@ impl App {
                     let Some(text) = page.body.get(index) else {
                         continue;
                     };
-                    slice_cells(text, from, to, page.area.width)
+                    let soft = page.soft.get(index).copied().unwrap_or(false);
+                    (
+                        slice_cells(text, from as usize, to as usize, page.area.width as usize),
+                        soft,
+                    )
                 }
             };
-            rows.push(row);
+            if first {
+                first = false;
+            } else if !soft {
+                out.push('\n');
+            }
+            out.push_str(&row);
         }
-        rows.join(joiner)
+        out
     }
 
     /// Purpose: Reverse the selected cells after the page is drawn, so a selection is visible without touching the transcript.
@@ -3673,56 +3837,95 @@ impl App {
     /// Serves: `App::draw` and the scrolling tests.
     /// Design: `docs/design/surfaces.md` §3.
     /// Up: `App::draw` and the tests.
-    /// Down: `App::live_lines`, `App::max_scroll`, `App::transcript_line` and `styled`.
+    /// Down: `App::body_rows`, `App::transcript_line` and `styled`.
     /// Verify: `cargo test -p loong-tui-app`.
     /// The scrollback the reader should see at this height.
     ///
     /// An open fold takes the whole area. It is the one thing on screen the reader asked
     /// to look at, and printing the full output beside the summary of itself would be two
     /// copies of one thing — where the summary is, the output goes.
-    pub fn visible_lines(&self, height: usize) -> Vec<Line<'static>> {
+    ///
+    /// The window counts the rows the page draws, which is not the number of lines in the
+    /// record: a line wider than the page takes several rows, and scrolling has to be able
+    /// to walk back over each of them.
+    pub fn visible_lines(&self, height: usize, width: u16) -> Vec<Line<'static>> {
         let rows = height.max(1);
+        let body = self.body_rows(width);
+        let total = body.len();
+        let shown = |start: usize, end: usize| -> Vec<Line<'static>> {
+            body[start..end]
+                .iter()
+                .map(|row| row.line.clone())
+                .collect()
+        };
         if let Some(open) = &self.open {
             // Read the way a terminal reads a command's output: the end is what you are
             // looking at, and paging back walks towards the start.
-            let end = open.lines.len().saturating_sub(open.scroll);
+            let end = total.saturating_sub(open.scroll);
             let start = end.saturating_sub(rows);
-            return (start..end).map(|at| styled(&open.lines[at])).collect();
+            return shown(start, end);
         }
         // What the model is writing right now is the **end of the transcript**, not a
         // separate thing below it. Appending it after a full window is what made the live
         // text stop moving: the box showed the beginning of the answer and clipped the
         // newest lines off the bottom, so a long answer appeared to freeze after one
         // screenful. Live lines are part of the content, and the window moves with them.
-        let live: Vec<&str> = self.live_lines();
-        let total = self.lines.len() + live.len();
         // Scrolling back can only reveal what is above the window, and a transcript shorter
         // than the window has nothing above it. Asking for more than there is used to push
         // lines off the *end* instead: the newest output vanished while `up` was pressed,
         // which is the opposite of what the key means.
-        let mut end = total - self.scroll.min(self.max_scroll(rows));
+        let mut end = total.saturating_sub(self.scroll.min(total.saturating_sub(rows)));
         let mut start = end.saturating_sub(rows);
         // A selection nobody can see is not a selection: when Tab has walked to a fold
-        // that has scrolled out of the window, the window follows it.
+        // that has scrolled out of the window, the window follows the row that fold's line
+        // starts on.
         if let Some(fold) = self.fold {
-            if fold >= end {
-                end = fold + 1;
-                start = end.saturating_sub(rows);
-            } else if fold < start {
-                start = fold.saturating_sub(rows / 2);
-                end = (start + rows).min(total);
+            if let Some(at) = body
+                .iter()
+                .position(|row| row.from_line == fold && !row.soft)
+            {
+                if at >= end {
+                    end = at + 1;
+                    start = end.saturating_sub(rows);
+                } else if at < start {
+                    start = at.saturating_sub(rows / 2);
+                    end = (start + rows).min(total);
+                }
             }
         }
-        (start..end)
-            .map(|at| match self.lines.get(at) {
-                Some(_) => self.transcript_line(at),
-                None => live_line(live[at - self.lines.len()]),
-            })
-            .collect()
+        shown(start, end)
+    }
+
+    /// Purpose: The page's body as the rows the reader sees: every record line wrapped to the page width, an open fold included.
+    /// Serves: `App::draw` and `App::visible_lines`.
+    /// Design: `docs/design/surfaces.md` §3; `docs/design/tui-selection.md` §2.
+    /// Up: `App::draw` and `App::visible_lines`.
+    /// Down: `App::transcript_line`, `App::live_lines`, `styled` and `push_wrapped`.
+    /// Verify: `cargo test -p loong-tui-app`.
+    /// Every row of the page, top to bottom.
+    ///
+    /// One place decides how a record line becomes rows, so the drawing, the scroll and the
+    /// mouse selection can never disagree about which row is which.
+    fn body_rows(&self, width: u16) -> Vec<BodyRow> {
+        let mut rows = Vec::new();
+        let Some(open) = self.open.as_ref() else {
+            for at in 0..self.lines.len() {
+                push_wrapped(&mut rows, self.transcript_line(at), width, at);
+            }
+            let live = self.live_lines();
+            for (at, line) in live.iter().enumerate() {
+                push_wrapped(&mut rows, live_line(line), width, self.lines.len() + at);
+            }
+            return rows;
+        };
+        for (at, line) in open.lines.iter().enumerate() {
+            push_wrapped(&mut rows, styled(line), width, at);
+        }
+        rows
     }
 
     /// Purpose: The answer being written this moment, as lines; empty once it settles into the transcript.
-    /// Contract: called by `visible_lines` and `max_scroll`; splits `streaming`.
+    /// Contract: called by `body_rows`; splits `streaming`.
     /// The answer being written this moment, as lines. Empty once it settles into the
     /// transcript, which is the only copy that is recorded.
     fn live_lines(&self) -> Vec<&str> {
@@ -3731,14 +3934,6 @@ impl App {
         } else {
             self.streaming.split('\n').collect()
         }
-    }
-
-    /// Purpose: How far back the view can go with a window this tall, capped so a short transcript cannot scroll.
-    /// Contract: called by `visible_lines` and `draw`; reads `lines` and `live_lines`.
-    /// How far back the view can go with a window this tall: everything above it. A
-    /// transcript shorter than the window has nothing above it, so the answer is zero.
-    fn max_scroll(&self, rows: usize) -> usize {
-        (self.lines.len() + self.live_lines().len()).saturating_sub(rows.max(1))
     }
 
     /// Purpose: One transcript row with its fold marker and keyboard highlight added, leaving the record itself unchanged.
@@ -3928,10 +4123,7 @@ impl App {
         } else {
             self.banner_lines(width)
         };
-        let body_rows = match &self.open {
-            Some(open) => open.lines.len(),
-            None => self.lines.len() + self.live_lines().len(),
-        };
+        let body = self.body_rows(width);
         let decision = if decision_height > 0 {
             self.approval_lines(width, decision_height)
         } else {
@@ -3949,7 +4141,7 @@ impl App {
         };
         let (input, caret_row, caret_column) = self.input_lines(width, input_rows);
 
-        let total = prefix.len() + body_rows;
+        let total = prefix.len() + body.len();
         // Sticky scroll: while the reader is away from the bottom, content that arrives
         // must not push the page. Adding the growth to the offset keeps the same rows on
         // screen — which is what makes selecting a long block possible while a turn runs.
@@ -3969,40 +4161,30 @@ impl App {
         let body_start = prefix.len();
         let mut page: Vec<Line> = Vec::with_capacity(last - first);
         for at in first..last {
-            if at < body_start {
-                page.push(prefix[at].clone());
-            } else {
-                let index = at - body_start;
-                page.push(match &self.open {
-                    Some(open) => styled(&open.lines[index]),
-                    None if index < self.lines.len() => self.transcript_line(index),
-                    None => {
-                        let live = self.live_lines();
-                        live_line(live[index - self.lines.len()])
-                    }
-                });
-            }
+            page.push(match at.checked_sub(body_start) {
+                Some(index) => body[index].line.clone(),
+                None => prefix[at].clone(),
+            });
         }
         // Remember what the page shows before it is consumed: a mouse event maps a cell
         // back to one of these body rows, and the copy reads the same plain text.
-        let body_from = body_start.max(first).min(last);
-        let body: Vec<String> = page[body_from - first..]
-            .iter()
-            .map(|line| line_text(line))
-            .collect();
-        // The prompt band rides the same `PageMap` the selection reads, so the two never
-        // disagree about which row is a prompt: it is true exactly where `classify` said
-        // `LineKind::Prompt`, and scrolling a row away scrolls its band away with it.
-        let band: Vec<bool> = body
-            .iter()
-            .map(|text| matches!(classify(text), LineKind::User))
-            .collect();
+        let body_from = body_start.max(first);
+        let visible: &[BodyRow] = if body_from < last {
+            &body[body_from - body_start..last - body_start]
+        } else {
+            &[]
+        };
+        // The prompt band and the wrap ride the same `PageMap` the selection reads, so the
+        // two never disagree about which row is a prompt: the band is true exactly where
+        // `classify` said `LineKind::User` on the line the row came from, and a row that
+        // continues the row above joins it without a newline when it is copied.
         self.page = Some(PageMap {
             area: view,
             body_top: (body_from - first) as u16,
-            body_base: body_from.saturating_sub(body_start),
-            body,
-            band,
+            body_base: body_from - body_start,
+            body: visible.iter().map(|row| line_text(&row.line)).collect(),
+            band: visible.iter().map(|row| row.band).collect(),
+            soft: visible.iter().map(|row| row.soft).collect(),
             input: None,
         });
         frame.render_widget(Paragraph::new(page), view);

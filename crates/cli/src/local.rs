@@ -1024,18 +1024,22 @@ pub(crate) fn configure_local(
     };
     let provider = loong_config::catalog::provider(&choice.provider)
         .ok_or_else(|| format!("catalog has no provider {:?}", choice.provider))?;
-    let probe = loong_providers::probe::Probe::Ok {
-        models: choice
-            .validation
-            .models
-            .iter()
-            .map(|(id, window)| loong_providers::probe::ModelInfo {
-                id: id.clone(),
-                context_window: *window,
-            })
-            .collect(),
-    };
-    adopt_local_model(&home, provider, &choice.key, &probe, already)?;
+    // The wizard's ticked rows *are* the selection — it is a picker, and the web panel
+    // draws the same rows (web-surface.md §6). Ticking nothing means the person said
+    // nothing, which is not the same as "remove every model this provider had": an
+    // endpoint that answers with an empty list must not empty the file.
+    let ticked: Vec<LocalModel> = choice
+        .validation
+        .models
+        .iter()
+        .map(|(id, window)| LocalModel {
+            name: id.clone(),
+            provider: format!("{}/{}", provider.id, id),
+            context_window: *window,
+        })
+        .collect();
+    let models = (!ticked.is_empty()).then_some(ticked);
+    adopt_local_model(&home, provider, &choice.key, models, already)?;
     Ok(())
 }
 
@@ -1248,24 +1252,30 @@ fn probe_provider(
     }
 }
 
-/// Purpose: Write the key to the env file and the models to `local.toml`, appending rather than replacing.
-/// Serves: `configure_local` once the wizard returns a validated choice.
+/// Purpose: Write the key to the env file and the chosen models to `local.toml`, appending rather than replacing.
+/// Serves: `configure_local` and `add_model_from_surface` once a choice is settled.
 /// Design: `docs/design/config-routing.md` §3 and §5.
-/// Up: `configure_local`; no other caller.
-/// Down: `write_env_secret`, `replacement_models`, `upsert_local_models` and `std::env::set_var`.
-/// Verify: `cargo test -p loongagent --test local_mode`.
+/// Up: `configure_local` and `add_model_from_surface`; no other caller.
+/// Down: `write_env_secret`, `upsert_local_models` and `std::env::set_var`.
+/// Verify: `cargo test -p loongagent` (`local.rs`), `--test local_mode`.
 /// Write the key where a secret belongs, and the models into the **local** file.
 ///
 /// Appending, not replacing: a second run is how somebody adds their *second* provider,
 /// and the models they configured last time must survive it. Re-adding a provider
 /// replaces that provider's own models and leaves every other provider alone.
+///
+/// `models` is the selection and both of its shapes mean something different. `None` is
+/// "nothing was chosen, so say nothing": the wizard reaches this when the provider named
+/// no models and the vendor's documented list is empty too. `Some(vec![])` is "chose
+/// nothing", which removes that provider's models and keeps its key — the panel's way of
+/// turning a model off (web-surface.md §6).
 fn adopt_local_model(
     home: &Path,
     provider: &loong_config::catalog::Provider,
     key: &str,
-    probe: &loong_providers::probe::Probe,
+    models: Option<Vec<LocalModel>>,
     had_models: bool,
-) -> Result<(), String> {
+) -> Result<Vec<String>, String> {
     // A loopback provider has no secret, and writing an empty one would create a file
     // that looks like a key store with a blank key in it.
     if !key.trim().is_empty() {
@@ -1276,7 +1286,7 @@ fn adopt_local_model(
     }
 
     let path = loong_config::local_profile_path();
-    let changed = match replacement_models(probe, &provider.id) {
+    let changed = match models {
         Some(models) => upsert_local_models(&path, &provider.id, models)?,
         // The provider answered without naming anything. The key is worth keeping — it
         // checked out — but the *models* are not ours to remove, and that is the whole
@@ -1306,49 +1316,220 @@ fn adopt_local_model(
              或用 `loongagent tui` 再配一个服务商。"
         );
     }
-    Ok(())
+    Ok(changed)
 }
 
-/// Purpose: What a probe's answer should replace a provider's entries with, and `None` when it named nothing.
-/// Serves: `adopt_local_model`, so an empty answer never deletes configured models.
-/// Design: `docs/design/config-routing.md` §8.
-/// Up: `adopt_local_model`; the `local.rs` tests.
-/// Down: no further call; it maps the probe.
-/// Verify: `cargo test -p loongagent`.
-/// What a probe's answer should replace this provider's entries with.
-///
-/// `None` for "the provider named nothing, so leave what is already there alone". That
-/// distinction is the whole reason this is a function: an empty list *is* a legitimate
-/// thing to write, and it deletes, so "nothing came back" and "nothing should remain" must
-/// not be the same value. Getting them confused means re-adding a provider whose list came
-/// back empty silently removes the models already configured for it — data loss dressed up
-/// as a refresh.
-fn replacement_models(
-    probe: &loong_providers::probe::Probe,
-    provider_id: &str,
-) -> Option<Vec<LocalModel>> {
-    let loong_providers::probe::Probe::Ok { models } = probe else {
-        return None;
-    };
-    if models.is_empty() {
-        return None;
-    }
-    Some(
-        models
-            .iter()
-            .map(|model| LocalModel {
-                name: model.id.clone(),
-                provider: format!("{provider_id}/{}", model.id),
-                context_window: model.context_window,
+/// Purpose: The provider catalogue as the browser panel needs it: what each one is called, and
+/// whether it wants a key at all.
+/// Serves: `model.providers`, the panel's provider list (web-surface.md §6).
+/// Design: `docs/design/config-routing.md` §8 and `docs/design/web-surface.md` §6.
+/// Up: `crate::web`'s `ModelSetup` impl; no other caller.
+/// Down: `loong_config::catalog::PROVIDERS`.
+/// Verify: `cargo test -p loongagent --test web_surface`.
+pub(crate) fn surface_providers() -> Value {
+    let providers = loong_config::catalog::PROVIDERS
+        .iter()
+        .map(|provider| {
+            json!({
+                "id": provider.id,
+                "label": provider.label,
+                "local": provider.local,
+                // A loopback provider has no secret, and asking for one is asking for a
+                // password that cannot exist (config-routing.md §8).
+                "needs_key": !provider.local,
+                "key_env": provider.key_env,
             })
-            .collect(),
-    )
+        })
+        .collect::<Vec<_>>();
+    json!({"providers": providers})
+}
+
+/// Purpose: Which provider a panel request means: the one it named, or the one the pasted key names.
+/// Serves: `surface_probe_models` and `add_model_from_surface`, the panel's two calls (web-surface.md §6).
+/// Design: `docs/design/config-routing.md` §8.
+/// Up: the two surface functions above; no other caller.
+/// Down: `loong_config::catalog::{provider, guess_from_key}`.
+/// Verify: `cargo test -p loongagent --test web_surface`.
+fn surface_provider(
+    provider_id: &str,
+    key: &str,
+) -> Result<&'static loong_config::catalog::Provider, String> {
+    let named = provider_id.trim();
+    if named.is_empty() {
+        let guessed = loong_config::catalog::guess_from_key(key);
+        let Some(id) = guessed.first() else {
+            return Err("这个 key 认不出是哪个服务商 — 请在下面选一个".to_string());
+        };
+        return loong_config::catalog::provider(id)
+            .ok_or_else(|| format!("目录里没有这个服务商：{id}"));
+    }
+    loong_config::catalog::provider(named).ok_or_else(|| format!("目录里没有这个服务商：{named}"))
+}
+
+/// Purpose: The key this machine already holds for a provider, so the panel can list models and
+/// change the selection later without the person pasting the secret again.
+/// Serves: `surface_probe_models` and `add_model_from_surface` (web-surface.md §6).
+/// Design: `docs/design/config-routing.md` §5.
+/// Up: the two surface functions above; no other caller.
+/// Down: `provider_key`, which reads what `read_env_files` put in this process at startup,
+/// including the key `adopt_local_model` wrote a moment ago.
+/// Verify: `cargo test -p loongagent --test web_surface`.
+fn surface_key(provider: &loong_config::catalog::Provider) -> Option<String> {
+    provider_key(provider).map(|(_, key)| key)
+}
+
+/// Purpose: Prove a key through the catalog's route, and report a refusal as a sentence rather
+/// than a probe value the page would have to interpret.
+/// Serves: `surface_probe_models` and `add_model_from_surface`.
+/// Design: `docs/design/config-routing.md` §8.
+/// Up: the two surface functions above; no other caller.
+/// Down: `probe_provider` and `loong_providers::probe`.
+/// Verify: `cargo test -p loongagent --test web_surface`.
+/// A key that did not check out is not written. The wizard lets a person keep going (it
+/// shows the probe and asks); a page cannot show a network error and a key field in the
+/// same breath without one of them lying, so it refuses and says why.
+fn surface_prove(
+    provider: &loong_config::catalog::Provider,
+    typed: &str,
+    stored: Option<&str>,
+) -> Result<loong_providers::probe::Probe, String> {
+    let trimmed = typed.trim();
+    // A loopback provider needs no key, and an empty one must not be sent as a header.
+    let send = if trimmed.is_empty() {
+        stored
+    } else {
+        Some(trimmed)
+    };
+    let probe = probe_provider(provider, provider_key_for_probe(provider, send));
+    match &probe {
+        loong_providers::probe::Probe::Rejected { detail, region, .. } => {
+            return Err(if *region {
+                format!("{detail}（这个 key 是另一个区域的，检查一下 endpoint）")
+            } else {
+                detail.clone()
+            })
+        }
+        loong_providers::probe::Probe::Unreachable { detail } => return Err(detail.clone()),
+        loong_providers::probe::Probe::Ok { .. } => {}
+    }
+    Ok(probe)
+}
+
+/// Purpose: What this provider offers, as rows the panel can tick — and what of it is already
+/// configured, so a second visit starts from the truth. Writes nothing.
+/// Serves: `model.probe` (web-surface.md §6).
+/// Design: `docs/design/config-routing.md` §3 and §8.
+/// Up: `crate::web`'s `ModelSetup` impl; no other caller.
+/// Down: `surface_provider`, `surface_key`, `surface_prove`, `offerable_models` and `read_local_blocks`.
+/// Verify: `cargo test -p loongagent --test web_surface`.
+/// The list is the answer to "which of these do you want", and it has to arrive **before**
+/// anything is written: a key is a statement about credentials, not about wanting every
+/// model a provider has ever published (web-surface.md §6).
+pub(crate) fn surface_probe_models(provider_id: &str, key: &str) -> Result<Value, String> {
+    let provider = surface_provider(provider_id, key)?;
+    let stored = surface_key(provider);
+    if !provider.local && key.trim().is_empty() && stored.is_none() {
+        return Err(format!(
+            "{} 还没有存过 key — 先贴一个再列模型",
+            provider.label
+        ));
+    }
+    let probe = surface_prove(provider, key, stored.as_deref())?;
+    let (offered, curated) = offerable_models(provider, &probe);
+    let blocks = read_local_blocks(&loong_config::local_profile_path());
+    let models = offered
+        .iter()
+        .map(|(name, window)| {
+            let written = format!("{}/{}", provider.id, name);
+            json!({
+                "name": name,
+                "context_window": window,
+                // Already in the file: the panel ticks it before the person does, because
+                // unticking what is configured is how a model is turned off.
+                "configured": blocks
+                    .iter()
+                    .any(|block| block.model.name == *name && block.model.provider == written),
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "provider": provider.id,
+        "label": provider.label,
+        "summary": loong_providers::probe::render(&probe),
+        // Which list this is: the endpoint's own, or the vendor's documented ids because
+        // the endpoint named none. A page that did not say so would look like it knew.
+        "curated": curated,
+        // Whether the key field can be left empty: the key is on file from an earlier add.
+        "key_on_file": stored.is_some(),
+        "models": models,
+    }))
+}
+
+/// Purpose: Add one provider's selection from the browser: prove the key when one is typed, write
+/// it, and write **exactly** the chosen `[[models]]` blocks as `loongagent local add` does.
+/// Serves: `model.add`, the panel's one button (web-surface.md §6).
+/// Design: `docs/design/config-routing.md` §3, §5 and §8.
+/// Up: `crate::web`'s `ModelSetup` impl; no other caller.
+/// Down: `surface_provider`, `surface_key`, `surface_prove`, `adopt_local_model` and `read_local_blocks`.
+/// Verify: `cargo test -p loongagent --test web_surface`.
+/// The panel's brain, and the reason it lives here rather than in `loong_web`: proving a key
+/// and writing this file are the two things the wizard already does, and a second copy of
+/// them in the web crate would be a second set of rules for the same file.
+///
+/// `models` is the selection the person made and it is written as given — a subset, or an
+/// empty list when they unticked everything, which removes this provider's models and keeps
+/// its key so they can be put back (web-surface.md §6). An empty key means the secret is
+/// already on file, so nothing is probed and nothing is written to `env`: changing which
+/// models are on is not a reason to ask for a password again.
+pub(crate) fn add_model_from_surface(
+    home: &Path,
+    provider_id: &str,
+    key: &str,
+    models: &[(String, Option<u64>)],
+) -> Result<Value, String> {
+    let provider = surface_provider(provider_id, key)?;
+    let stored = surface_key(provider);
+    if !provider.local && key.trim().is_empty() && stored.is_none() {
+        return Err(format!("{} 需要一个 API key 才能添加", provider.label));
+    }
+    if !key.trim().is_empty() {
+        surface_prove(provider, key, stored.as_deref())?;
+    }
+
+    let chosen = models
+        .iter()
+        .map(|(name, window)| LocalModel {
+            name: name.clone(),
+            provider: format!("{}/{}", provider.id, name),
+            context_window: *window,
+        })
+        .collect::<Vec<_>>();
+    let path = loong_config::local_profile_path();
+    let had_models = !read_local_blocks(&path).is_empty();
+    let written = adopt_local_model(home, provider, key, Some(chosen), had_models)?;
+    let rows = written
+        .iter()
+        .map(|name| {
+            let window = models
+                .iter()
+                .find(|(chosen, _)| chosen == name)
+                .and_then(|(_, window)| *window);
+            json!({"name": name, "context_window": window})
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "provider": provider.id,
+        "label": provider.label,
+        // The whole selection, not a delta: the page replaces this provider's rows with it,
+        // so a model that was unticked really does disappear from its list.
+        "models": rows,
+    }))
 }
 
 /// Purpose: One model in `local.toml`, as this file understands it.
-/// Serves: `LocalBlock`, `read_local_blocks` and `replacement_models`.
+/// Serves: `LocalBlock`, `read_local_blocks`, `upsert_local_models` and `add_model_from_surface`.
 /// Design: `docs/design/config-routing.md` §3.
-/// Up: `block_model` and `replacement_models` build it; `LocalBlock` carries it.
+/// Up: `block_model`, `LocalBlock::render` and the surface's selection build it; `LocalBlock` carries it.
 /// Down: no further call; it is data.
 /// Verify: `cargo test -p loongagent`.
 /// One model in `local.toml`, as this file understands it.
@@ -1400,13 +1581,13 @@ impl LocalBlock {
     }
 }
 
-/// Purpose: Add or replace one provider's models in `local.toml` by text surgery, keeping everything else byte for byte.
+/// Purpose: Write one provider's models in `local.toml` by text surgery, keeping everything else byte for byte.
 /// Serves: `adopt_local_model` and the `local.rs` tests.
 /// Design: `docs/design/config-routing.md` §3.
 /// Up: `adopt_local_model`; the `local.rs` tests.
 /// Down: `read_local_blocks`, `write_local_blocks` and `LocalBlock::render`.
 /// Verify: `cargo test -p loongagent`.
-/// Add or replace one provider's models in `local.toml`, keeping everything else.
+/// Write one provider's models in `local.toml`, keeping everything else.
 ///
 /// Deliberately **text surgery, not a re-serialize**: the file is meant to be read and
 /// edited by a person, and the comments in it are the only documentation the models
@@ -1414,25 +1595,46 @@ impl LocalBlock {
 /// them, so the blocks for this provider are swapped out in place and the rest of the
 /// file is preserved byte for byte.
 ///
-/// Returns the names it wrote, which is empty when the provider offered no models.
+/// `models` is the provider's whole new set: a model missing from it is a model that was
+/// unticked, and its block goes. A model that is still in the set is a model that stays —
+/// so its block keeps its own text, and the comment above it survives being deselected and
+/// reselected (web-surface.md §6).
+///
+/// Returns the names it wrote, which is empty when the selection is empty.
 fn upsert_local_models(
     path: &Path,
     provider_id: &str,
     models: Vec<LocalModel>,
 ) -> Result<Vec<String>, String> {
     let mut blocks = read_local_blocks(path);
-    // This provider's previous entries are being replaced, not duplicated — pasting a new
-    // key for a provider already configured should update it. Every other provider's block
-    // is left exactly as it was, comments and all.
+    // This provider's previous entries are being replaced, not duplicated — changing a
+    // provider's selection should update it. Every other provider's block is left exactly
+    // as it was, comments and all.
     let prefix = format!("{provider_id}/");
+    let previous: Vec<LocalBlock> = blocks
+        .iter()
+        .filter(|block| block.model.provider.starts_with(&prefix))
+        .cloned()
+        .collect();
     blocks.retain(|block| !block.model.provider.starts_with(&prefix));
     let names: Vec<String> = models.iter().map(|m| m.name.clone()).collect();
-    blocks.extend(models.into_iter().map(LocalBlock::render));
-    if blocks.is_empty() {
-        // Nothing was configured and nothing is being added: leave the file alone rather
-        // than writing a header with no models under it.
+    // Nothing to remove and nothing to add: an empty selection for a provider that had no
+    // models is not a reason to touch the file, and must not create one. An empty
+    // selection for a provider that *did* have them is the opposite — the whole point is
+    // that they go — so it writes, and `route_tail` takes `[router]` with them.
+    if models.is_empty() && previous.is_empty() {
         return Ok(names);
     }
+    let kept: Vec<LocalBlock> = models
+        .into_iter()
+        .map(
+            |model| match previous.iter().find(|block| block.model.name == model.name) {
+                Some(block) => block.clone(),
+                None => LocalBlock::render(model),
+            },
+        )
+        .collect();
+    blocks.extend(kept);
     write_local_blocks(path, &blocks)?;
     Ok(names)
 }
@@ -2313,45 +2515,90 @@ mod tests {
         assert!(text.contains("name = \"c\""), "{text}");
     }
 
-    /// Purpose: An empty, rejected or unreachable probe leaves configured models alone.
+    /// Purpose: A selection is written as given — unticking one model removes one model, unticking
+    /// all of them removes that provider's models and nothing else.
     #[test]
-    fn a_probe_that_named_nothing_does_not_delete_what_is_already_there() {
-        // "Nothing came back" and "nothing should remain" are different things, and an
-        // empty list means the second. Confusing them makes `local add <provider>` silently
-        // remove that provider's models whenever its list endpoint hiccups.
-        use loong_providers::probe::{ModelInfo, Probe};
+    fn an_empty_selection_removes_only_that_provider_s_models() {
+        // This is how the panel turns a model off (web-surface.md §6): the write is the
+        // selection, so a model missing from it is a model that goes. "Nothing came back
+        // from the provider" is a different value — `None` — and never reaches this
+        // function, which is why an empty provider list cannot empty the file.
+        let path = local_temp("selection");
+        upsert_local_models(
+            &path,
+            "kimi",
+            vec![
+                model("kimi-k2", "kimi/kimi-k2"),
+                model("kimi-k3", "kimi/kimi-k3"),
+            ],
+        )
+        .unwrap();
+        upsert_local_models(
+            &path,
+            "deepseek",
+            vec![model("ds-flash", "deepseek/ds-flash")],
+        )
+        .unwrap();
 
+        let written =
+            upsert_local_models(&path, "kimi", vec![model("kimi-k3", "kimi/kimi-k3")]).unwrap();
+        assert_eq!(written, vec!["kimi-k3".to_string()]);
+        let text = std::fs::read_to_string(&path).unwrap();
         assert!(
-            replacement_models(&Probe::Ok { models: Vec::new() }, "deepseek").is_none(),
-            "an empty answer leaves the file alone"
+            text.contains("kimi/kimi-k3"),
+            "the ticked one stays: {text}"
         );
-        for unreachable in [
-            Probe::Unreachable {
-                detail: "timeout".to_string(),
-            },
-            Probe::Rejected {
-                status: 401,
-                detail: "no".to_string(),
-                region: false,
-            },
-        ] {
-            assert!(
-                replacement_models(&unreachable, "deepseek").is_none(),
-                "and so does one that never arrived"
-            );
-        }
+        assert!(
+            !text.contains("kimi/kimi-k2"),
+            "the unticked one goes: {text}"
+        );
+        assert!(
+            text.contains("deepseek/ds-flash"),
+            "and the other provider is untouched: {text}"
+        );
 
-        let answered = Probe::Ok {
-            models: vec![ModelInfo {
-                id: "deepseek-flash".to_string(),
-                context_window: Some(1_048_576),
-            }],
-        };
-        let written = replacement_models(&answered, "deepseek").expect("a named model is written");
-        assert_eq!(written.len(), 1);
-        assert_eq!(written[0].name, "deepseek-flash");
-        assert_eq!(written[0].provider, "deepseek/deepseek-flash");
-        assert_eq!(written[0].context_window, Some(1_048_576));
+        let written = upsert_local_models(&path, "kimi", Vec::new()).unwrap();
+        assert!(written.is_empty());
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !text.contains("kimi/"),
+            "the provider's models are gone: {text}"
+        );
+        assert!(
+            text.contains("deepseek/ds-flash"),
+            "the other provider is still there: {text}"
+        );
+    }
+
+    /// Purpose: A model that survives a selection write keeps its own block text, so a comment
+    /// written above it is still above it afterwards.
+    #[test]
+    fn a_kept_model_keeps_its_comment_across_a_selection_write() {
+        // Turning a second model on must not re-render the first one: the comment above it
+        // is the only documentation that model has (config-routing.md §3).
+        let path = local_temp("selection-comment");
+        std::fs::write(
+            &path,
+            "# kimi-k2 是我平时用的那个\n\
+             [[models]]\n\
+             name = \"kimi-k2\"\n\
+             provider = \"kimi/kimi-k2\"\n",
+        )
+        .unwrap();
+
+        upsert_local_models(
+            &path,
+            "kimi",
+            vec![
+                model("kimi-k2", "kimi/kimi-k2"),
+                model("kimi-k3", "kimi/kimi-k3"),
+            ],
+        )
+        .unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# kimi-k2 是我平时用的那个"), "{text}");
+        assert_eq!(sections(&text, "[[models]]"), 2, "{text}");
     }
 
     /// Purpose: Deleting the model the router names moves the default to one that still exists.

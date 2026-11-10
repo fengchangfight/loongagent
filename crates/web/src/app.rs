@@ -62,6 +62,9 @@ pub enum SurfaceCall {
     Sessions,
     /// `session.delete` — the session id that was removed.
     DeleteSession(String),
+    /// `model.configured`, `model.providers` or `model.add` — answered on the socket, with
+    /// the tab's children reloaded when a model was adopted (web-surface.md §6).
+    Models,
     /// anything else: straight to the workspace's session bridge.
     Forward,
 }
@@ -117,6 +120,13 @@ pub struct Tab {
     pub seat: usize,
     /// the session id the tab is attached to; `None` until it opens or creates one
     pub attached: Option<String>,
+    /// The slot order this tab has arranged, when ctrl+left / ctrl+right moved something.
+    ///
+    /// The session answers `model.list` in *declaration* order, and a child read its profile
+    /// at startup, so a reorder has to be remembered here and laid over every later list —
+    /// otherwise the next refresh would snap the bar back (web-surface.md §4). `None` means
+    /// "never arranged", which is the declaration order and needs no interference.
+    pub model_order: Option<Vec<String>>,
 }
 
 impl State {
@@ -249,6 +259,7 @@ pub fn handle_ws(
         &Path,
         Option<&str>,
     ) -> Result<(Arc<Mutex<dyn Session>>, String), String>,
+    models: &dyn crate::ModelSetup,
 ) -> Result<(), String> {
     let mut tab = Tab::default();
     loop {
@@ -280,6 +291,7 @@ pub fn handle_ws(
                     &mut tab,
                     home,
                     start_session,
+                    models,
                     &method,
                     &request,
                     socket,
@@ -330,6 +342,7 @@ fn dispatch_surface(
         &Path,
         Option<&str>,
     ) -> Result<(Arc<Mutex<dyn Session>>, String), String>,
+    models: &dyn crate::ModelSetup,
     method: &str,
     request: &Value,
     socket: &mut tungstenite::WebSocket<TcpStream>,
@@ -485,6 +498,9 @@ fn dispatch_surface(
             sessions::known(&sessions::client_root(), &dir, open)?;
             let session_id = ensure_child(state, tab.seat, home, Some(open), start_session)?;
             tab.attached = Some(session_id.clone());
+            // An arrangement belongs to the models of one session; another session's list
+            // has its own, and carrying the old order over would reorder by accident.
+            tab.model_order = None;
             reply(
                 socket,
                 id,
@@ -503,6 +519,8 @@ fn dispatch_surface(
             // asking the child (web-surface.md §2).
             let session_id = ensure_child(state, tab.seat, home, None, start_session)?;
             tab.attached = Some(session_id.clone());
+            // A brand-new session starts on the declaration order, as a fresh tab does.
+            tab.model_order = None;
             reply(
                 socket,
                 id,
@@ -535,8 +553,372 @@ fn dispatch_surface(
             reply(socket, id, json!({"deleted": session_id}))?;
             Ok(SurfaceCall::DeleteSession(session_id.to_string()))
         }
+        "model.reorder" => {
+            // ctrl+left / ctrl+right: this moves the *current* model one slot, it does not
+            // switch to another one. Told apart from `model.select` on purpose — they are
+            // different acts and the bar has a key for each (web-surface.md §4).
+            let delta = params.get("delta").and_then(Value::as_i64).unwrap_or(0);
+            if delta != 1 && delta != -1 {
+                return Err(Error(
+                    "model.reorder takes delta: 1 (right) or -1 (left)".to_string(),
+                ));
+            }
+            // A turn owns its child for the whole of it, so asking mid-turn would either
+            // block this socket or lie. The page disables the keys; this catches the rest.
+            if workspace_busy(state, tab)? {
+                return Err(Error(
+                    "a turn is running in this workspace; reorder the models when it ends"
+                        .to_string(),
+                ));
+            }
+            let session_id = params
+                .get("session_id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .or_else(|| tab.attached.clone())
+                .ok_or_else(|| Error("model.reorder needs an open session".to_string()))?;
+            // The order to move *in* is the one the session currently declares, read now:
+            // a cached copy would be stale after `model.add`, and this is one cheap read.
+            let list = ask_child(
+                state,
+                tab,
+                home,
+                start_session,
+                &session_id,
+                "model.list",
+                &json!({"session_id": session_id}),
+            )?;
+            let names: Vec<String> = list["models"]
+                .as_array()
+                .map(|models| {
+                    models
+                        .iter()
+                        .filter_map(|m| m["name"].as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let selected = list["selected"].as_str().unwrap_or("").to_string();
+            // Walk on from what the bar is showing, not from the declaration: the session
+            // keeps answering in declaration order, so a second press would otherwise undo
+            // the first (web-surface.md §4).
+            let shown = shown_order(tab.model_order.as_deref(), &names);
+            let (order, from, to) = move_in_order(&shown, &selected, delta).map_err(Error)?;
+            // The move itself never fails: the bar is this session's arrangement, and a file
+            // that cannot be rewritten (or is not this run's to rewrite) does not unmake it.
+            // Told apart so the answer can say which happened — the TUI makes the same split
+            // and for the same reason (web-surface.md §4).
+            let (persisted, warning) = match models.save_order(&order) {
+                Ok(persisted) => (persisted, None),
+                Err(error) => (false, Some(error)),
+            };
+            tab.model_order = Some(order.clone());
+            let mut answer = list.clone();
+            answer["models"] = offerings_in_order(&list["models"], &order);
+            answer["moved"] = json!({"name": selected, "from": from + 1, "to": to + 1});
+            answer["persisted"] = json!(persisted);
+            if let Some(warning) = warning {
+                answer["warning"] = json!(warning);
+            }
+            reply(socket, id, answer)?;
+            Ok(SurfaceCall::Models)
+        }
+        "model.configured" => {
+            // Asked before any session exists: a new browser sits with no tab, no child
+            // and no `model.list` to consult, and the empty-state warning has to be
+            // right then (web-surface.md §6).
+            reply(socket, id, models.configured())?;
+            Ok(SurfaceCall::Models)
+        }
+        "model.providers" => {
+            reply(socket, id, models.providers())?;
+            Ok(SurfaceCall::Models)
+        }
+        "model.probe" => {
+            let provider = params.get("provider").and_then(Value::as_str).unwrap_or("");
+            let key = params.get("key").and_then(Value::as_str).unwrap_or("");
+            // No busy guard and no reload: this call writes nothing, so a turn in progress
+            // cannot be disturbed by it, and no child has to be told about anything
+            // (web-surface.md §6).
+            let offered = models.probe(provider, key).map_err(Error)?;
+            reply(socket, id, offered)?;
+            Ok(SurfaceCall::Models)
+        }
+        "model.add" => {
+            let provider = params
+                .get("provider")
+                .and_then(Value::as_str)
+                .ok_or_else(|| Error("model.add needs a provider".to_string()))?;
+            let key = params.get("key").and_then(Value::as_str).unwrap_or("");
+            // The selection, and required: a page that forgot to send one must not be read
+            // as "tick nothing", because that means "turn them all off" (web-surface.md §6).
+            let chosen = selection(&params).map_err(Error)?;
+            // A running child is mid-turn: killing it would drop that turn. The page
+            // disables the panel while its own turn runs; this catches the other tabs.
+            if workspace_busy(state, tab)? {
+                return Err(Error(
+                    "a turn is running in this workspace; change the models when it ends"
+                        .to_string(),
+                ));
+            }
+            let adopted = models.adopt(provider, key, &chosen).map_err(Error)?;
+            // Config is read once, when a child starts, so every idle child is now stale.
+            // Dropping one kills it and the next request spawns a fresh one — a child is
+            // a reader of the session log, never its owner (web-surface.md §6).
+            let (restarted, waiting) = {
+                let mut st = lock(state)?;
+                reload_children(&mut st)
+            };
+            let mut answer = adopted;
+            if let Value::Object(map) = &mut answer {
+                map.insert("restarted".to_string(), json!(restarted));
+                map.insert("waiting".to_string(), json!(waiting));
+            }
+            // The file is authoritative again: whatever this tab had arranged is now
+            // either written there or beside the point (web-surface.md §6).
+            tab.model_order = None;
+            reply(socket, id, answer)?;
+            Ok(SurfaceCall::Models)
+        }
         _ => Ok(SurfaceCall::Forward),
     }
+}
+
+/// Purpose: The models a `model.add` names, as `(name, context window)` pairs.
+/// Serves: `model.add`, so a selection is written as the person ticked it (web-surface.md §6).
+/// Design: `docs/design/web-surface.md` §6.
+/// Up: `dispatch_surface`.
+/// Down: nothing; `ModelSetup::adopt` takes the pairs.
+/// Verify: `cargo test -p loong-web` (`model_`).
+/// Required, and an empty array is a real answer: it means every model of this provider was
+/// unticked, which turns them off and keeps the key. A *missing* array is a broken page, and
+/// reading it as "tick nothing" would delete models nobody meant to touch.
+fn selection(params: &Value) -> Result<Vec<(String, Option<u64>)>, String> {
+    let rows = params
+        .get("models")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "model.add needs models: [{name, context_window}]".to_string())?;
+    rows.iter()
+        .map(|row| {
+            let name = row
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "every model in a selection needs a name".to_string())?;
+            Ok((
+                name.to_string(),
+                row.get("context_window").and_then(Value::as_u64),
+            ))
+        })
+        .collect()
+}
+
+/// Purpose: Whether any child in this tab's workspace is mid-turn.
+/// Serves: the guards in `model.add` and `model.reorder`, the two calls that would otherwise
+/// have to wait for a running turn's exclusive hold on its child.
+/// Design: `docs/design/web-surface.md` §3 and §4.
+/// Up: `dispatch_surface`.
+/// Down: `Workspace::children` and `Child::busy`.
+/// Verify: `cargo test -p loong-web` (`reorder_`).
+/// Contract: a poisoned state answers "busy", because refusing is the safe side.
+fn workspace_busy(state: &Arc<Mutex<State>>, tab: &Tab) -> Result<bool, Error> {
+    let st = lock(state)?;
+    Ok(st
+        .workspaces
+        .get(tab.seat)
+        .is_some_and(|w| w.children.values().any(|c| c.busy.is_some())))
+}
+
+/// Purpose: Ask one session a question and give back its answer, for the surface's own calls.
+/// Serves: `model.reorder`, which needs the current list before it can move anything in it.
+/// Design: `docs/design/web-surface.md` §4.
+/// Up: `dispatch_surface`.
+/// Down: `ensure_child` and `Session::exchange`; the request carries a surface-only id so the
+/// answer cannot be mistaken for one the browser is waiting for.
+/// Verify: `cargo test -p loong-web` (`reorder_`).
+/// Contract: lines that are not the answer (deltas, events) are dropped, not forwarded: this
+/// read happens off the browser's own request, so nothing of it belongs on the page.
+fn ask_child(
+    state: &Arc<Mutex<State>>,
+    tab: &mut Tab,
+    home: &Path,
+    start_session: &dyn Fn(
+        &Path,
+        Option<&str>,
+    ) -> Result<(Arc<Mutex<dyn Session>>, String), String>,
+    session_id: &str,
+    method: &str,
+    params: &Value,
+) -> Result<Value, Error> {
+    let child_id =
+        ensure_child(state, tab.seat, home, Some(session_id), start_session).map_err(|e| e.0)?;
+    tab.attached = Some(child_id.clone());
+    let session = {
+        let st = lock(state)?;
+        st.workspaces
+            .get(tab.seat)
+            .and_then(|w| w.children.get(&child_id))
+            .map(|c| c.session.clone())
+            .ok_or_else(|| Error("the session has no live child".to_string()))?
+    };
+    let id = json!("surface");
+    let request = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+    let mut answer = None;
+    let outcome = match session.lock() {
+        Ok(mut session) => session.exchange(&request.to_string(), &mut |line| {
+            let parsed: Value = serde_json::from_str(&line).unwrap_or(Value::Null);
+            if parsed.get("id") == Some(&id) {
+                answer = Some(parsed);
+            }
+            Ok(())
+        }),
+        Err(_) => Err("the session is poisoned".to_string()),
+    };
+    outcome.map_err(Error)?;
+    let answer = answer.ok_or_else(|| Error(format!("{method} got no answer from the session")))?;
+    if let Some(error) = answer.get("error") {
+        let message = error["message"].as_str().unwrap_or("the session refused");
+        return Err(Error(message.to_string()));
+    }
+    // The caller wants the answer's body, not the envelope around it.
+    Ok(answer.get("result").cloned().unwrap_or(Value::Null))
+}
+
+/// Purpose: The order the bar is currently showing, given what it arranged and what the session
+/// declares — so a second move walks on from the first instead of starting over.
+/// Serves: `model.reorder`; without it two ctrl+rights would oscillate between two arrangements.
+/// Design: `docs/design/web-surface.md` §4.
+/// Up: `dispatch_surface`'s `model.reorder` arm.
+/// Down: nothing; the caller swaps one slot in the result.
+/// Verify: `cargo test -p loong-web` (`reorder_`).
+/// Contract: names the arrangement no longer covers are dropped, ones it has not seen are
+/// appended in declaration order, and `None` simply means "the declaration is the order".
+fn shown_order(arranged: Option<&[String]>, declared: &[String]) -> Vec<String> {
+    let Some(arranged) = arranged else {
+        return declared.to_vec();
+    };
+    let mut order: Vec<String> = arranged
+        .iter()
+        .filter(|name| declared.iter().any(|d| d == *name))
+        .cloned()
+        .collect();
+    let rest: Vec<String> = declared
+        .iter()
+        .filter(|name| !order.iter().any(|o| o == *name))
+        .cloned()
+        .collect();
+    order.extend(rest);
+    order
+}
+
+/// Purpose: Swap the selected model one slot, or say which edge it is already at.
+/// Serves: `model.reorder`.
+/// Design: `docs/design/web-surface.md` §4.
+/// Up: `dispatch_surface`'s `model.reorder` arm.
+/// Down: nothing; the caller writes the order and reorders the offerings with it.
+/// Verify: `cargo test -p loong-web` (`reorder_`).
+/// Contract: returns the new order and the 0-based from/to slots.
+fn move_in_order(
+    names: &[String],
+    selected: &str,
+    delta: i64,
+) -> Result<(Vec<String>, usize, usize), String> {
+    if names.is_empty() {
+        return Err("this session has no models to reorder".to_string());
+    }
+    let at = names
+        .iter()
+        .position(|name| name == selected)
+        .ok_or_else(|| format!("{selected:?} is not in this session's model list"))?;
+    let target = at as i64 + delta;
+    if target < 0 {
+        return Err(format!("{selected} is already in the first slot"));
+    }
+    if target as usize >= names.len() {
+        return Err(format!("{selected} is already in the last slot"));
+    }
+    let mut order = names.to_vec();
+    order.swap(at, target as usize);
+    Ok((order, at, target as usize))
+}
+
+/// Purpose: Lay an arranged order over the offerings the session sent, keeping any name the
+/// order does not mention at the end rather than dropping it.
+/// Serves: `model.reorder`'s answer and `forward`, which applies the same order to later lists.
+/// Design: `docs/design/web-surface.md` §4.
+/// Up: `dispatch_surface` and `forward`.
+/// Down: nothing beyond `serde_json::Value`.
+/// Verify: `cargo test -p loong-web` (`reorder_`).
+/// Contract: the two passes are what make a stale order harmless — a model added since the
+/// arrangement was made still appears, and one removed since simply has no match.
+fn offerings_in_order(models: &Value, order: &[String]) -> Value {
+    let listed = models.as_array().cloned().unwrap_or_default();
+    let named = |name: &String| {
+        listed
+            .iter()
+            .any(|m| m["name"].as_str() == Some(name.as_str()))
+    };
+    let mut out = Vec::with_capacity(listed.len());
+    for name in order.iter().filter(|name| named(name)) {
+        if let Some(found) = listed
+            .iter()
+            .find(|m| m["name"].as_str() == Some(name.as_str()))
+        {
+            out.push(found.clone());
+        }
+    }
+    out.extend(listed.into_iter().filter(|m| {
+        m["name"]
+            .as_str()
+            .is_none_or(|n| !order.iter().any(|o| o == n))
+    }));
+    Value::Array(out)
+}
+
+/// Purpose: Rewrite a `model.list` line so it carries the order this tab arranged.
+/// Serves: `forward`, so a later refresh does not snap the bar back to declaration order.
+/// Design: `docs/design/web-surface.md` §4.
+/// Up: `forward`'s sink closure.
+/// Down: `offerings_in_order`.
+/// Verify: `cargo test -p loong-web` (`reorder_`).
+/// Contract: anything that is not a successful `model.list` answer goes through untouched,
+/// including a line that is not JSON at all.
+fn reorder_reply(line: &str, order: &[String]) -> String {
+    let Ok(mut parsed) = serde_json::from_str::<Value>(line) else {
+        return line.to_string();
+    };
+    let Some(models) = parsed.get("result").and_then(|r| r.get("models")) else {
+        return line.to_string();
+    };
+    if !models.is_array() {
+        return line.to_string();
+    }
+    let ordered = offerings_in_order(models, order);
+    if let Some(result) = parsed.get_mut("result").and_then(Value::as_object_mut) {
+        result.insert("models".to_string(), ordered);
+    }
+    parsed.to_string()
+}
+
+/// Purpose: Drop every idle session child so the next request starts one that has read the
+/// config just written; leave the children mid-turn alone.
+///
+/// Serves: `model.add`, the one call that changes `local.toml` under a running surface.
+/// Design: `docs/design/web-surface.md` §6 — a child is a reader of the log, so dropping one
+/// loses nothing that replay cannot restore.
+/// Up: `dispatch_surface`.
+/// Down: `Workspace::children`, whose dropped bridges kill their processes on `Drop`.
+/// Verify: `cargo test -p loong-web` (`model_add_`).
+/// Contract: returns (restarted, still busy and therefore stale until the turn ends).
+fn reload_children(st: &mut State) -> (usize, usize) {
+    let mut restarted = 0;
+    let mut waiting = 0;
+    for workspace in st.workspaces.iter_mut() {
+        let before = workspace.children.len();
+        workspace.children.retain(|_, child| child.busy.is_some());
+        restarted += before - workspace.children.len();
+        waiting += workspace.children.len();
+    }
+    (restarted, waiting)
 }
 
 /// Purpose: Carry one line down the tab's workspace session and stream every answer line back.
@@ -609,11 +991,20 @@ fn forward(
     }
     // Held for the whole exchange: one request at a time reaches the session,
     // while each line goes out the moment it exists.
+    //
+    // A `model.list` answer is the one line the surface edits: the tab may have arranged
+    // the slots with ctrl+left / ctrl+right, and the session answers in declaration order
+    // because its child read the profile at startup (web-surface.md §4).
+    let arranged = tab.model_order.clone();
     let mut failure = None;
     {
         let socket_ref = &mut *socket;
         let outcome = match session.lock() {
             Ok(mut session) => session.exchange(line, &mut |answer| {
+                let answer = match (&arranged, method) {
+                    (Some(order), "model.list") => reorder_reply(&answer, order),
+                    _ => answer,
+                };
                 socket_ref
                     .send(Message::text(answer))
                     .and_then(|_| socket_ref.flush())
@@ -782,20 +1173,6 @@ mod tests {
     /// Contract: take the lock before `set_var("LOONGAGENT_HOME", …)`, hold it to the end.
     static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// Purpose: a scripted session factory for the dispatch tests; the id the surface
-    /// asked for is handed straight back as the child's id.
-    /// Contract: always succeeds, and reuses the requested id or mints `echo`.
-    fn echo_factory(
-    ) -> impl Fn(&Path, Option<&str>) -> Result<(Arc<Mutex<dyn Session>>, String), String> {
-        |_: &Path, session: Option<&str>| {
-            let id = session.unwrap_or("echo").to_string();
-            Ok((
-                Arc::new(Mutex::new(Echo(vec![]))) as Arc<Mutex<dyn Session>>,
-                id,
-            ))
-        }
-    }
-
     /// Purpose: a session factory that records the session id each child was started
     /// for, so the tests can assert two sessions become two children (web-surface.md §3).
     /// Serves: the `session.open`/`session.new` tests in this module.
@@ -849,6 +1226,582 @@ mod tests {
             )
         });
         (addr, token)
+    }
+
+    /// Purpose: a full web surface on loopback **with** a model setup, for the panel tests.
+    /// Serves: `model_panel_*`, the tests for the add-model panel (web-surface.md §6).
+    /// Design: `docs/design/web-surface.md` §6.
+    /// Up: those tests.
+    /// Down: `serve_web_with_models`, on a private listener with a fresh token.
+    /// Verify: `cargo test -p loong-web` (`model_panel`).
+    fn start_with_models(models: Arc<dyn crate::ModelSetup>) -> (std::net::SocketAddr, String) {
+        let (listener, addr) = bind("127.0.0.1", 0).unwrap();
+        let token = crate::random_token().unwrap();
+        let for_server = token.clone();
+        let home = std::env::temp_dir();
+        std::thread::spawn(move || {
+            crate::serve_web_with_models(
+                listener,
+                for_server,
+                home,
+                Arc::new(|_: &Path, session: Option<&str>| {
+                    let id = session.unwrap_or("echo").to_string();
+                    Ok((
+                        Arc::new(Mutex::new(Echo(vec![]))) as Arc<Mutex<dyn Session>>,
+                        id,
+                    ))
+                }),
+                models,
+            )
+        });
+        (addr, token)
+    }
+
+    /// Purpose: the panel's stand-in: one provider, an empty profile, and a key it insists on.
+    /// Serves: the `model_panel_*` tests, which must not touch a real config file.
+    /// Design: `docs/design/web-surface.md` §6.
+    /// Up: `start_with_models`.
+    /// Down: `crate::ModelSetup`, whose three answers the surface relays.
+    /// Verify: `cargo test -p loong-web` (`model_panel`).
+    struct OneProvider;
+
+    impl crate::ModelSetup for OneProvider {
+        /// Purpose: An empty profile, the case the banner is for.
+        /// Contract: `crate::ModelSetup::configured`, answered over the socket.
+        fn configured(&self) -> Value {
+            json!({"models": []})
+        }
+
+        /// Purpose: One hosted provider, which the panel must offer and mark as wanting a key.
+        /// Contract: `crate::ModelSetup::providers`, relayed by `model.providers`.
+        fn providers(&self) -> Value {
+            json!({"providers": [
+                {"id": "fake", "label": "Fake", "local": false,
+                 "needs_key": true, "key_env": "FAKE_KEY"}
+            ]})
+        }
+
+        /// Purpose: Write nothing, refuse a keyless probe, and name the models a key would unlock.
+        /// Serves: the panel test, as the provider the page would have asked.
+        /// Design: `docs/design/web-surface.md` §6.
+        /// Up: `crate::ModelSetup::probe`, relayed by `model.probe`.
+        /// Down: nothing; it answers from a constant.
+        /// Verify: `cargo test -p loong-web` (`model_`).
+        fn probe(&self, provider: &str, key: &str) -> Result<Value, String> {
+            if key.trim().is_empty() {
+                return Err("fake needs an API key".to_string());
+            }
+            Ok(json!({"provider": provider, "label": "Fake", "models": [
+                {"name": "model", "context_window": 32768, "configured": false},
+                {"name": "model-pro", "context_window": 131072, "configured": false},
+            ]}))
+        }
+
+        /// Purpose: Write nothing, refuse a keyless add, and echo the selection it was given.
+        /// Serves: the panel test, so the assertion is about what the page sent, not about a file.
+        /// Design: `docs/design/web-surface.md` §6.
+        /// Up: `crate::ModelSetup::adopt`, relayed by `model.add`.
+        /// Down: nothing; it answers from its own arguments.
+        /// Verify: `cargo test -p loong-web` (`model_`).
+        fn adopt(
+            &self,
+            provider: &str,
+            key: &str,
+            models: &[(String, Option<u64>)],
+        ) -> Result<Value, String> {
+            if key.trim().is_empty() {
+                return Err("fake needs an API key".to_string());
+            }
+            let rows: Vec<Value> = models
+                .iter()
+                .map(|(name, ctx)| json!({"name": name, "context_window": ctx}))
+                .collect();
+            Ok(json!({"provider": provider, "label": "Fake", "models": rows}))
+        }
+    }
+
+    /// Purpose: A child that really answers `model.list`, so a reorder has a list to move in.
+    /// Serves: the `reorder_` tests, and the proof that a later list still comes back arranged.
+    /// Design: `docs/design/web-surface.md` §4.
+    /// Up: `start_with_models` in the reorder test.
+    /// Down: nothing; it is a stand-in for `loongagent serve` on a three-model profile.
+    /// Verify: `cargo test -p loong-web` (`reorder_`).
+    struct Models {
+        /// Purpose: The models this "profile" declares, in declaration order.
+        names: Vec<String>,
+        /// Purpose: Which one the session says is current.
+        selected: String,
+    }
+
+    impl Models {
+        /// Purpose: The `ModelList` shape, always in declaration order — which is the whole
+        /// reason the surface has to remember an arrangement of its own.
+        /// Contract: what `model.list` and `model.select` answer with.
+        fn list(&self) -> Value {
+            let models: Vec<Value> = self
+                .names
+                .iter()
+                .map(|name| json!({"name": name, "model": name, "provider": "fake"}))
+                .collect();
+            json!({"models": models, "selected": self.selected})
+        }
+    }
+
+    impl Session for Models {
+        /// Purpose: Answer `model.list` and `model.select` in declaration order, ignoring order.
+        /// Serves: the `reorder_` tests' stand-in child.
+        /// Design: `docs/design/web-surface.md` §4.
+        /// Up: `dispatch_surface` and `forward` through the seam.
+        /// Down: nothing; `serde_json` only.
+        /// Verify: `cargo test -p loong-web` (`reorder_`).
+        fn exchange(
+            &mut self,
+            line: &str,
+            sink: &mut dyn FnMut(String) -> Result<(), String>,
+        ) -> Result<(), String> {
+            let request: Value = serde_json::from_str(line).map_err(|e| e.to_string())?;
+            let id = request.get("id").cloned().unwrap_or(Value::Null);
+            let reply = match request["method"].as_str().unwrap_or("") {
+                "model.list" => json!({"jsonrpc": "2.0", "id": id, "result": self.list()}),
+                "model.select" => {
+                    self.selected = request["params"]["name"].as_str().unwrap_or("").to_string();
+                    json!({"jsonrpc": "2.0", "id": id, "result": self.list()})
+                }
+                _ => json!({"jsonrpc": "2.0", "id": id, "result": {"accepted": true}}),
+            };
+            sink(reply.to_string())
+        }
+    }
+
+    /// Purpose: The setup that keeps the order it was handed, so the test can see what the
+    /// surface asked it to write.
+    /// Serves: `reorder_`, which has to tell "written" from "this session only".
+    /// Design: `docs/design/web-surface.md` §4.
+    /// Up: the reorder test.
+    /// Down: `crate::ModelSetup::save_order`.
+    /// Verify: `cargo test -p loong-web` (`reorder_`).
+    #[derive(Clone, Default)]
+    struct OrderSink {
+        /// Purpose: The last order the surface asked to be written; `None` until it asks.
+        saved: Arc<Mutex<Option<Vec<String>>>>,
+        /// Purpose: When set, `save_order` fails, the case of a file that refuses the write.
+        refuses: bool,
+    }
+
+    impl crate::ModelSetup for OrderSink {
+        /// Purpose: Record the order and claim it was written, or refuse it.
+        /// Contract: `crate::ModelSetup::save_order`, relayed by `model.reorder`.
+        fn save_order(&self, names: &[String]) -> Result<bool, String> {
+            if self.refuses {
+                return Err("the file disagrees with this list".to_string());
+            }
+            *self.saved.lock().unwrap() = Some(names.to_vec());
+            Ok(true)
+        }
+    }
+
+    /// Purpose: With three models and the middle one current, ctrl+right moves it one slot and
+    /// keeps it lit; ctrl+left twice more walks it to the edge and stops there.
+    /// Serves: the reorder keys, which are not the switch keys (web-surface.md §4).
+    /// Design: `docs/design/web-surface.md` §4.
+    /// Up: `cargo test -p loong-web`.
+    /// Down: `move_in_order`, `offerings_in_order` and `reorder_reply`.
+    /// Verify: `cargo test -p loong-web` (`reorder_`).
+    #[test]
+    fn reorder_swaps_one_slot_and_stops_at_the_edge() {
+        let names: Vec<String> = ["a", "b", "c"].iter().map(|n| n.to_string()).collect();
+
+        let (order, from, to) = move_in_order(&names, "b", 1).expect("b can move right");
+        assert_eq!(order, vec!["a", "c", "b"], "b swaps with c");
+        assert_eq!(
+            (from, to),
+            (1, 2),
+            "and the answer says which slots changed"
+        );
+
+        // The base a move starts from is the arrangement on screen, not the declaration:
+        // otherwise a second ctrl+right would undo the first, since the session keeps
+        // answering in declaration order.
+        let declared: Vec<String> = ["a", "b", "c"].iter().map(|n| n.to_string()).collect();
+        let arranged: Vec<String> = ["a", "c", "b"].iter().map(|n| n.to_string()).collect();
+        let shown = shown_order(Some(&arranged), &declared);
+        assert_eq!(
+            shown, arranged,
+            "an arrangement that still fits is kept as it is"
+        );
+        let (order, _, to) = move_in_order(&shown, "b", -1).expect("b walks back left");
+        assert_eq!(
+            order,
+            vec!["a", "b", "c"],
+            "from [a, c, b], left swaps b and c back"
+        );
+        assert_eq!(to, 1);
+
+        // An arrangement made before a model was added keeps the new one, at the end.
+        let stale: Vec<String> = ["c", "a"].iter().map(|n| n.to_string()).collect();
+        assert_eq!(shown_order(Some(&stale), &declared), vec!["c", "a", "b"]);
+        assert_eq!(
+            shown_order(None, &declared),
+            declared,
+            "no arrangement, no interference"
+        );
+
+        let first = move_in_order(&names, "a", -1).expect_err("a is already first");
+        assert!(first.contains("first slot"), "{first}");
+        let last = move_in_order(&names, "c", 1).expect_err("c is already last");
+        assert!(last.contains("last slot"), "{last}");
+        let unknown = move_in_order(&names, "zz", 1).expect_err("zz is not in the list");
+        assert!(unknown.contains("zz"), "{unknown}");
+    }
+
+    /// Purpose: An offering list is re-arranged by name, and a name the arrangement does not
+    /// mention — one added since, or one removed — neither disappears nor blocks the rest.
+    /// Serves: the reorder answer and the `model.list` rewrite in `forward`.
+    /// Design: `docs/design/web-surface.md` §4.
+    /// Up: `cargo test -p loong-web`.
+    /// Down: `offerings_in_order` and `reorder_reply`.
+    /// Verify: `cargo test -p loong-web` (`reorder_`).
+    #[test]
+    fn reorder_lays_the_order_over_offerings_without_losing_any() {
+        let models = json!([
+            {"name": "a", "model": "a"},
+            {"name": "b", "model": "b"},
+            {"name": "c", "model": "c"}
+        ]);
+        let order: Vec<String> = ["c", "a"].iter().map(|n| n.to_string()).collect();
+        let arranged = offerings_in_order(&models, &order);
+        let names: Vec<&str> = arranged
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["c", "a", "b"],
+            "named models come first in the arranged order, the rest follow as they were"
+        );
+
+        // The line the browser gets carries the arrangement; a line that is not a model list
+        // — an event, a delta, or something that is not JSON — goes through untouched.
+        let line =
+            json!({"jsonrpc": "2.0", "id": 7, "result": {"models": models, "selected": "a"}});
+        let rewritten = reorder_reply(&line.to_string(), &order);
+        let parsed: Value = serde_json::from_str(&rewritten).unwrap();
+        assert_eq!(parsed["result"]["models"][0]["name"], "c");
+        assert_eq!(
+            parsed["result"]["selected"], "a",
+            "which model is current is not the order's business"
+        );
+        assert_eq!(reorder_reply("not json", &order), "not json");
+        let event =
+            json!({"jsonrpc": "2.0", "method": "model.selected", "params": {"selected": "a"}});
+        assert_eq!(
+            reorder_reply(&event.to_string(), &order),
+            event.to_string(),
+            "an event is not a list and must not be rewritten"
+        );
+    }
+
+    /// Purpose: ctrl+right over the socket moves the current model, says which slots changed, and
+    /// a later `model.list` still comes back arranged — the child answers in declaration order,
+    /// so this is what proves the surface remembers the arrangement (web-surface.md §4).
+    /// Serves: `model.reorder`, the reorder half of the keys.
+    /// Design: `docs/design/web-surface.md` §4.
+    /// Up: `cargo test -p loong-web`.
+    /// Down: `dispatch_surface`'s `model.reorder` arm, `ask_child` and `forward`'s rewrite.
+    /// Verify: `cargo test -p loong-web` (`reorder_`).
+    #[test]
+    fn reorder_over_the_socket_moves_the_model_and_survives_a_refresh() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let sink = OrderSink::default();
+        let written = Arc::clone(&sink.saved);
+        let (addr, token) = {
+            let (listener, addr) = bind("127.0.0.1", 0).unwrap();
+            let token = crate::random_token().unwrap();
+            let for_server = token.clone();
+            let setup = sink.clone();
+            std::thread::spawn(move || {
+                crate::serve_web_with_models(
+                    listener,
+                    for_server,
+                    std::env::temp_dir(),
+                    Arc::new(|_: &Path, session: Option<&str>| {
+                        let id = session.unwrap_or("models").to_string();
+                        Ok((
+                            Arc::new(Mutex::new(Models {
+                                names: ["a", "b", "c"].iter().map(|n| n.to_string()).collect(),
+                                selected: "b".to_string(),
+                            })) as Arc<Mutex<dyn Session>>,
+                            id,
+                        ))
+                    }),
+                    Arc::new(setup),
+                )
+            });
+            (addr, token)
+        };
+        let request = format!("ws://{addr}/ws?token={token}")
+            .into_client_request()
+            .unwrap();
+        let (mut socket, _) = tungstenite::connect(request).unwrap();
+        let mut ask = |id: u64, method: &str, params: Value| -> Value {
+            socket
+                .send(Message::text(
+                    json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})
+                        .to_string(),
+                ))
+                .unwrap();
+            let line = loop {
+                let line = socket.read().unwrap().into_text().unwrap().to_string();
+                // Rows about the workspace or the child arrive first; the answer is the one
+                // carrying our id.
+                let parsed: Value = serde_json::from_str(&line).unwrap();
+                if parsed.get("id") == Some(&json!(id)) {
+                    break parsed;
+                }
+            };
+            line
+        };
+
+        ask(1, "workspace.list", json!({}));
+        ask(2, "session.new", json!({}));
+
+        let moved = ask(3, "model.reorder", json!({"delta": 1}));
+        assert_eq!(
+            moved["result"]["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| m["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["a", "c", "b"],
+            "c is where b was and b took its slot: {moved}"
+        );
+        assert_eq!(
+            moved["result"]["selected"], "b",
+            "the move is not a switch: {moved}"
+        );
+        assert_eq!(
+            moved["result"]["moved"],
+            json!({"name": "b", "from": 2, "to": 3})
+        );
+        assert_eq!(moved["result"]["persisted"], json!(true), "{moved}");
+        assert_eq!(
+            written.lock().unwrap().clone(),
+            Some(vec!["a".to_string(), "c".to_string(), "b".to_string()]),
+            "the surface asked for exactly the order it drew"
+        );
+
+        // A refresh: the child answers ["a","b","c"] again, and the bar must not snap back.
+        let refreshed = ask(4, "model.list", json!({"session_id": "models"}));
+        assert_eq!(
+            refreshed["result"]["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| m["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["a", "c", "b"],
+            "the arrangement outlives a fresh model.list: {refreshed}"
+        );
+
+        // b is last now: ctrl+right has nowhere to go and says so instead of wrapping.
+        let edge = ask(5, "model.reorder", json!({"delta": 1}));
+        assert!(
+            edge["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("last slot"),
+            "the edge is an answer, not a wrap-around: {edge}"
+        );
+    }
+
+    /// Purpose: A file that refuses the write does not unmake the move: the bar is arranged and
+    /// the refusal is reported beside it (the same split the TUI makes).
+    /// Serves: the `warning` half of `model.reorder`.
+    /// Design: `docs/design/web-surface.md` §4.
+    /// Up: `cargo test -p loong-web`.
+    /// Down: `dispatch_surface`'s `model.reorder` arm and its `save_order` result handling.
+    /// Verify: `cargo test -p loong-web` (`reorder_`).
+    #[test]
+    fn reorder_keeps_the_arrangement_when_the_file_refuses() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let (addr, token) = {
+            let (listener, addr) = bind("127.0.0.1", 0).unwrap();
+            let token = crate::random_token().unwrap();
+            let for_server = token.clone();
+            std::thread::spawn(move || {
+                crate::serve_web_with_models(
+                    listener,
+                    for_server,
+                    std::env::temp_dir(),
+                    Arc::new(|_: &Path, session: Option<&str>| {
+                        let id = session.unwrap_or("models").to_string();
+                        Ok((
+                            Arc::new(Mutex::new(Models {
+                                names: ["a", "b"].iter().map(|n| n.to_string()).collect(),
+                                selected: "a".to_string(),
+                            })) as Arc<Mutex<dyn Session>>,
+                            id,
+                        ))
+                    }),
+                    Arc::new(OrderSink {
+                        saved: Arc::new(Mutex::new(None)),
+                        refuses: true,
+                    }),
+                )
+            });
+            (addr, token)
+        };
+        let request = format!("ws://{addr}/ws?token={token}")
+            .into_client_request()
+            .unwrap();
+        let (mut socket, _) = tungstenite::connect(request).unwrap();
+        let mut ask = |id: u64, method: &str, params: Value| -> Value {
+            socket
+                .send(Message::text(
+                    json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})
+                        .to_string(),
+                ))
+                .unwrap();
+            loop {
+                let line = socket.read().unwrap().into_text().unwrap().to_string();
+                let parsed: Value = serde_json::from_str(&line).unwrap();
+                if parsed.get("id") == Some(&json!(id)) {
+                    break parsed;
+                }
+            }
+        };
+        ask(1, "workspace.list", json!({}));
+        ask(2, "session.new", json!({}));
+        let moved = ask(3, "model.reorder", json!({"delta": 1}));
+        assert_eq!(
+            moved["result"]["models"][0]["name"], "b",
+            "the bar still rearranged: {moved}"
+        );
+        assert_eq!(
+            moved["result"]["persisted"],
+            json!(false),
+            "nothing reached the file, so nothing may claim it did: {moved}"
+        );
+        assert_eq!(
+            moved["result"]["warning"], "the file disagrees with this list",
+            "and the refusal is handed back to be shown: {moved}"
+        );
+    }
+
+    /// Purpose: the panel's three reads answer over the socket, and an adopt reloads the idle
+    /// children so the next session starts on the config just written (web-surface.md §6).
+    #[test]
+    fn model_panel_answers_and_reloads_the_children() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let base = std::env::temp_dir().join(format!("loong-models-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let home_dir = base.join("home");
+        std::fs::create_dir_all(&home_dir).unwrap();
+        std::env::set_var("LOONGAGENT_HOME", &home_dir);
+
+        let (addr, token) = start_with_models(Arc::new(OneProvider));
+        let request = format!("ws://{addr}/ws?token={token}")
+            .into_client_request()
+            .unwrap();
+        let (mut socket, _) = tungstenite::connect(request).unwrap();
+        let mut ask = |id: u64, method: &str, params: Value| -> Value {
+            socket
+                .send(Message::text(
+                    json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}).to_string(),
+                ))
+                .unwrap();
+            let line = socket.read().unwrap().into_text().unwrap().to_string();
+            serde_json::from_str(&line).unwrap()
+        };
+
+        // Seat the tab, then start a child: the adopt below has one to reload.
+        let listed = ask(1, "workspace.list", json!({}));
+        assert!(listed.get("result").is_some(), "{listed}");
+        let opened = ask(2, "session.new", json!({}));
+        assert!(opened.get("result").is_some(), "{opened}");
+
+        let empty = ask(3, "model.configured", json!({}));
+        assert_eq!(
+            empty["result"]["models"],
+            json!([]),
+            "a profile with no model says so, which is what the banner reads: {empty}"
+        );
+
+        let catalogue = ask(4, "model.providers", json!({}));
+        assert_eq!(
+            catalogue["result"]["providers"][0]["id"], "fake",
+            "the panel offers the catalogue: {catalogue}"
+        );
+
+        // The list arrives before anything is written, and asking for it without a key is
+        // refused in the provider's own words: the panel has rows to tick before it has a
+        // thing to write (web-surface.md §6).
+        let offered = ask(
+            5,
+            "model.probe",
+            json!({"provider": "fake", "key": "sk-test"}),
+        );
+        assert_eq!(
+            offered["result"]["models"][1]["name"], "model-pro",
+            "the provider's models are listed for ticking: {offered}"
+        );
+        let keyless = ask(6, "model.probe", json!({"provider": "fake", "key": ""}));
+        assert_eq!(
+            keyless["error"]["message"], "fake needs an API key",
+            "a keyless probe is refused, not guessed: {keyless}"
+        );
+
+        // A key the setup refuses comes back as an error, and nothing is reloaded.
+        let refused = ask(
+            7,
+            "model.add",
+            json!({"provider": "fake", "key": "", "models": []}),
+        );
+        assert_eq!(
+            refused["error"]["message"], "fake needs an API key",
+            "a keyless add is refused in the provider's own words: {refused}"
+        );
+
+        // A page that sends no selection is a broken page, not a request to tick nothing:
+        // "nothing ticked" deletes models, so it may never be assumed (web-surface.md §6).
+        let unselected = ask(
+            8,
+            "model.add",
+            json!({"provider": "fake", "key": "sk-test"}),
+        );
+        assert_eq!(
+            unselected["error"]["message"], "model.add needs models: [{name, context_window}]",
+            "the selection is required: {unselected}"
+        );
+
+        // One model ticked out of two: one block is written, not the whole catalogue.
+        let added = ask(
+            9,
+            "model.add",
+            json!({"provider": "fake", "key": "sk-test",
+                   "models": [{"name": "model", "context_window": 32768}]}),
+        );
+        assert_eq!(
+            added["result"]["models"],
+            json!([{"name": "model", "context_window": 32768}]),
+            "exactly the ticked model is written, and it is the whole set: {added}"
+        );
+        assert_eq!(
+            added["result"]["restarted"],
+            json!(1),
+            "the live child is dropped so the next one reads the new config: {added}"
+        );
+        assert_eq!(
+            added["result"]["waiting"],
+            json!(0),
+            "nothing was mid-turn, so nothing was left stale: {added}"
+        );
+
+        std::env::remove_var("LOONGAGENT_HOME");
+        std::fs::remove_dir_all(&base).ok();
     }
 
     /// Purpose: home is planted on the first `workspace.list`, and the tab is seated there.

@@ -26,6 +26,7 @@ use tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tungstenite::{accept_hdr, Message};
 
 pub mod app;
+mod files;
 mod sessions;
 
 /// The page, compiled in: one file, no build step, no CDN.
@@ -79,6 +80,111 @@ pub trait Session: Send {
         sink: &mut dyn FnMut(String) -> Result<(), String>,
     ) -> Result<(), String>;
 }
+
+/// What the "add a model" panel needs: what is configured now, what a provider asks
+/// for, what it offers, and the one act of adopting a selection.
+///
+/// The panel is the `local add` wizard without a terminal (web-surface.md §6). The
+/// probing, the key file and the `[[models]]` blocks stay where they already live, in
+/// the CLI, so this trait is the whole of what the surface knows about models: four
+/// answers, carried as JSON, and no opinion about where they come from.
+/// Purpose: What the surface needs to offer the model panel: what is configured, what a
+/// provider asks for, what it offers, and the act of adopting a selection.
+///
+/// Serves: a browser can go from "no models at all" to a working one without leaving the
+/// page, and can turn one off again later (web-surface.md §6, config-routing.md §6).
+/// Design: `docs/design/web-surface.md` §6.
+/// Up: `serve_web_with_models` holds one behind an `Arc`.
+/// Down: `app::dispatch_surface`'s `model.*` arms.
+/// Verify: `cargo test -p loong-web` (`model_`).
+pub trait ModelSetup: Send + Sync {
+    /// Purpose: The models the profile declares now, for the page's empty-state warning and
+    /// for the panel's list of what can be turned off.
+    ///
+    /// Serves: `model.configured`, which the page asks at boot before any session exists and
+    /// again after every write.
+    /// Design: `docs/design/web-surface.md` §6.
+    /// Up: `dispatch_surface`.
+    /// Down: whatever the implementation reads, usually the resolved profile.
+    /// Verify: `cargo test -p loong-web` (`model_`).
+    fn configured(&self) -> Value {
+        json!({"models": []})
+    }
+
+    /// Purpose: The providers the panel may offer, and whether each one needs a key.
+    ///
+    /// Serves: `model.providers`, which fills the panel's provider list.
+    /// Design: `docs/design/web-surface.md` §6.
+    /// Up: `dispatch_surface`.
+    /// Down: the implementation's provider catalogue.
+    /// Verify: `cargo test -p loong-web` (`model_`).
+    fn providers(&self) -> Value {
+        json!({"providers": []})
+    }
+
+    /// Purpose: Write a new model order where it belongs, and say whether it went anywhere.
+    ///
+    /// Serves: `model.reorder`, the ctrl+left / ctrl+right keys (web-surface.md §4).
+    /// Design: `docs/design/web-surface.md` §4 and `docs/design/config-routing.md` §3.
+    /// Up: `dispatch_surface`.
+    /// Down: the implementation's config writer.
+    /// Verify: `cargo test -p loong-web` (`reorder_`).
+    /// `Ok(true)` means the order is now on disk and the next child will read it;
+    /// `Ok(false)` means this surface has no file to rewrite, so the arrangement lives on the
+    /// bar for this session only — the same split the TUI makes between a local profile and a
+    /// managed one.
+    fn save_order(&self, _names: &[String]) -> Result<bool, String> {
+        Ok(false)
+    }
+
+    /// Purpose: List what one provider offers and which of it is already configured, without
+    /// writing anything.
+    ///
+    /// Serves: `model.probe`, the panel's second step: the rows it draws as tick boxes.
+    /// Design: `docs/design/web-surface.md` §6 and `docs/design/config-routing.md` §6.
+    /// Up: `dispatch_surface`.
+    /// Down: the implementation's probe and its read of the config.
+    /// Verify: `cargo test -p loong-web` (`model_`).
+    /// Nothing is written, and that is the point: pasting a key is a statement about the
+    /// credentials, not about wanting every model the provider has ever published. An empty
+    /// `key` means the secret is already on file.
+    fn probe(&self, _provider: &str, _key: &str) -> Result<Value, String> {
+        Err("this surface cannot list models".to_string())
+    }
+
+    /// Purpose: Write a provider's selection — the models ticked in the panel — and say which
+    /// ones are now configured.
+    ///
+    /// Serves: `model.add`, the button's one action.
+    /// Design: `docs/design/web-surface.md` §6 and `docs/design/config-routing.md` §6.
+    /// Up: `dispatch_surface`.
+    /// Down: the implementation's probe and config write.
+    /// Verify: `cargo test -p loong-web` (`model_`).
+    /// The list is written as given: the models in it are the models that end up on, and a
+    /// model missing from it is a model that goes off. An empty `key` means the secret is on
+    /// file, so nothing is probed before writing.
+    fn adopt(
+        &self,
+        _provider: &str,
+        _key: &str,
+        _models: &[(String, Option<u64>)],
+    ) -> Result<Value, String> {
+        Err("this surface cannot add a model".to_string())
+    }
+}
+
+/// The setup a surface without a model panel gets: it lists nothing and adds nothing.
+/// Purpose: The empty model setup, for a surface that offers no panel and for tests that do not
+/// exercise one.
+///
+/// Serves: `serve_web`, which wires no panel.
+/// Design: `docs/design/web-surface.md` §6.
+/// Up: `serve_web`.
+/// Down: every `ModelSetup` default.
+/// Verify: `cargo test -p loong-web`.
+pub struct NoModelSetup;
+
+impl ModelSetup for NoModelSetup {}
 
 /// A token no other page can guess, read from the OS entropy pool.
 /// Purpose: Read 16 bytes from the OS entropy pool and return them as hex.
@@ -162,6 +268,33 @@ pub fn serve_web(
             + Sync,
     >,
 ) {
+    serve_web_with_models(listener, token, home, start_session, Arc::new(NoModelSetup));
+}
+
+/// The same surface, with the model panel wired to a real setup.
+///
+/// The split exists so a surface with no panel — a test, or a build that cannot reach
+/// the config files — says so once, in its call, instead of every call site carrying an
+/// `Option` it will never fill.
+/// Purpose: Serve the browser surface with the "add a model" panel wired to `models`.
+///
+/// Serves: `loongagent web`, whose panel adopts a provider into the user's own config
+/// (web-surface.md §6).
+/// Design: `docs/design/web-surface.md` §6.
+/// Up: `crates/cli/src/web.rs`.
+/// Down: `handle_web`, which passes `models` to the socket bridge.
+/// Verify: `cargo test -p loong-web` (`model_`) and `cargo test -p loongagent --test web_surface`.
+pub fn serve_web_with_models(
+    listener: TcpListener,
+    token: String,
+    home: PathBuf,
+    start_session: Arc<
+        dyn Fn(&std::path::Path, Option<&str>) -> Result<(Arc<Mutex<dyn Session>>, String), String>
+            + Send
+            + Sync,
+    >,
+    models: Arc<dyn ModelSetup>,
+) {
     let state = Arc::new(Mutex::new(app::State::new()));
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
@@ -169,8 +302,9 @@ pub fn serve_web(
         let token = token.clone();
         let home = home.clone();
         let start_session = Arc::clone(&start_session);
+        let models = Arc::clone(&models);
         std::thread::spawn(move || {
-            if let Err(e) = handle_web(stream, state, token, home, start_session) {
+            if let Err(e) = handle_web(stream, state, token, home, start_session, models) {
                 eprintln!("[web] {e}");
             }
         });
@@ -273,6 +407,7 @@ fn handle_web(
             + Send
             + Sync,
     >,
+    models: Arc<dyn ModelSetup>,
 ) -> Result<(), String> {
     // Peek (not read): the WebSocket handshake must see the request itself, while
     // a static request is ours to answer.
@@ -282,7 +417,7 @@ fn handle_web(
     let request_line = head.lines().next().unwrap_or_default().to_string();
     let is_upgrade = head.to_ascii_lowercase().contains("upgrade: websocket");
     if request_line.contains("/ws") || is_upgrade {
-        return websocket_web(stream, state, token, home, start_session);
+        return websocket_web(stream, state, token, home, start_session, models);
     }
     let asked = request_line.split_whitespace().nth(1).unwrap_or("");
     let bare = asked.split('?').next().unwrap_or(asked);
@@ -297,6 +432,15 @@ fn handle_web(
                 return refuse_without_token(stream);
             }
             return browse(stream, asked, &home);
+        }
+        "/api/files" => {
+            // The composer's `@` picker asks for the workspace's files on every
+            // keystroke; same token, same rules as the directory picker
+            // (web-composer.md §2).
+            if presented_token(&head).as_deref() != Some(token.as_str()) {
+                return refuse_without_token(stream);
+            }
+            return files_under_workspace(stream, asked, &state);
         }
         _ => static_page(stream),
     }
@@ -445,6 +589,73 @@ fn browse(mut stream: TcpStream, asked: &str, home: &std::path::Path) -> Result<
         .map_err(|e| e.to_string())
 }
 
+/// Purpose: One decoded value from a request's query string, by name.
+///
+/// Serves: `files_under_workspace` for `q=`, `limit=` and `seat=`.
+/// Design: `docs/design/web-composer.md` §2.
+/// Up: `files_under_workspace`.
+/// Down: `sessions::percent_decode`.
+/// Verify: `cargo test -p loong-web` (`files_answer_ranks_the_typed_query`).
+/// Contract: a missing name is `None`, not the empty string; the caller decides the default.
+fn query_value(asked: &str, name: &str) -> Option<String> {
+    let query = asked.split_once('?')?.1;
+    query.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        if key == name {
+            Some(sessions::percent_decode(value))
+        } else {
+            None
+        }
+    })
+}
+
+/// Purpose: Answer the composer's `@` picker: the seat's workspace files, ranked for the typed query.
+///
+/// Serves: `handle_web` for `/api/files`.
+/// Design: `docs/design/web-composer.md` §2.
+/// Up: `handle_web`, after the token check.
+/// Down: `files::answer` and the workspace seat in `app::State`.
+/// Verify: `cargo test -p loong-web` (`files_answer_`).
+fn files_under_workspace(
+    mut stream: TcpStream,
+    asked: &str,
+    state: &Arc<Mutex<app::State>>,
+) -> Result<(), String> {
+    let mut buffer = [0u8; 4096];
+    let _ = stream.read(&mut buffer);
+    let query = query_value(asked, "q").unwrap_or_default();
+    let limit: usize = query_value(asked, "limit")
+        .and_then(|raw| raw.parse().ok())
+        .unwrap_or(10);
+    // The seat is asked for by index, and resolved to a directory here: a page must
+    // not be able to name a directory of its own choosing (web-composer.md §2).
+    let dir = query_value(asked, "seat")
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .and_then(|seat| {
+            state
+                .lock()
+                .ok()
+                .and_then(|st| st.workspaces.get(seat).map(|w| w.dir.clone()))
+        });
+    let (status, body) = match dir {
+        Some(dir) => ("200 OK", files::answer(&dir, &query, limit)),
+        None => (
+            "400 Bad Request",
+            json!({"error": "no such workspace seat"}).to_string(),
+        ),
+    };
+    let head = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json; charset=utf-8\r\n\
+         Content-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream
+        .write_all(head.as_bytes())
+        .and_then(|_| stream.write_all(body.as_bytes()))
+        .and_then(|_| stream.flush())
+        .map_err(|e| e.to_string())
+}
+
 /// Purpose: Accept the WebSocket handshake with the token check, then bridge messages to the session.
 ///
 /// Serves: the browser drives the same JSON-RPC session as the TUI (surfaces.md §4).
@@ -556,6 +767,7 @@ fn websocket_web(
             + Send
             + Sync,
     >,
+    models: Arc<dyn ModelSetup>,
 ) -> Result<(), String> {
     let mut socket = accept_hdr(stream, |request: &Request, response: Response| {
         let presented = request
@@ -578,7 +790,7 @@ fn websocket_web(
     })
     .map_err(|e| format!("websocket handshake refused: {e}"))?;
 
-    app::handle_ws(&mut socket, &state, &home, &*start_session)
+    app::handle_ws(&mut socket, &state, &home, &*start_session, &*models)
 }
 
 /// A session that answers from a script: the web layer's own tests, and a way to
@@ -620,6 +832,7 @@ impl Session for Echo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use loong_schema::generated as gen;
     use tungstenite::client::IntoClientRequest;
 
     /// Purpose: Start a server with a fresh token on loopback for a test.
@@ -631,6 +844,105 @@ mod tests {
         let for_server = token.clone();
         std::thread::spawn(move || serve(session, listener, for_server));
         (addr, token)
+    }
+
+    /// Purpose: Pin that the page only switches on event kinds the schema defines, and
+    /// only reads fields those events carry — the page once handled `tool.called`,
+    /// `decision.made` and `turn.completed`, none of which the protocol ever sends, so
+    /// tool calls and policy decisions were silently dropped.
+    #[test]
+    fn the_page_speaks_the_schemas_event_vocabulary() {
+        let kinds: Vec<&str> = gen::EVENT_KINDS.iter().map(|(kind, _)| *kind).collect();
+        // The kinds the surface itself puts on the wire, beside the schema's: a bad
+        // request is answered as an event so the page can show it in the transcript.
+        let surface_local = ["client.error"];
+        let handled: Vec<&str> = APP_JS
+            .match_indices("case \"")
+            .filter_map(|(at, marker)| {
+                let rest = &APP_JS[at + marker.len()..];
+                rest.find('"').map(|end| &rest[..end])
+            })
+            .collect();
+        assert!(
+            !handled.is_empty(),
+            "the event switch was not found in app.js"
+        );
+        for kind in &handled {
+            assert!(
+                kinds.contains(kind) || surface_local.contains(kind),
+                "app.js switches on `{kind}`, which is not an event kind — \
+                 the schema's kinds are {kinds:?}"
+            );
+        }
+        // The fields the client reads off each event, by kind. A name here that the
+        // schema does not carry is a field the page would read as undefined.
+        let fields: &[(&str, &[&str])] = &[
+            ("tool.call", &["call_id", "tool", "args", "action_class"]),
+            ("tool.result", &["call_id", "ok", "output"]),
+            ("policy.decided", &["action_class", "verdict", "rule"]),
+            (
+                "approval.requested",
+                &["request_id", "action_class", "reason"],
+            ),
+            ("message.appended", &["role", "text"]),
+            (
+                "compaction.applied",
+                &["tokens_before", "tokens_after", "summary"],
+            ),
+            (
+                "skill.invoked",
+                &["name", "source", "args", "tokens", "error"],
+            ),
+            ("cost.recorded", &["tokens_in", "tokens_out", "usd_micros"]),
+            ("permissions.relaxed", &["auto_approve"]),
+        ];
+        for (kind, names) in fields {
+            for name in *names {
+                assert!(
+                    APP_JS.contains(&format!("data.{name}")),
+                    "app.js never reads `data.{name}`, which `{kind}` carries"
+                );
+            }
+        }
+        // The names the page invented, gone for good: kinds checked as quoted strings,
+        // fields as the `data.` reads they would be.
+        for wrong in [
+            "tool.called",
+            "decision.made",
+            "decision.synthesized",
+            "tool.intercepted",
+            "turn.started",
+            "turn.completed",
+            "model.switched",
+            "session.resumed",
+        ] {
+            assert!(
+                !APP_JS.contains(&format!("\"{wrong}\"")),
+                "app.js still switches on `{wrong}`, which the protocol does not send"
+            );
+        }
+        for wrong in [
+            "data.cached_tokens",
+            "data.context_window",
+            "data.usd",
+            "data.lines",
+            "data.status",
+            "data.command",
+            "data.risk",
+        ] {
+            // `data.usd` must not match `data.usd_micros`, so the match has to end where
+            // the identifier ends.
+            let used = APP_JS.match_indices(wrong).any(|(at, found)| {
+                !APP_JS[at + found.len()..]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_alphanumeric() || c == '_')
+            });
+            assert!(
+                !used,
+                "app.js still reads `{wrong}`, which no event carries"
+            );
+        }
     }
 
     /// Purpose: Pins that the page is served without a token because the socket is the gated part.
@@ -652,6 +964,206 @@ mod tests {
             body.contains("loongagent"),
             "the page identifies itself: {body}"
         );
+    }
+
+    /// Purpose: Pins the model bar as a row of slots with keys and the YOLO switch as a
+    /// control that reads the session's own record — the banner once offered a dropdown,
+    /// and a region's shape is what a later refactor silently undoes (web-surface.md §4).
+    #[test]
+    fn the_banner_offers_every_model_at_once() {
+        assert!(
+            INDEX.contains("id=\"model-slots\""),
+            "the models are slots on one row, not a menu"
+        );
+        // The model list is a row, not a menu. A `<select>` elsewhere is fine — the
+        // add-model panel picks a *provider* from one, which is a catalogue, not a switch.
+        let bar = INDEX
+            .split("id=\"modelbar\"")
+            .nth(1)
+            .and_then(|rest| rest.split("</nav>").next())
+            .expect("the model bar is in the page");
+        assert!(
+            !bar.contains("<select"),
+            "no dropdown in the bar: every model is on screen (web-surface.md §4)"
+        );
+        assert!(
+            INDEX.contains("id=\"add-model\""),
+            "the bar carries the add-model button, and `id=\"add-model-dialog\"` the panel"
+        );
+        assert!(
+            INDEX.contains("id=\"no-models\""),
+            "an install with no model gets the warning before it gets anything else (web-surface.md §6)"
+        );
+        assert!(
+            !bar.contains("id=\"model-now\""),
+            "the selected model is said once, by its lit slot: a chip repeating the name \
+             beside the row says the same thing twice"
+        );
+        assert!(
+            APP_JS.contains("aria-current") && STYLE_CSS.contains(".slot.current"),
+            "the lit slot must answer in more than colour — `aria-current` and a bold face"
+        );
+        assert!(
+            INDEX.contains("id=\"yolo\""),
+            "the banner carries the session's approval switch"
+        );
+        for wanted in [
+            "ctrlKey",
+            "ArrowRight",
+            "ArrowLeft",
+            "model.select",
+            "model.reorder",
+            "permissions.set",
+            "permissions.relaxed",
+            "model.configured",
+            "model.providers",
+            "model.add",
+        ] {
+            assert!(
+                APP_JS.contains(wanted),
+                "app.js does not carry `{wanted}`, so the bar has no key or the switch no state"
+            );
+        }
+        // The chords the browser leaves alone: the letters on Alt, the arrows on Ctrl.
+        // Ctrl+N ("new window") and Ctrl+P ("print") are the browser's, and Alt+←/→ are its
+        // back/forward, so a page that binds them either loses the key or steals the action.
+        for wanted in ["alt+n", "alt+p", "ctrl+←"] {
+            assert!(
+                INDEX.contains(wanted),
+                "the bar does not print `{wanted}`, so the chord is only discoverable by trying"
+            );
+        }
+        // Two chords, two acts: the letters switch, the arrows move the current model one
+        // slot. Getting these mixed up is the bug this pins — Ctrl+arrow is not a switch.
+        let action = APP_JS
+            .split("function modelActionForKey(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}").next())
+            .expect("app.js reads the keys in modelActionForKey");
+        let letters = action
+            .find("act: \"switch\"")
+            .expect("alt+n / alt+p switch");
+        let arrows = action.find("act: \"order\"").expect("ctrl+arrows reorder");
+        let alt_guard = action.find("if (e.altKey").expect("the letters are on Alt");
+        let ctrl_guard = action
+            .find("if (e.ctrlKey")
+            .expect("the arrows are on Ctrl");
+        assert!(
+            alt_guard < letters && letters < ctrl_guard,
+            "switching belongs to the Alt branch: a letter key inside the Ctrl branch would \
+             take ctrl+n/ctrl+p from the browser"
+        );
+        assert!(
+            ctrl_guard < arrows,
+            "reordering belongs to the Ctrl branch, not to the letters"
+        );
+        assert!(
+            APP_JS.contains("moveModel("),
+            "the arrow chord must reach model.reorder, not stepModel: moving is not switching"
+        );
+        for wrong in ["ctrl+n", "ctrl+p", "alt+←", "alt+→"] {
+            assert!(
+                !INDEX.contains(wrong) && !APP_JS.contains(wrong),
+                "`{wrong}` is bindable only by taking it from the browser"
+            );
+        }
+        assert!(
+            APP_JS.contains("e.altKey") && APP_JS.contains("e.ctrlKey"),
+            "modelStepForKey must tell the two families apart, or one steals the other's keys"
+        );
+    }
+
+    /// Purpose: Pins the one thing that left the bar lighting nothing: the current model is
+    /// `ModelList.selected`, not a field on each offering.
+    /// Serves: the model bar's lit slot (web-surface.md §4).
+    /// Design: `docs/design/web-surface.md` §4 and the schema's `ModelList`/`ModelOffering`.
+    /// Up: `cargo test -p loong-web`.
+    /// Down: `APP_JS`'s `markSelected`, checked against the wire shape the schema generates.
+    /// Verify: `cargo test -p loong-web` (`the_model_bar_reads`).
+    #[test]
+    fn the_model_bar_reads_the_selected_name_the_schema_sends() {
+        // The wire shape, built from the generated types rather than from a hand-written
+        // object: a page that agrees with this test agrees with the server.
+        let list = gen::ModelList {
+            models: vec![gen::ModelOffering {
+                name: "a".to_string(),
+                model: "a-1".to_string(),
+                provider: Some("fake".to_string()),
+                context_window: Some(1000),
+            }],
+            selected: "a".to_string(),
+        };
+        let wire = serde_json::to_value(&list).expect("ModelList serialises");
+        assert!(
+            wire.get("selected").is_some(),
+            "ModelList carries `selected`; the page must read it there"
+        );
+        let offering = wire["models"][0]
+            .as_object()
+            .expect("an offering is an object");
+        assert!(
+            !offering.contains_key("active"),
+            "an offering carries no `active`: which one is current is `ModelList.selected`"
+        );
+        let keys: Vec<&str> = offering.keys().map(String::as_str).collect();
+
+        // The page derives it, from that field, in one place.
+        let derive = APP_JS
+            .split("function markSelected(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}").next())
+            .expect("app.js derives the current model in markSelected");
+        assert!(
+            derive.contains("list.selected"),
+            "markSelected must read `list.selected`, the field the schema sends"
+        );
+        assert!(
+            derive.contains("m.active ="),
+            "markSelected must write the derived `active` back onto each offering"
+        );
+
+        // And it is the *only* way `state.models` is filled from the wire: a bar that
+        // stores the offerings raw has nothing to light, whatever the derivation says.
+        let apply = APP_JS
+            .split("function applyModelList(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}").next())
+            .expect("app.js folds a ModelList in applyModelList");
+        assert!(
+            apply.contains("markSelected(list)"),
+            "applyModelList must go through markSelected, or the row lights nothing"
+        );
+
+        // And it reads nothing off an offering that the schema does not send. `active` is
+        // the derived flag; everything else has to be a field of `ModelOffering`.
+        let bar = APP_JS
+            .split("function renderModels(")
+            .nth(1)
+            .and_then(|rest| rest.split("function stepModel(").next())
+            .expect("app.js draws the bar in renderModels");
+        let mut reads: Vec<&str> = bar
+            .match_indices("m.")
+            .filter_map(|(at, found)| {
+                // Only a bare `m.` counts, so `dom.`-prefixed handles never match.
+                let before = bar[..at].chars().next_back();
+                if before.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '.') {
+                    return None;
+                }
+                let rest = &bar[at + found.len()..];
+                let end = rest
+                    .find(|c: char| !c.is_alphanumeric() && c != '_')
+                    .unwrap_or(rest.len());
+                (end > 0).then(|| &rest[..end])
+            })
+            .collect();
+        reads.sort_unstable();
+        reads.dedup();
+        for name in reads {
+            assert!(
+                keys.contains(&name) || name == "active",
+                "the bar reads `m.{name}`, which `ModelOffering` does not carry (it has {keys:?})"
+            );
+        }
     }
 
     /// Purpose: Pins that the site icon is served as a PNG, at both paths a browser may ask for,
@@ -1054,5 +1566,146 @@ mod tests {
             "with token: {listed}"
         );
         assert!(listed.contains("\"dirs\""), "{listed}");
+    }
+
+    /// Purpose: Pins the `@` picker's route: token-gated, seat-addressed, ranked, and closed to an unknown seat.
+    /// Serves: the composer's file list (`web-composer.md` §2).
+    /// Design: `docs/design/web-composer.md` §2.
+    /// Up: `cargo test -p loong-web`.
+    /// Down: `serve_web`, `handle_web` and `files::answer`.
+    /// Verify: `cargo test -p loong-web`.
+    #[test]
+    fn the_file_route_ranks_the_typed_query_and_refuses_an_unknown_seat() {
+        // A workspace of its own: seat 0 is the home directory the surface is opened on.
+        let home = std::env::temp_dir().join(format!("loong-web-files-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join("src")).unwrap();
+        std::fs::write(home.join("src/main.rs"), b"fn main() {}").unwrap();
+        std::fs::write(home.join("docs/notes.md"), b"x").ok();
+
+        let (listener, addr) = bind("127.0.0.1", 0).unwrap();
+        let token = random_token().unwrap();
+        let for_server = token.clone();
+        let served_dir = home.clone();
+        std::thread::spawn(move || {
+            serve_web(
+                listener,
+                for_server,
+                served_dir,
+                Arc::new(|_: &std::path::Path, session: Option<&str>| {
+                    let id = session.unwrap_or("echo").to_string();
+                    Ok((
+                        Arc::new(Mutex::new(Echo(vec![]))) as Arc<Mutex<dyn Session>>,
+                        id,
+                    ))
+                }),
+            )
+        });
+
+        /// Purpose: Run one GET and return the whole response.
+        /// Contract: the connection is closed by the server, so reading to the end is the body.
+        fn get(addr: SocketAddr, request: &str) -> String {
+            let mut stream = TcpStream::connect(addr).unwrap();
+            stream.write_all(request.as_bytes()).unwrap();
+            let mut body = String::new();
+            stream.read_to_string(&mut body).unwrap();
+            body
+        }
+
+        let refused = get(
+            addr,
+            "GET /api/files?seat=0&q=main HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert!(refused.starts_with("HTTP/1.1 401"), "no token: {refused}");
+
+        let unknown = get(
+            addr,
+            &format!(
+                "GET /api/files?token={token}&seat=9&q=main HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+            ),
+        );
+        assert!(
+            unknown.starts_with("HTTP/1.1 400"),
+            "a page must not name a directory by seat it does not have: {unknown}"
+        );
+
+        // Seat 0 is a workspace the page opened, as the real page does before any
+        // session exists: the seat is resolved on the server, never named by the page.
+        let request = format!("ws://{addr}/ws?token={token}")
+            .into_client_request()
+            .unwrap();
+        let (mut socket, _) = tungstenite::connect(request).unwrap();
+        socket
+            .send(Message::text(
+                json!({"jsonrpc": "2.0", "id": 1, "method": "workspace.add",
+                       "params": {"dir": home.to_string_lossy()}})
+                .to_string(),
+            ))
+            .unwrap();
+        loop {
+            let line = socket.read().unwrap().into_text().unwrap().to_string();
+            let parsed: Value = serde_json::from_str(&line).unwrap();
+            if parsed.get("id") == Some(&json!(1)) {
+                break;
+            }
+        }
+
+        let ranked = get(
+            addr,
+            &format!(
+                "GET /api/files?token={token}&seat=0&q=main HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+            ),
+        );
+        std::fs::remove_dir_all(&home).unwrap();
+
+        assert!(ranked.starts_with("HTTP/1.1 200 OK"), "{ranked}");
+        assert!(ranked.contains("\"src/main.rs\""), "{ranked}");
+    }
+
+    /// Purpose: Pins the composer's `@` picker: the markup, the route it asks, and the word-boundary rule.
+    /// Serves: typing `@` to name a workspace file (`web-composer.md` §2).
+    /// Design: `docs/design/web-composer.md` §2.
+    /// Up: `cargo test -p loong-web`.
+    /// Down: `INDEX`, `APP_JS`, `STYLE_CSS` and `files::answer`'s route.
+    /// Verify: `cargo test -p loong-web` (`the_composer_names`).
+    #[test]
+    fn the_composer_names_workspace_files_with_at() {
+        assert!(
+            INDEX.contains("id=\"file-picker\""),
+            "the composer needs a place to draw the `@` list"
+        );
+        assert!(
+            STYLE_CSS.contains("#file-picker"),
+            "the list must be drawn somewhere, and above the input it would cover it"
+        );
+        assert!(
+            APP_JS.contains("/api/files?token="),
+            "the picker asks the route that holds the workspace's files"
+        );
+        // The seat, not a path: a page must not be able to list a directory of its
+        // own choosing through this route.
+        assert!(
+            APP_JS.contains("seat=${state.seat}"),
+            "the picker names the workspace it sits on, and the server resolves it"
+        );
+        // `@` opens the list only at a word boundary, so `a@b` stays a plain address.
+        let rule = APP_JS
+            .split("function mentionAtCaret(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}").next())
+            .expect("mentionAtCaret is the one place the mention is read");
+        assert!(
+            rule.contains("boundary"),
+            "a mention begins at a word boundary: {rule}"
+        );
+        assert!(
+            rule.contains("/\\s/"),
+            "the word before `@` must be whitespace or the start of the message: {rule}"
+        );
+        // Choosing a row inserts the path and closes the list; it does not send.
+        assert!(
+            APP_JS.contains("function takeFile(") && APP_JS.contains("closeFilePicker();"),
+            "taking a row leaves `@path ` in the message and closes the list"
+        );
     }
 }

@@ -2323,6 +2323,7 @@ name = "loong-web"
 version = "0.0.1"
 dependencies = [
  "loong-config",
+ "loong-schema",
  "serde_json",
  "tungstenite",
 ]

@@ -29,10 +29,62 @@
   <div class="spacer"></div>
 </header>
 
-<nav id="modelbar" aria-label="Models">
-  <select id="model-select" aria-label="Model"></select>
-  <span class="hint"></span>
+<nav id="modelbar" aria-label="Model and approval mode">
+  <span class="bar-label">Model</span>
+  <div id="model-slots" role="group"
+       aria-label="Models: alt+n / alt+p switch, ctrl+left / ctrl+right move the current one"></div>
+  <button id="add-model" type="button" title="Add a model: paste a provider's key and it is written to local.toml, the same way `loongagent local add` does it">＋ Add model</button>
+  <span class="keys" aria-hidden="true">alt+n · alt+p switch · ctrl+← → move</span>
+  <button id="yolo" type="button" aria-pressed="false"
+          title="Approval prompts are on: every tool call asks first. Click to let this session run without asking — the sandbox still applies.">
+    <span class="dot" aria-hidden="true"></span><span class="word">YOLO</span><span class="state">OFF</span>
+  </button>
 </nav>
+
+<div id="no-models" class="no-models" hidden>
+  <span class="mark" aria-hidden="true">!</span>
+  <span class="text">No model is configured yet — the agent cannot answer until there is one.</span>
+  <button id="no-models-add" type="button">Add a model</button>
+</div>
+
+<dialog id="add-model-dialog" aria-labelledby="add-model-title">
+  <form method="dialog">
+    <h2 id="add-model-title">Models</h2>
+    <p class="lede">Tick the models this machine should offer. A key is checked against the
+      provider before anything is written; the key goes to <code>~/.loongagent/env</code> and
+      the ticked models to <code>local.toml</code> — the same two writes
+      <code>loongagent local add</code> makes. Untick one and save to turn it off; its key
+      stays, so it can come back later.</p>
+    <div class="add-provider">
+      <label class="field">
+        <span>Provider</span>
+        <select id="add-provider">
+          <option value="">— tell from the key —</option>
+        </select>
+      </label>
+      <label class="field">
+        <span id="add-key-label">API key</span>
+        <input id="add-key" type="password" autocomplete="off" spellcheck="false"
+               placeholder="paste the key here">
+      </label>
+      <button id="add-probe" type="button">List its models</button>
+    </div>
+    <p id="add-hint" class="hint"></p>
+    <div class="pick-head">
+      <input id="pick-filter" type="search" autocomplete="off"
+             placeholder="filter by name…" aria-label="Filter models by name">
+      <button id="pick-all" type="button">Select all</button>
+      <button id="pick-none" type="button">Clear</button>
+      <span id="pick-count" class="count"></span>
+    </div>
+    <div id="pick-list" class="pick-list" role="group" aria-label="Models"></div>
+    <p id="add-status" class="status" aria-live="polite"></p>
+    <div class="actions">
+      <button id="add-cancel" type="button">Close</button>
+      <button id="add-submit" type="button" class="primary">Save</button>
+    </div>
+  </form>
+</dialog>
 
 <div id="body">
 
@@ -48,15 +100,14 @@
 
   <main id="chat">
     <div id="transcript">
-      <div class="wrap" id="messages">
-        <div class="notice info">Connecting…</div>
-      </div>
+      <div class="wrap" id="messages"></div>
     </div>
 
     <div id="composer">
       <div class="wrap">
+        <div id="file-picker" role="listbox" aria-label="Workspace files" hidden></div>
         <form id="composer-form">
-          <textarea id="prompt" rows="1" placeholder="Message loongagent…  (Enter to send, Shift+Enter for a newline)"></textarea>
+          <textarea id="prompt" rows="1" placeholder="Message loongagent…  (Enter to send, Shift+Enter for a newline, @ to name a workspace file)"></textarea>
           <button id="send" type="submit">Send</button>
         </form>
         <div id="usage">
@@ -71,7 +122,7 @@
       </div>
     </div>
 
-    <div id="status">…</div>
+    <div id="status"></div>
   </main>
 
 </div>

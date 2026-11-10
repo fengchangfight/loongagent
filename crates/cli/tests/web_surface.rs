@@ -120,26 +120,102 @@ impl Web {
     /// Down: `common::isolated_command` and `std::io::BufReader`.
     /// Verify: `cargo test -p loongagent --test web_surface`.
     fn start(dir: &std::path::Path, base_url: &str) -> Self {
-        let mut child = common::isolated_command()
+        Self::start_with(dir, base_url, Some("openai-compat"))
+    }
+
+    /// Purpose: The same child, optionally launched with no `--model`, so a test can stand in
+    /// the shoes of an install that has never configured one.
+    /// Serves: the model-panel test's empty case (web-surface.md §6).
+    /// Design: `docs/design/web-surface.md` §6.
+    /// Up: `start`, and the panel test directly.
+    /// Down: `common::isolated_command` and the child's stdout banner.
+    /// Verify: `cargo test -p loongagent --test web_surface`.
+    fn start_with(dir: &std::path::Path, base_url: &str, model: Option<&str>) -> Self {
+        let mut command = common::isolated_command();
+        command
+            .arg("web")
+            .arg("--session")
+            .arg(dir.join("s.jsonl"))
+            .arg("--cwd")
+            .arg(dir);
+        if let Some(model) = model {
+            command.arg("--model").arg(model);
+        }
+        command
+            .arg("--bind")
+            .arg("127.0.0.1")
+            .arg("--port")
+            .arg("0");
+        command
+            .env("LOONGAGENT_BASE_URL", base_url)
+            .env("LOONGAGENT_MODEL", "fake")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        Self::from_spawned(command, dir)
+    }
+
+    /// Purpose: The same child on a local profile of its own: a home holding a `local.toml` with
+    /// several `[[models]]`, no `--model` and no `LOONGAGENT_MODEL` — the shape a reorder needs,
+    /// because the order is written back to that file.
+    /// Serves: the reorder test (web-surface.md §4).
+    /// Design: `docs/design/web-surface.md` §4 and `docs/design/config-routing.md` §3.
+    /// Up: the reorder test; no other caller.
+    /// Down: `common::isolated_command`, the banner on stdout, and the child's own home.
+    /// Verify: `cargo test -p loongagent --test web_surface` (`reorder_`).
+    fn start_local(dir: &std::path::Path, base_url: &str) -> Self {
+        let home = dir.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        // Three models on Ollama, which needs no key: nothing here reaches the network,
+        // and the first block is the one a new session would start with.
+        std::fs::write(
+            home.join("local.toml"),
+            "[[models]]\nname = \"alpha\"\nprovider = \"ollama/llama3\"\n\n\
+             [[models]]\nname = \"beta\"\nprovider = \"ollama/qwen2.5:3b\"\n\n\
+             [[models]]\nname = \"gamma\"\nprovider = \"ollama/mistral\"\n",
+        )
+        .unwrap();
+        let mut command = common::isolated_command();
+        command
             .arg("web")
             .arg("--session")
             .arg(dir.join("s.jsonl"))
             .arg("--cwd")
             .arg(dir)
-            .arg("--model")
-            .arg("openai-compat")
             .arg("--bind")
             .arg("127.0.0.1")
             .arg("--port")
             .arg("0")
+            .env("LOONGAGENT_HOME", &home)
+            .env("HOME", dir.join("homeuser"))
             .env("LOONGAGENT_BASE_URL", base_url)
-            .env("LOONGAGENT_MODEL", "fake")
+            .env_remove("LOONGAGENT_MODEL")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("the binary runs");
+            .stderr(Stdio::null());
+        Self::from_spawned(command, dir)
+    }
 
+    /// Purpose: Spawn the command and read the port and token out of its banner.
+    /// Serves: the two constructors above.
+    /// Design: `docs/design/surfaces.md` §4.
+    /// Up: `start_with` and `start_local`.
+    /// Down: the child process and its stdout.
+    /// Verify: `cargo test -p loongagent --test web_surface`.
+    /// Contract: the child's stdout is drained for the rest of the run, so it never blocks.
+    fn from_spawned(mut command: std::process::Command, dir: &std::path::Path) -> Self {
+        // A developer's shell may have any of these exported, and `model.add` treats a key
+        // it finds in the environment as one already on file — which it is. A test that
+        // wants "no key configured yet" has to say so, or it passes for a reason that has
+        // nothing to do with the code (config-routing.md §5, and `local_mode.rs` does the
+        // same).
+        for provider in loong_config::catalog::PROVIDERS {
+            command.env_remove(provider.key_env);
+            for alias in provider.aliases {
+                command.env_remove(alias);
+            }
+        }
+        let mut child = command.spawn().expect("the binary runs");
         // The banner carries the URL, which carries the token.
         let stdout = child.stdout.take().unwrap();
         let mut reader = BufReader::new(stdout);
@@ -344,6 +420,290 @@ fn a_browser_can_drive_a_session_with_a_model_behind_it() {
         "a page, not a protocol error"
     );
     assert!(page.contains("loongagent"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Purpose: A profile with no model says so to the page, the panel lists the real catalogue, and a
+/// keyless add for a provider that wants one is refused before any file is written.
+/// Serves: the empty-state warning and the panel's two offline reads (web-surface.md §6).
+/// Design: `docs/design/web-surface.md` §6.
+/// Up: `cargo test -p loongagent --test web_surface`.
+/// Down: `Web::start_with`, `exchange` and the surface's `model.*` arms.
+/// Verify: `cargo test -p loongagent --test web_surface`.
+#[test]
+fn the_model_panel_warns_when_nothing_is_configured() {
+    let dir = std::env::temp_dir().join(format!("loong-panel-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (base_url, _server) = fake_model();
+    // No `--model`: this is an install that has never configured one, which is exactly the
+    // person the warning exists for.
+    let web = Web::start_with(&dir, &base_url, None);
+    let mut socket = web.connect();
+
+    let (_, configured) = exchange(&mut socket, 1, "model.configured", json!({}));
+    assert_eq!(
+        configured["result"]["models"],
+        json!([]),
+        "a profile with no model is reported empty, and that is what shows the banner: {configured}"
+    );
+
+    let (_, providers) = exchange(&mut socket, 2, "model.providers", json!({}));
+    let list = providers["result"]["providers"]
+        .as_array()
+        .expect("the catalogue is an array");
+    let deepseek = list
+        .iter()
+        .find(|p| p["id"] == "deepseek")
+        .expect("deepseek is in the catalogue");
+    assert_eq!(
+        deepseek["needs_key"], true,
+        "a hosted provider says it wants a key, so the panel can ask for one: {deepseek}"
+    );
+    assert!(
+        list.iter().any(|p| p["needs_key"] == false),
+        "a loopback provider says it wants none, so the panel does not ask: {list:?}"
+    );
+
+    let (_, refused) = exchange(
+        &mut socket,
+        3,
+        "model.add",
+        json!({"provider": "deepseek", "key": "", "models": []}),
+    );
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("API key"),
+        "a keyless add names what is missing instead of writing half a provider: {refused}"
+    );
+
+    let (_, unselected) = exchange(
+        &mut socket,
+        4,
+        "model.add",
+        json!({"provider": "deepseek", "key": "sk-test"}),
+    );
+    assert!(
+        unselected["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("models"),
+        "a page that sends no selection is refused, never read as \"tick nothing\": {unselected}"
+    );
+
+    let (_, unknown) = exchange(
+        &mut socket,
+        5,
+        "model.add",
+        json!({"provider": "no-such-provider", "key": "x", "models": []}),
+    );
+    assert!(
+        unknown["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no-such-provider"),
+        "an unknown provider is named back: {unknown}"
+    );
+
+    // Listing a provider whose key was never stored says so instead of guessing at an
+    // empty key: the panel has no rows to draw until there is a key to draw them with
+    // (web-surface.md §6).
+    let (_, keyless) = exchange(
+        &mut socket,
+        6,
+        "model.probe",
+        json!({"provider": "deepseek", "key": ""}),
+    );
+    assert!(
+        keyless["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("key"),
+        "probing without a key on file is refused in words that name the key: {keyless}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Purpose: The panel writes exactly the models that were ticked and can untick one later —
+/// a provider with many models must not fill `local.toml` with all of them because a key was
+/// pasted, and turning one off must not cost the key.
+#[test]
+fn the_panel_writes_only_the_ticked_models_and_can_untick_them() {
+    let (base_url, _model) = fake_model();
+    let dir = workspace();
+    // Three models on Ollama, which needs no key: the write is the only thing under test,
+    // so nothing here reaches the network (a loopback provider has no `/models` to ask).
+    let web = Web::start_local(&dir, &base_url);
+    let mut socket = web.connect();
+    let profile = dir.join("home").join("local.toml");
+
+    let (_, configured) = exchange(&mut socket, 1, "model.configured", json!({}));
+    let rows = configured["result"]["models"]
+        .as_array()
+        .expect("configured models are an array");
+    let names: Vec<&str> = rows.iter().filter_map(|m| m["name"].as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["alpha", "beta", "gamma"],
+        "the panel opens on what is configured, because that is what can be turned off: {configured}"
+    );
+    assert_eq!(
+        rows[0]["provider"], "ollama",
+        "each row carries the provider it belongs to, so the page can write it back: {configured}"
+    );
+
+    // One ticked out of three: one block stays, two go. This is the write the panel makes
+    // when a person unticks a model, and it is the whole reason the key must not be needed
+    // again for it.
+    let (_, written) = exchange(
+        &mut socket,
+        2,
+        "model.add",
+        json!({"provider": "ollama", "key": "",
+               "models": [{"name": "beta", "context_window": 32768}]}),
+    );
+    assert_eq!(
+        written["result"]["models"],
+        json!([{"name": "beta", "context_window": 32768}]),
+        "the answer is the whole selection, not a delta: {written}"
+    );
+    let text = std::fs::read_to_string(&profile).unwrap();
+    assert!(
+        text.contains("name = \"beta\""),
+        "the ticked one stays: {text}"
+    );
+    assert!(
+        !text.contains("name = \"alpha\""),
+        "the unticked ones go: {text}"
+    );
+    assert!(!text.contains("name = \"gamma\""), "{text}");
+
+    let (_, after) = exchange(&mut socket, 3, "model.configured", json!({}));
+    assert_eq!(
+        after["result"]["models"],
+        json!([{"name": "beta", "provider": "ollama", "context_window": 32768}]),
+        "the panel's list follows what it just wrote, so no unticked model lingers: {after}"
+    );
+
+    // Ticking nothing is a real answer: it turns the provider's models off and keeps the
+    // provider, so the same panel can turn them back on later.
+    let (_, cleared) = exchange(
+        &mut socket,
+        4,
+        "model.add",
+        json!({"provider": "ollama", "key": "", "models": []}),
+    );
+    assert_eq!(cleared["result"]["models"], json!([]), "{cleared}");
+    let (_, none) = exchange(&mut socket, 5, "model.configured", json!({}));
+    assert_eq!(
+        none["result"]["models"],
+        json!([]),
+        "nothing is configured any more, which is what shows the banner again: {none}"
+    );
+    let text = std::fs::read_to_string(&profile).unwrap();
+    assert!(
+        !text.contains("ollama/"),
+        "the blocks are gone, not merely hidden: {text}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Purpose: Ctrl+right is a reorder, not a switch: on a real local profile it moves the current
+/// model one slot, keeps it current, and rewrites `local.toml` so the next session starts with
+/// the new order — while a refresh of `model.list` still shows the arrangement.
+#[test]
+fn reorder_writes_the_new_order_to_the_local_profile() {
+    let (base_url, _model) = fake_model();
+    let dir = workspace();
+    let web = Web::start_local(&dir, &base_url);
+    let mut socket = web.connect();
+
+    let (_, response) = exchange(
+        &mut socket,
+        1,
+        "session.attach",
+        json!({"cwd": "", "client": "web"}),
+    );
+    assert!(response["error"].is_null(), "{response}");
+    let session_id = response["result"]["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (_, listed) = exchange(
+        &mut socket,
+        2,
+        "model.list",
+        json!({"session_id": session_id}),
+    );
+    let names: Vec<&str> = listed["result"]["models"]
+        .as_array()
+        .expect("a model list")
+        .iter()
+        .map(|m| m["name"].as_str().unwrap_or(""))
+        .collect();
+    assert_eq!(
+        names,
+        vec!["alpha", "beta", "gamma"],
+        "the local profile's blocks, in file order: {listed}"
+    );
+    assert_eq!(listed["result"]["selected"], "alpha", "{listed}");
+
+    let (_, moved) = exchange(
+        &mut socket,
+        3,
+        "model.reorder",
+        json!({"session_id": session_id, "delta": 1}),
+    );
+    assert!(moved["error"].is_null(), "{moved}");
+    let after: Vec<&str> = moved["result"]["models"]
+        .as_array()
+        .expect("a model list")
+        .iter()
+        .map(|m| m["name"].as_str().unwrap_or(""))
+        .collect();
+    assert_eq!(
+        after,
+        vec!["beta", "alpha", "gamma"],
+        "one slot, not a switch: {moved}"
+    );
+    assert_eq!(
+        moved["result"]["selected"], "alpha",
+        "the model stayed current while its slot changed: {moved}"
+    );
+    assert_eq!(moved["result"]["persisted"], json!(true), "{moved}");
+
+    let text = std::fs::read_to_string(dir.join("home").join("local.toml")).unwrap();
+    let beta_at = text.find("name = \"beta\"").expect("beta is still there");
+    let alpha_at = text.find("name = \"alpha\"").expect("alpha is still there");
+    assert!(
+        beta_at < alpha_at,
+        "the file now leads with beta, which is what a new session starts on: {text}"
+    );
+
+    // A refresh from a child that read the old order must not snap the bar back.
+    let (_, refreshed) = exchange(
+        &mut socket,
+        4,
+        "model.list",
+        json!({"session_id": session_id}),
+    );
+    let refreshed: Vec<&str> = refreshed["result"]["models"]
+        .as_array()
+        .expect("a model list")
+        .iter()
+        .map(|m| m["name"].as_str().unwrap_or(""))
+        .collect();
+    assert_eq!(
+        refreshed,
+        vec!["beta", "alpha", "gamma"],
+        "the arrangement outlives a fresh model.list"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

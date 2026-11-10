@@ -382,7 +382,7 @@ fn resolve_dir(asked: &str, home: &Path) -> Result<PathBuf, Error> {
 /// Down: the decoded path string it canonicalises.
 /// Verify: `cargo test -p loong-web` (`browse_decodes_path`).
 /// Contract: invalid `%` sequences pass through unchanged; a directory path never needs them.
-fn percent_decode(raw: &str) -> String {
+pub(crate) fn percent_decode(raw: &str) -> String {
     let bytes = raw.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;

@@ -31,7 +31,7 @@ use loong_schema::generated as gen;
 use loong_schema::generated::ApprovalScope;
 use loong_server::Server;
 use loong_tui::{Client, Transport};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};

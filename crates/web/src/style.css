@@ -115,22 +115,52 @@ body {
 }
 #workspace-btn .chev { font-size: 10px; opacity: 0.6; }
 
-/* ── Model bar: the model picker and a quiet hint ────────────────────── */
+/* ── Model bar: every model on one row, the current one unmistakable ───
+ *
+ * Two things must be readable at a glance, because both change what the next
+ * turn does: which model is selected, and whether approval prompts are on. So
+ * neither is a colour alone — the lit slot carries a filled dot, a double
+ * border and a bold name (`aria-current` for the rest), and the YOLO switch
+ * prints `ON` / `OFF` beside its label. */
 
 #modelbar {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   padding: 0 14px;
-  height: 38px;
-  flex: 0 0 38px;
+  height: 44px;
+  flex: 0 0 44px;
   background: var(--bg-raised);
-  border-bottom: 1px solid var(--border-soft);
+  border-bottom: 1px solid var(--border);
 }
 
-#model-select {
-  max-width: 320px;
-  padding: 4px 8px;
+#modelbar .bar-label {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* Every model on one row, scrolling sideways rather than folding into a menu. */
+#model-slots {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+#model-slots::-webkit-scrollbar { display: none; }
+
+.slot {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  height: 26px;
+  padding: 0 10px;
   background: var(--bg-overlay);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -140,16 +170,80 @@ body {
   cursor: pointer;
   outline: none;
 }
-#model-select:hover:not(:disabled) { border-color: var(--accent); }
-#model-select:disabled { opacity: 0.45; cursor: not-allowed; }
+.slot:hover:not(:disabled) { border-color: var(--accent); background: #232b36; }
+.slot:focus-visible { box-shadow: 0 0 0 2px var(--accent); }
+.slot:disabled { opacity: 0.45; cursor: not-allowed; }
 
-#modelbar .hint {
-  color: var(--text-faint);
-  font-size: 11.5px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+/* The dot is drawn on every slot and hidden on the idle ones, so lighting one
+   up never shifts the row by a character. */
+.slot .dot { color: var(--accent); font-size: 9px; visibility: hidden; }
+.slot .name { white-space: nowrap; }
+
+/* The selected model: filled tint, double-weight border, bold, dot lit. */
+.slot.current {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+  color: #f0f6ff;
+  font-weight: 700;
 }
+.slot.current .dot { visibility: visible; }
+
+/* The keys, small and dim: there when wanted, never in the way. */
+#modelbar .keys {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* The YOLO switch states what it is: quiet and outlined while prompts are on,
+   filled amber and bold while the session runs without asking (ADR-0007 §5
+   asks a surface to show the opt-out; hiding it would be the lie this replaces). */
+#yolo {
+  margin-left: auto;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  background: var(--bg-overlay);
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  outline: none;
+}
+#yolo:hover:not(:disabled) { border-color: var(--amber); color: #fff; }
+#yolo:focus-visible { box-shadow: 0 0 0 2px var(--amber); }
+#yolo .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-dim);
+}
+#yolo .state {
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--border);
+  color: var(--text);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+#yolo.on {
+  background: var(--amber);
+  border-color: var(--amber);
+  color: #1c1206;
+}
+#yolo.on .dot { background: #1c1206; }
+#yolo.on .state { background: #1c1206; color: var(--amber); }
+#yolo:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* ── Body: rail + chat ──────────────────────────────────────────────── */
 
@@ -158,6 +252,269 @@ body {
   flex: 1;
   min-height: 0;
 }
+
+/* Adding a model is one button beside the row it will extend, because the moment
+   somebody wants it is the moment they see the bar is wrong (web-surface.md §6). */
+#add-model {
+  flex: 0 0 auto;
+  height: 26px;
+  padding: 0 11px;
+  background: var(--bg-overlay);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+  outline: none;
+}
+#add-model:hover { border-color: var(--accent); border-style: solid; color: var(--text); }
+#add-model:focus-visible { box-shadow: 0 0 0 2px var(--accent); }
+
+/* The empty state is a banner, not a dialog: it must be readable before anyone has
+   clicked anything, and it must not trap a page that is otherwise usable. */
+#no-models {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  background: var(--amber-soft);
+  border-bottom: 1px solid var(--amber);
+  color: var(--amber);
+  font-size: 12.5px;
+}
+#no-models[hidden] { display: none; }
+#no-models .mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--amber);
+  color: #1c1206;
+  font-size: 12px;
+  font-weight: 800;
+}
+#no-models .text { flex: 1 1 auto; min-width: 0; }
+#no-models button {
+  flex: 0 0 auto;
+  padding: 4px 12px;
+  background: var(--amber);
+  border: 1px solid var(--amber);
+  border-radius: var(--radius-sm);
+  color: #1c1206;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+#no-models button:hover { filter: brightness(1.08); }
+
+/* ── The add-model panel ─────────────────────────────────────────────── */
+
+#add-model-dialog {
+  width: min(560px, 94vw);
+  padding: 0;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+}
+#add-model-dialog::backdrop { background: rgba(0, 0, 0, 0.55); }
+#add-model-dialog form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px 20px 16px;
+}
+#add-model-dialog h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+}
+#add-model-dialog .lede {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.55;
+}
+#add-model-dialog code {
+  padding: 0 3px;
+  border-radius: 3px;
+  background: var(--bg-overlay);
+  font-size: 11.5px;
+}
+#add-model-dialog .field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 11.5px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  text-transform: uppercase;
+}
+#add-model-dialog select,
+#add-model-dialog input {
+  padding: 7px 9px;
+  background: var(--bg-overlay);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  outline: none;
+}
+#add-model-dialog select:focus,
+#add-model-dialog input:focus { border-color: var(--accent); }
+#add-model-dialog .hint {
+  margin: 0;
+  min-height: 1em;
+  color: var(--text-faint);
+  font-size: 11.5px;
+}
+/* The three controls of "which provider, with what key, show me what it has". The button
+ * sits on the baseline of the fields rather than under them: it acts on both. */
+#add-model-dialog .add-provider {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 10px;
+  align-items: end;
+}
+#add-model-dialog .add-provider button {
+  padding: 7px 10px;
+  background: var(--bg-overlay);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+#add-model-dialog .add-provider button:hover { border-color: var(--accent); }
+#add-model-dialog .add-provider button:disabled { opacity: 0.5; cursor: progress; }
+#add-model-dialog .pick-head {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
+#add-model-dialog .pick-head input {
+  flex: 1;
+  padding: 5px 8px;
+  font-size: 12px;
+}
+#add-model-dialog .pick-head button {
+  padding: 4px 9px;
+  background: var(--bg-overlay);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+#add-model-dialog .pick-head button:hover { border-color: var(--accent); }
+#add-model-dialog .pick-head .count {
+  color: var(--text-faint);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+/* The list scrolls, not the dialog: a provider with three hundred models must not push
+ * the Save button off the screen it is needed on. */
+#add-model-dialog .pick-list {
+  max-height: 42vh;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+#add-model-dialog .pick-list .empty {
+  padding: 14px 12px;
+  color: var(--text-faint);
+  font-size: 12px;
+  text-align: center;
+}
+#add-model-dialog .pick-group {
+  position: sticky;
+  top: 0;
+  padding: 5px 10px;
+  background: var(--bg-overlay);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+#add-model-dialog .pick-row {
+  display: flex;
+  gap: 9px;
+  align-items: center;
+  padding: 5px 10px;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+#add-model-dialog .pick-row:hover { background: var(--bg-overlay); }
+#add-model-dialog .pick-row input { margin: 0; accent-color: var(--accent); }
+#add-model-dialog .pick-row .name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#add-model-dialog .pick-row .meta {
+  color: var(--text-faint);
+  font-size: 11px;
+  white-space: nowrap;
+}
+/* A model the panel cannot attribute to a catalogue provider is shown but not offered:
+ * it has no box, because rewriting it would mean inventing a provider for it. */
+#add-model-dialog .pick-row.readonly {
+  color: var(--text-faint);
+  cursor: default;
+}
+#add-model-dialog .pick-row.readonly .name { padding-left: 22px; }
+#add-model-dialog .status {
+  margin: 0;
+  min-height: 1em;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+#add-model-dialog .status.bad { color: var(--red); }
+#add-model-dialog .status.ok { color: var(--green); }
+#add-model-dialog .actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+#add-model-dialog .actions button {
+  padding: 6px 14px;
+  background: var(--bg-overlay);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+#add-model-dialog .actions button:hover { border-color: var(--accent); }
+#add-model-dialog .actions .primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #08121f;
+  font-weight: 700;
+}
+#add-model-dialog .actions .primary:disabled { opacity: 0.5; cursor: progress; }
 
 /* ── Session rail ────────────────────────────────────────────────────────── */
 
@@ -319,6 +676,27 @@ body {
 .session-row:hover .delete { display: block; }
 .session-row .delete:hover { background: var(--red-soft); color: var(--red); }
 
+/* The copy button sits just left of the delete ×, and appears with it on hover. */
+.session-row .copy {
+  position: absolute;
+  top: 7px;
+  right: 28px;
+  display: none;
+  padding: 1px 6px;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: var(--text-faint);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1.4;
+}
+.session-row:hover .copy { display: block; }
+.session-row .copy:hover { background: var(--bg-overlay); color: var(--text); }
+.session-row .copy.copied { color: var(--green); }
+/* Room for both buttons, so a long title ellipsises instead of running under them. */
+.session-row:hover .title { padding-right: 46px; }
+
 #rail .empty {
   padding: 18px 14px;
   color: var(--text-faint);
@@ -408,10 +786,9 @@ body {
   line-height: 1.5;
 }
 .msg .text pre code { background: none; padding: 0; }
+/* ── The turn: one block per turn, machinery and words in order ─────── */
 
-/* ── The process panel: the turn's machinery, as it happens ─────────── */
-
-.process {
+.turn {
   margin: 2px 0 18px;
   border: 1px solid var(--border-soft);
   border-radius: var(--radius);
@@ -419,7 +796,7 @@ body {
   overflow: hidden;
 }
 
-.process summary {
+.turn summary {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -430,14 +807,15 @@ body {
   font-size: 12px;
   user-select: none;
 }
-.process summary::-webkit-details-marker { display: none; }
-.process summary::before {
+.turn summary::-webkit-details-marker { display: none; }
+.turn summary::before {
   content: "▸";
   color: var(--text-faint);
   transition: transform 0.15s;
 }
-.process[open] summary::before { transform: rotate(90deg); }
-.process summary .count {
+.turn[open] summary::before { transform: rotate(90deg); }
+.turn summary .label { font-weight: 600; color: var(--text-dim); }
+.turn summary .meta {
   margin-left: auto;
   color: var(--text-faint);
   font-family: var(--mono);
@@ -445,7 +823,7 @@ body {
 }
 
 /* One live spinner while the turn runs. */
-.process .spinner {
+.turn .spinner {
   display: inline-block;
   width: 10px;
   height: 10px;
@@ -456,65 +834,169 @@ body {
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-.process .steps { padding: 2px 0 8px; }
+.turn-body { padding: 0 0 4px; }
+
+/* The assistant's words inside a turn read as prose, not as a bubble: the bubble is
+ * for the user's own messages. */
+.turn-body .msg { margin: 10px 0; }
+.turn-body .msg .who {
+  margin-bottom: 4px;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--purple);
+}
+.turn-body .msg .text { white-space: pre-wrap; word-wrap: break-word; font-size: 14.5px; }
+
+/* ── Steps: the machinery, each on one scannable line ───────────────── */
 
 .step {
   display: flex;
-  gap: 10px;
-  padding: 6px 12px;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 5px 12px;
   border-top: 1px solid var(--border-soft);
   font-size: 12.5px;
+  color: var(--text-dim);
 }
 
 .step .badge {
   flex: 0 0 auto;
-  margin-top: 1px;
   padding: 1px 7px;
   border-radius: 4px;
   font-family: var(--mono);
   font-size: 10.5px;
   font-weight: 600;
   letter-spacing: 0.3px;
-  height: fit-content;
+  background: var(--bg-overlay);
+  color: var(--text-dim);
 }
 .step.tool .badge { background: var(--amber-soft); color: var(--amber); }
-.step.decision .badge { background: var(--green-soft); color: var(--green); }
-.step.event .badge { background: var(--bg-overlay); color: var(--text-dim); }
-.step.error .badge { background: var(--red-soft); color: var(--red); }
+.step.skill .badge { background: var(--purple-soft, var(--bg-overlay)); color: var(--purple); }
+.step.compaction .badge { background: var(--bg-overlay); color: var(--text-dim); }
 
-.step .body { min-width: 0; flex: 1; }
-.step .headline {
-  color: var(--text);
+/* A verdict reads at a glance: allow is quiet, ask is amber, deny is red. */
+.step.policy .badge.allow { background: var(--bg-overlay); color: var(--text-faint); }
+.step.policy .badge.ask { background: var(--amber-soft); color: var(--amber); }
+.step.policy .badge.deny { background: var(--red-soft); color: var(--red); }
+.step .badge.ok { background: var(--green-soft); color: var(--green); }
+.step .badge.deny, .step .badge.failed { background: var(--red-soft); color: var(--red); }
+.step.warn { color: var(--amber); }
+.step.warn .badge { background: var(--amber-soft); color: var(--amber); }
+
+.step .class, .step .rule {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+.step .rule.deny { color: var(--red); }
+.step .tool-name { color: var(--text); font-weight: 600; }
+.step .args-inline {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--text-faint);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  max-width: 46ch;
 }
-.step .detail {
-  margin-top: 4px;
-  padding: 8px 10px;
+.step .outcome { margin-left: auto; font-family: var(--mono); font-size: 11.5px; }
+.step .outcome.ok { color: var(--green); }
+.step .outcome.failed { color: var(--red); }
+
+/* A tool call opens to its arguments and its output. */
+details.step.tool { display: block; padding: 0; }
+details.step.tool > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 12px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+details.step.tool > summary::-webkit-details-marker { display: none; }
+details.step.tool > summary::before {
+  content: "▸";
+  color: var(--text-faint);
+  transition: transform 0.15s;
+  font-size: 10px;
+}
+details.step.tool[open] > summary::before { transform: rotate(90deg); }
+details.step.tool.failed > summary { background: rgba(248, 81, 73, 0.06); }
+
+.step .args, .step .output {
+  margin: 0;
+  padding: 8px 12px 8px 26px;
   background: var(--bg);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-sm);
-  color: var(--text-dim);
+  border-top: 1px solid var(--border-soft);
   font-family: var(--mono);
   font-size: 11.5px;
   line-height: 1.5;
+  color: var(--text-dim);
   white-space: pre-wrap;
   word-break: break-all;
-  max-height: 220px;
-  overflow-y: auto;
+  max-height: 320px;
+  overflow: auto;
 }
-.step .detail:empty { display: none; }
+.step .output { color: var(--text); }
+.step .empty { padding: 4px 12px 6px 26px; color: var(--text-faint); font-size: 11.5px; }
 .step .toggle {
-  margin-top: 3px;
+  display: block;
+  margin: 0;
+  padding: 4px 12px 8px 26px;
   background: none;
   border: none;
-  padding: 0;
   color: var(--accent);
   cursor: pointer;
   font: inherit;
   font-size: 11.5px;
+  text-align: left;
 }
+.step .toggle:hover { text-decoration: underline; }
+
+/* ── Rendered words: paragraphs, code, emphasis ─────────────────────── */
+
+.text.rendered { white-space: normal; }
+.text.rendered p { margin: 0 0 10px; }
+.text.rendered p:last-child { margin-bottom: 0; }
+.text.rendered code {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  background: var(--bg-overlay);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.text.rendered pre.code-block {
+  position: relative;
+  margin: 8px 0;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  overflow-x: auto;
+}
+.text.rendered pre.code-block code {
+  background: none;
+  padding: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+/* The fence's language, as a quiet corner tag. */
+.text.rendered pre.code-block[data-lang]::before {
+  content: attr(data-lang);
+  position: absolute;
+  top: 4px;
+  right: 8px;
+  color: var(--text-faint);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.4px;
+  text-transform: lowercase;
+}
+
 
 /* ── Approvals ──────────────────────────────────────────────────────── */
 
@@ -522,14 +1004,16 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin: 2px 0 18px;
-  padding: 12px 14px;
+  margin: 8px 12px;
+  padding: 10px 12px;
   background: var(--amber-soft);
   border: 1px solid rgba(210, 153, 34, 0.4);
   border-radius: var(--radius);
 }
 .approval .what { flex: 1; min-width: 0; font-size: 13px; }
-.approval .what .command {
+.approval .what .headline { font-weight: 600; color: var(--amber); }
+.approval .what .class,
+.approval .what .reason {
   display: block;
   margin-top: 4px;
   font-family: var(--mono);
@@ -572,6 +1056,57 @@ body {
 #composer .wrap {
   max-width: none; /* the input fills the chat pane, not the 780px text column */
   padding: 0;
+  position: relative; /* the `@` list floats above the input */
+}
+
+/* The `@` list: anchored to the composer, above the input, out of the layout so
+ * opening it never moves the message being typed (web-composer.md §2). */
+#file-picker {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  z-index: 20;
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 4px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.45);
+}
+
+#file-picker .file-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 4px;
+  font-size: 12.5px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+#file-picker .file-row.picked {
+  background: var(--accent-soft);
+}
+
+#file-picker .file-name {
+  color: var(--text);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The directory is context: dim, and the first thing to be cut. */
+#file-picker .file-dir {
+  color: var(--text-faint);
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl; /* a deep path keeps its tail visible */
+  text-align: left;
 }
 
 #composer form {
@@ -657,6 +1192,12 @@ body {
   background: var(--bg-overlay);
   border: 1px solid var(--border-soft);
   color: var(--text-dim);
+}
+/* A state change that widens what runs without asking (ADR-0007 §5). */
+.notice.warn {
+  background: var(--amber-soft);
+  border: 1px solid rgba(210, 153, 34, 0.35);
+  color: var(--amber);
 }
 
 /* ── The workspace picker overlay ───────────────────────────────────── */

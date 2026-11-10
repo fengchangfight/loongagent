@@ -9,3 +9,6 @@ description = "The web surface: the same session over a browser (ADR-0009)"
 serde_json.workspace = true
 tungstenite = "0.30.0"
 loong-config.workspace = true
+# The page renders the protocol's events, so it names their kinds and fields; the
+# dependency also lets a test hold the page to the schema's own vocabulary.
+loong-schema.workspace = true

@@ -50,8 +50,9 @@ ALLOWED = {
     "loong-server": {"loong-schema", "loong-protocol", "loong-eventlog", "loong-kernel"},
     "loong-tui": {"loong-schema", "loong-protocol"},
     "loong-tui-app": {"loong-schema", "loong-tui"},
-    # the web portal — needs the client's root ($LOONGAGENT_HOME) to read the session catalogue
-    "loong-web": {"loong-config"},
+    # the web portal — needs the client's root ($LOONGAGENT_HOME) to read the session catalogue,
+    # and the schema so the page renders the protocol's own event kinds (design/web-surface.md §4)
+    "loong-web": {"loong-config", "loong-schema"},
     # the study surface mounted inside the web portal (docs/design/reverse.md §4):
     # it depends on the portal it is mounted in, never on the kernel directly.
     "loong-reverse-ui": {"loong-web"},

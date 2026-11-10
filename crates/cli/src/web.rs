@@ -90,6 +90,9 @@ pub(crate) fn web(args: Args) -> Result<(), String> {
     let (listener, addr) = loong_web::bind(&args.bind, args.port)?;
 
     // Echo the home workspace's resolved settings, as the single-workspace surface did.
+    let local = args.is_local()?;
+    // Read before the factory below takes `args`: whether this run owns `local.toml`.
+    let writes_order = local && args.profile.is_none();
     let (settings, pack) = args.settings_with_pack()?;
     if let Some(state) = &pack {
         eprintln!(
@@ -158,8 +161,167 @@ pub(crate) fn web(args: Args) -> Result<(), String> {
     println!("Workspace: {}", home.display());
     // The URL is printed first, so a machine without an opener still shows the way in.
     crate::browser::open_in_browser(&url);
-    loong_web::serve_web(listener, token, home, std::sync::Arc::new(start_session));
+    loong_web::serve_web_with_models(
+        listener,
+        token,
+        home.clone(),
+        std::sync::Arc::new(start_session),
+        std::sync::Arc::new(LocalModelSetup {
+            // Local mode's models are `local.toml`'s `[[models]]`, so an arranged order can
+            // go back to the source: the next session reads the new order, and the first
+            // block becomes its default. A managed run, or a profile named with `--profile`,
+            // is not this run's file to rewrite, so the order stays on the bar — the TUI
+            // draws exactly the same line (web-surface.md §4).
+            writes_order,
+            // What the profile declares now, for the page's empty-state warning and for the
+            // panel's list of models it can turn off: a new browser has no tab and no child
+            // to ask, and both have to be right before the first session exists
+            // (web-surface.md §6).
+            models: std::sync::Mutex::new(
+                settings
+                    .models
+                    .iter()
+                    .map(|model| {
+                        json!({
+                            "name": model.name,
+                            // The catalog entry, not the endpoint: the panel writes a
+                            // model back by naming it under a provider, and a row it
+                            // cannot attribute is one it must not offer to rewrite.
+                            "provider": surface_provider_id(model.provider.as_deref()),
+                            "context_window": model.max_context_size,
+                        })
+                    })
+                    .collect(),
+            ),
+        }),
+    );
     Ok(())
+}
+
+/// Purpose: The catalog provider a model's `provider` field belongs to, or `None` when that
+/// field names no entry — a hand-written endpoint the panel must not pretend to own.
+/// Contract: `web`'s `LocalModelSetup` seed; the panel groups its rows by provider id.
+fn surface_provider_id(provider: Option<&str>) -> Option<&'static str> {
+    let named = provider?;
+    if let Some(entry) = loong_config::catalog::provider(named) {
+        return Some(entry.id);
+    }
+    // Written as the shorthand the catalog expands: `"kimi/kimi-k2"`.
+    let (prefix, _) = named.split_once('/')?;
+    loong_config::catalog::provider(prefix).map(|entry| entry.id)
+}
+
+/// Purpose: The "add a model" panel's setup, wired to the same files and probes `local add` uses.
+/// Serves: `loong_web::ModelSetup`, which the surface hands to `model.configured`, `model.providers`,
+/// `model.probe` and `model.add` (web-surface.md §6).
+/// Design: `docs/design/web-surface.md` §6 and `docs/design/config-routing.md` §6.
+/// Up: `web` constructs it and passes it to `loong_web::serve_web_with_models`.
+/// Down: `crate::local::{add_model_from_surface, surface_probe_models, surface_providers}` and the
+/// profile it froze at startup.
+/// Verify: `cargo test -p loongagent --test web_surface`.
+pub(crate) struct LocalModelSetup {
+    /// Purpose: Whether an arranged model order belongs in `local.toml` — true for a local run
+    /// with no `--profile`, the same condition the TUI's order writer uses.
+    writes_order: bool,
+    /// Purpose: The models the profile declared at startup, plus whatever this surface has
+    /// adopted since — behind a lock because `configured` is asked on every socket thread and
+    /// an add happens on one of them.
+    models: std::sync::Mutex<Vec<Value>>,
+}
+
+impl loong_web::ModelSetup for LocalModelSetup {
+    /// Purpose: Report the models configured now: the profile's, plus any this panel adopted.
+    /// Serves: `model.configured`; the page asks it at boot and again after an add, and the
+    /// empty-state banner must go away when the add works.
+    /// Design: `docs/design/web-surface.md` §6.
+    /// Up: `loong_web::dispatch_surface`.
+    /// Down: `LocalModelSetup::models`.
+    /// Verify: `cargo test -p loongagent --test web_surface` (`the_model_panel_`).
+    fn configured(&self) -> Value {
+        let models = self.models.lock().map(|m| m.clone()).unwrap_or_default();
+        json!({"models": models})
+    }
+
+    /// Purpose: Report the provider catalogue, which the panel draws as a list.
+    /// Serves: `model.providers`.
+    /// Design: `docs/design/web-surface.md` §6.
+    /// Up: `loong_web::dispatch_surface`.
+    /// Down: `local::surface_providers`.
+    /// Verify: `cargo test -p loongagent --test web_surface`.
+    fn providers(&self) -> Value {
+        crate::local::surface_providers()
+    }
+
+    /// Purpose: Write the arranged order back to `local.toml`, when this run owns that file.
+    /// Serves: `model.reorder` — ctrl+left / ctrl+right, and the default model of every later
+    /// session, because the first `[[models]]` block is what a new turn starts with.
+    /// Design: `docs/design/web-surface.md` §4 and `docs/design/config-routing.md` §3.
+    /// Up: `loong_web::dispatch_surface`.
+    /// Down: `local::reorder_local_models`, which keeps the blocks' own text and refuses a file
+    /// that disagrees with the list rather than guessing.
+    /// Verify: `cargo test -p loongagent --test web_surface` (`reorder_`).
+    fn save_order(&self, names: &[String]) -> Result<bool, String> {
+        if !self.writes_order {
+            // A managed run, or a profile named with `--profile`: the arrangement is this
+            // session's, and saying otherwise would be a promise this surface cannot keep.
+            return Ok(false);
+        }
+        crate::local::reorder_local_models(&loong_config::local_profile_path(), names)?;
+        Ok(true)
+    }
+
+    /// Purpose: Prove a key and list what that provider offers, writing nothing.
+    /// Serves: `model.probe`, the panel's tick-box list.
+    /// Design: `docs/design/web-surface.md` §6 and `docs/design/config-routing.md` §8.
+    /// Up: `loong_web::dispatch_surface`.
+    /// Down: `local::surface_probe_models`.
+    /// Verify: `cargo test -p loongagent --test web_surface` (`the_panel_`).
+    fn probe(&self, provider: &str, key: &str) -> Result<Value, String> {
+        crate::local::surface_probe_models(provider, key)
+    }
+
+    /// Purpose: Write a provider's selection, exactly as `loongagent local add` does without a
+    /// terminal: prove the key when one was typed, keep it, and write the ticked models.
+    /// Serves: `model.add`.
+    /// Design: `docs/design/web-surface.md` §6 and `docs/design/config-routing.md` §8.
+    /// Up: `loong_web::dispatch_surface`.
+    /// Down: `local::add_model_from_surface`.
+    /// Verify: `cargo test -p loongagent --test web_surface`.
+    /// A write that succeeded also replaces this provider's rows in the list `configured`
+    /// answers from: the page re-asks it to redraw the panel and to hide the empty-state
+    /// warning, and a list that outlived its own write would be the worst kind of stale — a
+    /// model the person just turned off would still look on.
+    fn adopt(
+        &self,
+        provider: &str,
+        key: &str,
+        models: &[(String, Option<u64>)],
+    ) -> Result<Value, String> {
+        // The key file lives in the config home the wizard writes to — not the workspace,
+        // which is where this surface serves from (`local add` writes here too).
+        let written = crate::local::add_model_from_surface(
+            &loong_config::loongagent_home(),
+            provider,
+            key,
+            models,
+        )?;
+        if let Ok(mut list) = self.models.lock() {
+            let id = written.get("provider").and_then(Value::as_str);
+            // The whole selection replaces this provider's rows, because that is what the
+            // file now says: a model that was unticked is not configured any more.
+            list.retain(|row| row.get("provider").and_then(Value::as_str) != id);
+            if let Some(rows) = written.get("models").and_then(Value::as_array) {
+                for row in rows {
+                    list.push(json!({
+                        "name": row.get("name").cloned().unwrap_or(Value::Null),
+                        "provider": id,
+                        "context_window": row.get("context_window").cloned().unwrap_or(Value::Null),
+                    }));
+                }
+            }
+        }
+        Ok(written)
+    }
 }
 
 /// Purpose: What `make_session` hands back: the socket's view of the session, the settings to

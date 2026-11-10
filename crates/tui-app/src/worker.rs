@@ -20,8 +20,31 @@ use super::*;
 /// ones it streams next: they are the same list the keyboard walks, and a fold's number has
 /// to mean the same thing on both sides of the channel.
 pub fn spawn_worker<T: Transport + Send + 'static>(
+    client: Client<T>,
+    folded: usize,
+) -> (Sender<ToWorker>, Receiver<FromWorker>) {
+    spawn_worker_with_tick(client, folded, CONTEXT_TICK)
+}
+
+/// Purpose: How long the worker may sit idle before it re-reads the context state on its own.
+///
+/// Serves: the memory strip under the input box, so a cleared degradation disappears without a keypress.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `spawn_worker`.
+/// Down: `std::sync::mpsc::Receiver::recv_timeout`.
+/// Verify: `cargo test -p loong-tui-app`.
+const CONTEXT_TICK: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Purpose: `spawn_worker` with a caller-chosen idle tick, so tests do not wait ten seconds.
+/// Serves: `spawn_worker` and the worker tests.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `spawn_worker`; the tests.
+/// Down: the command loop on `commands.recv_timeout`.
+/// Verify: `cargo test -p loong-tui-app worker::tests`.
+pub(crate) fn spawn_worker_with_tick<T: Transport + Send + 'static>(
     mut client: Client<T>,
     folded: usize,
+    tick: std::time::Duration,
 ) -> (Sender<ToWorker>, Receiver<FromWorker>) {
     let (to_worker, commands) = channel::<ToWorker>();
     let (events, from_worker) = channel::<FromWorker>();
@@ -31,7 +54,15 @@ pub fn spawn_worker<T: Transport + Send + 'static>(
         // The decision whose detail has been sent, so re-stating the same one does not
         // re-send it: the panel would lose the highlighted answer on every state change.
         let mut asked: Option<String> = None;
-        while let Ok(command) = commands.recv() {
+        loop {
+            let command = match commands.recv_timeout(tick) {
+                Ok(command) => command,
+                // Idle for a whole tick: ask the kernel for its own state again, so a
+                // memory degradation that has cleared leaves the strip under the input
+                // box on its own, without waiting for the next keypress.
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => ToWorker::RefreshContext,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            };
             let mut refreshed = false;
             let result = match command {
                 ToWorker::Submit(text) => {

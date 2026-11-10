@@ -27,12 +27,10 @@ pub mod mention;
 pub mod spend;
 use loong_tui::{Client, Transport};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{
-    Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
-};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 use spend::{CostEntry, Spend};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
@@ -815,7 +813,7 @@ enum SelectionArea {
 #[derive(Debug, Default)]
 struct PageMap {
     /// The page's screen rectangle.
-    area: ratatui::layout::Rect,
+    area: Rect,
     /// The first body row's offset from the page's top.
     body_top: u16,
     /// The body index of the first body row, so a scrolled page still maps to the right row.
@@ -833,6 +831,98 @@ struct PageMap {
     /// The prompt's own map, or `None` before the first frame. Empty `rows` (an empty
     /// draft) mean there is nothing to select.
     input: Option<InputMap>,
+    /// The bar on the page's right edge, or `None` when the frame drew none. It carries
+    /// what the frame measured — the page's rows and the transcript's — so a press on the
+    /// bar is read back with the same numbers the thumb was drawn from.
+    bar: Option<Bar>,
+}
+
+/// Purpose: The bar on the page's right edge: its column, its rows, and the two lengths that make it a ruler.
+/// Serves: `App::draw` draws the thumb from it; `App::handle_bar_mouse` turns a press and a
+/// drag back into a scroll offset with it.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: `App::draw` builds it from the frame's own geometry.
+/// Down: `App::draw` and `App::handle_bar_mouse` read the thumb's span.
+/// Verify: `cargo test -p loong-tui-app`.
+#[derive(Debug, Clone, Copy)]
+struct Bar {
+    /// The bar's screen rectangle: one column on the page's right edge, one row per page row.
+    area: ratatui::layout::Rect,
+    /// The rows the page shows at once — the size of the window onto the transcript.
+    rows: usize,
+    /// The rows the page has to walk through, marks and all.
+    total: usize,
+}
+
+impl Bar {
+    /// Purpose: The thumb's first screen row and its length, for a scroll offset counted up from the bottom.
+    /// Contract: called by `App::draw`; calls `first`, `top_of` and `len`.
+    fn thumb(self, scroll: usize) -> (u16, u16) {
+        (self.top_of(self.first(scroll)), self.len())
+    }
+
+    /// Purpose: The top row of the content the page shows, given a scroll offset counted up from the bottom.
+    /// Contract: called by `thumb` and `scroll_for_top`, so both directions agree on what the offset means.
+    fn first(self, scroll: usize) -> usize {
+        self.total.saturating_sub(self.rows).saturating_sub(scroll)
+    }
+
+    /// Purpose: The scroll offset counted up from the bottom that puts the top of the content at `first`.
+    /// Contract: the mirror of `first`, called by `scroll_for_top`.
+    fn scroll_at(self, first: usize) -> usize {
+        self.total.saturating_sub(self.rows).saturating_sub(first)
+    }
+
+    /// Purpose: The thumb's length — the page's share of the transcript, never under one row.
+    /// Contract: called by `thumb` and `scroll_for_top`, which both need the travel it leaves.
+    fn len(self) -> u16 {
+        let track = self.area.height as usize;
+        if self.total == 0 {
+            return track as u16;
+        }
+        let share = (self.rows * track + self.total / 2) / self.total;
+        share.clamp(1, track) as u16
+    }
+
+    /// Purpose: The thumb's top screen row for a window whose top row is `first`.
+    /// Contract: called by `thumb`; reads `len` and `travel`.
+    fn top_of(self, first: usize) -> u16 {
+        let travel = self.travel();
+        if travel == 0 {
+            return self.area.y;
+        }
+        let steps = self.total.saturating_sub(self.rows);
+        let offset = (first * travel + steps / 2) / steps.max(1);
+        self.area.y + offset.min(travel) as u16
+    }
+
+    /// Purpose: The scroll offset a thumb top at screen row `top` stands for, so a drag lands where the hand is.
+    /// Contract: called by `App::handle_bar_mouse` on every drag; calls `travel` and `scroll_at`.
+    fn scroll_for_top(self, top: u16) -> usize {
+        let travel = self.travel();
+        if travel == 0 {
+            return 0;
+        }
+        let offset = top.saturating_sub(self.area.y) as usize;
+        let steps = self.total.saturating_sub(self.rows);
+        let first = (offset.min(travel) * steps + travel / 2) / travel;
+        self.scroll_at(first)
+    }
+
+    /// Purpose: The rows the thumb can travel, so both ends of the track are reachable.
+    /// Contract: called by `top_of` and `scroll_for_top`.
+    fn travel(self) -> usize {
+        (self.area.height - self.len()) as usize
+    }
+
+    /// Purpose: Whether a mouse cell is on this bar at all.
+    /// Contract: called by `App::bar_at`; reads the bar's rectangle.
+    fn holds(self, column: u16, row: u16) -> bool {
+        column >= self.area.x
+            && column < self.area.x + self.area.width
+            && row >= self.area.y
+            && row < self.area.y + self.area.height
+    }
 }
 
 /// Purpose: One row the page draws: a fragment of one record line, with the band and the wrap it belongs to.
@@ -976,6 +1066,10 @@ pub struct App {
     page: Option<PageMap>,
     /// The mouse selection, while it is being dragged or has just been copied.
     select: Option<Selection>,
+    /// Where on the thumb a hand is holding it, in rows from the thumb's top, while the left
+    /// button drags the bar. It is also what keeps the bar on screen at the bottom: a drag
+    /// that reaches the end must not lose the grip it was holding.
+    bar_grab: Option<u16>,
     /// The fold the reader opened, if any. While it is open the output takes the
     /// transcript's place: reading a result is the one thing on screen worth the room.
     pub open: Option<OpenFold>,
@@ -1064,6 +1158,7 @@ impl App {
             fold: None,
             page: None,
             select: None,
+            bar_grab: None,
             open: None,
             folded: std::collections::BTreeMap::new(),
             models: Vec::new(),
@@ -3407,6 +3502,9 @@ impl App {
         {
             return Action::None;
         }
+        if let Some(action) = self.handle_bar_mouse(event) {
+            return action;
+        }
         match event.kind {
             MouseEventKind::ScrollUp if self.open.is_some() => {
                 self.select = None;
@@ -3476,6 +3574,51 @@ impl App {
             _ => {}
         }
         Action::None
+    }
+
+    /// Purpose: Take the bar on the page's right edge as a control: a press takes the thumb, a drag walks it, a release lets go.
+    /// Serves: `App::handle_mouse`, which asks it first — the bar's column is also the page's last column.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `App::handle_mouse`.
+    /// Down: `Bar::thumb`, `Bar::scroll_for_top`.
+    /// Verify: `cargo test -p loong-tui-app`.
+    fn handle_bar_mouse(&mut self, event: MouseEvent) -> Option<Action> {
+        use ratatui::crossterm::event::{MouseButton, MouseEventKind};
+        match event.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                let bar = self.bar_at(event.column, event.row)?;
+                let (top, len) = bar.thumb(self.scroll);
+                // Inside the thumb the hand keeps its grip and nothing moves; on the track
+                // it takes the middle of the thumb and the page goes there, which is what a
+                // reader who knows roughly where they are going wants in one press.
+                let inside = event.row >= top && event.row < top + len;
+                self.bar_grab = Some(if inside { event.row - top } else { len / 2 });
+                self.select = None;
+                if !inside {
+                    self.scroll = bar.scroll_for_top(event.row.saturating_sub(len / 2));
+                }
+                Some(Action::None)
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let grab = self.bar_grab?;
+                let bar = self.page.as_ref()?.bar?;
+                self.select = None;
+                self.scroll = bar.scroll_for_top(event.row.saturating_sub(grab));
+                Some(Action::None)
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.bar_grab.take()?;
+                Some(Action::None)
+            }
+            _ => None,
+        }
+    }
+
+    /// Purpose: The bar under a mouse cell, when the last frame drew one there.
+    /// Contract: called by `App::handle_bar_mouse`; calls `Bar::holds`.
+    fn bar_at(&self, column: u16, row: u16) -> Option<Bar> {
+        let bar = self.page.as_ref()?.bar?;
+        bar.holds(column, row).then_some(bar)
     }
 
     /// Purpose: The body row and display column under a mouse cell, or `None` outside both the conversation and the prompt.
@@ -3669,6 +3812,27 @@ impl App {
             }
         }
         let _ = view;
+    }
+
+    /// Purpose: Paint the bar on the page's right edge: the track, and the thumb where this offset puts it.
+    /// Serves: `App::draw`, so the thumb the reader grabs is the cell the same numbers measured.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `App::draw`.
+    /// Down: `Bar::thumb`.
+    /// Verify: `cargo test -p loong-tui-app`.
+    fn paint_bar(&self, frame: &mut Frame, bar: Bar, scroll: usize) {
+        let (top, len) = bar.thumb(scroll);
+        for y in bar.area.y..bar.area.y + bar.area.height {
+            let symbol = if y >= top && y < top + len {
+                "█"
+            } else {
+                "│"
+            };
+            if let Some(cell) = frame.buffer_mut().cell_mut((bar.area.x, y)) {
+                cell.set_style(MARK_QUIET);
+                cell.set_symbol(symbol);
+            }
+        }
     }
 
     /// Purpose: Paint the selection's reverse video over the conversation's rows.
@@ -4181,6 +4345,22 @@ impl App {
         } else {
             &[]
         };
+        // The bar on the page's right edge is a ruler, not a cursor: the thumb is the share
+        // of the transcript the page shows, and where it sits on the track is where the page
+        // sits in that transcript. It is drawn while the reader is away from the bottom, and
+        // while a hand is on it — a drag must not lose its grip by reaching the bottom and
+        // making the bar vanish under the hand. The page keeps its full width: the bar paints
+        // over the margin, never narrows the text. An open fold has no bar: the fold's rows
+        // are not `self.scroll`'s coordinate system, so the same number would lie there.
+        let bar = (self.open.is_none()
+            && total > rows
+            && view.width > 0
+            && (self.scroll > 0 || self.bar_grab.is_some()))
+        .then(|| Bar {
+            area: Rect::new(view.x + view.width - 1, view.y, 1, view.height),
+            rows,
+            total,
+        });
         // The prompt band and the wrap ride the same `PageMap` the selection reads, so the
         // two never disagree about which row is a prompt: the band is true exactly where
         // `classify` said `LineKind::User` on the line the row came from, and a row that
@@ -4193,24 +4373,11 @@ impl App {
             band: visible.iter().map(|row| row.band).collect(),
             soft: visible.iter().map(|row| row.soft).collect(),
             input: None,
+            bar,
         });
         frame.render_widget(Paragraph::new(page), view);
-        // A scrollbar on the page's right edge appears only while the reader is away from
-        // the bottom: at the newest line the track would be all thumb and say nothing.
-        // The page keeps its full width — the bar paints over the margin, never narrows
-        // the text. An open fold has no bar: the fold's rows are not `self.scroll`'s
-        // coordinate system, so the same number would lie there.
-        if self.scroll > 0 && self.open.is_none() {
-            let mut state = ScrollbarState::new(scroll).position(scroll);
-            frame.render_stateful_widget(
-                Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                    .begin_symbol(None)
-                    .end_symbol(None)
-                    .track_symbol(Some("│"))
-                    .style(MARK_QUIET),
-                view,
-                &mut state,
-            );
+        if let Some(bar) = bar {
+            self.paint_bar(frame, bar, scroll);
         }
         // The prompt band is a background on rows the paragraph just painted, so it is
         // drawn after it — and before the selection's reverse video, so a selected prompt
@@ -4474,6 +4641,8 @@ pub use wizard::{
     OfferedKey, Outcome, ProviderChoice, Validation, WizardAction, WizardState,
 };
 pub use worker::spawn_worker;
+#[cfg(test)]
+pub(crate) use worker::spawn_worker_with_tick;
 
 #[cfg(test)]
 mod tests;

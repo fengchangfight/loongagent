@@ -23,6 +23,9 @@ reaches the screen.
 - Dragging above or below the page clamps to the first or last row; dragging past the right
   edge clamps to the page's width. The status bar, prompt, approval panel and menus are not
   selectable — only the conversation page is.
+- The page's last column is the exception: while the scroll bar is drawn there it is a
+  control, not text. A left press on it takes the thumb and drags the page, and starts no
+  selection; the rest of the row is still selectable, so the one column costs no wrap width.
 - The wheel still scrolls, and scrolling clears the selection. While a drag is in progress
   the wheel is ignored so the rows the drag is anchored to do not move.
 - Output that arrives after a selection is complete does not change the selected text: the

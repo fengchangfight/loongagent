@@ -127,6 +127,59 @@ fn mouse_at(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
     }
 }
 
+/// Purpose: The page's bar as one drawn frame shows it: the rows the transcript covers, and where the thumb is in them.
+/// Serves: the bar tests, which read the thumb's length and position instead of guessing the layout.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: the bar tests.
+/// Down: no call; it reads a rendered `Buffer`.
+/// Verify: `cargo test -p loong-tui-app`.
+struct BarOnScreen {
+    /// The page's first and last screen rows, read from the rows that carry the transcript's text.
+    page: (u16, u16),
+    /// The thumb's first screen row and its length; the length is zero when the bar drew no thumb.
+    thumb: (u16, u16),
+}
+
+/// Purpose: Read the bar off a drawn frame — the page's rows and the thumb's span — so a test asserts on what the reader sees.
+/// Serves: the bar tests.
+/// Design: `docs/design/surfaces.md` §3.
+/// Up: the bar tests.
+/// Down: no call; it reads a rendered `Buffer`.
+/// Verify: `cargo test -p loong-tui-app`.
+fn bar_on_screen(buffer: &Buffer, needle: &str) -> BarOnScreen {
+    let area = *buffer.area();
+    // The page keeps the full width, so the bar is the last column, and a row belongs to
+    // the page when it also carries the transcript's text: the prompt box's border is in
+    // a row of its own.
+    let column = area.width - 1;
+    let mut page = None;
+    let mut thumb: (u16, u16) = (0, 0);
+    let mut seen_thumb = false;
+    for y in 0..area.height {
+        let row: String = (0..column)
+            .map(|x| buffer[(x, y)].symbol().to_string())
+            .collect();
+        if !row.contains(needle) {
+            continue;
+        }
+        page = Some(match page {
+            None => (y, y),
+            Some((first, _)) => (first, y),
+        });
+        if buffer[(column, y)].symbol() == "█" {
+            if !seen_thumb {
+                thumb.0 = y;
+                seen_thumb = true;
+            }
+            thumb.1 += 1;
+        }
+    }
+    BarOnScreen {
+        page: page.expect("the transcript is on screen"),
+        thumb,
+    }
+}
+
 /// Purpose: Typing `@` opens the picker, narrows it and inserts a real path on Enter.
 #[test]
 fn an_at_sign_opens_a_picker_and_enter_inserts_the_file() {
@@ -930,6 +983,171 @@ fn an_open_fold_draws_no_scrollbar() {
     assert!(
         !screen.contains('▲') && !screen.contains('█'),
         "the fold's rows are not the transcript's scroll space:\n{screen}"
+    );
+}
+
+/// Purpose: The thumb is a ruler — as long as the page's share of the transcript, and it sits where the page sits.
+#[test]
+fn the_thumb_marks_where_the_page_is() {
+    let mut app = App::new("s", "v");
+    app.logo = false;
+    app.push_lines((1..=200).map(|i| format!("row {i:03}")));
+
+    // One page up from the newest line: the window shows the last rows, so the thumb
+    // is a sliver at the bottom of the track.
+    draw(&mut app, 40, 20);
+    app.handle_key(key(KeyCode::PageUp));
+    let buffer = drawn_buffer(&mut app, 40, 20);
+    let bar = bar_on_screen(&buffer, "row ");
+    assert_eq!(
+        bar.thumb.0 + bar.thumb.1,
+        bar.page.1 + 1,
+        "one page up, the thumb rests on the bottom of the track"
+    );
+    assert!(
+        bar.thumb.1 <= 2,
+        "200 rows in a page this size is a sliver, not {} rows of thumb",
+        bar.thumb.1
+    );
+
+    // At the oldest line the same sliver sits at the top of the track.
+    app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::CONTROL));
+    let buffer = drawn_buffer(&mut app, 40, 20);
+    let bar = bar_on_screen(&buffer, "row ");
+    assert_eq!(
+        bar.thumb.0, bar.page.0,
+        "at the top of the transcript the thumb is at the top of the track"
+    );
+}
+
+/// Purpose: Pressing the thumb and dragging it up walks the page to where the thumb lands.
+#[test]
+fn dragging_the_thumb_walks_the_page() {
+    let mut app = App::new("s", "v");
+    app.logo = false;
+    app.push_lines((1..=200).map(|i| format!("row {i:03}")));
+    draw(&mut app, 40, 20);
+    app.handle_key(key(KeyCode::PageUp));
+
+    let buffer = drawn_buffer(&mut app, 40, 20);
+    let column = buffer.area().width - 1;
+    let bar = bar_on_screen(&buffer, "row ");
+    let before = draw(&mut app, 40, 20);
+    assert!(
+        !before.contains("row 001"),
+        "the beginning is off screen before the drag:\n{before}"
+    );
+
+    // Take hold of the thumb where it is, walk it to the top of the track, let go.
+    app.handle_mouse(mouse_at(
+        MouseEventKind::Down(MouseButton::Left),
+        column,
+        bar.thumb.0,
+    ));
+    app.handle_mouse(mouse_at(
+        MouseEventKind::Drag(MouseButton::Left),
+        column,
+        bar.page.0,
+    ));
+    app.handle_mouse(mouse_at(
+        MouseEventKind::Up(MouseButton::Left),
+        column,
+        bar.page.0,
+    ));
+
+    let after = draw(&mut app, 40, 20);
+    assert!(
+        after.contains("row 001"),
+        "the thumb dragged to the top of the track shows the beginning:\n{after}"
+    );
+}
+
+/// Purpose: A press on the bar takes the thumb, never a selection: the page's last column is a control.
+#[test]
+fn a_press_on_the_bar_takes_the_thumb_not_a_selection() {
+    let mut app = App::new("s", "v");
+    app.logo = false;
+    app.push_lines((1..=200).map(|i| format!("row {i:03}")));
+    app.handle_key(key(KeyCode::PageUp));
+
+    let buffer = drawn_buffer(&mut app, 40, 20);
+    let column = buffer.area().width - 1;
+    let bar = bar_on_screen(&buffer, "row ");
+
+    let pressed = app.handle_mouse(mouse_at(
+        MouseEventKind::Down(MouseButton::Left),
+        column,
+        bar.thumb.0,
+    ));
+    assert!(
+        matches!(pressed, Action::None),
+        "a press on the bar does nothing to the draft"
+    );
+    assert!(
+        app.select.is_none(),
+        "and it starts no selection, so nothing is highlighted under the hand"
+    );
+
+    app.handle_mouse(mouse_at(
+        MouseEventKind::Drag(MouseButton::Left),
+        column,
+        bar.page.0 + 2,
+    ));
+    let released = app.handle_mouse(mouse_at(
+        MouseEventKind::Up(MouseButton::Left),
+        column,
+        bar.page.0 + 2,
+    ));
+    assert!(
+        matches!(released, Action::None),
+        "releasing the bar copies nothing, unlike releasing a selection"
+    );
+    assert!(app.select.is_none(), "and still nothing is selected");
+}
+
+/// Purpose: A hand on the thumb keeps it visible at the bottom, so the page cannot slip out from under the drag.
+#[test]
+fn the_thumb_stays_under_the_hand_at_the_bottom() {
+    let mut app = App::new("s", "v");
+    app.logo = false;
+    app.push_lines((1..=200).map(|i| format!("row {i:03}")));
+    app.handle_key(key(KeyCode::PageUp));
+
+    let buffer = drawn_buffer(&mut app, 40, 20);
+    let column = buffer.area().width - 1;
+    let bar = bar_on_screen(&buffer, "row ");
+
+    app.handle_mouse(mouse_at(
+        MouseEventKind::Down(MouseButton::Left),
+        column,
+        bar.thumb.0,
+    ));
+    app.handle_mouse(mouse_at(
+        MouseEventKind::Drag(MouseButton::Left),
+        column,
+        bar.page.1,
+    ));
+    assert_eq!(
+        app.scroll, 0,
+        "dragged to the bottom, the page is at the bottom"
+    );
+
+    let held = drawn_buffer(&mut app, 40, 20);
+    assert!(
+        bar_on_screen(&held, "row ").thumb.1 > 0,
+        "while the hand is on the thumb it stays on screen, so the drag keeps its grip"
+    );
+
+    app.handle_mouse(mouse_at(
+        MouseEventKind::Up(MouseButton::Left),
+        column,
+        bar.page.1,
+    ));
+    let released = drawn_buffer(&mut app, 40, 20);
+    assert_eq!(
+        bar_on_screen(&released, "row ").thumb.1,
+        0,
+        "and let go at the bottom, the bar is gone as before"
     );
 }
 
@@ -6226,4 +6444,69 @@ fn a_line_a_thousand_rows_long_wraps_all_of_it() {
         screen.lines().all(|row| row.chars().count() <= 100),
         "and no row is wider than the page"
     );
+}
+
+/// Purpose: An idle worker re-asks for the context state after one tick, so a cleared memory degradation leaves the strip on its own.
+#[test]
+fn an_idle_worker_refreshes_the_context_after_one_tick() {
+    use std::sync::{Arc, Mutex};
+    /// Purpose: A transport that records every request line and answers `context.explain` with a minimal snapshot.
+    /// Serves: `an_idle_worker_refreshes_the_context_after_one_tick`.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: the test builds it and the client calls it.
+    /// Down: no call; the `loong_tui::Transport` impl below answers.
+    /// Verify: `cargo test -p loong-tui-app`.
+    #[derive(Clone, Default)]
+    struct Recorder {
+        sent: Arc<Mutex<Vec<String>>>,
+    }
+    impl loong_tui::Transport for Recorder {
+        /// Purpose: Record the request line the client writes.
+        /// Contract: called by `loong_tui::Client`; pushes the line onto the shared `sent` list.
+        fn send(&mut self, line: &str) -> Result<(), String> {
+            self.sent.lock().unwrap().push(line.to_string());
+            Ok(())
+        }
+        /// Purpose: Answer `context.explain` with a minimal snapshot, so the refresh round trip completes.
+        /// Serves: the tick test's `Client::context` call.
+        /// Design: `docs/design/surfaces.md` §3.
+        /// Up: `loong_tui::Client` reads it.
+        /// Down: no call; it returns a canned `ContextExplain` line.
+        /// Verify: `cargo test -p loong-tui-app`.
+        fn recv_line(&mut self) -> Result<Option<String>, String> {
+            Ok(Some(
+                serde_json::json!({"jsonrpc": "2.0", "id": 9, "result": {
+                    "context_tokens": 10, "budget_tokens": 0, "messages": 1, "tools": 1,
+                    "compactions": 0, "categories": [], "entries": [],
+                    "memory_mode": "", "memory_summarizer": "", "memory_degraded": "",
+                    "memory_layers": [], "memory_worker": {"state": "off", "windows": 0,
+                        "model_calls": 0, "enriched": 0, "failed": 0, "pending": 0,
+                        "deferrals": 0, "last_error": ""}
+                }})
+                .to_string(),
+            ))
+        }
+    }
+
+    let transport = Recorder::default();
+    let sent = Arc::clone(&transport.sent);
+    let client = Client::new(transport, "s-tick");
+    // A short tick, so the test does not wait the production ten seconds.
+    let (_to_worker, _from_worker) = spawn_worker_with_tick(
+        client,
+        0,
+        std::time::Duration::from_millis(50),
+    );
+
+    // Send nothing. Within a few ticks the worker must have asked for the context on
+    // its own — that is what makes a cleared degradation leave the strip by itself.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        let asked = sent.lock().unwrap().join("\n");
+        if asked.contains("context.explain") {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("an idle worker never re-asked for the context: {}", sent.lock().unwrap().join("\n"));
 }

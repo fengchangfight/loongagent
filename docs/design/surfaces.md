@@ -64,8 +64,7 @@ and `model.delta` notifications it gets back. `PendingDecision` is assembled fro
 not from a second source: the approval panel can say which tool and arguments are waiting
 because the client already saw the `tool.call` and `approval.requested`.
 
-A question is offered only while the kernel that asked it is alive: attach reports the request its
-kernel holds, and one it does not confirm is named once, then dropped ([sessions-lineage.md](sessions-lineage.md) §5).
+A question is offered only while the kernel that asked it is alive ([sessions-lineage.md](sessions-lineage.md) §5).
 
 `loong-tui-app` is the ratatui screen over that client. A turn blocks on I/O, so the client
 lives on a worker thread and the screen talks to it over channels; the key handler and drawing
@@ -121,8 +120,8 @@ also accepts the older English vocabulary, so scrolling back into an old session
 The palette names colours and never invents RGB, because a fixed tone is picked for one
 background and unreadable on the other: that is why the quiet lines are the **terminal's own
 foreground, dimmed**, not `DarkGray` — bright black *is* the background on a dark theme, so those
-lines were drawn into the wall (`MARK_QUIET`). A menu's unchosen answers are `default`, the
-chosen one coloured.
+lines were drawn into the wall (`MARK_QUIET`). A menu's unchosen answers are `default`, the chosen one
+coloured.
 
 The screen is one page above one fixed prompt: status, keys and usage row are the only bars; the
 mark and conversation scroll between them while the question, menus, prompt and usage stay put.
@@ -140,11 +139,12 @@ this size is one square of foreground — and the wordmark: five rows of block l
 gone with the first line; `/logo` puts both away, and under 52 columns by 26 rows there
 is no mark. The character is ANSI red and the frame ANSI magenta — never an absolute RGB.
 
-Scrolling is anchored to the page, not its end: away from the bottom, new output is appended
-below the window, so a long block stays selectable and the prompt's caret stays put. While the
-reader is away, a dimmed bar on the page's right edge shows where the transcript's window sits
-(`self.scroll` drives ratatui's `ScrollbarState`); it paints over the margin, it vanishes at the
-bottom, and an open fold has no bar, because the fold's rows are not the transcript's coordinates.
+Scrolling is anchored to the page, not its end: away from the bottom, new output is appended below
+the window, so a long block stays selectable and the prompt's caret stays put. While the reader is
+away, a dimmed bar on the page's right edge marks where the window sits and how much of the
+transcript it holds — its thumb that share, its place the page's place — and a press on it takes the
+thumb: a drag walks the page ([tui-selection.md](tui-selection.md) §1). It paints over the margin,
+vanishes at the bottom unless a hand is on it, and an open fold has no bar.
 
 ## 4. The web: a portal of thin bridges
 

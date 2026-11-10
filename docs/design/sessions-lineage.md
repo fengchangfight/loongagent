@@ -18,11 +18,28 @@ The file's name is the session's id. A fresh project mints `<id>.jsonl`; the leg
 name `session.jsonl` is kept and answers to `default`, and later sessions are `<id>.jsonl`
 in `~/.loongagent/projects/<project-slug>/`. A new id is eight characters from a clock and
 the process, in an alphabet with the easily confused pairs removed. A project is a directory
-and its slug carries a hash, so two checkouts do not share a conversation by accident.
+and its slug carries a hash, so two checkouts do not share a conversation by accident. The
+only other `.jsonl` there is the project's prompt history, `history.jsonl`
+([surfaces.md](surfaces.md) §3): it holds prompts, not events, so listing, `resume`, fork,
+delete and repair all skip it — one name, not a session.
+
+A surface that is not the workspace may keep its conversations in a **drawer**: one named
+folder under `projects/` instead of the workspace's own. The name is the whole mechanism —
+`session.new`, `session.open` and `session.list` take the directory they work in, and a drawer
+is another directory, so a drawer's list holds exactly the conversations kept there. The
+reverse surface uses one drawer per study project, named `reverse-<project>-<hash>`: several
+projects can live in one workspace, the workspace's directory is shared with the TUI and every
+other surface, and a study's picker must show its own conversations and nothing else
+([reverse-conversation.md](reverse-conversation.md) 「A project's sessions」). The drawer name
+reaches the server child as `--session-drawer`, an internal flag beside `--control-fd`; a name,
+never a path.
 
 The server owns the open log for the session it serves. `session.new` asks the CLI's factory
 for a fresh id and a fresh kernel, swaps `Server.kernel`, and resets `last_sent` and `turns`
-so the new session's events are not streamed as the old session's past. The old log is kept.
+so the new session's events are not streamed as the old session's past. `session.open` is the
+same swap for a session that already exists, through the CLI's opener — the reverse page's
+picker is its one caller, and the surface that offers it must have a way to say so; a server
+without an opener refuses instead of inventing a session. The old log is kept in both cases.
 `session.attach` reports the current id, schema version and `existing_events` (the log's
 `last_seq`); `session.replay` reads the log again with `replay_lenient`, so a client that
 joins late can render the past. The derived SQLite index is rebuilt from the log when the
@@ -60,6 +77,21 @@ branch first, refuses a multi-session branch without `--force`, and by default r
 another process holds a session open (`--force` overrides; the check reads `/proc` and is
 Linux-only), since unlinking a file a writer is appending to loses the conversation silently.
 
+`loongagent repair [ID|PATH …] [--all] [--check]` is what a session that no longer opens needs
+first. The damage is not a lost event but a lost *order*: a writer that replayed an earlier log
+and then appended puts its block after the events it duplicates, and the strict reader refuses
+the session from that line on ([events-storage.md](events-storage.md) §3). The repair replays
+the lines in file order and gives every out-of-step line the `seq` — and the `e<seq>` id — that
+its position asks for, so both blocks survive; a line the file holds twice carries nothing the
+first copy did not, so it is dropped. The bytes before the rewrite are kept as
+`<log>.broken-bak`, the lock is taken first (so an open session is refused rather than
+rewritten underneath), and a log that sets `parent_id` is refused too, since renumbering would
+move ids the tree names. The index beside the log needs nothing: it is rebuilt on the next
+open. The context store does need dropping — it holds a byte offset into the old bytes — and
+`loongagent context rebuild <id>` restores it. `--check` reports without writing, and exits
+non-zero when something needs repair; `--all` sweeps the project's sessions — the prompt
+history beside them is not one, so it is not swept.
+
 ## 5. Resume, retry, steer
 
 | Action | What the code does | Session boundary |
@@ -68,8 +100,13 @@ Linux-only), since unlinking a file a writer is appending to loses the conversat
 | **Retry** | In the TUI, `Alt+R` resends the last prompt to the model selected now. The history is kept: a resend is a new turn, not a rewind. | Same session, no new path. |
 | **Steer** | Not implemented. There is no channel that delivers a message to a running turn; the only mid-turn control is interrupt (`Ctrl-C`), which ends it. | — |
 
-A bare `loongagent` (or `loongagent tui`) starts a fresh session; `loongagent --session ID|latest`
-or `loongagent resume [ID]` opens an existing one. The other surfaces (`repl`, `run`, `web`,
+A bare `loongagent` (or `loongagent tui`) starts a fresh session. `loongagent reverse` does not:
+a project opens the conversation bound in `.reverse/projects/<project>/session`, and every start
+reopens it ([reverse.md](reverse.md) §5) — one of the several a project may keep on
+`.reverse/projects/<project>/sessions`, which is what its page's picker lists
+([reverse-conversation.md](reverse-conversation.md)). `loongagent --session ID|latest` or
+`loongagent resume [ID]` opens an existing one, and `--session`/`--new` on `reverse` names the
+one the project adopts. The other surfaces (`repl`, `run`, `web`,
 `server`) still continue this project's newest session when nothing is named.
 
 Leaving the TUI prints the way back — `session <id>` and `reopen:  loongagent resume <id>` — and
@@ -81,8 +118,12 @@ is told instead of keeping its own copy of the id.
 
 **Resume** is a disk read, not a process resume. A parked approval lives only in
 `Kernel.pending` in memory, so a restarted process does not resume the question; the person
-starts a new turn. `session.replay` is lenient by design, and the kernel's own replay drives
-the conversation.
+starts a new turn. The screen says that instead of asking: `session.attach` reports the request
+its kernel actually holds (`pending_approval`), the client retires any question the log carries
+that the kernel does not confirm, and the transcript gets one line naming it — otherwise the
+replayed `approval.requested` looked like a question to answer, and answering it failed with
+`-32602: out of order: no approval is pending`. `session.replay` is lenient by design, and the
+kernel's own replay drives the conversation.
 
 **Retry** keeps history because the evidence about what failed is the useful part. It sends
 `PromptSubmit` again in the same session and adds a new user `message.appended`; it does not
@@ -149,7 +190,9 @@ flowchart TB
   branch a session.
 - **Export/import is a decision.** No command, no bundle format, no checksum, no import
   path; the only continuity today is moving the file by hand.
-- **Resume does not restore a parked approval.** `Kernel.pending` is in memory only.
+- **Resume does not restore a parked approval.** `Kernel.pending` is in memory only, so the
+  attach result reports no pending question and the client says the old one expired rather than
+  offering it.
 
 ## 9. Where to read next
 

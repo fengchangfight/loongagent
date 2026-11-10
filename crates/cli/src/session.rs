@@ -1,10 +1,10 @@
-//! Purpose: Sessions as files: the id, the path, the listing, the resolution, the fork and the branch delete.
+//! Purpose: Sessions as files: the id, the path, the listing, the resolution, the fork, the branch delete and the log repair.
 //!
 //! # Contract
-//! - **Serves:** `tui`, `resume`, `sessions`, `fork` and `delete`, and `Args::finish_session`, which picks the session before any command runs.
+//! - **Serves:** `tui`, `resume`, `sessions`, `fork`, `delete` and `repair`, and `Args::finish_session`, which picks the session before any command runs.
 //! - **Design:** `docs/design/surfaces.md` §2; `docs/design/sessions-lineage.md` §1, §3–§5.
 //! - **Upstream:** `main.rs`'s session arms and `Args::finish_session` call in.
-//! - **Downstream:** `loong_eventlog` (`replay_lenient`, `SessionLog`, `lock_path`), `loong_schema`'s `SessionForked` and the filesystem under the client's one root.
+//! - **Downstream:** `loong_eventlog` (`replay_lenient`, `SessionLog`, `lock_path`, `repair`), `loong_schema`'s `SessionForked` and the filesystem under the client's one root.
 //! - **Verify:** `cargo test -p loongagent` · `./scripts/check.sh`
 
 use super::*;
@@ -101,6 +101,176 @@ fn session_path_in(root: &Path, id: &str, cwd: &Path) -> PathBuf {
     }
 }
 
+/// Purpose: A session's log file by id under a client root: the one place the id → file rule
+/// is applied for callers that hold a root rather than an `Args`.
+/// Serves: `crate::reverse::migrate_sessions_in`, which moves a project's earlier
+/// conversations out of the workspace's directory into the project's drawer
+/// (`docs/design/reverse.md` §5).
+/// Design: `docs/design/sessions-lineage.md` §1.
+/// Up: `migrate_sessions_in` and the session tests.
+/// Down: `session_path_in`; no further call.
+/// Verify: `cargo test -p loongagent reverse_`.
+pub(crate) fn session_file_in(home: &Path, cwd: &Path, id: &str) -> PathBuf {
+    session_path_in(home, id, cwd)
+}
+
+/// Purpose: The folder a *drawer* of sessions lives in: one named folder under `projects/`,
+/// beside the workspace's own, so a surface can keep its conversations apart from the TUI's
+/// without a second storage scheme.
+/// Serves: `crates/cli/src/server.rs`'s new/open/list and `crate::reverse::bind_session_in`.
+/// Design: `docs/design/sessions-lineage.md` §1; `docs/design/reverse-conversation.md`
+/// 「A project's sessions」.
+/// Up: `drawer_dir_in`; the reverse surface names the drawer and hands the name to the server
+/// child it spawns (`--session-drawer`).
+/// Down: `config_dir`.
+/// Verify: `cargo test -p loongagent reverse_drawer`.
+pub(crate) fn drawer_dir(drawer: &str) -> PathBuf {
+    drawer_dir_in(&config_dir(), drawer)
+}
+
+/// Purpose: The same folder under an injected root, for the tests and for the reverse surface,
+/// which binds and migrates sessions under a root it was handed.
+/// Serves: `drawer_dir`, `crate::reverse::{bind_session_in, migrate_sessions_in}`.
+/// Design: `docs/design/sessions-lineage.md` §1.
+/// Up: `drawer_dir` and the reverse surface.
+/// Down: no further call; it applies the `projects/<name>` rule.
+/// Verify: `cargo test -p loongagent reverse_drawer`.
+pub(crate) fn drawer_dir_in(root: &Path, drawer: &str) -> PathBuf {
+    root.join("projects").join(drawer)
+}
+
+/// Purpose: The drawer name a reverse project's conversations live in:
+/// `reverse-<project>-<hash>`.
+///
+/// Sessions are stored per directory, and a workspace's directory is shared with the TUI,
+/// headless runs and every other surface. A reverse *project* is not that directory: several
+/// projects can live in one workspace, each with its own conversations. So each project gets
+/// a drawer of its own, named so that `ls ~/.loongagent/projects` shows which are reverse
+/// projects and which project each belongs to. The project name is readable when it is ASCII;
+/// the hash of `cwd` + name is what actually keeps two projects apart, so a name that slugifies
+/// to nothing (「百度分析」) still gets a drawer nobody else shares.
+/// Serves: `crate::reverse::{bind_session_in, migrate_sessions_in}` and the page's list.
+/// Design: `docs/design/sessions-lineage.md` §1; `docs/design/reverse-conversation.md`
+/// 「A project's sessions」.
+/// Up: `crate::reverse::run`, which names the drawer before it binds a session.
+/// Down: `std::fs::canonicalize` and `std::process`-free FNV over the key.
+/// Verify: `cargo test -p loongagent reverse_drawer`.
+pub(crate) fn reverse_drawer_name(cwd: &Path, project: &str) -> String {
+    let path = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    let key = format!("{}\u{0}{project}", path.to_string_lossy());
+    let mut slug: String = project
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    while slug.contains("--") {
+        slug = slug.replace("--", "-");
+    }
+    let slug = slug.trim_matches('-');
+    let slug = if slug.is_empty() { "project" } else { slug };
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in key.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("reverse-{slug}-{:08x}", hash as u32)
+}
+
+/// Purpose: An id's file inside a drawer, with `default` keeping the legacy `session.jsonl` name.
+/// Serves: `crate::server`'s factory and `crate::reverse::fresh_log`.
+/// Design: `docs/design/sessions-lineage.md` §1.
+/// Up: `crate::server`'s factory closure and `crate::reverse::bind_session_in`.
+/// Down: no further call; it applies the id → file rule to a directory it was given.
+/// Verify: `cargo test -p loongagent reverse_drawer`.
+pub(crate) fn session_file_in_drawer(dir: &Path, id: &str) -> PathBuf {
+    if id == "default" {
+        dir.join("session.jsonl")
+    } else {
+        dir.join(format!("{id}.jsonl"))
+    }
+}
+
+/// Purpose: A fresh id for a conversation in a drawer, minting it against that folder so two
+/// drawers never pick the same name for different conversations.
+/// Serves: `crate::server`'s factory and `crate::reverse::fresh_log`.
+/// Design: `docs/design/sessions-lineage.md` §1.
+/// Up: `crate::server`'s factory closure and `crate::reverse::fresh_log`.
+/// Down: `new_session_id_in_dir`.
+/// Verify: `cargo test -p loongagent reverse_drawer`.
+pub(crate) fn new_session_id_in_drawer(dir: &Path) -> String {
+    new_session_id_in_dir(dir)
+}
+
+/// Purpose: The name a drawer's conversations are labelled with in error messages.
+/// Contract: `session.rs` drawer helpers; `resolve_session_in_drawer` and
+/// `session_infos_in_drawer` call it.
+fn drawer_label(dir: &Path) -> String {
+    dir.file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "drawer".to_string())
+}
+
+/// Purpose: Every conversation in a drawer, newest first, in the shape `session.list` answers.
+/// Serves: `crate::server`'s lister when the surface named a drawer.
+/// Design: `docs/design/sessions-lineage.md` §1 and §3; `docs/design/vscode-surface.md` §2.
+/// Up: `crate::server`'s lister closure.
+/// Down: `session_summaries_in` and `session_infos_from`.
+/// Verify: `cargo test -p loongagent reverse_drawer`.
+pub(crate) fn session_infos_in_drawer(
+    dir: &Path,
+    limit: u64,
+) -> Vec<loong_schema::generated::SessionInfo> {
+    session_infos_from(session_summaries_in(dir, &drawer_label(dir)), limit)
+}
+
+/// Purpose: Turn an id, a prefix or `latest` into a conversation *inside one drawer*, and only
+/// that drawer: a reverse project must not resume a conversation from the workspace or from
+/// another project, because those are not the conversations it is showing.
+/// Serves: `crate::server`'s opener when the surface named a drawer.
+/// Design: `docs/design/sessions-lineage.md` §5; `docs/design/reverse-conversation.md`
+/// 「The picker」.
+/// Up: `crate::server`'s opener closure.
+/// Down: `session_summaries_in`, `match_session` and `session_file_in_drawer`.
+/// Verify: `cargo test -p loongagent reverse_drawer`.
+pub(crate) fn resolve_session_in_drawer(dir: &Path, spec: &str) -> Result<PathBuf, String> {
+    if spec.contains('/') || spec.ends_with(".jsonl") {
+        return Ok(PathBuf::from(spec));
+    }
+    let wanted = spec.to_ascii_lowercase();
+    let sessions = session_summaries_in(dir, &drawer_label(dir));
+    if wanted == "latest" || wanted == "last" {
+        return sessions.first().map(|s| s.path.clone()).ok_or_else(|| {
+            format!(
+                "no sessions in {} yet — start one in the page",
+                dir.display()
+            )
+        });
+    }
+    match match_session(&sessions, &wanted)? {
+        Some(path) => Ok(path),
+        None => Err(format!(
+            "no session {spec:?} in {} — this project's conversations are{}",
+            dir.display(),
+            match sessions.len() {
+                0 => " none yet".to_string(),
+                _ => format!(
+                    ": {}",
+                    sessions
+                        .iter()
+                        .map(|s| s.id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            }
+        )),
+    }
+}
+
 /// Purpose: A fresh eight-character id that says itself out loud and does not collide.
 /// Serves: `Args::finish_session` and `server.rs`'s factory.
 /// Design: `docs/design/sessions-lineage.md` §1.
@@ -114,9 +284,13 @@ pub(crate) fn new_session_id(cwd: &Path) -> String {
     new_session_id_in(&config_dir(), cwd)
 }
 
-/// Purpose: The same generator under an injected root, for tests.
-/// Contract: `session.rs` id generation; `new_session_id` and the session tests call it.
-fn new_session_id_in(root: &Path, cwd: &Path) -> String {
+/// Purpose: The same generator under an injected root, for tests and for `bind_session`.
+/// Serves: `new_session_id` and `crate::reverse::bind_session_in`.
+/// Design: `docs/design/sessions-lineage.md` §1.
+/// Up: `new_session_id`, `bind_session_in` and the session tests.
+/// Down: `session_dir_in` and `new_session_id_in_dir`.
+/// Verify: `cargo test -p loongagent reverse_session`.
+pub(crate) fn new_session_id_in(root: &Path, cwd: &Path) -> String {
     new_session_id_in_dir(&session_dir_in(root, cwd))
 }
 
@@ -176,11 +350,22 @@ struct SessionSummary {
     parent: Option<(String, u64)>,
 }
 
+/// Purpose: Whether a file in a project's folder is a session log, rather than the prompt history kept beside it.
+/// Contract: `session.rs` listing; `session_summaries_in` is the only caller.
+/// A project's folder holds two kinds of `.jsonl`: the sessions, and that project's prompt
+/// history (`history.jsonl`, owned by `surfaces.md` §3). History is not a session — it has no
+/// events, no `seq` and no id anyone can resume — so every reader that enumerates sessions
+/// takes this gate first.
+fn is_session_file(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()) == Some("jsonl")
+        && path.file_name().and_then(|n| n.to_str()) != Some(HISTORY_FILE)
+}
+
 /// Purpose: Read every session log in a directory into summaries, counting the child's own events only.
 /// Serves: `session_summaries`, `all_session_summaries_in`, `newest_session_in` and `delete`.
 /// Design: `docs/design/sessions-lineage.md` §1 and §3.
 /// Up: `session_summaries`, `all_session_summaries_in`, `newest_session_in` and `delete`.
-/// Down: `std::fs::read_dir`, the JSONL line parser, `session_id_of` and `SessionSummary`.
+/// Down: `std::fs::read_dir`, `is_session_file`, the JSONL line parser, `session_id_of` and `SessionSummary`.
 /// Verify: `cargo test -p loongagent`.
 fn session_summaries_in(dir: &Path, project: &str) -> Vec<SessionSummary> {
     let mut sessions = Vec::new();
@@ -189,7 +374,7 @@ fn session_summaries_in(dir: &Path, project: &str) -> Vec<SessionSummary> {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+        if !is_session_file(&path) {
             continue;
         }
         let Ok(text) = std::fs::read_to_string(&path) else {
@@ -867,6 +1052,129 @@ fn writers_of(path: &Path) -> Vec<u32> {
     writers
 }
 
+/// Purpose: Heal a session log whose sequence went backwards, so a session two writers broke opens again.
+/// Serves: `loongagent repair [ID|PATH ...] [--all] [--check]`.
+/// Design: `docs/design/sessions-lineage.md` §5; `docs/design/events-storage.md` §3.
+/// Up: `main.rs`'s `repair` arm; no other caller.
+/// Down: `resolve_session`, `newest_session`, `session_summaries_in`, `session_id_of`, `loong_eventlog::repair` and the context store's files.
+/// Verify: `cargo test -p loongagent`.
+/// `loongagent repair [ID|PATH ...] [--all] [--check] [--cwd DIR]`
+///
+/// The damage a log can carry is not a lost event but a lost *order*: a writer that
+/// replayed an earlier log and then appended puts its block after the events it
+/// duplicates, and the strict reader refuses the whole session from that line on.
+/// The repair replays the lines in file order and gives every out-of-step line the
+/// sequence number its position asks for, which keeps every event. The log is the
+/// truth; the index and the context store beside it are derived and are rebuilt.
+pub(crate) fn repair(rest: &[String]) -> Result<(), String> {
+    let mut cwd = std::env::current_dir().map_err(|e| format!("current directory: {e}"))?;
+    let mut specs: Vec<String> = Vec::new();
+    let mut all = false;
+    let mut check = false;
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "--all" => all = true,
+            "--check" | "--dry-run" => check = true,
+            "--cwd" => {
+                i += 1;
+                cwd = PathBuf::from(rest.get(i).ok_or("--cwd needs a path")?);
+            }
+            other if !other.starts_with('-') => specs.push(other.to_string()),
+            other => return Err(format!("unexpected {other:?}\n\n{USAGE}")),
+        }
+        i += 1;
+    }
+    if all && !specs.is_empty() {
+        return Err(format!(
+            "--all repairs every session here; give it no id as well\n\n{USAGE}"
+        ));
+    }
+
+    let targets: Vec<PathBuf> = if all {
+        let dir = session_dir_in(&config_dir(), &cwd);
+        session_summaries_in(&dir, &project_slug(&cwd))
+            .into_iter()
+            .map(|session| session.path)
+            .collect()
+    } else if specs.is_empty() {
+        vec![newest_session(&cwd)
+            .ok_or_else(|| format!("no sessions in this project yet\n\n{USAGE}"))?]
+    } else {
+        let mut paths = Vec::new();
+        for spec in &specs {
+            paths.push(resolve_session(spec, &cwd)?);
+        }
+        paths
+    };
+    if targets.is_empty() {
+        println!("no sessions in this project");
+        return Ok(());
+    }
+
+    let mut broken = 0usize;
+    for path in &targets {
+        let id = session_id_of(path);
+        let report = if check {
+            loong_eventlog::repair_dry_run(path)
+        } else {
+            loong_eventlog::repair(path)
+        }
+        .map_err(|e| format!("{id}: {e}"))?;
+        if !report.changed() {
+            println!("  {id}  {} event(s), in order", report.events);
+            continue;
+        }
+        broken += 1;
+        if check {
+            println!(
+                "  {id}  {} event(s), {} to renumber, {} to drop",
+                report.events, report.renumbered, report.dropped
+            );
+            continue;
+        }
+        let backup = report
+            .backup
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        println!(
+            "  {id}  {} event(s), renumbered {}, dropped {}  (was {})",
+            report.events, report.renumbered, report.dropped, backup
+        );
+        // The context store keeps a byte offset into the log, and a renumbered
+        // line is a different length in a different place, so its cursor is
+        // meaningless now. The log is the truth; the store rebuilds from it.
+        let store = path.with_extension("context.db");
+        if store.exists() {
+            for sidecar in [
+                store.clone(),
+                path.with_extension("context.db-wal"),
+                path.with_extension("context.db-shm"),
+            ] {
+                let _ = std::fs::remove_file(sidecar);
+            }
+            println!("  {id}  dropped the context store; rebuild it with `loongagent context rebuild {id}`");
+        }
+    }
+
+    if broken == 0 {
+        println!("{} session(s), all in order", targets.len());
+    } else if check {
+        return Err(format!(
+            "{broken} session(s) need repair; run `loongagent repair {}`",
+            if all {
+                "--all".to_string()
+            } else {
+                "ID".to_string()
+            }
+        ));
+    } else {
+        println!("{broken} session(s) repaired");
+    }
+    Ok(())
+}
+
 /// Purpose: Delete a session and its whole branch, after saying what goes and refusing while it is open.
 /// Serves: `loongagent delete ID [--force]`.
 /// Design: `docs/design/sessions-lineage.md` §4.
@@ -1036,18 +1344,22 @@ pub(crate) fn default_session_path(cwd: &Path) -> PathBuf {
         .join("session.jsonl")
 }
 
+/// Purpose: The file name a project's prompt history keeps, shared so the listing can tell it from a session.
+/// Contract: `session.rs` paths; `history_path` writes it and `is_session_file` excludes it.
+const HISTORY_FILE: &str = "history.jsonl";
+
 /// Purpose: The file a project's prompt history lives in, beside its session files.
 /// Serves: `tui.rs`'s `full_screen`, which hands it to the screen.
 /// Design: `docs/design/surfaces.md` §3.
 /// Up: `tui.rs`.
-/// Down: `default_session_path`; no further call.
+/// Down: `default_session_path` and `HISTORY_FILE`; no further call.
 /// Verify: `cargo test -p loongagent` · `./scripts/check.sh`.
 ///
 /// A project's history, not the user's: a prompt that names this repository's files is
 /// rarely the one wanted in another checkout, and the same directory already holds the
 /// project's sessions.
 pub(crate) fn history_path(cwd: &Path) -> PathBuf {
-    default_session_path(cwd).with_file_name("history.jsonl")
+    default_session_path(cwd).with_file_name(HISTORY_FILE)
 }
 
 /// Purpose: A readable directory name for a project path, with a hash so two paths cannot share a conversation.
@@ -1119,6 +1431,59 @@ mod session_tests {
             seq += 1;
         }
         std::fs::write(path, text).unwrap();
+    }
+
+    /// Purpose: Pins that `repair` heals a log a second writer broke, from a path the way a caller would give one.
+    #[test]
+    fn repair_turns_a_log_a_second_writer_broke_into_one_that_opens() {
+        let root = temp_root("repair");
+        let cwd = Path::new("/tmp/project");
+        let path = session_path_in(&root, "pxyz2345", cwd);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut log = loong_eventlog::SessionLog::create(&path).unwrap();
+        for text in ["one", "two"] {
+            log.append(
+                "message.appended",
+                serde_json::json!({"role": "user", "text": text}),
+            )
+            .unwrap();
+        }
+        let second = path.display().to_string();
+        drop(log);
+        // A writer that replayed before the last turn and then appended: its own
+        // `seq 2` lands on top of the log's, which is the shape that stops a
+        // session opening.
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(
+            f,
+            "{}",
+            serde_json::json!({"seq": 2, "id": "e00000002", "parent_id": null, "kind": "message.appended", "ignorable": false, "time_ms": 2, "data": {"role": "user", "text": "three"}})
+        )
+        .unwrap();
+        drop(f);
+        assert!(
+            matches!(
+                loong_eventlog::replay(&path),
+                Err(loong_eventlog::LogError::SeqOutOfOrder { .. })
+            ),
+            "the broken log is what is being repaired"
+        );
+
+        repair(&[second]).unwrap();
+
+        let replayed = loong_eventlog::replay(&path).expect("the repaired log opens");
+        assert_eq!(
+            replayed.events.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![1, 2, 3],
+            "and it kept the second writer's event"
+        );
+        assert!(
+            PathBuf::from(format!("{}.broken-bak", path.display())).exists(),
+            "the bytes before the rewrite are kept"
+        );
     }
 
     /// Purpose: The intro names the session, and says how to start another when this run continued one.
@@ -1518,6 +1883,33 @@ mod session_tests {
             age_text(now - std::time::Duration::from_secs(172800)),
             "2 d ago"
         );
+    }
+
+    /// Purpose: The prompt history kept beside a project's sessions is not read as one of them.
+    #[test]
+    fn the_prompt_history_beside_the_sessions_is_not_a_session() {
+        let root = temp_root("history-not-a-session");
+        let cwd = Path::new("/tmp/project");
+        let dir = session_dir_in(&root, cwd);
+        write_session(&dir.join("aaaa1111.jsonl"), &["a real question"]);
+        // Exactly what the screen writes: one prompt per line, and no `seq`.
+        std::fs::write(
+            dir.join("history.jsonl"),
+            "{\"prompt\":\"a prompt the person typed\"}\n{\"prompt\":\"another\"}\n",
+        )
+        .unwrap();
+
+        let sessions = session_summaries_in(&dir, "project");
+        let ids: Vec<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["aaaa1111"], "{ids:?}");
+
+        assert_eq!(
+            newest_session_in(&root, cwd).unwrap().file_name().unwrap(),
+            "aaaa1111.jsonl",
+            "history is not the session `resume` reopens, however new it is"
+        );
+        let error = resolve_session_in(&root, "history", cwd).unwrap_err();
+        assert!(error.contains("loongagent sessions"), "{error}");
     }
 
     /// Purpose: Prompt history sits beside the project's sessions, so one checkout's prompts do not leak into another's.

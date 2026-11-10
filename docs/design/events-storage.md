@@ -97,7 +97,9 @@ sequence gap and an envelope that contradicts the schema are errors. `SessionLog
 `SessionLog::open` and `create` take an exclusive lock before replaying, and a second process is
 refused with `LogError::Locked` — ADR-0009 §5's one writer at the file. Two writers each keep their
 own `next_seq`, so the loser writes a duplicate `seq` and the strict reader then rejects the whole
-session: a log with `seq 5618` written twice did stop opening.
+session: a log with `seq 5618` written twice did stop opening. A log broken that way is healed by
+`loongagent repair`, which renumbers the out-of-step lines in file order and keeps every event
+([sessions-lineage.md](sessions-lineage.md) §4).
 
 The lock is a sidecar, `<log>.lock`, because a Windows lock is mandatory: locking the log would
 refuse every reader alive while the writer lives, and `sessions` and a surface replay both read the
@@ -110,11 +112,9 @@ The lock dies with its process, so a crash leaves no stale lock and the empty fi
 `loongagent delete` removes it. `append` also compares the file's length with the bytes this writer
 wrote and refuses with `LogError::ForeignWrite` where the lock is not honoured.
 
-A session is a file, and its file name is its id: `session.jsonl` is the first session and
-answers to `default`; later sessions are `<id>.jsonl` under
-`~/.loongagent/projects/<project-slug>/`. The server owns the open log for the session it
-serves, and `events_since` reads the log again rather than trusting a mirror, so the stream
-cannot drift from the record.
+A session is a file, and its name is its id: `session.jsonl` (answering to `default`) or
+`<id>.jsonl` under `~/.loongagent/projects/<project-slug>/`. The server owns the open log it
+serves, and `events_since` reads the log again rather than a mirror, so the stream cannot drift.
 
 ## 4. SQLite is a derived index
 

@@ -3805,6 +3805,7 @@ impl App {
                 loong_schema::generated::ApprovalScope::Once => "已批准（本次）",
                 loong_schema::generated::ApprovalScope::ActionClass => "已批准（此类）",
                 loong_schema::generated::ApprovalScope::Project => "已批准（本项目）",
+                loong_schema::generated::ApprovalScope::Session => "已批准（本会话）",
             }
         };
         self.push_lines(vec![format!("⧗ {how}: {request_id}")]);

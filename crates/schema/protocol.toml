@@ -67,6 +67,7 @@ variants = [
   { name = "Once", wire = "once" },
   { name = "ActionClass", wire = "action_class" },
   { name = "Project", wire = "project" },
+  { name = "Session", wire = "session" },
 ]
 
 [[types]]

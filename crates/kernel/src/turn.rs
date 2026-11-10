@@ -26,7 +26,9 @@ use loong_sandbox::Pdp;
 use loong_schema::generated as gen;
 use loong_schema::generated::{ActionClass, ApprovalScope, Json, Role, Verdict};
 use loong_skills::{parse_invocation, Origin, PromptFetcher, Skill, SkillSet, SkillTool};
-use loong_tools::{Confinement, ExecContext, NoConfinement, Registry};
+use loong_tools::{
+    irreversible_segments, segment_key, Confinement, ExecContext, NoConfinement, Registry,
+};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -608,6 +610,11 @@ pub struct Kernel {
     /// Distinct throwaway paths written this turn (`write_file` under a temp directory).
     /// New paths defeat the equal-arguments rule, so this counts the churn directly.
     scratch_writes: std::collections::HashSet<String>,
+    /// The irreversible command shapes the person approved with `Session`
+    /// scope this session: each entry is one segment's (verb, operands) key.
+    /// In-memory only — a fresh kernel has an empty set, so a restart asks
+    /// again, which is what keeps this from weakening ADR-0020.
+    remembered_irreversible: std::collections::HashSet<(String, Vec<String>)>,
     /// The steps in this turn whose clearing pass appended a `compaction.applied`, with
     /// the tokens before and after. Three passes inside a five-step window that each free
     /// little (or leave the context over its ceiling) mean the pass cannot keep up; the

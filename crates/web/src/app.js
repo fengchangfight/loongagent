@@ -65,6 +65,8 @@ const dom = {
   transcript: el("transcript"),
   prompt: el("prompt"),
   send: el("send"),
+  stop: el("stop"),
+  thinking: el("thinking"),
   form: el("composer-form"),
   status: el("status"),
   modelbar: el("modelbar"),
@@ -111,6 +113,48 @@ function notice(kind, text) {
 function setStatus(text, kind) {
   dom.status.textContent = text;
   dom.status.className = kind || "";
+}
+
+/* A turn in flight: the spinner says it is thinking, Stop says it can be ended, and
+ * the send button is spent. One function drives all three so they can never disagree
+ * (web-surface.md §4). */
+function setThinking(on) {
+  dom.thinking.hidden = !on;
+  dom.stop.hidden = !on;
+  dom.stop.disabled = false;
+  dom.send.disabled = on;
+}
+
+/* Stop the running turn: the TUI's esc.
+ *
+ * It cannot be a protocol method. A turn owns the session for as long as it runs — the
+ * child is blocked inside `prompt.submit` — so nothing the page sent over the socket
+ * would ever be read. The page therefore asks the listener to signal that child the way
+ * the terminal does, and the turn ends the way any interrupted turn does: with
+ * `turn.interrupted` and the answer to `prompt.submit` (web-surface.md §4). */
+async function stopTurn() {
+  if (!state.running) return;
+  dom.stop.disabled = true;
+  setStatus("interrupting…");
+  try {
+    const answer = await fetch(
+      `/api/interrupt?token=${encodeURIComponent(state.token)}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ session_id: state.sessionId }),
+      },
+    ).then((res) => res.json());
+    if (!answer.interrupted) {
+      // Nothing was running after all, or there is no process to signal: say so
+      // rather than leave a button that appears not to work.
+      setStatus(answer.reason || "nothing to interrupt", "bad");
+      dom.stop.disabled = false;
+    }
+  } catch (e) {
+    setStatus(`stop failed: ${e.message}`, "bad");
+    dom.stop.disabled = false;
+  }
 }
 
 function timeAgo(epochSeconds) {
@@ -242,7 +286,7 @@ function applyModelList(list) {
   renderUsage();
 }
 
-/* ── The banner: workspace ────────────────────────────────────────────── */
+/* ── The rail's workspace button ──────────────────────────────────────── */
 
 function renderWorkspace() {
   // The rail lists the newest workspace first, so a workspace is found by the `index`
@@ -445,6 +489,23 @@ function modelActionForKey(e) {
 
 function wireShortcuts() {
   document.addEventListener("keydown", (e) => {
+    // Esc ends a running turn, the TUI's own key (web-surface.md §4). A list that is
+    // open claims it first: the `@` picker and the workspace picker both close on Esc
+    // and mark the event handled, and a turn must not die because someone meant to
+    // dismiss a list.
+    if (e.key === "Escape") {
+      if (e.defaultPrevented) return;
+      if (dom.picker.classList.contains("open")) {
+        e.preventDefault();
+        picker.close();
+        return;
+      }
+      if (state.running) {
+        e.preventDefault();
+        stopTurn();
+      }
+      return;
+    }
     const action = modelActionForKey(e);
     if (!action) return;
     if (state.models.length === 0) return;
@@ -1534,12 +1595,25 @@ function showApproval(data) {
     box.classList.add("answered");
     approve.textContent = granted ? "Approved ✓" : "Approve";
     refuse.textContent = granted ? "Refuse" : "Refused ✕";
+    // Answering resumes the turn, and the resumed turn makes model calls that can take as
+    // long as any other: the spinner says so and Stop can end it (web-surface.md §4). This
+    // is the request whose 500 used to arrive as "approval.respond: model: transport: HTTP
+    // 500" with the tool already run and no way to end what followed.
+    state.running = true;
+    renderModels();
+    setThinking(true);
     sendRequest("approval.respond", {
       session_id: state.sessionId || "default",
       request_id: data.request_id,
       granted,
       scope: "once",
-    }).catch((e) => notice("error", `approval.respond: ${e.message}`));
+    })
+      .catch((e) => notice("error", `approval.respond: ${e.message}`))
+      .finally(() => {
+        state.running = false;
+        renderModels();
+        setThinking(false);
+      });
   };
   approve.onclick = () => answer(true);
   refuse.onclick = () => answer(false);
@@ -1726,6 +1800,8 @@ dom.form.onsubmit = (e) => {
   submit();
 };
 
+dom.stop.onclick = () => stopTurn();
+
 dom.prompt.onkeydown = (e) => {
   // Only keys the list can answer are taken from the input: with no rows on
   // screen, Enter still sends and Tab still leaves the field.
@@ -1771,7 +1847,7 @@ async function submit() {
   dom.prompt.style.height = "auto";
   state.running = true;
   renderModels();
-  dom.send.disabled = true;
+  setThinking(true);
   // The card and its spinner start now, not when the first event arrives: the model
   // may think for ten seconds before it says anything, and that silence must not
   // read as a stall. The user's own message is placed above this card when it arrives.
@@ -1787,7 +1863,7 @@ async function submit() {
   } finally {
     state.running = false;
     renderModels();
-    dom.send.disabled = false;
+    setThinking(false);
     closeTurn();
   }
 }

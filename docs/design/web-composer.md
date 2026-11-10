@@ -75,3 +75,36 @@ page and the agent to disagree about what the file contains.
   history is not on the wire.
 - **No slash commands.** `/model`, `/context` and `/yolo` are the TUI's; the page has the
   bar, the usage row and the switch instead.
+
+## 4. Stopping a turn
+
+While a turn runs, the composer's row carries a spinner that says it is thinking and a
+**Stop** button; `Esc` does the same. It is the TUI's `esc`.
+
+It cannot be a protocol method. A turn owns the session for as long as it runs — the
+child is blocked inside `prompt.submit`, so a line sent now would sit unread until the
+turn it was meant to end had already ended. The page therefore asks the listener to
+signal the child the way the terminal does (ADR-0019's reasoning, `surfaces.md` §7):
+
+```
+POST /api/interrupt?token=<token>   {"session_id": "<id>"}
+```
+
+The route answers with `interrupted`, and with a `reason` in words when it is false —
+"no turn is running" when there is nothing to stop, "this session has no process to
+signal" when the session is not a child process. The id travels in the body rather than
+the query so a stray link or an image tag cannot fire a signal at this surface, and the
+pid is looked up **on the server**: the page never learns, and never names, a process.
+
+The turn then ends the way any interrupted turn does: `turn.interrupted`, the
+`prompt.submit` answer, the spinner gone. The session survives it. The signal goes to a
+child that is busy *by this server's own bookkeeping* — a signal sent to an idle child
+would land on whatever it did next.
+
+The kernel reads the flag **between steps**, so a Stop pressed in the middle of a model
+call lands when that call returns, exactly as the TUI's `esc` does. A stop is not a
+socket teardown: the tool that was running finishes, and the turn ends after it.
+
+The answer to a parked approval resumes the turn too, and that resumed turn is where a
+model call can take as long as any other, so approving also shows the spinner and
+leaves Stop available.

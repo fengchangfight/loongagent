@@ -19,9 +19,9 @@ eager "default" session waits to collide with the user's first choice.
 ## 1. Workspaces — many, remembered
 
 A **workspace** is a directory the user works in. `loongagent web` registers its launch
-directory as the **home workspace**, and the page opens on it. The banner's directory
-button opens a picker (server-side listing, directories only); choosing one **adds** a
-workspace.
+directory as the **home workspace**, and the page opens on it. The rail's workspace button
+(its head, §4) opens a picker (server-side listing, directories only); choosing one
+**adds** a workspace. One control for one list: the button sits on the list it changes.
 
 Workspaces are **many and persistent**, not one extra per browser: the catalogue lives in
 `workspaces.json` under the config dir, so it survives a restart. Each entry records the
@@ -96,7 +96,10 @@ continue the stream. The tab computes what the TUI computes — the spend accumu
 
 Three regions, all fed by the event stream:
 
-- **Banner** — favicon and wordmark, the workspace button, then the **model bar**: a flat
+- **Banner** — favicon, the wordmark in capitals, and the terminal's own inscription
+  `⟬ ᛭ 兴云吐雾 ⋄ 隐介藏形 ᛭ ⟭` (`surfaces.md` §3, the TUI's `MARK_SUBLINE`), so the two
+  surfaces introduce themselves alike; it sheds runes, then itself, as the window narrows.
+  Then the **model bar**: a flat
   row of slots, one per `model.list` entry, every model drawn at once. It is the TUI's own
   bar (ADR-0008, `surfaces.md` §3) rather than a dropdown, because reaching for another
   model is usually mid-sentence and a menu costs a click and a read. Choosing a slot sends
@@ -141,7 +144,8 @@ Three regions, all fed by the event stream:
   reaches a running turn over ADR-0019's control channel, and this surface, which has
   none, keeps the switch disabled rather than show a state it cannot enforce.
 - **Session rail** — the two-level tree of §2: workspaces newest added first, each
-  expanding to its sessions **newest started first**, with new/delete/copy. Copy puts
+  expanding to its sessions **newest started first**, with new/delete/copy. Its head is the
+  **workspace button** of §1, naming the seated workspace and opening the picker. Copy puts
   the id on the clipboard, because the id names the session to every other surface
   (`loongagent --resume <id>`) while the row shows a title. Order is creation time —
   the first `time_ms` in the log, or the file's own time for a session with no event
@@ -195,12 +199,19 @@ Three regions, all fed by the event stream:
   is open and ends with its answer. A replayed turn carries no stopwatch — it is a record
   of the past.
 
+  The transcript is one column against the **left** edge, as wide as the pane less a
+  margin: a centred chat leaves two empty gutters and reads as a document, and the TUI it
+  mirrors has never centred anything. The block reaches the right edge; padding keeps a
+  paragraph inside a comfortable measure.
+
+- **Stop** — while a turn runs the composer's row carries a spinner and a **Stop** button
+  (`Esc` too): the TUI's `esc`, sent as `POST /api/interrupt` because a busy session reads
+  no line. [web-composer.md](web-composer.md) §4 owns it.
+
 The transcript's vocabulary is the protocol's, and a test holds the page to it: every
 event kind the page switches on must be one `loong_schema::generated::EVENT_KINDS`
-defines (or the surface's own `client.error`), and the fields it reads must be ones
-that event carries. The page once handled `tool.called`, `decision.made` and
-`turn.completed`, which the protocol never sends, so tool calls and decisions were
-silently dropped and the usage row read `usd` where events carry `usd_micros`.
+defines (or the surface's own `client.error`). The page once handled `tool.called` and
+`turn.completed`, which the protocol never sends, so tool calls were silently dropped.
 
 The composer shows the TUI's usage row — 入/出 tokens, calls, cache rate, context share —
 recomputed from `cost.recorded`. The share is the one number no cost event carries: it
@@ -212,10 +223,13 @@ file — is [web-composer.md](web-composer.md)'s.
 
 No new session protocol methods: the surface speaks the TUI's JSON-RPC over WebSocket
 instead of stdio. The web crate adds HTTP routes for its static assets (`app.js`,
-`style.css`, `/favicon.ico` from the bundled `assets/favicon.png`) and two surface-local
-JSON routes: `/api/browse`, listing subdirectories for the workspace picker, and
+`style.css`, `/favicon.ico` from the bundled `assets/favicon.png`) and three surface-local
+JSON routes: `/api/browse`, listing subdirectories for the workspace picker,
 `/api/files`, the composer's ranked file list behind `@` ([web-composer.md](web-composer.md)
-§2). Both belong to the control plane and stay in the web crate. The workspace catalogue of
+§2), and `/api/interrupt` ([web-composer.md](web-composer.md) §4), the one route that is
+not a read — which is why each connection gets its own thread: the socket carrying a turn
+is blocked inside `exchange` until the turn ends. All three stay in the web crate. The
+workspace catalogue of
 §1 is driven over the
 socket (`workspace.list`/`add`/`close`) and persisted internally to
 `workspaces.json` — there is no `/api/workspaces` HTTP route. One surface-local
@@ -225,8 +239,7 @@ are surface-local too, and so is `model.reorder` (§4): an arrangement the bar o
 plus a write to `local.toml` on a local profile.
 
 `--session` and `--new` no longer pre-select a session: the surface starts empty. The
-launch directory is all `loongagent web` fixes; everything session-shaped is chosen in
-the page.
+launch directory is all `loongagent web` fixes; the rest is chosen in the page.
 
 ## 6. Choosing models
 

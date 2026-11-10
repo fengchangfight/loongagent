@@ -79,6 +79,24 @@ pub trait Session: Send {
         line: &str,
         sink: &mut dyn FnMut(String) -> Result<(), String>,
     ) -> Result<(), String>;
+
+    /// The process this session talks to, when it talks to one.
+    ///
+    /// Purpose: Name the child whose turn a Stop button may end.
+    ///
+    /// Serves: `/api/interrupt` (`app::stop_running_turn`), which must ask the operating
+    /// system rather than the session: a running turn holds the session's lock, so a
+    /// question asked through `exchange` would be answered only after the turn it was
+    /// meant to end had already ended (web-surface.md §4).
+    /// Design: `docs/design/web-surface.md` §4.
+    /// Up: `app::Child::pid`, read once when the child is created.
+    /// Down: `ChildTransport`'s handle in `crates/cli`.
+    /// Verify: `cargo test -p loong-web` (`stop_`).
+    /// Contract: `None` means "not a process" — a test double, or a session served
+    /// in-process. It is not an error, and the route says so in words.
+    fn pid(&self) -> Option<u32> {
+        None
+    }
 }
 
 /// What the "add a model" panel needs: what is configured now, what a provider asks
@@ -268,8 +286,34 @@ pub fn serve_web(
             + Sync,
     >,
 ) {
-    serve_web_with_models(listener, token, home, start_session, Arc::new(NoModelSetup));
+    serve_web_with_models(
+        listener,
+        token,
+        home,
+        start_session,
+        Arc::new(NoModelSetup),
+        // No process was spawned by this call, so there is nothing for Stop to signal:
+        // the route says as much instead of pretending (web-surface.md §4).
+        Arc::new(|_: u32| {}),
+    );
 }
+
+/// How the surface stops a running turn: signal the process behind a session.
+///
+/// It is injected rather than asked of the session for one reason: a running turn holds
+/// the session's lock, so the only way to end one is to go around it — to the process
+/// itself (`web-surface.md` §4). The CLI wires `loong_tui::interrupt` here, so the
+/// browser's Stop and the terminal's esc are literally the same act, and this crate keeps
+/// no second copy of the platform code. A surface with no child (`serve_web` in the tests)
+/// passes a signal that does nothing.
+/// Purpose: Signal the process a session talks to, ending the turn it is running.
+///
+/// Serves: `/api/interrupt`, the page's Stop button and its esc (web-surface.md §4).
+/// Design: `docs/design/web-surface.md` §4.
+/// Up: `serve_web_with_models`, which takes one from the surface that spawned the child.
+/// Down: `handle_web`'s `interrupt` route.
+/// Verify: `cargo test -p loong-web` (`stop_`) and `cargo test -p loongagent --test web_surface`.
+pub type StopSignal = Arc<dyn Fn(u32) + Send + Sync>;
 
 /// The same surface, with the model panel wired to a real setup.
 ///
@@ -294,6 +338,7 @@ pub fn serve_web_with_models(
             + Sync,
     >,
     models: Arc<dyn ModelSetup>,
+    stop: StopSignal,
 ) {
     let state = Arc::new(Mutex::new(app::State::new()));
     for stream in listener.incoming() {
@@ -303,8 +348,9 @@ pub fn serve_web_with_models(
         let home = home.clone();
         let start_session = Arc::clone(&start_session);
         let models = Arc::clone(&models);
+        let stop = Arc::clone(&stop);
         std::thread::spawn(move || {
-            if let Err(e) = handle_web(stream, state, token, home, start_session, models) {
+            if let Err(e) = handle_web(stream, state, token, home, start_session, models, stop) {
                 eprintln!("[web] {e}");
             }
         });
@@ -408,6 +454,7 @@ fn handle_web(
             + Sync,
     >,
     models: Arc<dyn ModelSetup>,
+    stop: StopSignal,
 ) -> Result<(), String> {
     // Peek (not read): the WebSocket handshake must see the request itself, while
     // a static request is ours to answer.
@@ -441,6 +488,15 @@ fn handle_web(
                 return refuse_without_token(stream);
             }
             return files_under_workspace(stream, asked, &state);
+        }
+        "/api/interrupt" => {
+            // The page's Stop button and its esc (web-composer.md §4). The token is the
+            // same one every other data route takes: a signal is only as public as the
+            // socket it answers.
+            if presented_token(&head).as_deref() != Some(token.as_str()) {
+                return refuse_without_token(stream);
+            }
+            return interrupt(stream, &state, &stop);
         }
         _ => static_page(stream),
     }
@@ -587,6 +643,107 @@ fn browse(mut stream: TcpStream, asked: &str, home: &std::path::Path) -> Result<
         .and_then(|_| stream.write_all(body.as_bytes()))
         .and_then(|_| stream.flush())
         .map_err(|e| e.to_string())
+}
+
+/// Purpose: End the turn a session is running: the page's Stop button and its esc.
+///
+/// Serves: `handle_web` for `/api/interrupt` (web-surface.md §4).
+/// Design: `docs/design/web-surface.md` §4.
+/// Up: `handle_web`, after the token check.
+/// Down: `app::busy_child`, `read_request_body`, the injected `StopSignal`.
+/// Verify: `cargo test -p loong-web` (`stop_`).
+/// Contract: it answers with `interrupted` and, when false, a `reason` in words — never a
+/// bare status — because the page shows that answer in its status line.
+fn interrupt(
+    mut stream: TcpStream,
+    state: &Arc<Mutex<app::State>>,
+    stop: &StopSignal,
+) -> Result<(), String> {
+    // The session id travels in the body, not the query: a signal is not something a
+    // stray link or an image tag on another origin can fire at this surface.
+    let asked = serde_json::from_str::<Value>(&read_request_body(&mut stream)?)
+        .ok()
+        .and_then(|body| {
+            body.get("session_id")
+                .and_then(Value::as_str)
+                .map(|id| id.to_string())
+        });
+    let (status, body) = match app::busy_child(state, asked.as_deref()) {
+        Err(e) => (
+            "500 Internal Server Error",
+            json!({ "interrupted": false, "reason": e }),
+        ),
+        // Nothing to stop is not an error of the caller's: the turn may have answered
+        // between the click and this request.
+        Ok(None) => (
+            "409 Conflict",
+            json!({ "interrupted": false, "reason": "no turn is running" }),
+        ),
+        Ok(Some((_, None))) => (
+            "409 Conflict",
+            json!({ "interrupted": false, "reason": "this session has no process to signal" }),
+        ),
+        Ok(Some((_, Some(pid)))) => {
+            stop(pid);
+            ("200 OK", json!({ "interrupted": true }))
+        }
+    };
+    let body = body.to_string();
+    let head = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json; charset=utf-8\r\n\
+         Content-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream
+        .write_all(head.as_bytes())
+        .and_then(|_| stream.write_all(body.as_bytes()))
+        .and_then(|_| stream.flush())
+        .map_err(|e| e.to_string())
+}
+
+/// Purpose: Read a request's body, given that its head has only been peeked so far.
+///
+/// Serves: `interrupt`, the one route on this surface that takes a body.
+/// Design: `docs/design/web-surface.md` §5.
+/// Up: `interrupt`.
+/// Down: the socket reads and the `Content-Length` header.
+/// Verify: `cargo test -p loong-web` (`stop_`).
+/// Contract: a request with no body answers the empty string, and a body over 64 KiB is
+/// refused rather than buffered — this surface takes one field, not a payload.
+fn read_request_body(stream: &mut TcpStream) -> Result<String, String> {
+    let mut raw: Vec<u8> = Vec::new();
+    let mut buffer = [0u8; 4096];
+    loop {
+        let split = raw.windows(4).position(|window| window == b"\r\n\r\n");
+        let Some(split) = split else {
+            let read = stream.read(&mut buffer).map_err(|e| e.to_string())?;
+            if read == 0 {
+                return Ok(String::new());
+            }
+            raw.extend_from_slice(&buffer[..read]);
+            if raw.len() > 64 * 1024 {
+                return Err("request too large".to_string());
+            }
+            continue;
+        };
+        let head = String::from_utf8_lossy(&raw[..split]).to_ascii_lowercase();
+        let want = head
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length:"))
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        let start = split + 4;
+        if raw.len() - start >= want {
+            return Ok(String::from_utf8_lossy(&raw[start..start + want]).to_string());
+        }
+        let read = stream.read(&mut buffer).map_err(|e| e.to_string())?;
+        if read == 0 {
+            // A client that closed mid-body: answer with what arrived, and let the JSON
+            // parse decide whether it was enough.
+            return Ok(String::from_utf8_lossy(&raw[start..]).to_string());
+        }
+        raw.extend_from_slice(&buffer[..read]);
+    }
 }
 
 /// Purpose: One decoded value from a request's query string, by name.
@@ -1070,6 +1227,39 @@ mod tests {
         assert!(
             APP_JS.contains("e.altKey") && APP_JS.contains("e.ctrlKey"),
             "modelStepForKey must tell the two families apart, or one steals the other's keys"
+        );
+    }
+
+    /// Purpose: Pins the banner's name and the inscription beside it: the wordmark is set
+    /// in capitals, and the saying is the terminal's own — the two surfaces introduce
+    /// themselves with the same words (web-surface.md §4, `surfaces.md` §3).
+    #[test]
+    fn the_banner_says_the_name_and_the_inscription() {
+        assert!(
+            INDEX.contains("<span class=\"wordmark\">LOONGAGENT</span>"),
+            "the wordmark is a wordmark: capitals, not the command's spelling"
+        );
+        // The same words as `MARK_SUBLINE` in `crates/tui-app/src/lib.rs`: two halves and
+        // the diamond between them. The runes are drawn as text, so a font that lacks them
+        // shows boxes — but a page that drops them says half the saying.
+        for half in ["兴云吐雾", "隐介藏形"] {
+            assert!(
+                INDEX.contains(half),
+                "the inscription is missing `{half}`, so the banner says only one of the two"
+            );
+        }
+        assert!(
+            INDEX.contains("class=\"orn sep\">⋄"),
+            "the halves are divided by the terminal's diamond"
+        );
+        assert!(
+            STYLE_CSS.contains("#banner .mark .wordmark")
+                && STYLE_CSS.contains("#banner .mark .subline"),
+            "the name and the inscription are drawn by the banner's own rules"
+        );
+        assert!(
+            STYLE_CSS.contains("#banner .mark .subline .orn"),
+            "the runes take the frame's colour, not the text's: they frame the saying"
         );
     }
 

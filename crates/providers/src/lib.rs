@@ -231,6 +231,64 @@ impl ModelError {
         let lower = text.to_lowercase();
         NEEDLES.iter().any(|needle| lower.contains(needle))
     }
+
+    /// Purpose: Say whether this failure is a hiccup — "the request never got an answer" — rather than a refusal.
+    ///
+    /// Serves: `Kernel::complete_with_ladder`, which retries one of these before it lets
+    /// the turn unwind.
+    /// Design: `docs/design/model-faults.md` §1.
+    /// Up: `Kernel::complete_with_ladder`'s error branch.
+    /// Down: no callee; the status code and the wording of the transport message.
+    /// Verify: `cargo test -p loong-providers a_hiccup_is_told_apart_from_a_refusal`.
+    ///
+    /// The distinction the kernel draws is not "5xx is retryable" for its own sake: a
+    /// transient failure means *nothing was recorded* — no answer, no tool, no event — so
+    /// asking again is not asking twice, it is asking once. A 400, a 401 or a 422 says the
+    /// request itself was wrong and would be wrong again, so those stay fatal. A
+    /// `Protocol` error is the third kind: an answer arrived and could not be used, and
+    /// repeating the request earns the same answer.
+    pub fn is_transient(&self) -> bool {
+        let ModelError::Transport(text) = self else {
+            return false;
+        };
+        if let Some(status) = http_status(text) {
+            // 429 is the provider asking for a pause, not refusing the request; 5xx is the
+            // provider failing to answer at all. Both are worth one more try.
+            return status == 429 || (500..600).contains(&status);
+        }
+        // No status code: the request never reached an answer. These are the shapes a
+        // dropped socket takes across platforms and proxies.
+        const NEEDLES: [&str; 7] = [
+            "connection reset",
+            "connection refused",
+            "connection closed",
+            "broken pipe",
+            "timed out",
+            "timeout",
+            "unexpected eof",
+        ];
+        let lower = text.to_lowercase();
+        NEEDLES.iter().any(|needle| lower.contains(needle))
+    }
+}
+
+/// Purpose: The status code an adapter put at the front of its transport message, if any.
+///
+/// Serves: `ModelError::is_transient`.
+/// Design: `docs/design/model-faults.md` §1.
+/// Up: `is_transient`, and only it.
+/// Down: no callee.
+/// Verify: `cargo test -p loong-providers a_hiccup_is_told_apart_from_a_refusal`.
+/// Contract: adapters render the refusal as `HTTP <code>: <body>` (`openai_compat.rs`), so
+/// the first `HTTP ` token followed by three digits is the code; anything else is `None`,
+/// which `is_transient` reads as "no answer arrived".
+fn http_status(text: &str) -> Option<u16> {
+    let at = text.find("HTTP ")? + "HTTP ".len();
+    let digits: String = text[at..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().ok()
 }
 
 /// The one interface the kernel knows (ADR-0004: provider adapters are edges).
@@ -481,5 +539,36 @@ mod tests {
             !other.is_context_overflow(),
             "a 500 is not a context problem"
         );
+    }
+
+    /// Purpose: A hiccup is retried, a refusal is not: the line the kernel's retry draws.
+    #[test]
+    fn a_hiccup_is_told_apart_from_a_refusal() {
+        // The report: `approval.respond: model: transport: HTTP 500: {"type":"internal_error"}`
+        // killed a turn whose tool had already run. That error is a hiccup — nothing was
+        // recorded — so the kernel may ask again.
+        for text in [
+            r#"HTTP 500: {"error":{"message":"Internal Server Error","type":"internal_error"}}"#,
+            "HTTP 503: upstream is restarting",
+            "HTTP 429: slow down",
+            "connection reset by peer",
+            "unexpected EOF during a streamed answer",
+        ] {
+            let e = ModelError::Transport(text.to_string());
+            assert!(e.is_transient(), "{text}");
+        }
+        // A refusal would be refused again: retrying it only spends the person's time.
+        for text in [
+            "HTTP 400: bad request",
+            "HTTP 401: invalid api key",
+            "HTTP 422: unsupported parameter",
+            r#"HTTP 400: {"error":{"code":"context_length_exceeded"}}"#,
+        ] {
+            let e = ModelError::Transport(text.to_string());
+            assert!(!e.is_transient(), "{text}");
+        }
+        // An answer arrived and could not be used: the same request earns the same answer.
+        let protocol = ModelError::Protocol("HTTP 500 in a message body".to_string());
+        assert!(!protocol.is_transient(), "only transports are retried");
     }
 }

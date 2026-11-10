@@ -80,15 +80,49 @@ body {
   border-radius: 5px;
 }
 
+/* The name is set in caps: a wordmark, not a sentence. Capital letters sit close to
+ * each other by design, so they take a little air back or they read as one block. */
+#banner .mark .wordmark {
+  font-size: 13.5px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+}
+
+/* The inscription the terminal hangs under its own frame (`MARK_SUBLINE` in
+ * `crates/tui-app/src/lib.rs`): `⟬ ᛭ 兴云吐雾 ⋄ 隐介藏形 ᛭ ⟭`. It rides beside the name as
+ * a caption, quieter than everything it sits between — dim ink for the two halves, the
+ * frame's violet for the runes and the diamond, and a hairline rule instead of a gap so
+ * the eye reads one banner rather than two labels. The rule is drawn, not typed: a
+ * character would move with the font and drift away from the text it divides. */
+#banner .mark .subline {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 4px;
+  padding-left: 11px;
+  border-left: 1px solid var(--border);
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+
+#banner .mark .subline .orn { color: var(--purple); opacity: 0.85; }
+#banner .mark .subline .sep { opacity: 0.6; }
+
 #banner .spacer { flex: 1; }
 
-/* The workspace button: the directory the chat stands in. */
+/* The workspace button: the directory the chat stands in, at the head of the rail.
+ * It lives here rather than in the banner because the rail is the list of workspaces
+ * (web-surface.md §1, §4): one control, one list, and the full width of the rail means
+ * a long directory name never has to be truncated to make room for a session row. */
 #workspace-btn {
   display: flex;
   align-items: center;
   gap: 7px;
-  max-width: 320px;
-  padding: 5px 10px;
+  width: calc(100% - 20px);
+  margin: 10px 10px 2px;
+  padding: 7px 10px;
   background: var(--bg-overlay);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -96,22 +130,27 @@ body {
   cursor: pointer;
   font: inherit;
   font-size: 12.5px;
+  text-align: left;
 }
 #workspace-btn:hover { border-color: var(--accent); color: var(--text); }
 #workspace-btn .dir-name {
   color: var(--text);
   font-weight: 600;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 #workspace-btn .dir-path {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   direction: rtl; /* the tail of a long path matters more than its head */
   text-align: left;
-  max-width: 200px;
+  font-size: 11.5px;
+  color: var(--text-faint);
 }
 #workspace-btn .chev { font-size: 10px; opacity: 0.6; }
 
@@ -721,10 +760,14 @@ body {
   scroll-behavior: smooth;
 }
 
+/* One column, against the left edge, as wide as the pane (web-surface.md §4). Centring a
+ * 780px column in a wide window left two empty gutters and made the chat read as a
+ * document; the TUI this mirrors has never centred anything. The padding is the measure:
+ * lines still stop a comfortable distance from the edge. */
 .wrap {
-  max-width: 780px;
-  margin: 0 auto;
-  padding: 0 24px;
+  max-width: none;
+  margin: 0;
+  padding: 0 26px;
 }
 
 /* ── Messages ───────────────────────────────────────────────────────── */
@@ -1148,6 +1191,48 @@ details.step.tool.failed > summary { background: rgba(248, 81, 73, 0.06); }
 }
 #send:disabled { opacity: 0.45; cursor: not-allowed; }
 
+/* While a turn runs: the spinner says it is thinking, Stop says it can be ended
+ * (web-surface.md §4). Both are hidden the rest of the time, so the composer's row
+ * holds the same three elements whether or not a turn is in flight. */
+#thinking {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 11px; /* aligns with the first line of the prompt beside it */
+  color: var(--text-faint);
+  font-size: 12px;
+  white-space: nowrap;
+}
+/* `hidden` must win: an author `display` beats the user agent's `[hidden]` rule, so both
+ * the spinner and Stop need this or they never disappear. */
+#thinking[hidden],
+#stop[hidden] {
+  display: none;
+}
+#thinking .spinner {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid var(--accent);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+#stop {
+  padding: 9px 16px;
+  background: transparent;
+  border: 1px solid var(--red);
+  border-radius: var(--radius);
+  color: var(--red);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13.5px;
+  font-weight: 650;
+}
+#stop:hover { background: var(--red-soft); }
+#stop:disabled { opacity: 0.45; cursor: not-allowed; }
+
 /* The usage row, the TUI's own five numbers. */
 #usage {
   display: flex;
@@ -1348,6 +1433,11 @@ details.step.tool.failed > summary { background: rgba(248, 81, 73, 0.06); }
 
 /* ── Narrow windows: the rail folds away ────────────────────────────── */
 
+@media (max-width: 1100px) {
+  /* The runes go first: the two halves still say the saying, and the workspace button
+   * keeps the room it had. */
+  #banner .mark .subline .orn:not(.sep) { display: none; }
+}
 @media (max-width: 860px) {
   #rail { width: 200px; flex-basis: 200px; }
 }

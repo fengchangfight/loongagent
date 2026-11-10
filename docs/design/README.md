@@ -108,6 +108,7 @@ set, crate by crate, is [`../crate-map.md`](../crate-map.md), generated from
 | Document | Owns | Code |
 |---|---|---|
 | [kernel-loop.md](kernel-loop.md) | A turn: the step loop, the model and tool calls, the approval seam, and the ways a turn ends. | `crates/kernel/src/turn.rs`, `crates/kernel/src/turn/loop.rs` |
+| [model-faults.md](model-faults.md) | A failed model call: the three shapes, which ones are retried, and how often. | `crates/providers/src/lib.rs`, `crates/kernel/src/turn/loop.rs` |
 | [context-ledger.md](context-ledger.md) | What the model is shown: the ledger's categories and lifetimes, the budget, compaction, and `recall`. | `crates/kernel/src/ledger.rs`, `crates/kernel/src/turn/compaction.rs` |
 | [instructions.md](instructions.md) | Session-start instruction files: which `AGENTS.md` files load, in what order, and how they enter the ledger as pinned rules. | `crates/cli/src/instructions.rs`, `crates/kernel/src/turn/instructions.rs` |
 | [tools-permissions.md](tools-permissions.md) | The uniform tool interface, action classes, the PDP's allow/ask/deny, and the two enforcers. | `crates/tools/src/lib.rs`, `crates/sandbox/src/` |

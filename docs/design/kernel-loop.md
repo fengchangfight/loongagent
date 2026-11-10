@@ -74,12 +74,12 @@ each renewal, so an approval resume still spends what the turn has left:
    session does not have falls back to `selected_model`. A change appends
    `model.selected` through `Kernel::record_model_selected`.
 6. **Model call.** `Kernel::complete_with_ladder` calls
-   `Model::complete_streaming(&request, on_delta)`. A size refusal
-   (`ModelError::is_context_overflow`) retries inside the turn — a forced pass at
-   half the context, then the minimal request, then an honest stop with
-   `context.degraded` — and any other error becomes `KernelError::Model`. On
-   success `Kernel::record_cost` appends `cost.recorded`; cache counts and prices
-   are owned by [cost-accounting.md](cost-accounting.md).
+   `Model::complete_streaming(&request, on_delta)`. A size refusal retries inside
+   the turn — a forced pass at half the context, then the minimal request, then an
+   honest stop with `context.degraded`; a hiccup (a 5xx, a dropped socket) is
+   retried as-is; a refusal becomes `KernelError::Model`. All three are
+   [model-faults.md](model-faults.md). On success `Kernel::record_cost` appends
+   `cost.recorded`; [cost-accounting.md](cost-accounting.md) owns the prices.
 7. **No tool calls.** If the reply is text only, the loop first offers one nudge
    (§4). Otherwise `Kernel::record_assistant` appends `message.appended` and the
    turn returns the text.
@@ -244,6 +244,7 @@ The end-to-end sequence is [flows/turn-lifecycle.md](flows/turn-lifecycle.md); �
   fixed and the edges are not.
 - [ADR-0006](../decisions/0006-context-engine.md) — why the ledger, not the
   messages, is the write path to the model.
+- [model-faults.md](model-faults.md) — a failed model call, and which ones are retried.
 - [04 System overview](../04-system-overview.md) §3 — the four kernel-owned things.
 - `crates/kernel/src/turn/tests.rs` — the behaviour pinned here; run
   `cargo test -p loong-kernel`.

@@ -80,6 +80,9 @@ pub struct Child {
     pub session: Arc<Mutex<dyn Session>>,
     /// the request id of a prompt in flight on this child, if one is running
     pub busy: Option<u64>,
+    /// the process behind the bridge, read once at creation: a Stop button has to end a
+    /// turn that holds the bridge's lock, so the pid must not be asked for through it
+    pub pid: Option<u32>,
 }
 
 /// Purpose: One workspace: its directory and the live session children running there.
@@ -1086,14 +1089,52 @@ fn ensure_child(
         }
     }
     let (child, id) = start_session(&dir, session).map_err(Error)?;
+    // Asked now, while nothing else can hold the bridge: `pid()` on a session whose turn
+    // is running would wait for that turn to end, which is exactly the wait a Stop button
+    // must not have (web-surface.md §4).
+    let pid = child.lock().ok().and_then(|session| session.pid());
     st.workspaces[seat].children.insert(
         id.clone(),
         Child {
             session: child,
             busy: None,
+            pid,
         },
     );
     Ok(id)
+}
+
+/// Purpose: The child running a turn, and the pid a Stop button would signal.
+///
+/// Serves: `crate::interrupt` for `/api/interrupt` (web-surface.md §4).
+/// Design: `docs/design/web-surface.md` §4.
+/// Up: `crate::handle_web`'s route.
+/// Down: `Child::busy`, `Child::pid`.
+/// Verify: `cargo test -p loong-web` (`stop_`).
+/// Contract: `None` means nothing is running — which the route reports as a refusal, not
+/// as a failure. With no `session_id` the first busy child answers, so a page that lost its
+/// session can still stop the turn it is watching.
+pub fn busy_child(
+    state: &Arc<Mutex<State>>,
+    session_id: Option<&str>,
+) -> Result<Option<(String, Option<u32>)>, String> {
+    let st = state
+        .lock()
+        .map_err(|_| "the state is poisoned".to_string())?;
+    for workspace in &st.workspaces {
+        for (id, child) in &workspace.children {
+            if child.busy.is_none() {
+                continue;
+            }
+            if let Some(wanted) = session_id {
+                if wanted != id {
+                    continue;
+                }
+            }
+            return Ok(Some((id.clone(), child.pid)));
+        }
+    }
+    Ok(None)
 }
 
 /// Purpose: The directory of the tab's seat, planting home when nothing was chosen yet.
@@ -1252,6 +1293,7 @@ mod tests {
                     ))
                 }),
                 models,
+                Arc::new(|_: u32| {}),
             )
         });
         (addr, token)
@@ -1537,6 +1579,7 @@ mod tests {
                         ))
                     }),
                     Arc::new(setup),
+                    Arc::new(|_: u32| {}),
                 )
             });
             (addr, token)
@@ -1650,6 +1693,7 @@ mod tests {
                         saved: Arc::new(Mutex::new(None)),
                         refuses: true,
                     }),
+                    Arc::new(|_: u32| {}),
                 )
             });
             (addr, token)
@@ -2405,5 +2449,183 @@ mod tests {
         stream.read_to_string(&mut body).unwrap();
         assert!(body.starts_with("HTTP/1.1 200 OK"), "{body}");
         assert!(body.contains("\"dirs\""), "{body}");
+    }
+
+    /// Purpose: a session whose `prompt.submit` never answers until the test opens its gate,
+    /// and whose pid is a number the test can recognise.
+    /// Serves: `stop_ends_the_running_turn`.
+    /// Design: `docs/design/web-surface.md` §4.
+    /// Up: the factory `start_for_stop` hands to `serve_web_with_models`.
+    /// Down: `Echo`, for every method that is not a prompt.
+    /// Verify: `cargo test -p loong-web` (`stop_`).
+    /// Contract: only a prompt blocks; `session.new` must answer or the tab never learns
+    /// its session id and never becomes busy.
+    struct Stalled(Arc<(Mutex<bool>, std::sync::Condvar)>);
+
+    impl crate::Session for Stalled {
+        /// Purpose: Name the pid a Stop is expected to signal.
+        /// Contract: 4242 is a number no real child has, so the recording closure proves
+        /// the route took this session's pid and not something else.
+        fn pid(&self) -> Option<u32> {
+            Some(4242)
+        }
+
+        /// Purpose: Hold a prompt open until the gate opens, and answer every other method.
+        /// Serves: `stop_ends_the_running_turn`, which needs a turn that is still running.
+        /// Design: `docs/design/web-surface.md` §4.
+        /// Up: `app::forward`, which marks the child busy and then blocks here.
+        /// Down: `Echo`, for the methods that must answer.
+        /// Verify: `cargo test -p loong-web stop_`.
+        fn exchange(
+            &mut self,
+            line: &str,
+            sink: &mut dyn FnMut(String) -> Result<(), String>,
+        ) -> Result<(), String> {
+            if line.contains("prompt.submit") {
+                let (open, condvar) = &*self.0;
+                let mut opened = open.lock().unwrap();
+                while !*opened {
+                    opened = condvar.wait(opened).unwrap();
+                }
+                drop(opened);
+            }
+            Echo(vec![]).exchange(line, sink)
+        }
+    }
+
+    /// Purpose: a surface whose children stall on a prompt, recording every pid Stop signals.
+    /// Serves: `stop_ends_the_running_turn`.
+    /// Design: `docs/design/web-surface.md` §4.
+    /// Up: that test.
+    /// Down: `serve_web_with_models`, with `Stalled` children and a recording `StopSignal`.
+    /// Verify: `cargo test -p loong-web` (`stop_`).
+    fn start_for_stop(
+        gate: Arc<(Mutex<bool>, std::sync::Condvar)>,
+        signalled: Arc<Mutex<Vec<u32>>>,
+    ) -> (std::net::SocketAddr, String) {
+        let (listener, addr) = bind("127.0.0.1", 0).unwrap();
+        let token = crate::random_token().unwrap();
+        let for_server = token.clone();
+        std::thread::spawn(move || {
+            crate::serve_web_with_models(
+                listener,
+                for_server,
+                std::env::temp_dir(),
+                Arc::new(move |_: &Path, session: Option<&str>| {
+                    let id = session.unwrap_or("stall").to_string();
+                    Ok((
+                        Arc::new(Mutex::new(Stalled(Arc::clone(&gate)))) as Arc<Mutex<dyn Session>>,
+                        id,
+                    ))
+                }),
+                Arc::new(crate::NoModelSetup),
+                Arc::new(move |pid: u32| signalled.lock().unwrap().push(pid)),
+            )
+        });
+        (addr, token)
+    }
+
+    /// Purpose: POST `/api/interrupt` and hand back the status line and the body.
+    /// Serves: `stop_ends_the_running_turn`.
+    /// Design: `docs/design/web-surface.md` §4.
+    /// Up: that test.
+    /// Down: `TcpStream`, the route's answer.
+    /// Verify: `cargo test -p loong-web` (`stop_`).
+    fn interrupt_request(
+        addr: std::net::SocketAddr,
+        token: &str,
+        session_id: &str,
+    ) -> (String, String) {
+        let body = json!({ "session_id": session_id }).to_string();
+        let mut stream = TcpStream::connect(addr).unwrap();
+        let request = format!(
+            "POST /api/interrupt?token={token} HTTP/1.1\r\nHost: x\r\n\
+             Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(request.as_bytes()).unwrap();
+        let mut answer = String::new();
+        stream.read_to_string(&mut answer).unwrap();
+        let status = answer.lines().next().unwrap_or_default().to_string();
+        (status, answer)
+    }
+
+    /// Purpose: Stop ends the turn that is running, and refuses in words when none is
+    /// (web-surface.md §4).
+    #[test]
+    fn stop_ends_the_running_turn() {
+        let gate: Arc<(Mutex<bool>, std::sync::Condvar)> =
+            Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let signalled: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
+        let (addr, token) = start_for_stop(Arc::clone(&gate), Arc::clone(&signalled));
+
+        // Nothing running: a refusal, not a signal. A signal sent to an idle child would
+        // land on whatever it does next.
+        let (status, answer) = interrupt_request(addr, &token, "s1");
+        assert!(status.contains("409"), "{status}");
+        assert!(answer.contains("no turn is running"), "{answer}");
+        assert!(
+            signalled.lock().unwrap().is_empty(),
+            "signalled an idle child"
+        );
+
+        // A turn in flight: the gate holds the child inside `exchange`, which is exactly
+        // the state a Stop has to break.
+        let request = format!("ws://{addr}/ws?token={token}")
+            .into_client_request()
+            .unwrap();
+        let (mut socket, _) = tungstenite::connect(request).unwrap();
+        let mut ask = |id: u64, method: &str, params: Value| -> Value {
+            socket
+                .send(Message::text(
+                    json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})
+                        .to_string(),
+                ))
+                .unwrap();
+            serde_json::from_str(socket.read().unwrap().to_text().unwrap()).unwrap()
+        };
+        // Seat the tab, then open a session: `session.new` is a surface method, so it
+        // answers with the id the child was started under without asking the child.
+        ask(1, "workspace.list", json!({}));
+        let opened = ask(2, "session.new", json!({}));
+        let session_id = opened["result"]["session_id"].as_str().unwrap().to_string();
+        // Sent, not awaited: the child blocks on it, which is the point.
+        socket
+            .send(Message::text(
+                json!({"jsonrpc": "2.0", "id": 3, "method": "prompt.submit",
+                       "params": {"text": "hold the turn open"}})
+                .to_string(),
+            ))
+            .unwrap();
+        // The route reports a turn as running only once `forward` has marked it busy; retry
+        // briefly rather than sleep a guessed number of milliseconds.
+        let mut answered = (String::new(), String::new());
+        for _ in 0..100 {
+            answered = interrupt_request(addr, &token, &session_id);
+            if answered.0.contains("200") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(answered.0.contains("200 OK"), "{}", answered.1);
+        assert!(
+            answered.1.contains("\"interrupted\":true"),
+            "{}",
+            answered.1
+        );
+        assert_eq!(
+            *signalled.lock().unwrap(),
+            vec![4242],
+            "wrong pid signalled"
+        );
+
+        // And the turn ends because the child stopped, not because the socket closed: let
+        // the gate open and read the answer the page would have seen.
+        let (open, condvar) = &*gate;
+        *open.lock().unwrap() = true;
+        condvar.notify_all();
+        let ended = socket.read().unwrap();
+        let ended: Value = serde_json::from_str(ended.to_text().unwrap()).unwrap();
+        assert_eq!(ended["id"], json!(3), "{ended}");
     }
 }

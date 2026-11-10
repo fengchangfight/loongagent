@@ -24,6 +24,16 @@ struct WebSession {
 }
 
 impl loong_web::Session for WebSession {
+    /// Purpose: Name the child process, so the page's Stop can end a turn without the lock.
+    /// Serves: `loong_web::Session::pid` for `/api/interrupt` (web-surface.md §4).
+    /// Design: `docs/design/web-surface.md` §4.
+    /// Up: `loong_web::app`, which reads it once when the child is created.
+    /// Down: `ChildTransport::pid`.
+    /// Verify: `cargo test -p loongagent --test web_surface`.
+    fn pid(&self) -> Option<u32> {
+        Some(self.transport.pid())
+    }
+
     /// Purpose: Carry one browser line to the child, fill the attach cwd, and forward every line until this request's response.
     /// Serves: the `loong_web::Session` contract; `web` installs the impl.
     /// Design: `docs/design/surfaces.md` §4 and §7.
@@ -194,6 +204,10 @@ pub(crate) fn web(args: Args) -> Result<(), String> {
                     .collect(),
             ),
         }),
+        // The browser's Stop is the terminal's esc: the same signal to the same child, so
+        // the turn ends in the kernel's own interrupt path rather than in a second
+        // implementation of "cancel" (web-surface.md §4).
+        std::sync::Arc::new(loong_tui::interrupt),
     );
     Ok(())
 }

@@ -1173,6 +1173,8 @@ struct RefusingModel {
     inner: ScriptedModel,
     /// 1-based call numbers to refuse as too big; empty refuses nothing that way.
     refuse_on: Vec<usize>,
+    /// 1-based call numbers to fail as a hiccup (a 500 that clears by itself).
+    transient_on: Vec<usize>,
     /// When set, every call fails with this message — a fault that must stay fatal.
     fault: Option<&'static str>,
     calls: usize,
@@ -1188,6 +1190,7 @@ impl RefusingModel {
         Self {
             inner,
             refuse_on: Vec::new(),
+            transient_on: Vec::new(),
             fault: Some(fault),
             calls: 0,
             sizes: Arc::new(Mutex::new(Vec::new())),
@@ -1216,6 +1219,12 @@ impl Model for RefusingModel {
         if self.refuse_on.contains(&self.calls) {
             return Err(loong_providers::ModelError::Transport(
                 "HTTP 400 from https://api.x/v1: {\"error\":{\"code\":\"context_length_exceeded\"}}"
+                    .to_string(),
+            ));
+        }
+        if self.transient_on.contains(&self.calls) {
+            return Err(loong_providers::ModelError::Transport(
+                "HTTP 500: {\"error\":{\"message\":\"Internal Server Error\",\"type\":\"internal_error\"}}"
                     .to_string(),
             ));
         }
@@ -1249,6 +1258,7 @@ fn an_overflowing_request_is_compacted_and_retried_instead_of_failing() {
             response(vec![], Some("second done")),
         ]),
         refuse_on: vec![4],
+        transient_on: Vec::new(),
         fault: None,
         calls: 0,
         sizes: Arc::clone(&sizes),
@@ -1312,6 +1322,7 @@ fn the_minimal_rung_stubs_rather_than_dropping_when_the_engine_is_on() {
         // Calls 4 and 5: the answer after the read, and the retry after the forced
         // compaction. The third attempt (the minimal rung) is allowed through.
         refuse_on: vec![4, 5],
+        transient_on: Vec::new(),
         fault: None,
         calls: 0,
         sizes: Arc::new(Mutex::new(Vec::new())),
@@ -1364,16 +1375,81 @@ fn the_minimal_rung_stubs_rather_than_dropping_when_the_engine_is_on() {
 #[test]
 fn a_server_fault_still_fails_the_turn() {
     let t = Temp::new();
+    // A 401 is the case that must stay fatal: a key that will not work will not work on
+    // the second try either. (A 5xx is a hiccup and is retried — see
+    // `a_hiccup_is_retried_and_the_turn_survives`.)
     let model = RefusingModel::always(
         ScriptedModel::new(vec![response(vec![], Some("never reached"))]),
-        "HTTP 500 from https://api.x/v1: boom",
+        "HTTP 401 from https://api.x/v1: no such key",
     );
     let mut config = KernelConfig::new(&t.dir);
     config.budget_tokens = Some(8_000);
     let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
     assert!(
         k.submit("anything").is_err(),
-        "a 500 is a real fault; degrading on it would hide it"
+        "a refusal is a real fault; degrading on it would hide it"
+    );
+}
+
+/// Purpose: A 500 on the far side does not take the turn with it: the request is retried and the answer recorded.
+#[test]
+fn a_hiccup_is_retried_and_the_turn_survives() {
+    // The report: an approval had already run its tool, and the request that resumed the
+    // turn came back `HTTP 500 internal_error`. Before this, the whole task ended there —
+    // the tool's effect stood, and the person was left with half a turn and an error
+    // naming the method that happened to carry it.
+    let t = Temp::new();
+    let sizes = Arc::new(Mutex::new(Vec::new()));
+    let model = RefusingModel {
+        inner: ScriptedModel::new(vec![response(vec![], Some("answered on the second try"))]),
+        refuse_on: Vec::new(),
+        // The first call is the hiccup; the retry is call 2.
+        transient_on: vec![1],
+        fault: None,
+        calls: 0,
+        sizes: Arc::clone(&sizes),
+    };
+    let mut config = KernelConfig::new(&t.dir);
+    config.budget_tokens = Some(8_000);
+    let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+    let outcome = k
+        .submit("anything")
+        .expect("a hiccup must not fail the turn");
+    assert_eq!(
+        outcome.final_text.as_deref(),
+        Some("answered on the second try")
+    );
+    assert_eq!(
+        sizes.lock().unwrap().len(),
+        2,
+        "the same request was sent twice, not a smaller one"
+    );
+}
+
+/// Purpose: Retrying is bounded: a provider that is down stays down, and the turn says so instead of sleeping forever.
+#[test]
+fn a_hiccup_that_never_clears_still_fails_the_turn() {
+    let t = Temp::new();
+    let sizes = Arc::new(Mutex::new(Vec::new()));
+    let model = RefusingModel {
+        inner: ScriptedModel::new(vec![response(vec![], Some("never reached"))]),
+        refuse_on: Vec::new(),
+        transient_on: Vec::new(),
+        fault: Some("HTTP 500: {\"type\":\"internal_error\"}"),
+        calls: 0,
+        sizes: Arc::clone(&sizes),
+    };
+    let mut config = KernelConfig::new(&t.dir);
+    config.budget_tokens = Some(8_000);
+    let mut k = Kernel::create(&t.log, config, Box::new(model)).unwrap();
+    assert!(
+        k.submit("anything").is_err(),
+        "a provider that never answers must end the turn, not hang it"
+    );
+    assert_eq!(
+        sizes.lock().unwrap().len(),
+        3,
+        "the first attempt plus two retries, and no more"
     );
 }
 

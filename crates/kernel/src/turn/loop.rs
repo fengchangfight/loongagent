@@ -31,6 +31,24 @@ use loong_providers::CompletionResponse;
 /// Verify: `cargo test -p loong-kernel turn::tests::an_overflowing_request_is_compacted_and_retried_instead_of_failing`.
 const MAX_LADDER_RUNGS: usize = 2;
 
+/// Purpose: How long to wait before each retry of a transient model failure.
+///
+/// Serves: `Kernel::complete_with_ladder`, which retries a hiccup before letting the turn
+/// unwind.
+/// Design: `docs/design/model-faults.md` §2.
+/// Up: `Kernel::complete_with_ladder`.
+/// Down: no callee; one sleep per retry, shorter than a person's patience.
+/// Verify: `cargo test -p loong-kernel turn::tests::a_hiccup_is_retried_and_the_turn_survives`.
+///
+/// The length is a compromise: a provider that answered 500 usually recovers in well under
+/// a second, and a turn that is quietly asleep looks hung, so the schedule stops at 1.2
+/// seconds in total. The list's length is the number of retries, so there is one place to
+/// read both.
+const TRANSIENT_BACKOFF: [std::time::Duration; 2] = [
+    std::time::Duration::from_millis(300),
+    std::time::Duration::from_millis(900),
+];
+
 /// Purpose: Whether a path is a throwaway script location: a `.tmp` component anywhere, or
 /// the system temp directory outside the workspace.
 ///
@@ -686,20 +704,28 @@ impl Kernel {
         })
     }
 
-    /// Purpose: Send one request; when the provider refuses it as too big, shed and retry inside the turn.
+    /// Purpose: Send one request; retry it through a hiccup, and when the provider refuses it as too big, shed and retry inside the turn.
     ///
-    /// Serves: `Kernel::run_inner`'s single model call, so an oversized request costs
-    /// a compaction pass instead of the whole task. The report that prompted this:
-    /// a long session died with `Model(Transport("context_length_exceeded"))` on the
-    /// first call it made after the history grew, and every later turn died the same
-    /// way because a new turn starts from the same context.
-    /// Design: `docs/superpowers/specs/2026-11-07-finite-memory-unbounded-conversation-design.md` §5.
+    /// Serves: `Kernel::run_inner`'s single model call, so a hiccup costs a second
+    /// and an oversized request costs a compaction pass, instead of either costing
+    /// the whole task. Two reports decide this shape. A long session died with
+    /// `Model(Transport("context_length_exceeded"))` on the first call it made after
+    /// the history grew, and every later turn died the same way because a new turn
+    /// starts from the same context. Later, a turn died with
+    /// `model: transport: HTTP 500: {"type":"internal_error"}` in the request that
+    /// resumed it — the tool had already run and its approval had already been spent,
+    /// and a bad minute on the far side threw the rest of the task away.
+    /// Design: `docs/superpowers/specs/2026-11-07-finite-memory-unbounded-conversation-design.md` §5, `docs/design/model-faults.md` §1.
     /// Up: `Kernel::run_inner`.
     /// Down: `Model::complete_streaming`, `Kernel::compact_if_needed`,
-    /// `Kernel::drop_oldest_exchange`, `ModelError::is_context_overflow`.
-    /// Verify: `cargo test -p loong-kernel turn::tests::an_overflowing_request_is_compacted_and_retried_instead_of_failing`.
+    /// `Kernel::drop_oldest_exchange`, `ModelError::is_context_overflow`,
+    /// `ModelError::is_transient`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_hiccup_is_retried_and_the_turn_survives`.
     ///
-    /// Two rungs, then one honest stop. Rung 1 forces a compaction pass at half the
+    /// Two different failures, two different answers. A **hiccup** (5xx, 429, a socket
+    /// that closed) is retried as-is on `TRANSIENT_BACKOFF`: nothing was recorded, so the
+    /// same request may simply work. A **size refusal** descends two rungs, then stops
+    /// honestly. Rung 1 forces a compaction pass at half the
     /// context, which is stricter than any configured ceiling and therefore frees
     /// real room; rung 2 drops the oldest exchanges, which is the only lever left
     /// when clearing cannot reach the ceiling. Nothing here calls a model: the moment
@@ -718,6 +744,7 @@ impl Kernel {
         let mut attempts = 0;
         let mut rung: Option<&'static str> = None;
         let mut rungs = 0;
+        let mut retries = 0;
         loop {
             attempts += 1;
             let outcome = {
@@ -749,9 +776,35 @@ impl Kernel {
                     return Ok(Some(response));
                 }
                 Err(error) if !error.is_context_overflow() => {
-                    // Not a size problem: a 500, a bad key, a dead socket. Degrading
-                    // here would hide the fault behind a compaction pass that cannot
-                    // fix it.
+                    // Not a size problem. A hiccup — a 500, a 429, a socket that closed
+                    // before an answer arrived — is not a fault of this request: nothing
+                    // was recorded, so asking again is not asking twice. It is retried
+                    // here, before the turn unwinds, because the alternative is losing the
+                    // whole task to the far side's bad minute, including the tool result
+                    // an approval just paid for. A refusal (400, 401, 422) is not retried:
+                    // it would be refused again.
+                    if error.is_transient() {
+                        if let Some(pause) = TRANSIENT_BACKOFF.get(retries) {
+                            retries += 1;
+                            // A retried call may repeat preview deltas the failed attempt
+                            // already sent; the deltas are a preview, never the record, so
+                            // the answer that is finally logged is still sent once.
+                            eprintln!(
+                                "[model] {} is a transient failure ({retries}/{}); retrying",
+                                error,
+                                TRANSIENT_BACKOFF.len()
+                            );
+                            std::thread::sleep(*pause);
+                            continue;
+                        }
+                        eprintln!(
+                            "[model] {} survived {} retries; the turn fails",
+                            error,
+                            TRANSIENT_BACKOFF.len()
+                        );
+                    }
+                    // Degrading here would hide the fault behind a compaction pass that
+                    // cannot fix it.
                     return Err(KernelError::Model(error));
                 }
                 Err(_) if rungs >= MAX_LADDER_RUNGS => {

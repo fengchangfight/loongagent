@@ -18,14 +18,12 @@
 <header id="banner">
   <div class="mark">
     <img src="/favicon.png" alt="">
-    <span>loongagent</span>
+    <span class="wordmark">LOONGAGENT</span>
+    <!-- The same inscription the terminal hangs under its frame (`MARK_SUBLINE` in
+         `crates/tui-app/src/lib.rs`), so the two surfaces say the same words. Decoration,
+         not content: the reader is told the name, not the saying. -->
+    <span class="subline" aria-hidden="true"><span class="orn">⟬ ᛭</span><span class="half">兴云吐雾</span><span class="orn sep">⋄</span><span class="half">隐介藏形</span><span class="orn">᛭ ⟭</span></span>
   </div>
-  <button id="workspace-btn" title="Switch workspace">
-    <span class="icon">📁</span>
-    <span class="dir-name">…</span>
-    <span class="dir-path"></span>
-    <span class="chev">▾</span>
-  </button>
   <div class="spacer"></div>
 </header>
 
@@ -89,6 +87,15 @@
 <div id="body">
 
   <aside id="rail">
+    <!-- The workspace button sits on the list of workspaces, not in the banner: it names
+         the seated workspace and opens the picker that adds one (web-surface.md §1, §4). -->
+    <button id="workspace-btn" title="Add or switch workspace" aria-haspopup="dialog"
+            aria-label="Workspaces: the one this chat is in, and the button that opens another">
+      <span class="icon">📁</span>
+      <span class="dir-name">…</span>
+      <span class="dir-path"></span>
+      <span class="chev">▾</span>
+    </button>
     <div class="rail-head">
       <span>Sessions</span>
       <button id="new-session" title="New session (this workspace)">＋ New</button>
@@ -108,6 +115,10 @@
         <div id="file-picker" role="listbox" aria-label="Workspace files" hidden></div>
         <form id="composer-form">
           <textarea id="prompt" rows="1" placeholder="Message loongagent…  (Enter to send, Shift+Enter for a newline, @ to name a workspace file)"></textarea>
+          <!-- While a turn runs: a spinner that says it is thinking and a Stop button that
+               ends it, the TUI's esc (web-surface.md §4). -->
+          <span id="thinking" role="status" hidden><span class="spinner"></span>Thinking…</span>
+          <button id="stop" type="button" title="Stop the running turn (Esc)" hidden>Stop</button>
           <button id="send" type="submit">Send</button>
         </form>
         <div id="usage">

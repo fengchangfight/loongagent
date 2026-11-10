@@ -726,48 +726,118 @@ const PREFIX_WORDS: &[&str] = &[
     "sudo", "doas", "env", "command", "nohup", "time", "exec", "xargs",
 ];
 
+/// Why a single pipeline segment is irreversible, or `None` when it is not.
+/// Purpose: The irreversible family one segment belongs to.
+/// Serves: `irreversible_reason` and `irreversible_segments`.
+/// Design: `docs/design/tools-permissions.md` §2; ADR-0020 §4.
+/// Up: `irreversible_reason`, `irreversible_segments`.
+/// Down: `basename`, `carries_a_payload` and the three verb lists.
+/// Verify: `cargo test -p loong-tools`.
+fn segment_irreversible_reason(tokens: &[&str]) -> Option<&'static str> {
+    let mut i = 0;
+    while i < tokens.len() {
+        let word = tokens[i].to_lowercase();
+        let assignment = tokens[i].contains('=') && !tokens[i].starts_with('-');
+        if !PREFIX_WORDS.contains(&word.as_str()) && !assignment {
+            break;
+        }
+        i += 1;
+    }
+    let head = tokens.get(i)?;
+    let verb = basename(head);
+    let next = tokens
+        .get(i + 1)
+        .map(|t| t.to_lowercase())
+        .unwrap_or_default();
+    let deletes = DELETE_VERBS.contains(&verb.as_str())
+        || (verb == "git" && next == "rm")
+        || (verb == "dd" && tokens.iter().any(|t| t.starts_with("of=")))
+        || tokens.iter().any(|t| *t == "-delete");
+    if deletes {
+        return Some("deletes or overwrites files");
+    }
+    let egresses = EGRESS_VERBS.contains(&verb.as_str())
+        || (verb == "git" && next == "push")
+        || (matches!(verb.as_str(), "npm" | "pnpm" | "yarn") && next == "publish")
+        || (verb == "cargo" && next == "publish")
+        || (verb == "gh" && next == "release")
+        || (matches!(verb.as_str(), "curl" | "wget") && carries_a_payload(&tokens[i + 1..]));
+    if egresses {
+        return Some("sends data off the machine");
+    }
+    None
+}
+
 /// Why a command line is irreversible, or `None` when it is not.
 /// Purpose: The irreversible family a command line belongs to, for the reason and the class.
 /// Serves: `classify_command`, which returns `Irreversible` when this fires.
 /// Design: `docs/design/tools-permissions.md` §2; ADR-0020 §4.
 /// Up: `classify_command`.
-/// Down: `segments`, `basename`, `carries_a_payload` and the three verb lists.
+/// Down: `segments` and `segment_irreversible_reason`.
 /// Verify: `cargo test -p loong-tools`.
 fn irreversible_reason(command: &str) -> Option<&'static str> {
     for tokens in segments(command) {
-        let mut i = 0;
-        while i < tokens.len() {
-            let word = tokens[i].to_lowercase();
-            let assignment = tokens[i].contains('=') && !tokens[i].starts_with('-');
-            if !PREFIX_WORDS.contains(&word.as_str()) && !assignment {
-                break;
-            }
-            i += 1;
-        }
-        let Some(head) = tokens.get(i) else { continue };
-        let verb = basename(head);
-        let next = tokens
-            .get(i + 1)
-            .map(|t| t.to_lowercase())
-            .unwrap_or_default();
-        let deletes = DELETE_VERBS.contains(&verb.as_str())
-            || (verb == "git" && next == "rm")
-            || (verb == "dd" && tokens.iter().any(|t| t.starts_with("of=")))
-            || tokens.iter().any(|t| *t == "-delete");
-        if deletes {
-            return Some("deletes or overwrites files");
-        }
-        let egresses = EGRESS_VERBS.contains(&verb.as_str())
-            || (verb == "git" && next == "push")
-            || (matches!(verb.as_str(), "npm" | "pnpm" | "yarn") && next == "publish")
-            || (verb == "cargo" && next == "publish")
-            || (verb == "gh" && next == "release")
-            || (matches!(verb.as_str(), "curl" | "wget") && carries_a_payload(&tokens[i + 1..]));
-        if egresses {
-            return Some("sends data off the machine");
+        if let Some(reason) = segment_irreversible_reason(&tokens) {
+            return Some(reason);
         }
     }
     None
+}
+
+/// Every irreversible segment of a command line, as owned token lists.
+///
+/// `irreversible_reason` stops at the first hit, which is enough to classify
+/// but not enough to remember: a remembered shape has to cover *every*
+/// irreversible segment, or one approved segment would launder its siblings.
+/// Purpose: The token list of every irreversible segment, not just the first.
+/// Serves: the kernel's session approval remembering.
+/// Design: `docs/design/flows/tool-approval.md`; `docs/superpowers/specs/2026-11-18-session-approval-remembering.md`.
+/// Up: the kernel's `Kernel::is_remembered` and `respond_to_approval`.
+/// Down: `segments` and `segment_irreversible_reason`.
+/// Verify: `cargo test -p loong-tools`.
+pub fn irreversible_segments(command: &str) -> Vec<Vec<String>> {
+    segments(command)
+        .into_iter()
+        .filter(|tokens| segment_irreversible_reason(tokens).is_some())
+        .map(|tokens| tokens.iter().map(|t| t.to_string()).collect())
+        .collect()
+}
+
+/// The rememberable shape of one irreversible segment: its verb and the
+/// operands it acts on, so two commands share a key only when the action and
+/// its targets match. `rm -rf .smoke` and `rm -rf ~` never collide, and
+/// `rm a b` equals `rm b a` (operands are sorted). `None` when the segment
+/// has no resolvable operand, so an un-keyable segment is never auto-approved.
+/// Purpose: Reduce one irreversible segment to the (verb, operands) key a session remembers.
+/// Serves: the kernel's session approval remembering.
+/// Design: `docs/superpowers/specs/2026-11-18-session-approval-remembering.md`.
+/// Up: the kernel's `Kernel::is_remembered` and `respond_to_approval`.
+/// Down: `basename` and `PREFIX_WORDS`.
+/// Verify: `cargo test -p loong-tools`.
+pub fn segment_key(segment: &[String]) -> Option<(String, Vec<String>)> {
+    let mut i = 0;
+    while i < segment.len() {
+        let word = segment[i].to_lowercase();
+        let assignment = segment[i].contains('=') && !segment[i].starts_with('-');
+        if !PREFIX_WORDS.contains(&word.as_str()) && !assignment {
+            break;
+        }
+        i += 1;
+    }
+    let head = segment.get(i)?;
+    let verb = basename(head);
+    let mut operands: Vec<String> = segment[i + 1..]
+        .iter()
+        .map(|t| t.trim_matches(|c: char| "\"'`;()".contains(c)))
+        .filter(|t| !t.is_empty() && !t.starts_with('-'))
+        .map(|t| t.to_string())
+        .collect();
+    if operands.is_empty() {
+        return None;
+    }
+    operands.sort();
+    operands.dedup();
+    Some((verb, operands))
 }
 
 /// The whitespace tokens of each `|`/`&`/`;`/newline-separated segment.
@@ -1509,5 +1579,47 @@ mod tests {
             .unwrap();
         let canonical = std::fs::canonicalize(&cwd).unwrap();
         assert!(out.contains(canonical.to_string_lossy().as_ref()), "{out}");
+    }
+
+    #[test]
+    /// Purpose: Pin that every irreversible segment is returned, not just the first.
+    fn every_irreversible_segment_is_returned_not_just_the_first() {
+        let segs = irreversible_segments("rm -rf a && git push origin main");
+        assert_eq!(segs.len(), 2, "{segs:?}");
+    }
+
+    #[test]
+    /// Purpose: Pin that a deletion key is the verb plus its removed paths.
+    fn a_deletion_key_is_verb_plus_paths() {
+        let segs = irreversible_segments("rm -rf .smoke");
+        assert_eq!(
+            segment_key(&segs[0]),
+            Some(("rm".to_string(), vec![".smoke".to_string()]))
+        );
+    }
+
+    #[test]
+    /// Purpose: Pin that different deletion targets produce different keys.
+    fn different_targets_make_different_keys() {
+        let a = irreversible_segments("rm -rf .smoke");
+        let b = irreversible_segments("rm -rf ~");
+        assert_ne!(segment_key(&a[0]), segment_key(&b[0]));
+    }
+
+    #[test]
+    /// Purpose: Pin that a bare deletion verb has no operand and so no key.
+    fn a_bare_deletion_has_no_key() {
+        let segs = irreversible_segments("rm");
+        assert!(segs.is_empty() || segment_key(&segs[0]).is_none());
+    }
+
+    #[test]
+    /// Purpose: Pin that the key's verb skips sudo and env assignments.
+    fn the_verb_skips_prefixes_and_assignments() {
+        let segs = irreversible_segments("sudo FOO=1 rm -rf .smoke");
+        assert_eq!(
+            segment_key(&segs[0]),
+            Some(("rm".to_string(), vec![".smoke".to_string()]))
+        );
     }
 }

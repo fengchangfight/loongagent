@@ -99,7 +99,10 @@ impl std::fmt::Display for LogError {
                 "line {line}: event kind {kind:?} declares ignorable={declared} in the schema but the record says {found}"
             ),
             LogError::SeqOutOfOrder { line, expected, found } => {
-                write!(f, "line {line}: expected seq {expected}, found {found}")
+                write!(
+                    f,
+                    "line {line}: expected seq {expected}, found {found} — a second writer appended out of step, and `loongagent repair` renumbers the lines it put there"
+                )
             }
             LogError::Locked { path } => write!(
                 f,
@@ -488,6 +491,207 @@ fn read(path: impl AsRef<Path>, lenient: bool) -> Result<Replay, LogError> {
     Ok(out)
 }
 
+/// What one repair pass found in a log and what it did to it.
+///
+/// Purpose: Report a repair pass so the command that ran it can say what changed.
+///
+/// Serves: `loongagent repair`'s report, and a test that wants the counts without a file (events-storage.md §3).
+/// Design: `docs/design/events-storage.md` (ADR-0003); `docs/design/sessions-lineage.md` §5.
+/// Up: `repair`, `repair_dry_run` and `loong-cli`'s repair command.
+/// Down: `RepairReport::changed`, and the numbers the caller prints.
+/// Verify: `cargo test -p loong-eventlog`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepairReport {
+    /// The log this pass was about.
+    pub path: PathBuf,
+    /// How many events the repaired log holds.
+    pub events: usize,
+    /// How many lines were given a new sequence number and id.
+    pub renumbered: usize,
+    /// How many lines were dropped as an exact repeat of the line above.
+    pub dropped: usize,
+    /// The copy taken before the rewrite, when there was one.
+    pub backup: Option<PathBuf>,
+}
+
+impl RepairReport {
+    /// Purpose: Say whether the log's sequence was broken, so a caller can tell "in order" from "rewritten".
+    ///
+    /// Serves: the command's summary line and its exit advice (sessions-lineage.md §5).
+    /// Design: `docs/design/events-storage.md` (ADR-0003).
+    /// Up: `loong-cli`'s repair command.
+    /// Down: the `renumbered` and `dropped` counts.
+    /// Verify: `cargo test -p loong-eventlog`.
+    pub fn changed(&self) -> bool {
+        self.renumbered > 0 || self.dropped > 0
+    }
+}
+
+/// Report what repairing a log would change, without writing anything.
+///
+/// Purpose: Let a caller look before it leaps, and let `--all --check` sweep a project without touching it.
+///
+/// Serves: `loongagent repair --check` (sessions-lineage.md §5).
+/// Design: `docs/design/events-storage.md` (ADR-0003).
+/// Up: `loong-cli`'s repair command.
+/// Down: `plan_repair`.
+/// Verify: `cargo test -p loong-eventlog`.
+pub fn repair_dry_run(path: impl AsRef<Path>) -> Result<RepairReport, LogError> {
+    let path = path.as_ref().to_path_buf();
+    let (_, report) = plan_repair(&path)?;
+    Ok(report)
+}
+
+/// Rewrite a log whose sequence went backwards, keeping every event.
+///
+/// Purpose: Heal a log a second writer broke, instead of leaving the session unopenable forever.
+///
+/// Serves: recovery from the duplicate-sequence corruption a lockless writer leaves behind (events-storage.md §3).
+/// Design: `docs/design/events-storage.md` (ADR-0003); the rule and the command in `docs/design/sessions-lineage.md` §5.
+/// Up: `loong-cli`'s `repair` command.
+/// Down: `lock_writer`, `plan_repair`, `backup_path`, `replay` and the log file itself.
+/// Verify: `cargo test -p loong-eventlog`.
+pub fn repair(path: impl AsRef<Path>) -> Result<RepairReport, LogError> {
+    let path = path.as_ref().to_path_buf();
+    // The lock is the whole safety story: a live writer means the file is not ours to rewrite.
+    let lock = lock_writer(&path)?;
+    let (bytes, mut report) = plan_repair(&path)?;
+    if !report.changed() {
+        return Ok(report);
+    }
+    let backup = backup_path(&path);
+    std::fs::copy(&path, &backup)?;
+    report.backup = Some(backup);
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".repair-tmp");
+    let tmp = PathBuf::from(name);
+    std::fs::write(&tmp, &bytes)?;
+    // Prove the rewritten log reads strictly before it replaces the original: a
+    // repair that leaves a log `replay` still refuses has fixed nothing.
+    if let Err(e) = replay(&tmp) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    if let Ok(meta) = std::fs::metadata(&path) {
+        let _ = std::fs::set_permissions(&tmp, meta.permissions());
+    }
+    std::fs::rename(&tmp, &path)?;
+    drop(lock);
+    Ok(report)
+}
+
+/// Purpose: The path a repair pass backs the log up to, never overwriting an older backup.
+///
+/// Serves: the pre-repair bytes, so a repair that surprises someone can be undone (events-storage.md §3).
+/// Design: `docs/design/events-storage.md` (ADR-0003).
+/// Up: `repair` only.
+/// Down: the log's own path with `.broken-bak` appended, numbered when that name is taken.
+/// Verify: `cargo test -p loong-eventlog`.
+fn backup_path(path: &Path) -> PathBuf {
+    let mut candidate = path.as_os_str().to_os_string();
+    candidate.push(".broken-bak");
+    let mut backup = PathBuf::from(candidate);
+    let mut n = 1;
+    while backup.exists() {
+        let mut candidate = path.as_os_str().to_os_string();
+        candidate.push(format!(".broken-bak.{n}"));
+        backup = PathBuf::from(candidate);
+        n += 1;
+    }
+    backup
+}
+
+/// Purpose: One out-of-step line, rewritten with the `seq` and id its position asks for.
+///
+/// Serves: a repair that changes two numbers and nothing else, so the diff is auditable (events-storage.md §3).
+/// Design: `docs/design/events-storage.md` (ADR-0003).
+/// Up: `plan_repair` only.
+/// Down: the line's own text after the `{"seq":…,"id":…,` prefix, or `EventEnvelope`'s serialiser when the line is laid out another way.
+/// Verify: `cargo test -p loong-eventlog`.
+fn renumbered_line(line: &[u8], env: &EventEnvelope, seq: Seq) -> Vec<u8> {
+    let id = format!("e{seq:08}");
+    // The writer emits `{"seq":N,"id":"eNNNNNNNN",` first, so everything after
+    // that prefix can be copied across untouched. A line written any other way
+    // falls back to a full re-serialisation.
+    let head = format!("{{\"seq\":{},\"id\":\"{}\",", env.seq, env.id);
+    match std::str::from_utf8(line)
+        .ok()
+        .and_then(|text| text.strip_prefix(&head))
+    {
+        Some(rest) => format!("{{\"seq\":{seq},\"id\":\"{id}\",{rest}").into_bytes(),
+        None => {
+            let rewritten = EventEnvelope {
+                seq,
+                id,
+                ..env.clone()
+            };
+            // An envelope that parsed is an envelope that serialises: no floats,
+            // no map keys, nothing a `Value` cannot write back out.
+            serde_json::to_vec(&rewritten).expect("a parsed envelope serialises")
+        }
+    }
+}
+
+/// Purpose: Read the log the way a repair sees it: which lines are out of step, and what a rewrite would hold.
+///
+/// Serves: one scan behind both the write and the dry run, so `--check` cannot disagree with the repair (events-storage.md §3).
+/// Design: `docs/design/events-storage.md` (ADR-0003).
+/// Up: `repair` and `repair_dry_run` only.
+/// Down: `serde_json`'s decoding, `renumbered_line`, `RepairReport` and the bytes a rewrite would write.
+/// Verify: `cargo test -p loong-eventlog`.
+fn plan_repair(path: &Path) -> Result<(Vec<u8>, RepairReport), LogError> {
+    let text = std::fs::read(path)?;
+    let mut out = Vec::with_capacity(text.len());
+    let mut report = RepairReport {
+        path: path.to_path_buf(),
+        events: 0,
+        renumbered: 0,
+        dropped: 0,
+        backup: None,
+    };
+    let mut expected: Seq = 1;
+    let mut previous: Option<Vec<u8>> = None;
+    let mut tree = false;
+    for (i, raw) in text.split_inclusive(|b| *b == b'\n').enumerate() {
+        let line_no = i + 1;
+        let body = raw.strip_suffix(b"\n").unwrap_or(raw);
+        let body = body.strip_suffix(b"\r").unwrap_or(body);
+        if body.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let env: EventEnvelope = serde_json::from_slice(body).map_err(|e| LogError::Malformed {
+            line: line_no,
+            detail: e.to_string(),
+        })?;
+        tree |= env.parent_id.is_some();
+        if previous.as_deref() == Some(body) {
+            // The same record twice: one write that reached the file twice. It
+            // carries no event the first copy did not, so it is dropped.
+            report.dropped += 1;
+            continue;
+        }
+        if env.seq == expected {
+            out.extend_from_slice(body);
+        } else {
+            out.extend_from_slice(&renumbered_line(body, &env, expected));
+            report.renumbered += 1;
+        }
+        out.push(b'\n');
+        previous = Some(body.to_vec());
+        report.events += 1;
+        expected += 1;
+    }
+    if report.renumbered > 0 && tree {
+        return Err(LogError::Malformed {
+            line: 0,
+            detail: "this log names parents; renumbering would move ids the event tree points at, \
+                     so it is left as it is"
+                .into(),
+        });
+    }
+    Ok((out, report))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -525,12 +729,17 @@ mod tests {
         }
     }
     impl Drop for Temp {
-        /// Purpose: Remove the temporary file and its lock sidecar when the fixture goes out of scope.
+        /// Purpose: Remove the temporary file, its lock sidecar and any repair backup when the fixture goes out of scope.
         ///
         /// Contract: `crates/eventlog/src/lib.rs`.
         fn drop(&mut self) {
             let _ = std::fs::remove_file(&self.0);
             let _ = std::fs::remove_file(lock_path(&self.0));
+            for suffix in [".broken-bak", ".broken-bak.1", ".repair-tmp"] {
+                let mut name = self.0.as_os_str().to_os_string();
+                name.push(suffix);
+                let _ = std::fs::remove_file(PathBuf::from(name));
+            }
         }
     }
 
@@ -745,11 +954,181 @@ mod tests {
         ));
     }
 
+    /// Purpose: Pins that a repair renumbers a second writer's block, keeps every event, and backs the log up.
+    #[test]
+    fn repair_renumbers_a_second_writers_block_and_keeps_every_event() {
+        let t = Temp::new();
+        let mut log = SessionLog::create(t.path()).unwrap();
+        log.append("message.appended", json!({"role": "user", "text": "一"}))
+            .unwrap();
+        log.append(
+            "message.appended",
+            json!({"role": "assistant", "text": "二"}),
+        )
+        .unwrap();
+        drop(log);
+        // The shape a lockless writer leaves: it kept its own counter from an
+        // earlier replay and writes 2, 3, 4 over the log's own 2.
+        for text in ["三", "四", "五"] {
+            append_raw(
+                t.path(),
+                json!({"seq": 2, "id": "e00000002", "parent_id": null, "kind": "message.appended", "ignorable": false, "time_ms": 0, "data": {"role": "user", "text": text}}),
+            );
+        }
+        assert!(
+            matches!(replay(t.path()), Err(LogError::SeqOutOfOrder { .. })),
+            "the log does not open: that is the symptom being repaired"
+        );
+
+        let planned = repair_dry_run(t.path()).unwrap();
+        assert_eq!(
+            (planned.events, planned.renumbered, planned.dropped),
+            (5, 3, 0)
+        );
+        assert!(planned.changed());
+        assert!(planned.backup.is_none(), "a dry run takes no backup");
+        assert!(
+            replay(t.path()).is_err(),
+            "and it leaves the file exactly as it found it"
+        );
+
+        let report = repair(t.path()).unwrap();
+        assert_eq!(
+            (report.events, report.renumbered, report.dropped),
+            (5, 3, 0)
+        );
+        let backup = report.backup.expect("a changed log is backed up");
+        assert!(
+            replay(&backup).is_err(),
+            "the backup holds the broken bytes"
+        );
+
+        let r = replay(t.path()).expect("the repaired log opens strictly");
+        assert_eq!(r.events.len(), 5);
+        assert_eq!(
+            r.events.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5]
+        );
+        assert_eq!(
+            r.events.iter().map(|e| e.id.clone()).collect::<Vec<_>>(),
+            (1..=5).map(|s| format!("e{s:08}")).collect::<Vec<_>>()
+        );
+        let texts: Vec<_> = r
+            .events
+            .iter()
+            .map(|e| e.data["text"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            texts,
+            vec!["一", "二", "三", "四", "五"],
+            "no event is lost"
+        );
+    }
+
+    /// Purpose: Pins that a repair rewrites only the two numbers and leaves the rest of a line alone.
+    #[test]
+    fn repair_keeps_the_rest_of_a_renumbered_line_byte_for_byte() {
+        let t = Temp::new();
+        let mut log = SessionLog::create(t.path()).unwrap();
+        log.append("message.appended", json!({})).unwrap();
+        drop(log);
+        // A line as the writer lays one out, including a `data` object whose keys
+        // are not in alphabetical order: renumbering must not touch it.
+        let line = r#"{"seq":1,"id":"e00000001","parent_id":null,"kind":"message.appended","ignorable":false,"time_ms":7,"data":{"role":"user","text":"hi","z":1,"a":2}}"#;
+        append_line(t.path(), line);
+        repair(t.path()).unwrap();
+        let text = std::fs::read_to_string(t.path()).unwrap();
+        assert!(
+            text.contains(r#"{"seq":2,"id":"e00000002","parent_id":null,"kind":"message.appended","ignorable":false,"time_ms":7,"data":{"role":"user","text":"hi","z":1,"a":2}}"#),
+            "the record is the same record, two numbers further on: {text}"
+        );
+    }
+
+    /// Purpose: Pins that a line the file holds twice is dropped, because it carries no event the first copy did not.
+    #[test]
+    fn repair_drops_a_line_written_twice_and_keeps_a_second_event() {
+        let t = Temp::new();
+        let mut log = SessionLog::create(t.path()).unwrap();
+        log.append("message.appended", json!({"role": "user", "text": "one"}))
+            .unwrap();
+        drop(log);
+        let repeated = json!({"seq": 1, "id": "e00000001", "parent_id": null, "kind": "message.appended", "ignorable": false, "time_ms": 5, "data": {"role": "user", "text": "two"}});
+        append_raw(t.path(), repeated.clone());
+        append_raw(t.path(), repeated);
+        let report = repair(t.path()).unwrap();
+        assert_eq!(
+            (report.events, report.renumbered, report.dropped),
+            (2, 1, 1)
+        );
+        let r = replay(t.path()).unwrap();
+        let texts: Vec<_> = r
+            .events
+            .iter()
+            .map(|e| e.data["text"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(texts, vec!["one", "two"]);
+    }
+
+    /// Purpose: Pins that a log in order is left alone: no rewrite, no backup.
+    #[test]
+    fn repair_leaves_a_log_in_order_alone() {
+        let t = Temp::new();
+        let mut log = SessionLog::create(t.path()).unwrap();
+        log.append("message.appended", json!({})).unwrap();
+        log.append("message.appended", json!({})).unwrap();
+        drop(log);
+        let before = std::fs::read(t.path()).unwrap();
+        let report = repair(t.path()).unwrap();
+        assert!(!report.changed());
+        assert_eq!(
+            (report.events, report.renumbered, report.dropped),
+            (2, 0, 0)
+        );
+        assert!(report.backup.is_none());
+        assert_eq!(std::fs::read(t.path()).unwrap(), before);
+    }
+
+    /// Purpose: Pins that a repair refuses a live writer's log rather than rewriting it underneath.
+    #[test]
+    fn repair_refuses_a_log_a_writer_holds() {
+        let t = Temp::new();
+        let mut log = SessionLog::create(t.path()).unwrap();
+        log.append("message.appended", json!({})).unwrap();
+        assert!(matches!(repair(t.path()), Err(LogError::Locked { .. })));
+        drop(log);
+        assert!(repair(t.path()).is_ok(), "with the writer gone it is ours");
+    }
+
+    /// Purpose: Pins that a repair refuses a log whose ids an event tree names, instead of breaking the tree.
+    #[test]
+    fn repair_refuses_a_log_that_names_parents() {
+        let t = Temp::new();
+        let mut log = SessionLog::create(t.path()).unwrap();
+        let first = log.append("message.appended", json!({})).unwrap();
+        log.append_with_parent("message.appended", json!({}), Some(first.id))
+            .unwrap();
+        drop(log);
+        append_raw(
+            t.path(),
+            json!({"seq": 2, "id": "e00000002", "parent_id": null, "kind": "message.appended", "ignorable": false, "time_ms": 0, "data": {}}),
+        );
+        let before = std::fs::read(t.path()).unwrap();
+        assert!(matches!(repair(t.path()), Err(LogError::Malformed { .. })));
+        assert_eq!(std::fs::read(t.path()).unwrap(), before);
+    }
+
     /// Purpose: Append a raw JSON line, bypassing the writer's validation.
     ///
     /// Contract: `crates/eventlog/src/lib.rs`.
     fn append_raw(path: &Path, value: serde_json::Value) {
+        append_line(path, &value.to_string());
+    }
+
+    /// Purpose: Append one already-serialised line, to reproduce a writer's own byte layout.
+    ///
+    /// Contract: `crates/eventlog/src/lib.rs`.
+    fn append_line(path: &Path, line: &str) {
         let mut f = OpenOptions::new().append(true).open(path).unwrap();
-        writeln!(f, "{value}").unwrap();
+        writeln!(f, "{line}").unwrap();
     }
 }

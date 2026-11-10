@@ -62,6 +62,14 @@ pub(crate) fn repl(args: Args) -> Result<(), String> {
     for line in client.replay().unwrap_or_default() {
         println!("{line}");
     }
+    // A question the log still carries and no kernel holds: say so. The transcript shows
+    // the question, so silence would read as "answer it" — and the answer would come back
+    // as `-32602: no approval is pending`.
+    if let Some(request_id) = client.expired_question() {
+        println!(
+            "· {request_id} 这个问题是上个进程问的，进程结束它就没法再答了 —— 重新发一次提问即可"
+        );
+    }
 
     let stdin = std::io::stdin();
     loop {

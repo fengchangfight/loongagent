@@ -122,6 +122,10 @@ pub fn run<T: Transport + Send + 'static>(
     // one more read on a client that is already reading twice, and it means the bar is
     // there on the first frame instead of appearing after it.
     let models = client.models().ok();
+    // A question the log still carries and no kernel holds: it died with the process that
+    // asked it. Read here because the client moves into the worker below, and shown
+    // because the transcript shows the question — silence would read as "answer it".
+    let expired = client.expired_question().map(|id| id.to_string());
     let shown = history
         .iter()
         .filter(|line| loong_tui::is_fold_marker(line))
@@ -148,6 +152,11 @@ pub fn run<T: Transport + Send + 'static>(
         app.remember_fold(at, text.split('\n').map(|line| line.to_string()).collect());
     }
     app.push_lines(history);
+    if let Some(request_id) = expired {
+        app.push_lines(vec![format!(
+            "· {request_id} 这个问题是上个进程问的，进程结束它就没法再答了 —— 重新发一次提问即可"
+        )]);
+    }
     // Intro lines belong in the conversation view, not the one-line diagnostics
     // strip: the session path and "no model configured" both need to be readable.
     app.push_lines(

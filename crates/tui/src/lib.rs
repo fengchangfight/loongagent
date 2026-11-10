@@ -55,6 +55,10 @@ pub struct Client<T: Transport> {
     /// the transcript, instead of asking the log a second time. The events stay
     /// unparsed: an older log lacks the newer fields, and the reader defaults them.
     last_costs: Vec<Value>,
+    /// A question the log still carries but no live kernel holds — it died with the
+    /// process that asked it. Kept so a surface can say so instead of offering an
+    /// answer that would come back as `-32602: no approval is pending`.
+    expired_question: Option<String>,
 }
 
 /// Purpose: A question the session is waiting on, with the detail needed to answer it.
@@ -621,6 +625,7 @@ impl<T: Transport> Client<T> {
             last_tool_call: None,
             last_accepted: true,
             last_costs: Vec::new(),
+            expired_question: None,
         }
     }
 
@@ -655,6 +660,16 @@ impl<T: Transport> Client<T> {
     /// The same question with the detail a person needs to answer it — however it was met.
     pub fn pending_decision(&self) -> Option<&PendingDecision> {
         self.pending.as_ref()
+    }
+
+    /// Purpose: The question the log carries but no live kernel holds, so a surface can say it died instead of offering an answer.
+    /// Serves: `crates/cli/src/repl.rs` and `crates/tui-app/src/surface.rs`, each of which says it once at attach.
+    /// Design: `docs/design/sessions-lineage.md` §5; `docs/design/surfaces.md` §3.
+    /// Up: `crates/cli/src/repl.rs`, `crates/tui-app/src/surface.rs` and the tests.
+    /// Down: the field `attach` sets when the kernel reports nothing pending.
+    /// Verify: `cargo test -p loong-tui`.
+    pub fn expired_question(&self) -> Option<&str> {
+        self.expired_question.as_deref()
     }
 
     /// Purpose: Whether the last submitted prompt was accepted, rather than refused by a hook.
@@ -694,10 +709,24 @@ impl<T: Transport> Client<T> {
             gen::method::SESSION_ATTACH,
             serde_json::to_value(params).unwrap(),
         )?;
-        let attached: gen::SessionAttachResult =
+        let attach_result: gen::SessionAttachResult =
             serde_json::from_value(result).map_err(|e| format!("attach result: {e}"))?;
-        self.session_id = attached.session_id.clone();
-        Ok(attached)
+        self.session_id = attach_result.session_id.clone();
+        // Attaching streams the log back, and the log keeps the question that was asked
+        // — so a resumed session arrives with a question armed by an event no live
+        // kernel holds. Answering it came back as `-32602: no approval is pending`
+        // (`sessions-lineage.md` §5: a parked approval lives in memory, so a restarted
+        // process starts a new turn instead). The attach result is the kernel's own
+        // word on what it is waiting for, and that word can only *retire* a question:
+        // one the client never saw has no detail to put in a panel, so it is not
+        // invented here.
+        if let Some(armed) = self.pending.as_ref() {
+            if attach_result.pending_approval.as_deref() != Some(armed.request_id.as_str()) {
+                self.expired_question = Some(armed.request_id.clone());
+                self.pending = None;
+            }
+        }
+        Ok(attach_result)
     }
 
     /// Purpose: The most recent tool result in full, as `/expand` shows.
@@ -1263,7 +1292,8 @@ mod tests {
     fn attach_sends_the_declared_method_and_learns_the_session() {
         let fake = Fake::with(vec![response(
             1,
-            json!({"session_id": "s-1", "schema_version": gen::SCHEMA_VERSION, "existing_events": 4}),
+            json!({"session_id": "s-1", "schema_version": gen::SCHEMA_VERSION,
+                   "existing_events": 4, "auto_approve": false}),
         )]);
         let mut client = Client::new(fake, "unset");
         let attached = client.attach("/work", "tui").unwrap();
@@ -1272,6 +1302,77 @@ mod tests {
         let sent: Value = serde_json::from_str(&client.transport.outbound[0]).unwrap();
         assert_eq!(sent["method"], "session.attach");
         assert_eq!(sent["params"]["cwd"], "/work");
+    }
+
+    /// Purpose: Pin that a question written to the log before this process started is not offered as answerable.
+    /// Verify: `cargo test -p loong-tui`.
+    #[test]
+    fn a_question_from_the_log_is_not_a_question_this_session_can_answer() {
+        // Exactly what a resume is: the server streams the log back, the last thing in
+        // it is an approval request nobody answered, and the kernel — a new process —
+        // holds no such question. `sessions-lineage.md` §5: a parked approval lives in
+        // memory, so the person starts a new turn instead.
+        let fake = Fake::with(vec![
+            event(
+                3,
+                gen::event::TOOL_CALL,
+                json!({"tool": "write_file", "args": {"path": "outside.txt"}}),
+            ),
+            event(
+                4,
+                gen::event::APPROVAL_REQUESTED,
+                json!({"request_id": "appr-4", "action_class": "out_of_bounds",
+                       "reason": "outside the workspace"}),
+            ),
+            response(
+                1,
+                json!({"session_id": "s-1", "schema_version": gen::SCHEMA_VERSION,
+                       "existing_events": 4, "auto_approve": false}),
+            ),
+        ]);
+        let mut client = Client::new(fake, "unset");
+        client.attach("/work", "tui").unwrap();
+        assert_eq!(
+            client.pending_approval(),
+            None,
+            "the screen must not offer an answer the kernel would refuse with \
+             `-32602: out of order: no approval is pending`"
+        );
+        assert_eq!(
+            client.expired_question(),
+            Some("appr-4"),
+            "the question is still worth saying out loud: it died with the process"
+        );
+    }
+
+    /// Purpose: Pin that attach keeps a question its kernel really holds, so a surface arriving mid-turn can answer it.
+    /// Verify: `cargo test -p loong-tui`.
+    #[test]
+    fn attach_keeps_a_question_its_kernel_really_holds() {
+        let fake = Fake::with(vec![
+            event(
+                3,
+                gen::event::TOOL_CALL,
+                json!({"tool": "write_file", "args": {"path": "outside.txt"}}),
+            ),
+            event(
+                4,
+                gen::event::APPROVAL_REQUESTED,
+                json!({"request_id": "appr-4", "action_class": "out_of_bounds",
+                       "reason": "outside the workspace"}),
+            ),
+            response(
+                1,
+                json!({"session_id": "s-1", "schema_version": gen::SCHEMA_VERSION,
+                       "existing_events": 4, "pending_approval": "appr-4",
+                       "auto_approve": false}),
+            ),
+        ]);
+        let mut client = Client::new(fake, "unset");
+        client.attach("/work", "tui").unwrap();
+        assert_eq!(client.pending_approval(), Some("appr-4"));
+        assert_eq!(client.pending_decision().unwrap().tool, "write_file");
+        assert_eq!(client.expired_question(), None);
     }
 
     /// Purpose: Pin that a cost event stays out of the transcript while its data is still available to the spend total.

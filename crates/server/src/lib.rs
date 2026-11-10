@@ -259,6 +259,17 @@ impl From<std::io::Error> for ServerError {
 /// needs to be able to ask for another one.
 pub type KernelFactory = Box<dyn FnMut() -> Result<(String, Kernel), String>>;
 
+/// Purpose: A closure that opens a session that already exists, for `session.open`.
+/// Serves: `Server::with_session_opener` and `dispatch`'s `session.open` arm.
+/// Design: `docs/design/sessions-lineage.md` §1.
+/// Up: `crates/cli/src/server.rs`, which knows where the logs live and how to build a kernel.
+/// Down: the `(id, kernel)` pair consumed by `dispatch`.
+/// Verify: `cargo test -p loong-server session_open`.
+/// Opens rather than creates: the id it is given must already have a log, and opening a log
+/// another process is writing must fail instead of starting a second writer
+/// (events-storage.md §3).
+pub type KernelOpener = Box<dyn FnMut(&str) -> Result<(String, Kernel), String>>;
+
 /// Purpose: A project-scoped session lister the CLI injects; it reads the logs, not the client.
 /// Serves: `Server::with_session_lister` and `dispatch`'s `session.list` arm.
 /// Design: `docs/design/sessions-lineage.md` §1 and §3.
@@ -280,6 +291,10 @@ pub struct Server {
     /// was handed one kernel and nothing else — it then simply cannot start new sessions,
     /// and says so rather than pretending.
     factory: Option<KernelFactory>,
+    /// How to get a kernel for a session that already exists. Absent when the server was
+    /// handed one kernel and nothing else — it then cannot switch, and says so rather than
+    /// inventing a session for the id it was given.
+    opener: Option<KernelOpener>,
     /// The project's session listing. Absent when no CLI lister was injected; then
     /// `session.list` answers empty rather than inventing entries.
     session_lister: Option<SessionLister>,
@@ -324,6 +339,7 @@ impl Server {
             kernel,
             session_id: session_id.into(),
             factory: None,
+            opener: None,
             session_lister: None,
             last_sent: 0,
             connection: None,
@@ -368,6 +384,20 @@ impl Server {
     /// Teach this server how to start a session of its own.
     pub fn with_factory(mut self, factory: KernelFactory) -> Self {
         self.factory = Some(factory);
+        self
+    }
+
+    /// Purpose: Give the server a way to open a session that already exists.
+    /// Serves: `crates/cli/src/server.rs`; the reverse page's session picker.
+    /// Design: `docs/design/sessions-lineage.md` §1; `docs/design/reverse-conversation.md`.
+    /// Up: `crates/cli/src/server.rs` injects the log-backed opener.
+    /// Down: `dispatch`'s `session.open` arm.
+    /// Verify: `cargo test -p loong-server session_open`.
+    /// Without this, `session.open` is refused: the server was started on one session and
+    /// cannot move to another, and saying so is better than opening a fresh log under the
+    /// id it was asked for.
+    pub fn with_session_opener(mut self, opener: KernelOpener) -> Self {
+        self.opener = Some(opener);
         self
     }
 
@@ -473,26 +503,56 @@ impl Server {
                     Ok(made) => made,
                     Err(e) => return self.refuse(id, &e),
                 };
-                self.kernel = kernel;
-                // The interrupt flag belongs to the process, not to a log. Without this
-                // the kernel `/new` installs would hold a fresh, unreachable flag and the
-                // next Ctrl-C would stop nothing while still saying "interrupting…".
-                if let Some(flag) = INTERRUPT.get() {
-                    self.kernel.use_interruptor(std::sync::Arc::clone(flag));
+                self.adopt(session_id, kernel);
+                self.respond(
+                    id,
+                    gen::SessionNewResult {
+                        session_id: self.session_id.clone(),
+                    },
+                    "session.new",
+                )
+            }
+            gen::method::SESSION_OPEN => {
+                let params: gen::SessionOpenParams = match request.params_as() {
+                    Ok(p) => p,
+                    Err(e) => return vec![e.to_line()],
+                };
+                // Same check as `session.new`: a client that has lost track of where it is
+                // should find that out, not have its switch land somewhere unexpected.
+                if let Some(bad) = self.wrong_session(&id, &params.session_id) {
+                    return vec![bad];
                 }
-                // The control channel belongs to the process too: a new kernel must
-                // still be reachable from the surface that is watching this server.
-                if let Some(control) = &self.permissions {
-                    self.kernel
-                        .use_permissions_requester(std::sync::Arc::clone(&control.slot));
+                // Picking the session already open is not a switch: reopening its log here
+                // would be a second writer asking for the lock this server already holds.
+                if params.open == self.session_id {
+                    return self.respond(
+                        id,
+                        gen::SessionOpenResult {
+                            session_id: self.session_id.clone(),
+                        },
+                        "session.open",
+                    );
                 }
-                self.session_id = session_id.clone();
-                // The new session has its own log, so every counter about the old one is
-                // now wrong. Forgetting to reset `last_sent` would stream the new
-                // session's first events as if they were the old session's past.
-                self.last_sent = 0;
-                self.turns = 0;
-                self.respond(id, gen::SessionNewResult { session_id }, "session.new")
+                let Some(opener) = self.opener.as_mut() else {
+                    return self.refuse(
+                        id,
+                        "this server cannot open another session — no opener was supplied",
+                    );
+                };
+                let (session_id, kernel) = match opener(&params.open) {
+                    Ok(opened) => opened,
+                    // A log another process holds, or an id with no log: the caller's
+                    // problem, reported as such. Never papered over with a fresh session.
+                    Err(e) => return self.refuse(id, &e),
+                };
+                self.adopt(session_id, kernel);
+                self.respond(
+                    id,
+                    gen::SessionOpenResult {
+                        session_id: self.session_id.clone(),
+                    },
+                    "session.open",
+                )
             }
             gen::method::SESSION_ATTACH => {
                 let params: gen::SessionAttachParams = match request.params_as() {
@@ -504,6 +564,19 @@ impl Server {
                     session_id: self.session_id.clone(),
                     schema_version: gen::SCHEMA_VERSION.to_string(),
                     existing_events: self.kernel.last_seq(),
+                    // A question is answerable only while the kernel that asked it is
+                    // alive: it lives in `Kernel.pending`, in memory (ADR-0009,
+                    // `sessions-lineage.md` §5). The log keeps the question that was
+                    // asked, so a resumed client sees one on the wire — this field is
+                    // what tells it whether that question is still its to answer.
+                    pending_approval: self
+                        .kernel
+                        .pending()
+                        .map(|pending| pending.request_id.clone()),
+                    // The surface renders its YOLO toggle from what the kernel says,
+                    // never from its own guess: a resumed session, or one where `/yolo`
+                    // was typed in the TUI, must show the state that is really in force.
+                    auto_approve: self.kernel.auto_approve(),
                 };
                 self.respond(id, result, "session.attach")
             }
@@ -699,6 +772,36 @@ impl Server {
             )
             .to_line()],
         }
+    }
+
+    /// Purpose: Move this server onto another session — the swap both `session.new` and
+    /// `session.open` end with.
+    /// Serves: `dispatch`'s `session.new` and `session.open` arms.
+    /// Design: `docs/design/sessions-lineage.md` §1.
+    /// Up: those two arms only.
+    /// Down: `Kernel::{use_interruptor, use_permissions_requester}`; it writes the fields
+    /// `stream_drained` and `prompt.submit` read.
+    /// Verify: `cargo test -p loong-server session_open`.
+    fn adopt(&mut self, session_id: String, kernel: Kernel) {
+        self.kernel = kernel;
+        // The interrupt flag belongs to the process, not to a log. Without this the kernel
+        // would hold a fresh, unreachable flag and the next Ctrl-C would stop nothing while
+        // still saying "interrupting…".
+        if let Some(flag) = INTERRUPT.get() {
+            self.kernel.use_interruptor(std::sync::Arc::clone(flag));
+        }
+        // The control channel belongs to the process too: the new kernel must still be
+        // reachable from the surface that is watching this server.
+        if let Some(control) = &self.permissions {
+            self.kernel
+                .use_permissions_requester(std::sync::Arc::clone(&control.slot));
+        }
+        self.session_id = session_id;
+        // The new session has its own log, so every counter about the old one is now wrong.
+        // Forgetting to reset `last_sent` would stream the new session's first events as if
+        // they were the old session's past.
+        self.last_sent = 0;
+        self.turns = 0;
     }
 
     /// Purpose: Stream what this call drained, then answer with one result.
@@ -1244,6 +1347,131 @@ mod tests {
         assert_eq!(server.session_id(), "only", "and nothing changed");
     }
 
+    /// Purpose: Pin what `session.open` does — move onto an existing log, keep the old one,
+    /// refuse an opener's error instead of inventing a session, and treat "the one already
+    /// open" as no switch at all.
+    /// Verify: `cargo test -p loong-server session_open`.
+    #[test]
+    fn session_open_moves_onto_the_log_it_was_given() {
+        let t = Temp::new();
+        let kernel = Kernel::create(
+            t.0.join("first.jsonl"),
+            KernelConfig::new(&t.0),
+            Box::new(scripted(vec![], Some("hi"))),
+        )
+        .unwrap();
+        let root = t.0.clone();
+        let asked = Rc::new(RefCell::new(Vec::new()));
+        let recorded = Rc::clone(&asked);
+        let opener: KernelOpener = Box::new(move |wanted: &str| {
+            recorded.borrow_mut().push(wanted.to_string());
+            // `gone` stands for a log another process holds, or one that is not there:
+            // the opener fails and the server has to pass that on.
+            if wanted == "gone" {
+                return Err("it is being written by another process".to_string());
+            }
+            let kernel = Kernel::create(
+                root.join(format!("{wanted}.jsonl")),
+                KernelConfig::new(&root),
+                Box::new(scripted(vec![], Some("hi"))),
+            )
+            .map_err(|e| e.to_string())?;
+            Ok((wanted.to_string(), kernel))
+        });
+        let mut server = Server::new(kernel, "first").with_session_opener(opener);
+
+        let out = lines_of(
+            &mut server,
+            &Request::new(
+                2,
+                gen::method::SESSION_OPEN,
+                json!({"session_id": "first", "open": "second"}),
+            )
+            .to_line(),
+        );
+        let answer = out
+            .iter()
+            .find_map(|v| v.get("result"))
+            .expect("a result, not an error");
+        assert_eq!(answer["session_id"], "second", "{out:?}");
+        assert_eq!(server.session_id(), "second");
+        assert_eq!(*asked.borrow(), vec!["second".to_string()]);
+
+        // The conversation it left is still on disk: switching is not deleting.
+        assert!(t.0.join("first.jsonl").exists());
+
+        // A log the opener could not take is an error, and the server stays where it was.
+        let out = lines_of(
+            &mut server,
+            &Request::new(
+                3,
+                gen::method::SESSION_OPEN,
+                json!({"session_id": "second", "open": "gone"}),
+            )
+            .to_line(),
+        );
+        let error = out
+            .iter()
+            .find_map(|v| v.get("error"))
+            .expect("an error, not a silent success");
+        assert!(error["message"]
+            .as_str()
+            .unwrap()
+            .contains("another process"));
+        assert_eq!(server.session_id(), "second", "and nothing changed");
+
+        // Picking the one that is already open is not a switch: reopening its log here would
+        // be a second writer asking for a lock this server already holds.
+        let out = lines_of(
+            &mut server,
+            &Request::new(
+                4,
+                gen::method::SESSION_OPEN,
+                json!({"session_id": "second", "open": "second"}),
+            )
+            .to_line(),
+        );
+        assert!(out.iter().any(|v| v.get("result").is_some()), "{out:?}");
+        assert_eq!(
+            asked.borrow().len(),
+            2,
+            "the opener was not asked to reopen the open log: {:?}",
+            asked.borrow()
+        );
+    }
+
+    /// Purpose: Pin the refusal when a server was never given an opener: no opener, no switch.
+    /// Verify: `cargo test -p loong-server session_open`.
+    #[test]
+    fn a_server_without_an_opener_cannot_open_a_session() {
+        let t = Temp::new();
+        let kernel = Kernel::create(
+            t.0.join("only.jsonl"),
+            KernelConfig::new(&t.0),
+            Box::new(scripted(vec![], Some("hi"))),
+        )
+        .unwrap();
+        let mut server = Server::new(kernel, "only");
+        let out = lines_of(
+            &mut server,
+            &Request::new(
+                1,
+                gen::method::SESSION_OPEN,
+                json!({"session_id": "only", "open": "other"}),
+            )
+            .to_line(),
+        );
+        let error = out
+            .iter()
+            .find_map(|v| v.get("error"))
+            .expect("an error, not a silent success");
+        assert!(
+            error["message"].as_str().unwrap().contains("cannot open"),
+            "{error:?}"
+        );
+        assert_eq!(server.session_id(), "only", "and nothing changed");
+    }
+
     /// Purpose: Pin attach's result fields and that its opening event precedes the response.
     /// Verify: `cargo test -p loong-server`.
     #[test]
@@ -1406,6 +1634,90 @@ mod tests {
         assert!(kinds.contains(&"tool.result"));
         assert_eq!(out.last().unwrap()["result"]["accepted"], false);
         assert!(!escape.exists());
+    }
+
+    /// Purpose: Pin that attach names the question its own kernel holds, and that a resumed kernel claims none.
+    /// Verify: `cargo test -p loong-server`.
+    #[test]
+    fn attach_names_the_question_its_kernel_holds_and_a_resumed_one_claims_none() {
+        let t = Temp::new();
+        let escape = t.0.parent().unwrap().join("loong-server-attach-escape.txt");
+        let _ = std::fs::remove_file(&escape);
+        let log = t.0.join("s.jsonl");
+        let model = scripted(
+            vec![ToolCallRequest {
+                call_id: "c1".into(),
+                tool: "write_file".into(),
+                args: json!({"path": escape.to_string_lossy(), "content": "x"}),
+            }],
+            Some("understood"),
+        );
+        let kernel = Kernel::create(log.clone(), KernelConfig::new(&t.0), Box::new(model)).unwrap();
+        let mut server = Server::new(kernel, "s-local");
+        let parked = lines_of(
+            &mut server,
+            &Request::new(
+                2,
+                gen::method::PROMPT_SUBMIT,
+                json!({"session_id": "s-local", "text": "escape"}),
+            )
+            .to_line(),
+        );
+        let request_id = parked
+            .iter()
+            .find(|v| v["method"] == "event" && v["params"]["kind"] == "approval.requested")
+            .expect("the turn parked on a question")
+            .clone()["params"]["data"]["request_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let out = lines_of(&mut server, &attach_line());
+        assert_eq!(
+            out.last().unwrap()["result"]["pending_approval"],
+            json!(request_id),
+            "a surface attaching mid-turn must be able to answer the question"
+        );
+
+        // The same file, opened by a second process: what a resume is. The question is in
+        // the log, but `Kernel.pending` is memory, so this kernel holds nothing — and the
+        // client is told exactly that instead of offering an answer it cannot take. The
+        // first process has to be gone first: one log, one writer.
+        drop(server);
+        let resumed = Kernel::open(
+            &log,
+            KernelConfig::new(&t.0),
+            Box::new(scripted(vec![], Some("hello"))),
+        )
+        .unwrap();
+        let mut resumed = Server::new(resumed, "s-local");
+        let out = lines_of(&mut resumed, &attach_line());
+        assert_eq!(
+            out.last().unwrap()["result"]["pending_approval"],
+            Value::Null,
+            "a resumed kernel owns no question, whatever the log's last line says"
+        );
+        let refused = lines_of(
+            &mut resumed,
+            &Request::new(
+                2,
+                gen::method::APPROVAL_RESPOND,
+                json!({
+                    "session_id": "s-local",
+                    "request_id": request_id,
+                    "granted": true,
+                    "scope": "once"
+                }),
+            )
+            .to_line(),
+        );
+        assert!(
+            refused.last().unwrap()["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("no approval is pending"),
+            "{refused:?}"
+        );
+        let _ = std::fs::remove_file(&escape);
     }
 
     /// Purpose: A model that writes its answer in pieces, for the delta path.

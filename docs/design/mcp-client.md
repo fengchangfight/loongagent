@@ -13,10 +13,14 @@ the model, and what is deliberately missing.
 ## 1. A server is a manifest entry, behind one trust gate
 
 `McpSet::load` reads `<workspace>/.loongagent/mcp.toml`, and merges a second, optional source:
-`<workspace>/.reverse/mcp.toml`, written by the reverse session
-([reverse.md](reverse.md) §3). Both files parse through the same validation, and each entry is
-stamped with an origin (`workspace` / `reverse`) so `mcp list` can say where a server came from.
-A name shared by the two files is a loud duplicate error, not a silent overwrite.
+the reverse session's manifest, `<workspace>/.reverse/runs/<run>/mcp.toml`
+([reverse.md](reverse.md) §3). That second path is not fixed: the reverse process points
+`LOONGAGENT_REVERSE_DIR` at its own run directory for the session it starts, and
+`McpSet::load_for_process` follows it; a session without that variable reads only the workspace
+file, so a normal `loongagent` can never pick up reverse tools even while a reverse session runs
+in the same project. Both files parse through the same validation, and each entry is stamped
+with an origin (`workspace` / `reverse`) so `mcp list` can say where a server came from. A name
+shared by the two files is a loud duplicate error, not a silent overwrite.
 
 Trust is fail-closed per source: each manifest is checked against its own sibling record
 (`mcp.trusted` beside it), neither record covers the other file, and writing or deleting one
@@ -40,8 +44,8 @@ and it must name exactly one transport:
 
 Each manifest pair is inert until its bytes are recorded in its own `mcp.trusted` — the human
 runs `loongagent mcp trust` for the workspace pair; the reverse binary records its own pair when
-it writes it. The record is a hash of the manifest's bytes: editing one character, including a
-URL, revokes it. What trust
+it writes it, inside its run directory. The record is a hash of the manifest's bytes: editing
+one character, including a URL, revokes it. What trust
 does **not** cover is unchanged and stated in [extension-model.md](extension-model.md) §3 — the
 command, its PATH lookup and the files it reads are not hashed, and the process is outside the
 tool sandbox.

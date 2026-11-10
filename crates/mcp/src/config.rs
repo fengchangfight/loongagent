@@ -63,13 +63,22 @@ impl ManifestOrigin {
     }
 }
 
-/// Purpose: The directory holding the reverse session's own manifest pair.
-/// Serves: `McpSet::load`, which merges the optional `.reverse/mcp.toml` as a second source.
+/// Purpose: The directory holding the reverse session's own manifest pair, when a session names none.
+/// Serves: `McpSet::load`, which merges the optional `<reverse dir>/mcp.toml` as a second source.
 /// Design: `docs/design/reverse.md` §3.
 /// Up: `McpSet::load`; `crates/cli/src/reverse.rs` writes the pair.
-/// Down: `McpSet::{load, trust_now}`.
+/// Down: `McpSet::{load, trust_reverse_now}`.
 /// Verify: `cargo test -p loong-mcp`.
 pub const REVERSE_DIR: &str = ".reverse";
+
+/// Purpose: The variable a reverse session sets to its own run directory, so only that session reads its manifest.
+/// Serves: `McpSet::load_for_process`, and `crates/cli/src/reverse.rs`, which sets it for its child.
+/// Design: `docs/design/reverse.md` §3 and `docs/design/mcp-client.md` §1.
+/// Up: `crates/cli/src/tui.rs` (child spawn, sets it) and `crates/kernel/src/turn/build.rs` (reads it).
+/// Down: `McpSet::load_from`, with the value as `reverse_dir`.
+/// Verify: `cargo test -p loong-mcp reverse_manifest`.
+pub const REVERSE_DIR_ENV: &str = "LOONGAGENT_REVERSE_DIR";
+
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 const MAX_TIMEOUT_MS: u64 = 600_000;
 
@@ -218,27 +227,45 @@ pub struct McpSet {
     pub dir: PathBuf,
     pub servers: Vec<McpServerSpec>,
     pub trust: loong_manifest::TrustStatus,
-    /// Why the reverse manifest's servers are inert, when `.reverse/mcp.toml` failed its own trust check.
+    /// The directory this session reads its reverse manifest pair from. `None` is a plain
+    /// session, which reads the workspace manifest and nothing else.
+    reverse_dir: Option<PathBuf>,
+    /// Why the reverse manifest's servers are inert, when its pair failed its own trust check.
     reverse_trust_failure: Option<String>,
 }
 
 impl McpSet {
     /// Purpose: Parse the manifest and check its trust record, with no manifest meaning no servers.
-    /// Serves: `crates/kernel/src/turn/build.rs`, `crates/cli/src/mcp.rs` and `crates/cli/src/server.rs`.
+    /// Serves: `crates/cli/src/mcp.rs`, `crates/cli/src/server.rs` and the kernel's own tests.
     /// Design: `docs/design/mcp-client.md` §1.
-    /// Up: those three callers.
-    /// Down: `loong_manifest::check`, `parse_class` and `expand`.
+    /// Up: those callers.
+    /// Down: `McpSet::load_from` with no reverse directory: a plain session reads one manifest.
     /// Verify: `cargo test -p loong-mcp`.
     pub fn load(workspace: impl AsRef<Path>) -> Result<Self, ConfigError> {
+        Self::load_from(workspace, None)
+    }
+
+    /// Purpose: Parse both manifests, taking the reverse pair from `reverse_dir` when one is named.
+    /// Serves: `McpSet::load`, `McpSet::load_for_process` and `crates/cli/src/reverse.rs`.
+    /// Design: `docs/design/mcp-client.md` §1 and `docs/design/reverse.md` §3.
+    /// Up: `McpSet::load`, `McpSet::load_for_process` and `crates/cli/src/reverse.rs`.
+    /// Down: `loong_manifest::check`, `parse_servers`, `load_reverse`.
+    /// Verify: `cargo test -p loong-mcp reverse_manifest`.
+    pub fn load_from(
+        workspace: impl AsRef<Path>,
+        reverse_dir: Option<&Path>,
+    ) -> Result<Self, ConfigError> {
         let workspace = workspace.as_ref().to_path_buf();
         let dir = workspace.join(MCP_DIR);
         let manifest = dir.join(MCP_FILE);
-        let reverse_manifest = workspace.join(REVERSE_DIR).join(MCP_FILE);
+        let reverse_dir = reverse_dir.map(Path::to_path_buf);
+        let reverse_manifest = reverse_dir.as_ref().map(|dir| dir.join(MCP_FILE));
         let mut set = Self {
             workspace,
             dir: dir.clone(),
             servers: Vec::new(),
             trust: loong_manifest::TrustStatus::Absent,
+            reverse_dir,
             reverse_trust_failure: None,
         };
 
@@ -252,8 +279,8 @@ impl McpSet {
             set.trust = trust;
         }
 
-        if reverse_manifest.exists() {
-            set.load_reverse(&reverse_manifest)?;
+        if let Some(manifest) = reverse_manifest.filter(|path| path.exists()) {
+            set.load_reverse(&manifest)?;
         }
 
         let mut seen = std::collections::BTreeSet::new();
@@ -280,10 +307,21 @@ impl McpSet {
         Ok(set)
     }
 
-    /// Purpose: Parse `.reverse/mcp.toml`, check its own trust record and merge its servers.
-    /// Serves: `McpSet::load`, the reverse session's second manifest source.
+    /// Purpose: Load the manifests this *process* should see, honouring `LOONGAGENT_REVERSE_DIR`.
+    /// Serves: `crates/kernel/src/turn/build.rs`, the one place a session's tools are attached.
+    /// Design: `docs/design/mcp-client.md` §1 and `docs/design/reverse.md` §3.
+    /// Up: `crates/kernel/src/turn/build.rs`.
+    /// Down: `McpSet::load_from`, with the variable's value as the reverse directory.
+    /// Verify: `cargo test -p loong-mcp reverse_manifest`.
+    pub fn load_for_process(workspace: impl AsRef<Path>) -> Result<Self, ConfigError> {
+        let named = std::env::var_os(REVERSE_DIR_ENV).map(PathBuf::from);
+        Self::load_from(workspace, named.as_deref())
+    }
+
+    /// Purpose: Parse the reverse manifest, check its own trust record and merge its servers.
+    /// Serves: `McpSet::load_from`, the reverse session's second manifest source.
     /// Design: `docs/design/reverse.md` §3 and `docs/design/mcp-client.md` §1.
-    /// Up: `McpSet::load` only.
+    /// Up: `McpSet::load_from` only.
     /// Down: `read_manifest`, `parse_servers`, `loong_manifest::check`; sets `reverse_trust_failure`.
     /// Verify: `cargo test -p loong-mcp reverse_manifest`.
     fn load_reverse(&mut self, manifest: &Path) -> Result<(), ConfigError> {
@@ -298,9 +336,10 @@ impl McpSet {
                 let count = servers.len();
                 // An untrusted (or never-answered) reverse pair stays inert but visible:
                 // its entries land in `servers` so `mcp list` shows them, and this
-                // message names why nothing from `.reverse/` runs.
+                // message names why nothing from the run directory runs.
                 self.reverse_trust_failure = Some(format!(
-                    "{count} reverse server(s) inert — the manifest at {REVERSE_DIR}/{MCP_FILE} is not trusted (changed or never trusted); run `loongagent mcp trust` to re-review and accept"
+                    "{count} reverse server(s) inert — the manifest at {manifest} is not trusted (changed or never trusted); run `loongagent mcp trust` to re-review and accept",
+                    manifest = manifest.display()
                 ));
                 self.servers.extend(servers);
             }
@@ -355,14 +394,20 @@ impl McpSet {
         Ok(path)
     }
 
-    /// Purpose: Record the current `.reverse/mcp.toml` bytes as trusted.
-    /// Serves: `crates/cli/src/reverse.rs`, which writes and trusts its own manifest.
+    /// Purpose: Record the reverse manifest bytes this set read as trusted, in the same directory.
+    /// Serves: `crates/cli/src/reverse.rs`, which writes and trusts its own run's manifest.
     /// Design: `docs/design/reverse.md` §3.
     /// Up: `crates/cli/src/reverse.rs` only; a human never runs this.
-    /// Down: `loong_manifest::record` on `.reverse/mcp.trusted`.
+    /// Down: `loong_manifest::record` on `<reverse dir>/mcp.trusted`.
     /// Verify: `cargo test -p loong-mcp reverse_manifest`.
     pub fn trust_reverse_now(&self) -> Result<PathBuf, ConfigError> {
-        let manifest = self.workspace.join(REVERSE_DIR).join(MCP_FILE);
+        let reverse_dir = self.reverse_dir.as_deref().ok_or_else(|| {
+            ConfigError::Invalid(
+                "this session has no reverse manifest to trust — it was loaded without a run directory"
+                    .to_string(),
+            )
+        })?;
+        let manifest = reverse_dir.join(MCP_FILE);
         let mut servers: Vec<McpServerSpec> = self
             .servers
             .iter()
@@ -370,7 +415,7 @@ impl McpSet {
             .cloned()
             .collect();
         let sources = sources_of(&manifest, &mut servers);
-        let path = self.workspace.join(REVERSE_DIR).join(MCP_TRUST_FILE);
+        let path = reverse_dir.join(MCP_TRUST_FILE);
         loong_manifest::record(&path, &sources).map_err(ConfigError::Io)?;
         Ok(path)
     }
@@ -405,14 +450,30 @@ impl McpSet {
         };
         if let Some(failure) = &self.reverse_trust_failure {
             base.push_str(&format!(
-                "; {REVERSE_DIR}/{MCP_FILE} INERT ({} reverse server(s) held back): {failure}",
+                "; {manifest} INERT ({} reverse server(s) held back): {failure}",
                 self.servers
                     .iter()
                     .filter(|s| s.origin == ManifestOrigin::Reverse)
-                    .count()
+                    .count(),
+                manifest = self
+                    .reverse_dir
+                    .as_ref()
+                    .map(|dir| dir.join(MCP_FILE))
+                    .unwrap_or_default()
+                    .display()
             ));
         }
         base
+    }
+
+    /// Purpose: The directory this session reads its reverse pair from.
+    /// Serves: `crates/cli/src/mcp.rs`, which lists the pair it loaded, and `reverse.rs`'s cleanup.
+    /// Design: `docs/design/reverse.md` §3.
+    /// Up: `crates/cli/src/reverse.rs` and `crates/cli/src/mcp.rs`.
+    /// Down: `reverse_dir`, set by `McpSet::load_from`.
+    /// Verify: `cargo test -p loong-mcp reverse_manifest`.
+    pub fn reverse_dir(&self) -> Option<&Path> {
+        self.reverse_dir.as_deref()
     }
 }
 
@@ -705,11 +766,17 @@ mod tests {
         std::fs::write(dir.join(MCP_FILE), body).unwrap();
     }
 
+    /// Purpose: Load a test workspace's pair the way a reverse session does, naming `.reverse` as the run directory.
+    /// Contract: `crates/mcp/src/config.rs`.
+    fn load_with_reverse(ws: &Path) -> Result<McpSet, ConfigError> {
+        McpSet::load_from(ws, Some(&ws.join(REVERSE_DIR)))
+    }
+
     #[test]
     /// Purpose: Pin that no manifest means no servers and the "no MCP servers" summary.
     fn no_manifest_means_no_servers() {
         let ws = workspace();
-        let set = McpSet::load(&ws).unwrap();
+        let set = load_with_reverse(&ws).unwrap();
         assert!(set.servers.is_empty());
         assert!(set.active().is_empty());
         assert_eq!(set.summary(), "no MCP servers");
@@ -723,7 +790,7 @@ mod tests {
             &ws,
             "[[server]]\nname = \"fs\"\ncommand = \"node\"\nargs = [\"server.js\"]\n",
         );
-        let set = McpSet::load(&ws).unwrap();
+        let set = load_with_reverse(&ws).unwrap();
         assert_eq!(set.servers.len(), 1);
         assert_eq!(set.servers[0].command, "node");
         assert_eq!(set.servers[0].args, vec!["server.js".to_string()]);
@@ -732,7 +799,7 @@ mod tests {
         assert!(set.summary().contains("INERT"));
 
         set.trust_now().unwrap();
-        let trusted = McpSet::load(&ws).unwrap();
+        let trusted = load_with_reverse(&ws).unwrap();
         assert_eq!(trusted.active().len(), 1);
         assert!(trusted.summary().contains("trusted"));
     }
@@ -742,7 +809,7 @@ mod tests {
     fn the_default_action_class_is_the_cautious_one() {
         let ws = workspace();
         write(&ws, "[[server]]\nname = \"fs\"\ncommand = \"node\"\n");
-        let set = McpSet::load(&ws).unwrap();
+        let set = load_with_reverse(&ws).unwrap();
         assert_eq!(set.servers[0].action_class, ActionClass::OutOfBounds);
         assert_eq!(
             set.servers[0].class_for("anything"),
@@ -768,7 +835,7 @@ mod tests {
             "[[server]]\nname = \"fs\"\ncommand = \"node\"\naction_class = \"investigate\"\n\
              [server.tools]\nwrite_file = \"out_of_bounds\"\n",
         );
-        let set = McpSet::load(&ws).unwrap();
+        let set = load_with_reverse(&ws).unwrap();
         let spec = &set.servers[0];
         assert_eq!(spec.class_for("read_file"), ActionClass::Investigate);
         assert_eq!(spec.class_for("write_file"), ActionClass::OutOfBounds);
@@ -781,19 +848,19 @@ mod tests {
         let ws = workspace();
 
         write(&ws, "[[server]]\ncommand = \"node\"\n");
-        assert!(McpSet::load(&ws)
+        assert!(load_with_reverse(&ws)
             .unwrap_err()
             .to_string()
             .contains("needs a name"));
 
         write(&ws, "[[server]]\nname = \"a b\"\ncommand = \"node\"\n");
-        assert!(McpSet::load(&ws)
+        assert!(load_with_reverse(&ws)
             .unwrap_err()
             .to_string()
             .contains("namespace"));
 
         write(&ws, "[[server]]\nname = \"a\"\n");
-        assert!(McpSet::load(&ws)
+        assert!(load_with_reverse(&ws)
             .unwrap_err()
             .to_string()
             .contains("needs a command or a url"));
@@ -802,7 +869,7 @@ mod tests {
             &ws,
             "[[server]]\nname = \"a\"\ncommand = \"node\"\nurl = \"https://example.com/mcp\"\n",
         );
-        assert!(McpSet::load(&ws)
+        assert!(load_with_reverse(&ws)
             .unwrap_err()
             .to_string()
             .contains("name one transport"));
@@ -811,7 +878,7 @@ mod tests {
             &ws,
             "[[server]]\nname = \"a\"\ncommand = \"node\"\naction_class = \"whatever\"\n",
         );
-        assert!(McpSet::load(&ws)
+        assert!(load_with_reverse(&ws)
             .unwrap_err()
             .to_string()
             .contains("unknown action_class"));
@@ -820,7 +887,7 @@ mod tests {
             &ws,
             "[[server]]\nname = \"a\"\ncommand = \"node\"\ndefer = \"sometimes\"\n",
         );
-        assert!(McpSet::load(&ws)
+        assert!(load_with_reverse(&ws)
             .unwrap_err()
             .to_string()
             .contains("unknown defer"));
@@ -829,14 +896,14 @@ mod tests {
             &ws,
             "[[server]]\nname = \"a\"\ncommand = \"node\"\n\n[[server]]\nname = \"a\"\ncommand = \"node\"\n",
         );
-        assert!(McpSet::load(&ws)
+        assert!(load_with_reverse(&ws)
             .unwrap_err()
             .to_string()
             .contains("duplicate"));
 
         write(&ws, "not toml {{{");
         assert!(matches!(
-            McpSet::load(&ws).unwrap_err(),
+            load_with_reverse(&ws).unwrap_err(),
             ConfigError::Parse(_)
         ));
     }
@@ -846,9 +913,9 @@ mod tests {
     fn editing_the_manifest_re_arms_the_question() {
         let ws = workspace();
         write(&ws, "[[server]]\nname = \"a\"\ncommand = \"node\"\n");
-        McpSet::load(&ws).unwrap().trust_now().unwrap();
+        load_with_reverse(&ws).unwrap().trust_now().unwrap();
         assert_eq!(
-            McpSet::load(&ws).unwrap().trust,
+            load_with_reverse(&ws).unwrap().trust,
             loong_manifest::TrustStatus::Trusted
         );
 
@@ -856,7 +923,7 @@ mod tests {
             &ws,
             "[[server]]\nname = \"a\"\ncommand = \"node\"\nargs = [\"--evil\"]\n",
         );
-        match McpSet::load(&ws).unwrap().trust {
+        match load_with_reverse(&ws).unwrap().trust {
             loong_manifest::TrustStatus::Untrusted { changed } => {
                 assert_eq!(changed, vec![MCP_FILE.to_string()])
             }
@@ -872,7 +939,7 @@ mod tests {
             &ws,
             "[[server]]\nname = \"remote\"\nurl = \"https://example.com/mcp\"\n",
         );
-        let set = McpSet::load(&ws).unwrap();
+        let set = load_with_reverse(&ws).unwrap();
         assert_eq!(set.servers[0].transport(), "http");
         assert_eq!(
             set.servers[0].url.as_deref(),
@@ -884,22 +951,22 @@ mod tests {
             &ws,
             "[[server]]\nname = \"local\"\nurl = \"http://127.0.0.1:8931/mcp\"\n",
         );
-        assert!(McpSet::load(&ws).is_ok(), "loopback http is allowed");
+        assert!(load_with_reverse(&ws).is_ok(), "loopback http is allowed");
         write(
             &ws,
             "[[server]]\nname = \"local\"\nurl = \"http://localhost:8931/mcp\"\n",
         );
-        assert!(McpSet::load(&ws).is_ok(), "localhost is loopback");
+        assert!(load_with_reverse(&ws).is_ok(), "localhost is loopback");
 
         write(
             &ws,
             "[[server]]\nname = \"bad\"\nurl = \"http://example.com/mcp\"\n",
         );
-        let err = McpSet::load(&ws).unwrap_err().to_string();
+        let err = load_with_reverse(&ws).unwrap_err().to_string();
         assert!(err.contains("loopback"), "{err}");
 
         write(&ws, "[[server]]\nname = \"bad\"\nurl = \"ftp://x/mcp\"\n");
-        let err = McpSet::load(&ws).unwrap_err().to_string();
+        let err = load_with_reverse(&ws).unwrap_err().to_string();
         assert!(err.contains("https"), "{err}");
     }
 
@@ -914,7 +981,7 @@ mod tests {
             "[[server]]\nname = \"remote\"\nurl = \"https://example.com/mcp\"\n\
              [server.headers]\nAuthorization = \"Bearer ${LOONG_MCP_TEST_TOKEN}\"\n",
         );
-        let set = McpSet::load(&ws).unwrap();
+        let set = load_with_reverse(&ws).unwrap();
         assert_eq!(
             set.servers[0]
                 .headers
@@ -928,7 +995,7 @@ mod tests {
             "[[server]]\nname = \"remote\"\nurl = \"https://example.com/mcp\"\n\
              [server.headers]\nAuthorization = \"Bearer ${LOONG_MCP_TEST_MISSING}\"\n",
         );
-        let err = McpSet::load(&ws).unwrap_err().to_string();
+        let err = load_with_reverse(&ws).unwrap_err().to_string();
         assert!(err.contains("LOONG_MCP_TEST_MISSING"), "{err}");
         assert!(!err.contains("s3cret"), "the value is never printed: {err}");
 
@@ -937,7 +1004,7 @@ mod tests {
             "[[server]]\nname = \"local\"\ncommand = \"node\"\n\
              [server.headers]\nAuthorization = \"Bearer x\"\n",
         );
-        let err = McpSet::load(&ws).unwrap_err().to_string();
+        let err = load_with_reverse(&ws).unwrap_err().to_string();
         assert!(err.contains("url transport"), "{err}");
         std::env::remove_var("LOONG_MCP_TEST_TOKEN");
     }
@@ -955,7 +1022,10 @@ mod tests {
             &ws,
             "[[server]]\nname = \"a\"\nurl = \"https://example.com/mcp\"\ndefer = \"always\"\n",
         );
-        assert_eq!(McpSet::load(&ws).unwrap().servers[0].defer, Defer::Always);
+        assert_eq!(
+            load_with_reverse(&ws).unwrap().servers[0].defer,
+            Defer::Always
+        );
     }
 
     #[test]
@@ -967,9 +1037,9 @@ mod tests {
             &ws,
             "[[server]]\nname = \"loong-reverse\"\ncommand = \"loong-reverse-mcp\"\n",
         );
-        let set = McpSet::load(&ws).unwrap();
+        let set = load_with_reverse(&ws).unwrap();
         set.trust_now().unwrap();
-        let set = McpSet::load(&ws).unwrap();
+        let set = load_with_reverse(&ws).unwrap();
         let failure = set
             .reverse_trust_failure()
             .expect("an untrusted reverse pair holds its servers back");
@@ -981,7 +1051,7 @@ mod tests {
         assert_eq!(set.active()[0].name, "fs");
 
         set.trust_reverse_now().unwrap();
-        let set = McpSet::load(&ws).unwrap();
+        let set = load_with_reverse(&ws).unwrap();
         assert_eq!(set.active().len(), 2, "both trusted sources run");
         assert!(
             set.active().iter().any(|s| s.name == "loong-reverse"),
@@ -1000,6 +1070,77 @@ mod tests {
     }
 
     #[test]
+    /// Purpose: Pin that a session told about its run directory reads that pair and never the shared `.reverse` one.
+    fn load_for_process_follows_the_run_directory() {
+        let _guard = ENV.lock().unwrap();
+        let ws = workspace();
+        // A pair left by an older layout, or by a killed run, is never read by a plain
+        // session: the run directory only ever comes from the variable.
+        write_reverse(
+            &ws,
+            "[[server]]\nname = \"stale\"\ncommand = \"loong-reverse-mcp\"\n",
+        );
+        let run = ws.join(REVERSE_DIR).join("runs").join("run-001");
+        std::fs::create_dir_all(&run).unwrap();
+        let body = "[[server]]\nname = \"loong-reverse\"\ncommand = \"loong-reverse-mcp\"\n";
+        std::fs::write(run.join(MCP_FILE), body).unwrap();
+        let _env = EnvVar::new(REVERSE_DIR_ENV, &run);
+
+        let set = McpSet::load_for_process(&ws).unwrap();
+        assert_eq!(set.reverse_dir(), Some(run.as_path()));
+        let names: Vec<&str> = set.servers.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["loong-reverse"],
+            "only the run's manifest is read, not the stale `.reverse` one"
+        );
+
+        set.trust_reverse_now().unwrap();
+        assert!(
+            run.join(MCP_TRUST_FILE).exists(),
+            "the trust record lands beside the run's manifest"
+        );
+        let set = McpSet::load_for_process(&ws).unwrap();
+        assert_eq!(set.active().len(), 1, "the trusted run server runs");
+        assert_eq!(set.active()[0].name, "loong-reverse");
+        assert!(set.reverse_trust_failure().is_none());
+
+        drop(_env);
+        let set = McpSet::load_for_process(&ws).unwrap();
+        assert!(
+            set.servers.is_empty(),
+            "without the variable a plain session reads no reverse manifest at all: {:?}",
+            set.servers.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
+        std::fs::remove_dir_all(&ws).unwrap();
+    }
+
+    /// Purpose: Set one environment variable for the duration of a test, and unsets it on drop.
+    /// Serves: `load_for_process_follows_the_run_directory`, the one test that needs the variable.
+    /// Design: `docs/design/reverse.md` §3.
+    /// Up: that test only.
+    /// Down: `std::env::{set_var, remove_var}`.
+    /// Verify: `cargo test -p loong-mcp reverse_manifest`.
+    struct EnvVar(&'static str);
+
+    impl EnvVar {
+        /// Purpose: Set the variable now, handing back the value that unsets it on drop.
+        /// Contract: `crates/mcp/src/config.rs`.
+        fn new(name: &'static str, value: &Path) -> Self {
+            std::env::set_var(name, value);
+            Self(name)
+        }
+    }
+
+    impl Drop for EnvVar {
+        /// Purpose: Remove the variable the test set, even when an assertion panics.
+        /// Contract: `crates/mcp/src/config.rs`.
+        fn drop(&mut self) {
+            std::env::remove_var(self.0);
+        }
+    }
+
+    #[test]
     /// Purpose: Pin that an untrusted `.reverse/mcp.toml` alone fails closed while the trusted workspace server runs.
     fn reverse_manifest_untrusted_alone_fails_closed() {
         let ws = workspace();
@@ -1008,10 +1149,10 @@ mod tests {
             &ws,
             "[[server]]\nname = \"loong-reverse\"\ncommand = \"loong-reverse-mcp\"\n",
         );
-        let set = McpSet::load(&ws).unwrap();
+        let set = load_with_reverse(&ws).unwrap();
         set.trust_now().unwrap();
 
-        let set = McpSet::load(&ws).unwrap();
+        let set = load_with_reverse(&ws).unwrap();
         assert_eq!(
             set.trust,
             loong_manifest::TrustStatus::Trusted,
@@ -1036,9 +1177,9 @@ mod tests {
     fn workspace_manifest_hash_untouched_by_reverse_pair() {
         let ws = workspace();
         write(&ws, "[[server]]\nname = \"fs\"\ncommand = \"node\"\n");
-        let set = McpSet::load(&ws).unwrap();
+        let set = load_with_reverse(&ws).unwrap();
         set.trust_now().unwrap();
-        let set = McpSet::load(&ws).unwrap();
+        let set = load_with_reverse(&ws).unwrap();
         assert_eq!(set.trust, loong_manifest::TrustStatus::Trusted);
 
         // Write and trust the reverse pair: the workspace verdict does not move.
@@ -1046,9 +1187,9 @@ mod tests {
             &ws,
             "[[server]]\nname = \"loong-reverse\"\ncommand = \"loong-reverse-mcp\"\n",
         );
-        let set = McpSet::load(&ws).unwrap();
+        let set = load_with_reverse(&ws).unwrap();
         set.trust_reverse_now().unwrap();
-        let set = McpSet::load(&ws).unwrap();
+        let set = load_with_reverse(&ws).unwrap();
         assert_eq!(
             set.trust,
             loong_manifest::TrustStatus::Trusted,
@@ -1058,7 +1199,7 @@ mod tests {
 
         // Delete the reverse pair (the reverse session's exit path): still trusted.
         std::fs::remove_dir_all(ws.join(REVERSE_DIR)).unwrap();
-        let set = McpSet::load(&ws).unwrap();
+        let set = load_with_reverse(&ws).unwrap();
         assert_eq!(
             set.trust,
             loong_manifest::TrustStatus::Trusted,
@@ -1080,7 +1221,7 @@ mod tests {
             &ws,
             "[[server]]\nname = \"loong-reverse\"\ncommand = \"loong-reverse-mcp\"\n",
         );
-        let err = McpSet::load(&ws).unwrap_err().to_string();
+        let err = load_with_reverse(&ws).unwrap_err().to_string();
         assert!(err.contains("duplicate server name"), "{err}");
         assert!(err.contains("already in .loongagent"), "{err}");
     }
@@ -1093,9 +1234,9 @@ mod tests {
             &ws,
             "[[server]]\nname = \"loong-reverse\"\ncommand = \"loong-reverse-mcp\"\n",
         );
-        let set = McpSet::load(&ws).unwrap();
+        let set = load_with_reverse(&ws).unwrap();
         set.trust_reverse_now().unwrap();
-        let set = McpSet::load(&ws).unwrap();
+        let set = load_with_reverse(&ws).unwrap();
         assert_eq!(set.servers.len(), 1);
         assert_eq!(set.active().len(), 1, "the trusted reverse server runs");
         assert_eq!(set.active()[0].origin, ManifestOrigin::Reverse);

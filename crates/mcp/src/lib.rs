@@ -34,6 +34,6 @@ pub use client::{
 };
 pub use config::{
     ConfigError, Defer, ManifestOrigin, McpServerSpec, McpSet, MCP_DIR, MCP_FILE, MCP_TRUST_FILE,
-    REVERSE_DIR,
+    REVERSE_DIR, REVERSE_DIR_ENV,
 };
 pub use loong_manifest::TrustStatus;

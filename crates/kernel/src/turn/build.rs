@@ -101,10 +101,10 @@ struct AttachedMcp {
 /// Serves: external tools behind the same registry and gate as the built-ins, with a required server fatal when unusable.
 /// Design: `docs/design/extension-model.md` §3.
 /// Up: `Kernel::build`.
-/// Down: `McpSet::load`, `McpClient::start`, `list_tools`, `list_prompts` and `Registry::register`.
+/// Down: `McpSet::load_for_process`, `McpClient::start`, `list_tools`, `list_prompts` and `Registry::register`.
 /// Verify: `cargo test -p loong-kernel turn::tests::a_required_server_that_cannot_start_is_fatal`.
 fn attach_mcp(workspace: &Path, tools: &mut Registry) -> Result<AttachedMcp, KernelError> {
-    let set = McpSet::load(workspace).map_err(|e| KernelError::Mcp(e.to_string()))?;
+    let set = McpSet::load_for_process(workspace).map_err(|e| KernelError::Mcp(e.to_string()))?;
     let mut note = set.summary();
     // The reverse manifest is fail-closed per source: its servers stay inert when
     // their own trust check fails, but the session still starts and is told.

@@ -72,7 +72,10 @@ pub(crate) fn serve(args: Args) -> Result<(), String> {
         Ok(set) => eprintln!("[hooks] {}", set.summary()),
         Err(e) => return Err(format!("hooks.toml is broken: {e}")),
     }
-    match loong_mcp::McpSet::load(&args.cwd) {
+    // `load_for_process`: a reverse session's manifest lives in its own run directory,
+    // named by `LOONGAGENT_REVERSE_DIR` (reverse.md §3), and this line should report
+    // what *this* process will attach, not what a plain session would.
+    match loong_mcp::McpSet::load_for_process(&args.cwd) {
         Ok(set) => eprintln!("[mcp]   {}", set.summary()),
         Err(e) => return Err(format!("mcp.toml is broken: {e}")),
     }
@@ -160,10 +163,44 @@ pub(crate) fn serve(args: Args) -> Result<(), String> {
     // and a fresh log beside the current one.
     let factory_args = args.clone();
     let factory_settings = settings.clone();
+    // A drawer is where a surface keeps its conversations: a named folder instead of the
+    // workspace's own, which is how a reverse project's picker stays its own list.
+    let drawer = args
+        .session_drawer
+        .as_deref()
+        .map(crate::session::drawer_dir);
+    let factory_drawer = drawer.clone();
     let factory: loong_server::KernelFactory = Box::new(move || {
-        let id = new_session_id(&factory_args.cwd);
-        let path = session_dir(&factory_args.cwd).join(format!("{id}.jsonl"));
+        let (id, path) = match &factory_drawer {
+            Some(dir) => {
+                let id = crate::session::new_session_id_in_drawer(dir);
+                let path = crate::session::session_file_in_drawer(dir, &id);
+                (id, path)
+            }
+            None => {
+                let id = new_session_id(&factory_args.cwd);
+                let path = session_dir(&factory_args.cwd).join(format!("{id}.jsonl"));
+                (id, path)
+            }
+        };
         build_kernel(&factory_args, &factory_settings, &path).map(|kernel| (id, kernel))
+    });
+    // `session.open` needs the same service for a session that already exists — the reverse
+    // page's picker names one of this project's logs, and the answer must be that log or an
+    // error, never a fresh one under the same name (reverse-conversation.md).
+    let opener_args = args.clone();
+    let opener_settings = settings.clone();
+    let opener_drawer = drawer.clone();
+    let opener: loong_server::KernelOpener = Box::new(move |wanted: &str| {
+        check_session_id(wanted)?;
+        let path = match &opener_drawer {
+            // Inside a drawer the answer is that drawer's log or an error: falling back to
+            // another project's conversation would hand the page a history it is not showing.
+            Some(dir) => crate::session::resolve_session_in_drawer(dir, wanted)?,
+            None => crate::session::resolve_session(wanted, &opener_args.cwd)?,
+        };
+        let id = crate::session::session_id_of(&path);
+        build_kernel(&opener_args, &opener_settings, &path).map(|kernel| (id, kernel))
     });
     // The surface that spawned us may have opened a private control channel, which is how
     // `/yolo` reaches a turn that owns the connection. The slot is created here because
@@ -177,9 +214,14 @@ pub(crate) fn serve(args: Args) -> Result<(), String> {
         kernel.use_permissions_requester(std::sync::Arc::clone(slot));
     }
     let session_cwd = args.cwd.clone();
+    let list_drawer = drawer.clone();
     let server = Server::new(kernel, args.session_id())
         .with_factory(factory)
-        .with_session_lister(Box::new(move |limit| session_infos(&session_cwd, limit)));
+        .with_session_opener(opener)
+        .with_session_lister(Box::new(move |limit| match &list_drawer {
+            Some(dir) => crate::session::session_infos_in_drawer(dir, limit),
+            None => session_infos(&session_cwd, limit),
+        }));
     #[cfg(unix)]
     let server = match (&permissions, args.control_fd) {
         (Some(slot), Some(fd)) => server.with_permissions(std::sync::Arc::clone(slot), fd),
@@ -328,6 +370,29 @@ pub(crate) const DEFAULT_SUMMARIZER_URL: &str = "http://127.0.0.1:11434";
 /// the attempt sequence (`Store::digest`), because asking a model to copy a list it
 /// can read was measured to fail both ways.
 pub(crate) const DEFAULT_SUMMARIZER_MODEL: &str = "qwen2.5:7b-instruct";
+
+/// Purpose: Refuse anything that is not a session id before it can be read as a path.
+///
+/// A surface names a session, and a surface may be handed anything: an id that contains a
+/// separator, or that already looks like a log path, would resolve outside the session
+/// directory if `resolve_session` (which does accept paths, for the command line) saw it.
+/// The page's picker only ever sends ids from `session.list`, so anything else is a caller
+/// that is confused or hostile, and both deserve the same refusal.
+/// Serves: the `KernelOpener` `serve` installs.
+/// Design: `docs/design/reverse-conversation.md` 「The picker」.
+/// Up: that opener only.
+/// Down: nothing.
+/// Verify: `cargo test -p loongagent opens_only_session_ids`.
+fn check_session_id(wanted: &str) -> Result<(), String> {
+    if wanted.is_empty()
+        || wanted.contains('/')
+        || wanted.contains('\\')
+        || wanted.ends_with(".jsonl")
+    {
+        return Err(format!("{wanted:?} is not a session id"));
+    }
+    Ok(())
+}
 
 /// Purpose: Open the log at a path or create it, with the models, catalogue and memory a session needs.
 /// Serves: `serve` for the first session and the `KernelFactory` for every later one.
@@ -667,6 +732,19 @@ mod instruction_wiring_tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static N: AtomicU64 = AtomicU64::new(0);
+
+    /// Purpose: The opener takes ids and refuses paths, so a picker cannot read outside the
+    /// session directory.
+    /// Verify: `cargo test -p loongagent opens_only_session_ids`.
+    #[test]
+    fn opens_only_session_ids() {
+        assert!(super::check_session_id("20261019-120000-1").is_ok());
+        assert!(super::check_session_id("latest").is_ok());
+        for bad in ["", "../../etc/passwd", "/tmp/x", "x.jsonl", "dir\\id"] {
+            let refused = super::check_session_id(bad).expect_err(bad);
+            assert!(refused.contains("is not a session id"), "{refused}");
+        }
+    }
 
     /// Purpose: A real build reads AGENTS.md and seats it as a rules entry, not just an empty config field.
     #[test]

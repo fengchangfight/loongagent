@@ -81,14 +81,15 @@ impl loong_web::Session for WebSession {
 /// Serves: `loongagent web`.
 /// Design: `docs/design/surfaces.md` §4.
 /// Up: `main.rs`'s `web` arm; no other caller.
-/// Down: `Args::settings_with_pack`, `ChildTransport::spawn`, `loong_web::{random_token, bind, serve}`.
+/// Down: `Args::settings_with_pack`, `ChildTransport::spawn`, `loong_web::{random_token, bind, serve}`,
+/// and `crate::browser::open_in_browser` for the printed URL.
 /// Verify: `cargo test -p loongagent --test web_surface`.
 pub(crate) fn web(args: Args) -> Result<(), String> {
-    let (session, settings) = make_session(&args)?;
+    let portal = make_session(&args)?;
     let token = loong_web::random_token()?;
     let (listener, addr) = loong_web::bind(&args.bind, args.port)?;
 
-    for row in settings.explain_all() {
+    for row in portal.settings.explain_all() {
         eprintln!(
             "[config] {:<28} {:<9} {}",
             row.key,
@@ -96,32 +97,44 @@ pub(crate) fn web(args: Args) -> Result<(), String> {
             row.source
         );
     }
+    let url = format!("http://{addr}/#token={token}");
     println!("loongagent web — open this URL:");
     println!();
-    println!("  http://{addr}/#token={token}");
+    println!("  {url}");
     println!();
     println!("The token is in the URL fragment: browsers never send it to a server, and");
     println!("another page cannot open the socket without it. Bound to {addr}.");
-    loong_web::serve(session, listener, token);
+    // The URL is printed first, so a machine without an opener still shows the way in.
+    crate::browser::open_in_browser(&url);
+    loong_web::serve(portal.session, listener, token);
     Ok(())
 }
 
+/// Purpose: What `make_session` hands back: the socket's view of the session, the settings to
+/// echo, and the server child's pid — the id a stop needs, because interrupting a turn is a
+/// signal to the child (`surfaces.md` §7), not a request the busy child could read.
+/// Serves: `web` and the reverse session's portal.
+/// Design: `docs/design/surfaces.md` §4 and §7.
+/// Up: `web`, `crate::reverse::run_portal`.
+/// Down: nothing; the fields are read by those two callers.
+/// Verify: `cargo test -p loongagent` (the `web_surface.rs` integration tests).
+pub(crate) struct Portal {
+    /// Purpose: The session every browser socket shares, behind the one lock `exchange` takes.
+    pub(crate) session: std::sync::Arc<std::sync::Mutex<dyn loong_web::Session>>,
+    /// Purpose: The resolved settings, for the caller to print.
+    pub(crate) settings: loong_config::Profile,
+    /// Purpose: The server child's process id, for `loong_tui::interrupt`.
+    pub(crate) server_pid: u32,
+}
+
 /// Purpose: Build the kernel-backed `Session` shared by every socket, with the
-/// resolved settings for the caller to echo.
+/// resolved settings for the caller to echo and the child's pid for a stop.
 /// Serves: `web` and the reverse session's portal (`crates/cli/src/reverse.rs`).
 /// Design: `docs/design/surfaces.md` §4.
 /// Up: `web`, `crate::reverse::run_portal`.
 /// Down: `ChildTransport::spawn`, `WebSession`.
 /// Verify: `cargo test -p loongagent` (the `web_surface.rs` integration tests).
-pub(crate) fn make_session(
-    args: &Args,
-) -> Result<
-    (
-        std::sync::Arc<std::sync::Mutex<dyn loong_web::Session>>,
-        loong_config::Profile,
-    ),
-    String,
-> {
+pub(crate) fn make_session(args: &Args) -> Result<Portal, String> {
     args.ensure_parent()?;
     let (settings, pack) = args.settings_with_pack()?;
     if let Some(state) = &pack {
@@ -133,6 +146,7 @@ pub(crate) fn make_session(
         );
     }
     let (transport, notes, _control) = ChildTransport::spawn(args, true)?;
+    let server_pid = transport.pid();
     if let Some(notes) = notes {
         // The server's own diagnostics go to this terminal, where the operator is.
         std::thread::spawn(move || {
@@ -146,5 +160,9 @@ pub(crate) fn make_session(
             transport,
             cwd: args.cwd.display().to_string(),
         }));
-    Ok((session, settings))
+    Ok(Portal {
+        session,
+        settings,
+        server_pid,
+    })
 }

@@ -34,6 +34,23 @@ use tungstenite::{accept_hdr, Message};
 /// The page, compiled in: one file, no build step, no CDN.
 pub const INDEX: &str = include_str!("index.html");
 
+/// Purpose: The site icon, compiled in — one copy for every page this crate serves.
+///
+/// The chat page and the study tab live on one origin, so both ask for the same path and the
+/// browser shows a recognisable tab. It is the same logo the extension ships, copied rather
+/// than referenced: the two crates must not depend on each other for an image.
+/// Serves: `handle_routed`, for a request to `FAVICON_PATH`.
+/// Design: `docs/design/reverse-ui.md` §Layout.
+/// Up: `handle_routed`.
+/// Down: the file `assets/favicon.png`, compiled in by `include_bytes!`.
+/// Verify: `cargo test -p loong-web favicon`.
+pub const FAVICON: &[u8] = include_bytes!("../assets/favicon.png");
+
+/// Purpose: The path a page names in `<link rel="icon">`; the browsers' own `/favicon.ico`
+/// request answers the same bytes.
+/// Contract: `crates/web/src/lib.rs`.
+pub const FAVICON_PATH: &str = "/favicon.png";
+
 /// What the web layer needs from a session: a line in, lines out.
 ///
 /// The lines are exactly what the stdio server writes — events first, then the
@@ -225,6 +242,12 @@ fn handle_routed(
     if request_line.contains("/ws") || is_upgrade {
         return websocket(stream, session, token);
     }
+    // One icon for every page on this origin, before the router gets a say: the study tab asks
+    // for it too, and its own router has no reason to know about images.
+    let asked = request_line.split_whitespace().nth(1).unwrap_or("");
+    if asked == FAVICON_PATH || asked == "/favicon.ico" {
+        return icon(stream);
+    }
     if let Some(router) = router {
         let path = request_line.split_whitespace().nth(1).unwrap_or("");
         let prefix = router.prefix();
@@ -244,6 +267,29 @@ fn handle_routed(
         }
     }
     static_page(stream)
+}
+
+/// Purpose: Answer a request for the site icon with the compiled-in PNG.
+///
+/// Serves: the chat page and the study tab, both of which name `/favicon.png`.
+/// Design: `docs/design/reverse-ui.md` §Layout.
+/// Up: `handle_routed`.
+/// Down: `FAVICON` and the TCP writes.
+/// Verify: `cargo test -p loong-web favicon`.
+fn icon(mut stream: TcpStream) -> Result<(), String> {
+    // Drain the request: an unread buffer makes the kernel answer RST instead of our bytes.
+    let mut buffer = [0u8; 4096];
+    let _ = stream.read(&mut buffer);
+    let head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\n\
+         Cache-Control: max-age=86400\r\nConnection: close\r\n\r\n",
+        FAVICON.len()
+    );
+    stream
+        .write_all(head.as_bytes())
+        .and_then(|_| stream.write_all(FAVICON))
+        .and_then(|_| stream.flush())
+        .map_err(|e| e.to_string())
 }
 
 /// Purpose: Answer a plain GET with the embedded page.
@@ -437,6 +483,31 @@ mod tests {
         );
     }
 
+    /// Purpose: Pins that the site icon is served as a PNG, at both paths a browser may ask for,
+    /// so the tab is recognisable on the chat page and on the study tab.
+    #[test]
+    fn favicon_is_served_as_a_png() {
+        let session = Arc::new(Mutex::new(Echo(vec![])));
+        let (addr, _) = start(session);
+        for path in [FAVICON_PATH, "/favicon.ico"] {
+            let mut stream = TcpStream::connect(addr).unwrap();
+            let request =
+                format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+            stream.write_all(request.as_bytes()).unwrap();
+            let mut body = Vec::new();
+            stream.read_to_end(&mut body).unwrap();
+            let head = String::from_utf8_lossy(&body).to_string();
+            assert!(head.starts_with("HTTP/1.1 200 OK"), "{path}: {head}");
+            assert!(head.contains("Content-Type: image/png"), "{path}: {head}");
+            assert!(body.ends_with(FAVICON), "{path}: the bytes are the icon");
+        }
+        // And the page names it, or no browser would ask.
+        assert!(
+            INDEX.contains("rel=\"icon\"") && INDEX.contains(&format!("href=\"{FAVICON_PATH}\"")),
+            "the page points at the icon"
+        );
+    }
+
     /// Purpose: Pins that a WebSocket carries a request and gets the event and then the answer.
     #[test]
     fn a_websocket_carries_a_request_and_gets_the_answer_back() {
@@ -596,6 +667,10 @@ mod tests {
             "message.appended",
             "tool.call",
             "approval.requested",
+            // The session offers models; the page lists them and can switch.
+            "model.list",
+            "model.select",
+            "id=\"model\"",
             "ws",
         ] {
             assert!(INDEX.contains(needle), "the page handles {needle}");

@@ -46,7 +46,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "/yolo",
         aliases: &[],
-        description: "打开或关闭确认提示（沙箱不受影响）",
+        description: "关掉确认提示，删东西和外发仍然会问",
     },
     Command {
         name: "/expand",

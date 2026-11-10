@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>loongagent</title>
+<link rel="icon" type="image/png" href="/favicon.png">
 <style>
   :root {
     --bg: #12141a; --panel: #191c24; --line: #262b36; --fg: #dfe3ec;
@@ -17,6 +18,12 @@
            border-bottom: 1px solid var(--line); background: var(--panel); }
   header b { color: var(--accent); font-weight: 600; }
   header .meta { color: var(--dim); font-size: 13px; }
+  #model { font: inherit; font-size: 13px; color: var(--fg);
+           background: #14161d; border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; }
+  #model:disabled { color: var(--dim); }
+  #yolo { margin-left: auto; font: inherit; font-size: 13px; color: var(--fg); background: #14161d;
+          border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px; cursor: pointer; }
+  #yolo.on { border-color: var(--warn); color: var(--warn); }
   #log { padding: 16px; height: calc(100vh - 148px); overflow-y: auto; }
   .row { margin: 0 0 10px; white-space: pre-wrap; word-break: break-word; }
   .you { color: var(--accent); }
@@ -48,6 +55,9 @@
   <b>loongagent</b>
   <span class="meta" id="session">connecting…</span>
   <span class="meta" id="state"></span>
+  <!-- Deleting and sending data out still ask even when this is on (ADR-0020). -->
+  <button id="yolo" type="button" title="skip the questions, except deleting and sending data out">auto-approve: off</button>
+  <select id="model" title="model for this session"></select>
 </header>
 <div id="log"></div>
 <footer>
@@ -61,6 +71,8 @@
   const sessionLabel = document.getElementById("session");
   const stateLabel = document.getElementById("state");
   const input = document.getElementById("prompt");
+  const modelSelect = document.getElementById("model");
+  const yoloButton = document.getElementById("yolo");
 
   // The token is in the fragment: browsers never send a fragment to a server, so
   // it does not appear in any log on the way here.
@@ -93,6 +105,26 @@
   }
   const escape = (text) => String(text ?? "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
 
+  // YOLO is the kernel's fact, not this page's guess: `session.attach` says whether it
+  // is already in force, and `permissions.relaxed` says when it changes.
+  let yoloOn = false;
+  function showYolo(on) {
+    yoloOn = !!on;
+    yoloButton.textContent = yoloOn ? "auto-approve: on" : "auto-approve: off";
+    yoloButton.classList.toggle("on", yoloOn);
+    yoloButton.title = yoloOn
+      ? "deleting and sending data out still ask. Click to ask about everything again."
+      : "skip the questions, except deleting and sending data out";
+  }
+  yoloButton.onclick = () => {
+    if (!sessionId) return;
+    send("permissions.set", { session_id: sessionId, auto_approve: !yoloOn }, (message) => {
+      if (message.error) { row("permissions: " + escape(message.error.message), "bad"); return; }
+      showYolo(message.result.auto_approve);
+    });
+  };
+  showYolo(false);
+
   function setBusy(value, label) {
     busy = value;
     stateLabel.textContent = value ? (label || "working…") : "";
@@ -107,13 +139,46 @@
 
   const socket = new WebSocket(`ws://${location.host}/ws?token=${encodeURIComponent(token)}`);
 
+  // The models this session offers come from the server: `model.list` names them and
+  // `model.select` switches, recorded as a person's choice exactly as the TUI's is.
+  function showModels(result) {
+    const models = result.models || [];
+    modelSelect.innerHTML = "";
+    for (const offering of models) {
+      const option = document.createElement("option");
+      option.value = offering.name;
+      option.textContent = offering.name;
+      option.title = [offering.provider, offering.model,
+        offering.context_window ? `${offering.context_window} tokens` : ""]
+        .filter(Boolean).join(" · ");
+      modelSelect.appendChild(option);
+    }
+    modelSelect.value = result.selected;
+    modelSelect.disabled = models.length < 2;
+    modelSelect.title = models.length < 2
+      ? "this configuration offers one model"
+      : "model for this session";
+  }
+  modelSelect.onchange = () => {
+    const name = modelSelect.value;
+    send("model.select", { session_id: sessionId, name }, (message) => {
+      if (message.error) { row("model: " + escape(message.error.message), "bad"); return; }
+      showModels(message.result);
+      row(`model: <b>${escape(name)}</b>`, "note");
+    });
+  };
+
   socket.onopen = () => {
     send("session.attach", { cwd: "", client: "web" }, (message) => {
       if (message.error) { row("attach failed: " + escape(message.error.message), "bad"); return; }
       sessionId = message.result.session_id;
       sessionLabel.textContent = `session ${sessionId} · schema ${message.result.schema_version}` +
         (message.result.existing_events ? ` · ${message.result.existing_events} events` : "");
+      showYolo(message.result.auto_approve);
       row("Connected. Ask for something — try <code>/help</code>.", "note");
+      send("model.list", { session_id: sessionId }, (listed) => {
+        if (listed.result) showModels(listed.result);
+      });
     });
   };
   socket.onclose = () => { setBusy(false); row("Disconnected.", "bad"); };
@@ -148,6 +213,12 @@
       case "policy.decided":
         row(`policy: <b>${escape(data.verdict)}</b> by ${escape(data.rule)} (${escape(data.action_class)})`, "note");
         break;
+      case "permissions.relaxed":
+        showYolo(data.auto_approve);
+        row(data.auto_approve
+          ? "auto-approve is on: deleting and sending data out still ask."
+          : "auto-approve is off: every out-of-bounds action asks.", "note");
+        break;
       case "approval.requested": askApproval(data); break;
       case "approval.decided":
         row(`approval ${data.granted ? "granted" : "denied"} (${escape(data.scope)})`, data.granted ? "ok" : "warn");
@@ -173,6 +244,10 @@
         break;
       case "cost.recorded":
         row(`tokens ${data.tokens_in} in / ${data.tokens_out} out`, "note");
+        break;
+      case "model.selected":
+        // A routing rule may switch mid-turn; the picker follows the session.
+        modelSelect.value = data.model;
         break;
       default:
         row(kind, "note");

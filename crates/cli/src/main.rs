@@ -38,6 +38,7 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::mpsc::Receiver;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod browser;
 mod config_cmd;
 mod context;
 mod control;
@@ -67,8 +68,8 @@ use crate::repl::repl;
 use crate::sandbox::sandbox_self_test;
 use crate::server::serve;
 use crate::session::{
-    choose_session, default_session_path, delete, fork, list_sessions, resume, session_id_of,
-    SessionSource,
+    choose_session, default_session_path, delete, fork, list_sessions, repair, resume,
+    session_id_of, SessionSource,
 };
 use crate::tui::full_screen;
 use crate::web::web;
@@ -99,12 +100,18 @@ USAGE:
   loongagent sessions       [--all] [--limit N] [--cwd DIR]                list them
   loongagent fork [ID]      [--at SEQ] [--cwd DIR]                         a child session
   loongagent delete ID      [--force] [--cwd DIR]                          its whole branch
+  loongagent repair [ID|PATH ...] [--all] [--check] [--cwd DIR]   renumber a log two writers broke
   loongagent repl           [--session PATH] [--cwd DIR] [--model NAME]   line mode (any pipe)
   loongagent web            [--session PATH] [--cwd DIR] [--model NAME] [--port N] [--bind IP]
   loongagent reverse        [--cwd DIR] [--port N] [--bind IP]         a reverse-engineering study session:
                             serves the study tab (/reverse) beside the chat tab on one portal;
                             pick the target (a file or folder) at the top of that tab, and the
-                            notes land in .reverse/study/. A target argument only prefills it.
+                            notes land in .reverse/study/<run>/. The conversation it opens is the
+                            one in .reverse/projects/<project>/session, and the page replays it,
+                            so the history is there tomorrow; the project's other conversations
+                            are in the page's picker, and --session/--new names a different one.
+                            One launch is one run (run-001, run-002, …). A target argument only
+                            prefills it.
   loongagent run \"PROMPT\"   [--session PATH] [--cwd DIR] [--model NAME] [--budget N] [--keep-newest N]
                             [--max-steps N]   a step is one model call; 0 means no limit
   --debug-model             append every raw model exchange to <session>.models.jsonl:
@@ -236,6 +243,17 @@ struct Args {
     bootstrap: Vec<String>,
     /// `plugin add --force`: replace an existing install of the same name.
     force: bool,
+    /// The reverse run directory this session reads its MCP manifest from (set by
+    /// `reverse::run`, never by a flag). It reaches the server child as
+    /// `LOONGAGENT_REVERSE_DIR`, so a second reverse process in the same project keeps
+    /// its own manifest ([reverse.md](../design/reverse.md) §3).
+    reverse_dir: Option<PathBuf>,
+    /// The drawer of sessions this server's new/open/list calls work in (set by
+    /// `reverse::run`; a person never passes it). A reverse project keeps its
+    /// conversations in a folder of its own instead of the workspace's, so its picker
+    /// cannot show the TUI's conversations
+    /// ([sessions-lineage.md](../design/sessions-lineage.md) §1).
+    session_drawer: Option<String>,
     positional: Vec<String>,
 }
 
@@ -250,20 +268,20 @@ impl Args {
         Self::parse_with(rest, false)
     }
 
-    /// Purpose: Parse the full-screen surface's flags, whose default with no `--session` is a fresh session.
+    /// Purpose: Parse the flags for a command whose default with no `--session` is a fresh session.
     /// Serves: `run`'s `tui` arm and its default arm (no subcommand, or only flags).
-    /// Design: `docs/design/surfaces.md` §2.
-    /// Up: `run`'s `tui` arm and its default arm.
+    /// Design: `docs/design/surfaces.md` §2 and `docs/design/sessions-lineage.md` §5.
+    /// Up: those two arms of `run`.
     /// Down: `parse_with`.
     /// Verify: `cargo test -p loongagent`.
-    fn parse_tui(rest: &[String]) -> Result<Self, String> {
+    fn parse_fresh(rest: &[String]) -> Result<Self, String> {
         Self::parse_with(rest, true)
     }
 
     /// Purpose: The one parser: read the flags, load the env files, and settle the session once the whole line is known.
-    /// Serves: `parse` and `parse_tui`.
+    /// Serves: `parse` and `parse_fresh`.
     /// Design: `docs/design/surfaces.md` §2; `docs/design/config-routing.md` §5.
-    /// Up: `parse` and `parse_tui`; no other caller.
+    /// Up: `parse` and `parse_fresh`; no other caller.
     /// Down: `load_env_files`, `config_dir` and `finish_session`.
     /// Verify: `cargo test -p loongagent`.
     fn parse_with(rest: &[String], fresh_by_default: bool) -> Result<Self, String> {
@@ -300,6 +318,8 @@ impl Args {
             skills: None,
             bootstrap: Vec::new(),
             force: false,
+            reverse_dir: None,
+            session_drawer: None,
             positional: Vec::new(),
         };
         // Before anything resolves a reference: a pack says `env:NAME`, and this is
@@ -320,6 +340,14 @@ impl Args {
                     );
                 }
                 "--new" => args.new_session = true,
+                "--session-drawer" => {
+                    i += 1;
+                    let name = rest.get(i).ok_or("--session-drawer needs a name")?.clone();
+                    if name.contains('/') || name.contains("..") || name.is_empty() {
+                        return Err(format!("{name:?} is not a drawer name"));
+                    }
+                    args.session_drawer = Some(name);
+                }
                 "--cwd" => {
                     i += 1;
                     args.cwd = PathBuf::from(rest.get(i).ok_or("--cwd needs a path")?);
@@ -621,6 +649,18 @@ impl Args {
         session_id_of(&self.session_path())
     }
 
+    /// Purpose: Whether the person named the session themselves (`--session …` or `--new`),
+    /// rather than a default having picked one — which is what `reverse` needs to know before
+    /// it binds a project's conversation (`docs/design/reverse.md` §5).
+    /// Serves: `crate::reverse::run`.
+    /// Design: `docs/design/sessions-lineage.md` §5.
+    /// Up: `crate::reverse::run`; no other caller.
+    /// Down: nothing; it reads two fields `parse_with` set.
+    /// Verify: `cargo test -p loongagent reverse_session`.
+    fn session_was_named(&self) -> bool {
+        self.session_spec.is_some() || self.new_session
+    }
+
     /// Purpose: Create the session directory before anything writes the log into it.
     /// Contract: `main.rs` accessor; `serve`, `full_screen`, `repl`, `headless` and `web` call it.
     fn ensure_parent(&self) -> Result<(), String> {
@@ -706,7 +746,7 @@ fn run() -> Result<(), String> {
     match command {
         // No subcommand is the full-screen surface: `loongagent` is what people type,
         // and `tui` stays as the explicit spelling of the same thing.
-        "" => full_screen(Args::parse_tui(rest)?),
+        "" => full_screen(Args::parse_fresh(rest)?),
         "server" => {
             let args = Args::parse(rest)?;
             if !args.stdio {
@@ -761,18 +801,23 @@ fn run() -> Result<(), String> {
         "control" => control(rest),
         "profiles" => profiles(Args::parse(rest)?),
         "use" => use_profile(Args::parse(rest)?, rest),
-        "tui" => full_screen(Args::parse_tui(rest)?),
+        "tui" => full_screen(Args::parse_fresh(rest)?),
         "resume" => resume(rest),
         "fork" => fork(rest),
         "delete" => delete(rest),
+        "repair" => repair(rest),
         "sessions" => list_sessions(rest),
         "repl" => repl(Args::parse(rest)?),
         "web" => web(Args::parse(rest)?),
         "reverse" => {
             // No target on the command line: it is chosen in the study tab
             // (docs/design/reverse.md §4.1). A target given anyway only prefills it.
-            let args = Args::parse(rest)?;
-            crate::reverse::run(args.positional.first().map(String::as_str), &args)
+            // Not `parse_fresh`: the project owns the conversation, and `reverse::run`
+            // binds it after reading `projects/<project>/session` — a fresh id here would
+            // outrank that binding and lose the history on every start (§5).
+            let mut args = Args::parse(rest)?;
+            let target = args.positional.first().cloned();
+            crate::reverse::run(target.as_deref(), &mut args)
         }
         "run" => {
             let args = Args::parse(rest)?;
@@ -798,10 +843,84 @@ fn run() -> Result<(), String> {
         }
         // A run whose first token is a flag is the same default surface:
         // `loongagent --cwd DIR` should not make someone discover `tui` first.
-        flag if flag.starts_with("--") => full_screen(Args::parse_tui(&argv)?),
+        flag if flag.starts_with("--") => full_screen(Args::parse_fresh(&argv)?),
         _ => {
             println!("{USAGE}");
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Purpose: A scratch working directory so the parse tests touch nothing of the caller's.
+    /// Contract: `crates/cli/src/main.rs` test fixtures.
+    fn scratch_cwd(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("loongagent-args-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a scratch cwd");
+        dir
+    }
+
+    #[test]
+    /// Purpose: Pin what the `reverse` arm relies on: a bare `reverse` must not be a fresh
+    /// session, and a named one must be reported as named — that pair is what lets the project
+    /// reopen its recorded conversation across restarts (docs/design/reverse.md §5).
+    fn reverse_parses_a_project_session_not_a_fresh_one() {
+        let dir = scratch_cwd("reverse-bound");
+        let flags = ["--cwd".to_string(), dir.to_string_lossy().to_string()];
+
+        let bare = Args::parse(&flags).expect("reverse's flags");
+        assert!(
+            !bare.session_was_named(),
+            "nothing named means the project's own conversation decides, not the parser"
+        );
+
+        let mut named = flags.to_vec();
+        named.push("--new".to_string());
+        let named = Args::parse(&named).expect("reverse's flags with --new");
+        assert!(
+            named.session_was_named(),
+            "--new is the person opening a second conversation, and it gets recorded"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    /// Purpose: The drawer flag is how a reverse project's server child is told which folder
+    /// its conversations live in — an internal name, never a path, so it cannot write outside
+    /// `projects/` (docs/design/sessions-lineage.md §1).
+    fn the_session_drawer_is_a_name_not_a_path() {
+        let dir = scratch_cwd("drawer");
+        let base = ["--cwd".to_string(), dir.to_string_lossy().to_string()];
+
+        let mut flags = base.to_vec();
+        flags.push("--session-drawer".to_string());
+        flags.push("reverse-baidu-3f9a1c22".to_string());
+        let parsed = Args::parse(&flags).expect("a drawer name");
+        assert_eq!(
+            parsed.session_drawer.as_deref(),
+            Some("reverse-baidu-3f9a1c22"),
+            "the child is told which drawer to work in"
+        );
+
+        for bad in ["../../etc", "a/b", ""] {
+            let mut flags = base.to_vec();
+            flags.push("--session-drawer".to_string());
+            flags.push(bad.to_string());
+            assert!(
+                Args::parse(&flags).is_err(),
+                "{bad:?} is not a drawer name: the drawer is one folder under projects/"
+            );
+        }
+        // No flag is the ordinary case: the workspace's own directory.
+        assert_eq!(
+            Args::parse(&base).expect("no drawer").session_drawer,
+            None,
+            "the TUI keeps the workspace's session directory"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

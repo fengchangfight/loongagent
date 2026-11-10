@@ -2139,6 +2139,8 @@ mod tests {
             skills: None,
             bootstrap: Vec::new(),
             force: false,
+            reverse_dir: None,
+            session_drawer: None,
             positional: Vec::new(),
         };
         let empty = loong_config::Profile::default();

@@ -31,10 +31,12 @@ pub(crate) struct ChildTransport {
 
 impl ChildTransport {
     /// Purpose: The child's process id, so the interface can signal a turn without waiting for its blocked read.
-    /// Contract: `tui.rs` transport; `full_screen` is the only caller.
-    /// The server process, so the interface can ask it to stop a turn (SIGINT) without the
-    /// client's blocked read standing in the way.
-    fn pid(&self) -> u32 {
+    /// Serves: `full_screen` for the TUI's Ctrl+C, `web::make_session` for the page's stop.
+    /// Design: `docs/design/surfaces.md` §7.
+    /// Up: `full_screen` and `web::make_session`.
+    /// Down: nothing; the pid is only carried to `loong_tui::interrupt`.
+    /// Verify: `cargo test -p loongagent --test tui_surface`.
+    pub(crate) fn pid(&self) -> u32 {
         self.child.id()
     }
 
@@ -134,6 +136,19 @@ impl ChildTransport {
             command.arg("--control-fd").arg("3");
             (read, write)
         };
+        // A reverse session's manifest pair lives in its own run directory, and only the
+        // server it starts should read it: the variable rides this one child
+        // (docs/design/reverse.md §3). A plain session sets nothing, so it can never
+        // pick up reverse tools, even while a reverse session runs in this project.
+        if let Some(reverse_dir) = &args.reverse_dir {
+            command.env(loong_mcp::REVERSE_DIR_ENV, reverse_dir);
+        }
+        // A reverse project's conversations live in a drawer of their own, so its picker
+        // cannot offer the workspace's TUI conversations. Only this child gets it
+        // ([sessions-lineage.md](../design/sessions-lineage.md) §1).
+        if let Some(drawer) = &args.session_drawer {
+            command.arg("--session-drawer").arg(drawer);
+        }
         let mut child = command
             .arg("--stdio")
             .arg("--session")

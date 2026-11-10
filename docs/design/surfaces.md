@@ -46,7 +46,7 @@ The command surface, grouped by what it does:
 
 | Group | Commands | Talks to a server? |
 |---|---|---|
-| Session | `server`, `tui`, `resume`, `repl`, `web`, `run`, `sessions`, `fork`, `delete` | yes, or reads the logs |
+| Session | `server`, `tui`, `resume`, `repl`, `web`, `run`, `sessions`, `fork`, `delete`, `repair` | yes, or reads the logs |
 | Setup | `setup`, `local`, `local semantic`, `profiles`, `use`, `control` | no; writes or shows configuration and the control-plane cache |
 | Inspection | `config show`, `config explain`, `context status / verify / rebuild`, `skills list`, `hooks list`, `mcp list`, `plugin list` | some read the logs or the layer files directly |
 | Trust | `hooks trust`, `mcp trust`, `plugin add / update / remove` | no; the human decision, recorded on disk |
@@ -64,18 +64,20 @@ and `model.delta` notifications it gets back. `PendingDecision` is assembled fro
 not from a second source: the approval panel can say which tool and arguments are waiting
 because the client already saw the `tool.call` and `approval.requested`.
 
+A question is offered only while the kernel that asked it is alive: attach reports the request its
+kernel holds, and one it does not confirm is named once, then dropped ([sessions-lineage.md](sessions-lineage.md) §5).
+
 `loong-tui-app` is the ratatui screen over that client. A turn blocks on I/O, so the client
 lives on a worker thread and the screen talks to it over channels; the key handler and drawing
 are driven from ratatui's `TestBackend` in the tests. It adds only presentation and intents:
 the model picker, context panel, folds, `/yolo`, `/new`, and interrupt (a signal, not a
-protocol method); `Ctrl+←`/`Ctrl+→` reorder the model slots (`/left`, `/right` are the typed fallbacks). Local mode writes the new order back to `local.toml`'s `[[models]]`, so the next session starts with it and its first block is the default; a managed profile keeps the order for the run only. A paste arrives as one block; enter during a turn refuses a new prompt; `/yolo` still reaches the control channel. The mouse is captured by default: the wheel scrolls, and a left-drag selects the conversation and copies it on release — see [tui-selection.md](tui-selection.md); `/mouse` hands the mouse back for a terminal-native selection, and Shift-drag stays the terminal's. Server stderr becomes notes in the transcript, and a long note wraps to the page width instead of being clipped.
+protocol method); `Ctrl+←`/`Ctrl+→` reorder the model slots (`/left`, `/right` are the typed fallbacks). Local mode writes the new order back to `local.toml`'s `[[models]]`, so the next session starts with it and its first block is the default; a managed profile keeps the order for the run only. A paste arrives as one block; enter during a turn refuses a new prompt; `/yolo` still reaches the control channel. The mouse is captured by default: the wheel scrolls, and a left-drag selects the conversation and copies it on release — see [tui-selection.md](tui-selection.md); `/mouse` hands the mouse back for a terminal-native selection, and Shift-drag stays the terminal's. Server stderr becomes notes in the transcript. The page wraps: a line wider than the terminal is drawn on as many rows as it needs, breaking between words first and never inside a CJK glyph, so an answer, a tool call, a note and an open fold are all read in full instead of being cut at the right edge. Scrolling counts those rows, not the lines of the record ([tui-selection.md](tui-selection.md) §2).
 
 The prompt keeps a per-project history: ↑/↓ walk the prompts this project asked
-(`~/.loongagent/projects/<slug>/history.jsonl`, newest 200, multi-line intact); ↓ past the
-newest restores the draft. The arrows belong to the prompt, so the transcript scrolls with
-PageUp/PageDown and the wheel. While the walk is live the `@` picker and command menu stay
-closed (a recalled `/` or `@` prompt would take the arrows back), the title says `历史 n/m`,
-and the file is written best effort — a read-only home costs history, never a prompt.
+(`~/.loongagent/projects/<slug>/history.jsonl`, newest 200, multi-line intact), ↓ past the
+newest restores the draft, and the transcript scrolls with PageUp/PageDown and the wheel. While
+the walk is live the `@` picker and command menu stay closed (a recalled `/` or `@` prompt would
+take the arrows back), the title says `历史 n/m`, and a read-only home costs history, never a prompt.
 
 The screen's slash commands are offered while they are typed: `/` opens a menu above the
 input, narrowed by the prefix, one line each; ↑/↓ walks it, enter runs an exact name and only
@@ -117,14 +119,13 @@ also accepts the older English vocabulary, so scrolling back into an old session
 | anything else | default | the model's own answer, left alone |
 
 The palette names colours and never invents RGB, because a fixed tone is picked for one
-background and unreadable on the other. The same rule is why the quiet lines are the
-**terminal's own foreground, dimmed**, and not `DarkGray`: bright black *is* the background
-on a dark theme, so the bookkeeping lines were drawn into the wall (`MARK_QUIET`). The
-answers not chosen in a decision menu are `default` too; the highlighted one is coloured.
+background and unreadable on the other: that is why the quiet lines are the **terminal's own
+foreground, dimmed**, not `DarkGray` — bright black *is* the background on a dark theme, so those
+lines were drawn into the wall (`MARK_QUIET`). A menu's unchosen answers are `default`, the
+chosen one coloured.
 
-The screen is one page above one fixed prompt. The status line, the keys and the usage row
-are the only bars; between them the mark and conversation scroll, while the question, menus,
-prompt and usage row stay put, so what is typed and what the session spent stay visible.
+The screen is one page above one fixed prompt: status, keys and usage row are the only bars; the
+mark and conversation scroll between them while the question, menus, prompt and usage stay put.
 
     ╔═════════༺ ᛭ ༻═════════╗   ← the mark, scrolled away by the conversation
     ║  ▀█▀▀█▀  ██╗  ██████╗  ║
@@ -164,12 +165,16 @@ and answer the rest with the chat page; `serve` is `serve_with(..., None)`, so `
 The reverse study surface is the first tenant: `/` is chat, `/reverse` is its tab, one socket for
 both — a later mode adds a prefix and a tab, not a port ([reverse.md](reverse.md) §4).
 
+**The page chooses the model and the URL opens itself.** The header lists the session's own
+models (`model.list`) and switches with `model.select`, the TUI's choice made with a mouse; `web`
+and `reverse` hand their printed URL to the OS opener, keeping it in the terminal when none exists.
+
 ## 5. ACP: decided, not built
 
 ADR-0002 makes ACP a dialect of this protocol over JSON-RPC; ADR-0009 places the adapter after
-the TUI and web, and its control-plane URL is not built either. There is no `acp` command, crate or adapter in the tree. The only trace is the
-`"acp"` label the schema allows in `SessionAttachParams.client`. The VS Code panel is a
-separate Webview client: [vscode-surface.md](vscode-surface.md).
+the TUI and web. Neither is built: there is no `acp` command, crate or adapter and no
+control-plane URL; the only trace is the `"acp"` label `SessionAttachParams.client` allows. The
+VS Code panel is a separate Webview client: [vscode-surface.md](vscode-surface.md).
 
 ## 6. What a surface may do, and what it may not
 
@@ -181,8 +186,7 @@ separate Webview client: [vscode-surface.md](vscode-surface.md).
 | Read the session's own log through `session.replay` (a read that records nothing). | Treat a surface-local cache as policy, or let the browser page be the place a rule lives. |
 
 The rule behind the right column is ADR-0009 §3: a capability is implemented once, in the
-server. A surface may lag in exposing it; the gap should be an explicit unsupported marker, not
-a divergent local implementation.
+server. A surface may lag; the gap should be an explicit unsupported marker, not a divergent copy.
 
 ## 7. The protocol they share
 
@@ -198,9 +202,9 @@ Every surface speaks newline-delimited **JSON-RPC 2.0** from [`crates/protocol`]
 
 The method and event names live in [`crates/schema/protocol.toml`](../../crates/schema/protocol.toml),
 which is the one source for the Rust types, the TypeScript client and the samples. `session.attach`
-returns `schema_version` and the number of existing events; there is no capability negotiation.
-The event stream and its storage are owned by [events-storage.md](events-storage.md); session
-lifecycle and lineage by [sessions-lineage.md](sessions-lineage.md).
+returns `schema_version`, the event count, the request its kernel holds (`pending_approval`) and
+whether prompts are off (`auto_approve`) — a surface draws its YOLO toggle from that, never from a
+guess; there is no capability negotiation. The stream is [events-storage.md](events-storage.md)'s.
 
 ```mermaid
 flowchart LR
@@ -223,19 +227,15 @@ flowchart LR
 - **No unix socket and no shared daemon.** ADR-0001's per-user server and ADR-0009's
   multi-surface attach are not implemented; the transport is stdio and each surface starts its own
   child, which the log's write lock refuses when the session is already open in another one.
-- **`session.attach` is a handshake, not a takeover.** It returns the session id, schema version
-  and event count; it does not hand over a write token or register an observer.
-- **ACP is not built.** Only the schema's optional client label exists.
-- **The team web path is not built.** There is no control-plane relay, and the browser page is
-  served by the local binary.
+- **ACP is not built.** §5 carries what exists, which is only the schema's client label.
+- **The team web path is not built.** No control-plane relay: the local binary serves the page.
 - **The web token is the whole authentication.** The server has no user identity; a non-loopback
   bind relies on the token and on the operator's network. `random_token` reads `/dev/urandom`,
-  so `loongagent web` is effectively Unix-only today.
+  so `loongagent web` is Unix-only today.
 - **The TUI is the widest surface.** Trust and plugin commands are CLI-only; the TUI has no
   `/plugin`, `/hooks` or `/mcp` page. That is a surface gap, not a second implementation.
 - **No capability inventory.** The unsupported marker ADR-0009 asks for is a convention, not a
   checked list.
-
 ## 9. Where to read next
 
 - [ADR-0001](../decisions/0001-one-binary-client-server.md) — one binary, always client/server.

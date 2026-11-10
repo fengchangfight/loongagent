@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>loongagent · 逆向研究</title>
+<link rel="icon" type="image/png" href="/favicon.png">
 <style>
   :root {
     --bg: #12141a; --panel: #191c24; --line: #262b36; --fg: #dfe3ec;
@@ -16,12 +17,19 @@
          display: flex; flex-direction: column; height: 100vh; }
   header { display: flex; gap: 16px; align-items: baseline; padding: 10px 16px;
            border-bottom: 1px solid var(--line); background: var(--panel); }
-  header b { color: var(--accent); font-weight: 600; }
+  header b { color: var(--accent); font-weight: 600; display: flex; gap: 8px; align-items: center; }
+  header b img { width: 20px; height: 20px; display: block; }
+  header .project { color: var(--fg); font-size: 13px; padding: 2px 10px;
+                    border: 1px solid var(--line); border-radius: 999px; }
+  header .project b { color: var(--accent); font-weight: 600; }
   header .meta { color: var(--dim); font-size: 13px; }
   header nav { margin-left: auto; display: flex; gap: 8px; }
   header nav a { color: var(--dim); text-decoration: none; padding: 4px 10px;
                  border: 1px solid var(--line); border-radius: 6px; font-size: 13px; }
   header nav a.here { color: var(--accent); border-color: var(--accent); }
+  #model { font: inherit; font-size: 13px; color: var(--fg); background: #14161d;
+           border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; }
+  #model:disabled { color: var(--dim); }
 
   /* ① 选择目标：最上面、最醒目。三种类型分开，因为第一步的工具不同。 */
   #target { padding: 14px 16px 16px; border-bottom: 1px solid var(--line); background: #14161d; }
@@ -76,34 +84,138 @@
   .step button:disabled { cursor: not-allowed; border-color: var(--line); color: var(--dim);
                           background: #191c24; }
   .arrow { align-self: center; color: var(--dim); font-size: 20px; }
+  /* 进度：点下去立刻变灰 + 转圈 + 一句话说清此刻在干什么。 */
+  #progress { flex-basis: 100%; display: flex; gap: 8px; align-items: center;
+              font-size: 13px; color: var(--dim); min-height: 20px; }
+  #progress.busy { color: var(--accent); }
+  #progress.ok { color: var(--ok); }
+  #progress.bad { color: var(--bad); }
+  .spin { flex: none; width: 11px; height: 11px; border-radius: 50%;
+          border: 2px solid #3a4152; border-top-color: var(--accent);
+          animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
   #gateline { flex-basis: 100%; font-size: 12px; color: var(--dim); }
   #gateline.ready { color: var(--ok); }
 
-  main { display: grid; grid-template-columns: 240px 1fr 1fr; flex: 1; min-height: 0; }
+  /* 三栏宽度可拖：宽度是这台浏览器的心愿，不是项目事实，所以存 localStorage 而不是 .reverse/。 */
+  main { display: grid; flex: 1; min-height: 0;
+         grid-template-columns: var(--w-projects, 190px) 6px var(--w-tree, 240px) 6px 1fr; }
   .pane { border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
   .pane:last-child { border-right: 0; }
+  .pane h3 #btn-yolo.on { border-color: var(--accent); color: var(--accent); }
+  /* 会话选择器：这个项目所有的对话都在这一个下拉里，选一份接着聊。 */
+  .pane h3 #session-picker { margin-left: auto; max-width: 45%; font: inherit; font-size: 12px;
+                             color: var(--fg); background: #14161d; border: 1px solid var(--line);
+                             border-radius: 6px; padding: 2px 6px; }
+  .pane h3 #session-picker:disabled { color: var(--dim); }
+  .pane h3 #btn-new-session { margin-left: 0; }
+  .pane h3 #btn-new-session:disabled { color: var(--dim); }
+  .grip { cursor: col-resize; background: transparent; }
+  .grip:hover, .grip.dragging { background: var(--accent); opacity: .55; }
+  body.resizing { cursor: col-resize; user-select: none; }
   .pane h3 { margin: 0; padding: 8px 12px; font-size: 12px; letter-spacing: 0.08em;
              color: var(--dim); border-bottom: 1px solid var(--line);
              display: flex; gap: 8px; align-items: center; }
   .pane h3 button { margin-left: auto; font: inherit; font-size: 12px; padding: 2px 10px;
                     border-radius: 5px; border: 1px solid var(--line); background: #2b3040;
                     color: var(--fg); cursor: pointer; }
+  /* 左侧项目栏：一次只研究一个项目，切换就换一整套状态（reverse.md §3）。 */
+  #projects { overflow: auto; padding: 6px 0; flex: 1; }
+  #projects a { display: block; padding: 4px 12px; color: var(--dim); text-decoration: none;
+                white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #projects a:hover { background: #20222c; color: var(--fg); }
+  #projects a.here { color: var(--fg); background: #232733; font-weight: 600; }
+  #projects a .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+                     background: var(--ok); margin-left: 6px; vertical-align: middle; }
+  /* 删除是唯一从磁盘上删东西的按钮：平时藏起来，鼠标停在这一行才露出来，
+     免得点错项目（reverse-ui.md §"The project rail"）。 */
+  .prow { display: flex; align-items: center; }
+  .prow a { flex: 1; min-width: 0; }
+  .prow .del { flex: none; font: inherit; font-size: 13px; line-height: 1; padding: 2px 6px;
+               margin-right: 6px; border: 0; border-radius: 4px; background: transparent;
+               color: var(--dim); cursor: pointer; opacity: 0; }
+  .prow:hover .del, .prow .del:focus-visible { opacity: 1; }
+  .prow .del:hover { background: #3a2430; color: var(--bad); }
+  #projects-footer { padding: 8px 12px; border-top: 1px solid var(--line); }
+  #projects-footer button { width: 100%; font: inherit; font-size: 13px; padding: 6px 10px;
+                            border-radius: 6px; border: 1px solid var(--line);
+                            background: #2b3040; color: var(--fg); cursor: pointer; }
+  #projects-footer button:hover { border-color: var(--accent); color: var(--accent); }
   #tree { overflow: auto; font-family: var(--mono); font-size: 13px; padding: 8px 0; flex: 1; }
   #tree a { display: block; color: var(--fg); text-decoration: none; padding: 2px 12px;
             white-space: nowrap; }
   #tree a:hover { background: #20222c; }
   #tree a.dir { color: var(--dim); }
-  #preview { overflow: auto; flex: 1; padding: 12px 16px; font-family: var(--mono);
-             font-size: 13px; white-space: pre-wrap; word-break: break-word; }
+  /* 看笔记是看一眼就走的事：点文件名浮一层，Esc 或点背景关掉，不占一栏。 */
+  #preview-modal { position: fixed; inset: 6% 10% 6% 10%; display: none; flex-direction: column;
+                   background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+                   box-shadow: 0 18px 50px #000a; overflow: hidden; z-index: 12; }
+  #preview-modal.open { display: flex; }
+  #preview-modal header { border-bottom: 1px solid var(--line); }
+  #preview-modal header button { font: inherit; font-size: 12px; padding: 2px 10px;
+                                 border-radius: 5px; border: 1px solid var(--line);
+                                 background: #2b3040; color: var(--fg); cursor: pointer; }
+  #preview-modal header button:hover { border-color: var(--accent); color: var(--accent); }
+  #preview-name { flex: 1; font-family: var(--mono); font-size: 13px; color: var(--accent);
+                  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #preview-body { overflow: auto; flex: 1; padding: 12px 16px; font-family: var(--mono);
+                  font-size: 13px; white-space: pre-wrap; word-break: break-word; }
   #chat { overflow: auto; flex: 1; padding: 12px; }
   .row { margin: 0 0 8px; white-space: pre-wrap; word-break: break-word; }
   .you { color: var(--accent); }
   .say { color: var(--fg); }
   .note { color: var(--dim); font-size: 13px; }
   .bad { color: var(--bad); }
+  /* 工具行：转圈 → ✓/✗，参数一行，输出折起来。 */
+  .tool { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; font-size: 13px; }
+  .tool .mark { flex: none; width: 12px; text-align: center; }
+  .tool.ok .mark { color: var(--ok); }
+  .tool.bad .mark { color: var(--bad); }
+  .tool .name { font-family: var(--mono); color: var(--fg); }
+  .tool .args { color: var(--dim); font-family: var(--mono); font-size: 12px;
+                flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+                white-space: nowrap; }
+  .tool details { flex-basis: 100%; }
+  .tool summary { color: var(--dim); font-size: 12px; cursor: pointer; }
+  .tool pre { margin: 4px 0 0; max-height: 12em; overflow: auto; font-size: 12px;
+              color: var(--dim); white-space: pre-wrap; }
+  .tool button { font: inherit; font-size: 12px; padding: 2px 10px; border-radius: 5px;
+                 border: 1px solid var(--line); background: #2b3040; color: var(--fg);
+                 cursor: pointer; }
+  .tool button:hover { border-color: var(--accent); color: var(--accent); }
+  /* 答过的按钮不再有“还能再点一次”的样子：灰掉，鼠标也不再是点击手势。
+     点击后按钮本身会被结论替掉（见 askApproval），这条是为来不及替换的那一刻兜底。 */
+  .tool button:disabled { color: var(--dim); background: var(--panel);
+                          border-color: var(--line); cursor: not-allowed; }
+  .tool button:disabled:hover { border-color: var(--line); color: var(--dim); }
+  /* 决策落定后留在原地的结论：这张卡片已经答完，不必再回来。 */
+  .tool .decided { font-size: 12px; padding: 1px 8px; border-radius: 5px;
+                   border: 1px solid var(--line); color: var(--dim); }
+  .row.tool.ok .decided { color: var(--ok); }
+  .row.tool.bad .decided { color: var(--bad); }
+  /* 还在写的那一行：末尾一个闪动的光标，说明模型正一个词一个词地写。 */
+  .live::after { content: "▌"; color: var(--accent); animation: blink 1s steps(2) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) {
+    .spin, .live::after { animation: none; }
+  }
   footer { padding: 8px 12px; border-top: 1px solid var(--line); background: var(--panel); }
-  #prompt { width: 100%; padding: 8px 10px; font: inherit; color: var(--fg);
+  /* 输入框和它右边那颗按钮是一排：按钮宽度固定，输入框吃掉剩下的空间。 */
+  #composer { display: flex; gap: 8px; align-items: stretch; }
+  #prompt { flex: 1; min-width: 0; padding: 8px 10px; font: inherit; color: var(--fg);
             background: #14161d; border: 1px solid var(--line); border-radius: 6px; outline: none; }
+  /* 同一颗按钮两种身份：能说话时「发送」，模型还在写时「停止」。位置不动，语义跟着
+     working 走——跑着的时候给人一个按了没用的发送键，等于骗他两秒
+     （reverse-ui.md §"The chat pane"）。 */
+  #btn-send { flex: none; min-width: 76px; padding: 0 14px; font: inherit; font-size: 13px;
+              border-radius: 6px; border: 1px solid var(--line); background: #2b3040;
+              color: var(--fg); cursor: pointer; }
+  #btn-send:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  #btn-send.stop { border-color: var(--bad); color: var(--bad); }
+  #btn-send.stop:hover { background: #3a2430; }
+  #btn-send:disabled { color: var(--dim); background: var(--panel); cursor: not-allowed; }
+  /* 用量行：跟 TUI 底栏一个口径，一眼看到这个会话说了多少话、命中多少缓存。 */
+  #metrics { margin-top: 6px; font-size: 12px; font-family: var(--mono); }
 
   /* 选文件的目录浏览器：浏览器不给完整路径，只能自己列。 */
   #picker { position: fixed; inset: 10% 15% auto 15%; max-height: 70vh; display: none;
@@ -124,24 +236,26 @@
 </head>
 <body>
 <header>
-  <b>loongagent</b>
+  <b><img src="/favicon.png" alt="">loongagent</b>
   <span class="meta">逆向研究</span>
+  <span class="project" title="当前项目：笔记在 .reverse/study/&lt;项目&gt;/">项目 <b id="project">…</b></span>
   <span class="meta" id="session">连接中…</span>
+  <span class="meta" id="run" title="这次进程的编号">run-…</span>
   <nav>
     <a href="/#token=" id="tab-chat">聊天</a>
     <a href="/reverse" class="here">逆向研究</a>
   </nav>
+  <select id="model" title="这个会话用哪个模型"></select>
 </header>
 
 <section id="target">
   <div class="stephead">
     <span class="no">1</span>
     <h2>选择目标</h2>
-    <span class="hint">先定下要看什么，再开始研究。三种目标打开方式不同。</span>
+    <span class="hint">先定下要看什么，再开始研究。文件和网址走两条入口。</span>
   </div>
   <div id="kinds">
-    <button type="button" data-kind="binary">程序文件</button>
-    <button type="button" data-kind="apk">Android APK</button>
+    <button type="button" data-kind="local">本地目标</button>
     <button type="button" data-kind="url">网站</button>
   </div>
   <div id="targetrow">
@@ -155,14 +269,18 @@
 <section id="workflow">
   <div class="step" id="step-study">
     <div class="title"><span class="no">1</span>研究</div>
-    <div class="what">把目标查清楚：是什么、怎么运行、结构如何。结论写进 <code>.reverse/study/</code> 里的研究笔记。</div>
+    <div class="what">把目标查清楚：是什么、怎么运行、结构如何。结论写进 <code id="study-path">.reverse/study/</code> 里的研究笔记，解包、脚本、抓取这些原料放同目录的 <code>evidence/</code>。</div>
     <button class="primary" id="btn-study" type="button">开始研究</button>
   </div>
   <div class="arrow">→</div>
   <div class="step locked" id="step-build">
     <div class="title"><span class="no">2</span>重构</div>
-    <div class="what">按研究笔记重写一份功能等价的实现，产物落在 <code>.reverse/build/</code>。研究没完成前不能开始。</div>
+    <div class="what">按研究笔记重写一份功能等价的实现，产物落在 <code id="build-path">.reverse/build/</code>。研究没完成前不能开始。</div>
     <button id="btn-build" type="button" disabled>开始重构</button>
+  </div>
+  <div id="progress">
+    <span class="spin" id="progress-spin" style="display:none"></span>
+    <span id="progress-text">还没开始：选好目标，点「开始研究」。</span>
   </div>
   <div id="gateline">研究跑完后，点下面的按钮才算研究完成——重构那一步才会解锁。</div>
   <div style="flex-basis:100%">
@@ -174,20 +292,46 @@
 </section>
 
 <main>
-  <section class="pane">
-    <h3>.reverse/ <button id="btn-refresh" type="button">刷新</button></h3>
+  <section class="pane" id="pane-projects">
+    <h3>项目</h3>
+    <div id="projects"></div>
+    <div id="projects-footer">
+      <button id="btn-new-project" type="button">+ 新建项目</button>
+    </div>
+  </section>
+  <div class="grip" id="grip-projects" role="separator" aria-orientation="vertical" aria-label="调节栏宽" title="拖动调整宽度，双击回到默认"></div>
+  <section class="pane" id="pane-tree">
+    <h3>文件 <button id="btn-refresh" type="button">刷新</button></h3>
     <div id="tree"></div>
   </section>
-  <section class="pane">
-    <h3>文件预览 <span class="meta" id="preview-name"></span></h3>
-    <div id="preview">点左边的文件名，在这里看内容。</div>
-  </section>
-  <section class="pane">
-    <h3>对话</h3>
+  <div class="grip" id="grip-tree" role="separator" aria-orientation="vertical" aria-label="调节栏宽" title="拖动调整宽度，双击回到默认"></div>
+  <section class="pane" id="pane-chat">
+    <h3>对话
+      <!-- 这个项目所有的会话都列在这儿：一个项目可以有多份对话，选一份接着聊
+           （reverse-conversation.md）。空着的标题是“会话记录里没写过话”。 -->
+      <select id="session-picker" title="这个项目的会话，选一个接着聊"></select>
+      <button id="btn-new-session" type="button" title="另起一段对话，旧的留着">＋ 新会话</button>
+      <button id="btn-yolo" type="button"
+        title="自动批准：除了删除和把数据发出去，不再每次问你">自动批准：关</button></h3>
     <div id="chat"></div>
-    <footer><input id="prompt" placeholder="跟这个会话说点什么…" autocomplete="off"></footer>
+    <footer>
+      <div id="composer">
+        <input id="prompt" placeholder="跟这个会话说点什么…" autocomplete="off">
+        <button id="btn-send" type="button" title="发送（Enter）" disabled>发送</button>
+      </div>
+      <!-- 用量：跟 TUI 底栏一样摆出来（cost-accounting.md §4），不用去别处问花了多少。 -->
+      <div id="metrics" class="note">这个会话还没有模型调用。</div>
+    </footer>
   </section>
 </main>
+
+<div id="preview-modal">
+  <header>
+    <span id="preview-name"></span>
+    <button id="btn-preview-close" type="button">关闭</button>
+  </header>
+  <div id="preview-body"></div>
+</div>
 
 <div id="picker">
   <header>
@@ -207,11 +351,17 @@
 (() => {
   const token = new URLSearchParams(location.hash.replace(/^#/, "")).get("token") || "";
   const tree = document.getElementById("tree");
-  const preview = document.getElementById("preview");
+  const projectsEl = document.getElementById("projects");
+  const projectLabel = document.getElementById("project");
+  const modal = document.getElementById("preview-modal");
   const previewName = document.getElementById("preview-name");
+  const previewBody = document.getElementById("preview-body");
   const chatlog = document.getElementById("chat");
   const input = document.getElementById("prompt");
+  const btnSend = document.getElementById("btn-send");
+  const metricsEl = document.getElementById("metrics");
   const sessionLabel = document.getElementById("session");
+  const modelSelect = document.getElementById("model");
   const valueInput = document.getElementById("value");
   const targetStatus = document.getElementById("target-status");
   const picker = document.getElementById("picker");
@@ -224,14 +374,21 @@
   const stepStudy = document.getElementById("step-study");
   const stepBuild = document.getElementById("step-build");
   const gateline = document.getElementById("gateline");
+  const progressBar = document.getElementById("progress");
+  const progressTextEl = document.getElementById("progress-text");
+  const progressSpin = document.getElementById("progress-spin");
+  const btnYolo = document.getElementById("btn-yolo");
+  const sessionPicker = document.getElementById("session-picker");
+  const btnNewSession = document.getElementById("btn-new-session");
+  sessionPicker.onchange = () => switchSession(sessionPicker.value);
+  btnNewSession.onclick = () => newSession();
   document.getElementById("tab-chat").href = "/#token=" + encodeURIComponent(token);
 
   const HINTS = {
-    binary: "粘贴可执行文件的完整路径，例如 /home/you/app.elf",
-    apk: "粘贴 APK 的完整路径，例如 /home/you/app.apk",
+    local: "粘贴文件或文件夹的完整路径，例如 /home/you/app.elf 或 /home/you/app.apk",
     url: "粘贴网址，例如 https://example.com",
   };
-  const NAMES = { binary: "程序文件", apk: "Android APK", url: "网站" };
+  const NAMES = { local: "本地目标", url: "网站" };
 
   const escape = (t) => String(t ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   function row(html, cls) {
@@ -252,8 +409,157 @@
     targetStatus.className = kind || "";
   }
 
-  // ---- ① 目标：三个标签，类型决定第一步用哪个工具 --------------------------
-  let kind = "binary";
+  // 这次进程的 run 和它研究的项目：笔记目录按项目命名，服务端说了算
+  // （docs/design/reverse.md §3）。
+  let run = { name: "run-001", project: "", study: "study/", build: "build/", studied: false };
+
+  // 项目名会进提示词，先按服务端的规则挑一遍，报错也照服务端那句话，人说一遍就够。
+  async function loadRun() {
+    const answer = await api("/reverse/run");
+    if (!answer.ok) return;
+    try { run = await answer.json(); } catch (e) { return; }
+    document.getElementById("run").textContent = run.name;
+    projectLabel.textContent = run.project || "（还没有项目）";
+    document.getElementById("study-path").textContent = ".reverse/" + run.study + "/";
+    document.getElementById("build-path").textContent = ".reverse/" + run.build + "/";
+  }
+
+  // ---- 三栏宽度：拖得动，记得住 -------------------------------------------
+  // 宽度是这台电脑上的心愿，不是项目事实，所以只存浏览器本地；换台机器重来也不丢什么。
+  const COLUMNS = [
+    { grip: "grip-projects", pane: "pane-projects", variable: "--w-projects", min: 120, max: 420, fallback: 190 },
+    { grip: "grip-tree", pane: "pane-tree", variable: "--w-tree", min: 140, max: 520, fallback: 240 },
+  ];
+  const main = document.querySelector("main");
+  const WIDTHS_KEY = "reverse.column-widths";
+  function rememberColumns() {
+    const widths = {};
+    for (const column of COLUMNS) widths[column.grip] = parseInt(getComputedStyle(main).getPropertyValue(column.variable), 10) || column.fallback;
+    try { localStorage.setItem(WIDTHS_KEY, JSON.stringify(widths)); } catch (_) { /* 隐私模式下存不了，不影响这次拖 */ }
+  }
+  function applyColumn(column, px) {
+    main.style.setProperty(column.variable, Math.round(px) + "px");
+  }
+  function restoreColumns() {
+    let saved = {};
+    try { saved = JSON.parse(localStorage.getItem(WIDTHS_KEY) || "{}") || {}; } catch (_) { saved = {}; }
+    for (const column of COLUMNS) {
+      const px = saved[column.grip];
+      if (typeof px === "number" && px >= column.min && px <= column.max) applyColumn(column, px);
+    }
+  }
+  for (const column of COLUMNS) {
+    const grip = document.getElementById(column.grip);
+    // 双击回到默认宽度：拖歪了总得有条回家的路。
+    grip.ondblclick = () => { applyColumn(column, column.fallback); rememberColumns(); };
+    grip.onpointerdown = (event) => {
+      event.preventDefault();
+      grip.setPointerCapture(event.pointerId);
+      grip.classList.add("dragging");
+      document.body.classList.add("resizing");
+      const startX = event.clientX;
+      const startWidth = document.getElementById(column.pane).getBoundingClientRect().width;
+      const move = (moveEvent) => {
+        const next = Math.min(column.max, Math.max(column.min, startWidth + moveEvent.clientX - startX));
+        applyColumn(column, next);
+      };
+      const stop = () => {
+        grip.classList.remove("dragging");
+        document.body.classList.remove("resizing");
+        grip.onpointermove = null;
+        grip.onpointerup = null;
+        grip.onpointercancel = null;
+        rememberColumns();
+      };
+      grip.onpointermove = move;
+      grip.onpointerup = stop;
+      grip.onpointercancel = stop;
+    };
+  }
+  restoreColumns();
+
+  // ---- 自动批准（YOLO）：开着也不放宽删除和外发 -----------------------------
+  // 开关状态来自服务端（session.attach 的 auto_approve），本页不自己猜：
+  // 可能是别的标签页或 TUI 打开的，重连之后也得照实显示（ADR-0020）。
+  let yoloOn = false;
+  function showYolo(on) {
+    yoloOn = !!on;
+    btnYolo.textContent = yoloOn ? "自动批准：开" : "自动批准：关";
+    btnYolo.classList.toggle("on", yoloOn);
+    btnYolo.title = yoloOn
+      ? "除了删除和把数据发出去，不再每次问你。点一下恢复逐个确认。"
+      : "点一下：除了删除和把数据发出去，不再每次问你。";
+  }
+  btnYolo.onclick = () => {
+    if (!sessionId) { row("还没连上会话，等一两秒再点。", "bad"); return; }
+    send("permissions.set", { session_id: sessionId, auto_approve: !yoloOn }, (message) => {
+      if (message.error) { row("切换自动批准没成：" + escape(message.error.message), "bad"); return; }
+      showYolo(message.result.auto_approve);
+    });
+  };
+  showYolo(false);
+
+  // ---- the project rail: one project at a time -----------------------------
+  // 切换项目 = 换一整套状态：目标、进度、文件树都从服务端重新读，
+  // 所以直接重载页面，屏幕上不会留上一个项目的任何东西（reverse-ui.md §Rail）。
+  async function loadProjects() {
+    const answer = await api("/reverse/projects");
+    if (!answer.ok) return;
+    const data = await answer.json();
+    projectsEl.innerHTML = "";
+    for (const entry of data.projects) {
+      const prow = document.createElement("div");
+      prow.className = "prow";
+      const a = document.createElement("a");
+      a.href = "#";
+      a.className = entry.name === data.current ? "here" : "";
+      a.innerHTML = escape(entry.name) + (entry.studied ? '<span class="dot" title="这个项目已经研究过了"></span>' : "");
+      a.onclick = (event) => { event.preventDefault(); switchProject(entry.name); };
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "del";
+      del.textContent = "×";
+      del.title = "删除项目：从磁盘上删掉它的笔记、原料和重构产物，不能恢复";
+      del.onclick = (event) => { event.preventDefault(); deleteProject(entry.name); };
+      prow.appendChild(a);
+      prow.appendChild(del);
+      projectsEl.appendChild(prow);
+    }
+    if (!data.projects.length) {
+      const empty = document.createElement("a");
+      empty.textContent = "（还没有项目）";
+      empty.className = "note";
+      projectsEl.appendChild(empty);
+    }
+  }
+  async function switchProject(name) {
+    if (name === run.project) return;
+    const answer = await api("/reverse/project", { method: "POST", body: "select:" + name });
+    if (!answer.ok) { row(escape(await answer.text()), "bad"); return; }
+    location.reload();
+  }
+  document.getElementById("btn-new-project").onclick = async () => {
+    const name = window.prompt("新项目的名字（就是输出目录名，例如 my-router）");
+    if (name === null) return;
+    const answer = await api("/reverse/project", { method: "POST", body: "create:" + name.trim() });
+    if (!answer.ok) { row(escape(await answer.text()), "bad"); return; }
+    // 新项目就是干净的一页：重载，目标、进度、文件树全部从头开始。
+    location.reload();
+  };
+  // 唯一真正删磁盘内容的操作，所以先让人把项目名打一遍：回车、点错都不能造成删除。
+  async function deleteProject(name) {
+    const typed = window.prompt(
+      "删除项目「" + name + "」会从磁盘上删掉它的三处目录（projects/、study/、build/），"
+      + "连同 .trash/ 里它以前的旧笔记。删掉不能恢复。\n\n确定就输入项目名：", "");
+    if (typed === null) return;
+    if (typed.trim() !== name) { row("项目名不对，什么都没有删。", "bad"); return; }
+    const answer = await api("/reverse/project", { method: "POST", body: "delete:" + name });
+    if (!answer.ok) { row(escape(await answer.text()), "bad"); return; }
+    location.reload();
+  }
+
+  // ---- ① 目标：两个标签，类型决定第一步用哪个工具 --------------------------
+  let kind = "local";
   let target = "";
 
   function setKind(next) {
@@ -279,10 +585,10 @@
     if (savedValue) {
       target = savedValue;
       valueInput.value = savedValue;
-      setKind(NAMES[savedKind] ? savedKind : "binary");
+      setKind(NAMES[savedKind] ? savedKind : "local");
       say("沿用上次的目标：" + savedValue + "（" + NAMES[kind] + "）", "ok");
     } else {
-      setKind("binary");
+      setKind("local");
     }
   }
 
@@ -307,12 +613,167 @@
   // ---- ② 工作流：研究 → 重构，第二步等用户点“标记研究完成” -----------------
   let studyDone = false;
 
+  // ---- 进度：点下去立刻变灰，然后一步一步说清此刻在做什么 --------------------
+  // 一轮对话在服务端是同步跑的：prompt.submit 的回复要等这一轮跑完才回来。所以
+  // “在跑”就是发出请求到收到回复之间，中间的 model.delta / tool.call / tool.result
+  // 就是这一刻的进度。按钮跟着它变灰，人就不会对着一个还亮着的按钮猜。
+  let working = false;
+  let workingMode = "";   // study · build · chat · approval
+  let lastMode = "chat";  // 批准之后接着跑时，沿用同一条腿
+  let workingLabel = "";
+  let workingSince = 0;
+  let toolsStarted = 0;
+  let toolsDone = 0;
+  let lastTool = "";
+  let ticker = 0;
+  let parked = false;            // 停下来等人批准：没在跑，但这一轮也没结束
+  let live = null;               // 正在流式输出的那一行
+  let parkedApprovals = 0;       // 停下来等人批准的请求数
+  let stopping = false;          // 本页点过「停止」，这一轮的收尾要按“被打断”说
+  let interrupted = false;       // 服务端说了 turn.interrupted，这一轮没跑完
+  let stepRows = new Map();    // call_id → 工具行，好把结果贴回发起的那一行
+  let approvalRows = new Map(); // request_id → 批准卡片，好在别处答完时也收成结论
+  let switching = false;       // 换会话的请求还在路上：这颗下拉此刻不该再被人点
+
+  // 用量：跟 TUI 的 Spend 同一个口径（cost-accounting.md §4）——一条 cost.recorded
+  // 是一次模型调用；命中率只算“报了缓存”的那些调用，没报的不能算成没命中。
+  const spend = { calls: 0, tokensIn: 0, tokensOut: 0, cacheHit: 0, cacheCheckedIn: 0, usdMicros: 0, bases: {} };
+  function addCost(data) {
+    spend.calls += 1;
+    spend.tokensIn += data.tokens_in || 0;
+    spend.tokensOut += data.tokens_out || 0;
+    spend.cacheHit += data.cache_hit_tokens || 0;
+    if (data.cache_reported) spend.cacheCheckedIn += data.tokens_in || 0;
+    spend.usdMicros += data.usd_micros || 0;
+    const basis = data.price_basis || "unknown";
+    spend.bases[basis] = (spend.bases[basis] || 0) + 1;
+    renderSpend();
+  }
+  const count = (n) => Number(n).toLocaleString("en-US");
+  function price() {
+    const bases = Object.keys(spend.bases);
+    if (!bases.length) return "";
+    if (bases.every((basis) => basis === "local-free")) return "免费（本地）";
+    // 只要有调用知道价钱就照实算，哪怕是 0：不知道价钱的那几次不参与，也不许被当成免费。
+    if (bases.some((basis) => basis !== "unknown")) return "估算 $" + (spend.usdMicros / 1e6).toFixed(6);
+    return "价格未知，不估算";
+  }
+  function renderSpend() {
+    if (!spend.calls) {
+      metricsEl.textContent = "这个会话还没有模型调用。";
+      return;
+    }
+    const parts = ["入 " + count(spend.tokensIn), "出 " + count(spend.tokensOut),
+      "调用 " + spend.calls + " 次"];
+    if (spend.cacheCheckedIn) {
+      const rate = (spend.cacheHit * 100) / spend.cacheCheckedIn;
+      parts.push("缓存命中 " + count(spend.cacheHit) + "（" + rate.toFixed(0) + "%）");
+    }
+    parts.push(price());
+    metricsEl.textContent = parts.join(" · ");
+  }
+
+  // 一颗按钮，两种身份。跑着（或停着等批准）时它是「停止」，否则是「发送」：
+  // 同一个位置不该同时提供两个动作。
+  function renderButton() {
+    const busy = working || parked;
+    btnSend.textContent = busy ? "停止" : "发送";
+    btnSend.classList.toggle("stop", busy);
+    btnSend.title = busy ? "打断这一轮（跟 TUI 里一样）" : "发送（Enter）";
+    btnSend.disabled = !sessionId;
+    // 跑着或停着等批准时不给换：换过去以后这一轮的事件会写进页面已经不看的会话里。
+    // 换的请求还在路上时也不给点第二下。
+    sessionPicker.disabled = busy || switching || !sessionId;
+    btnNewSession.disabled = busy || switching || !sessionId;
+  }
+
+  function renderProgress() {
+    const parts = [];
+    if (workingLabel) parts.push(workingLabel);
+    if (working) parts.push("已用 " + Math.round((Date.now() - workingSince) / 1000) + " 秒");
+    if (toolsStarted) parts.push("工具 " + toolsDone + "/" + toolsStarted);
+    progressTextEl.textContent = parts.join(" · ") || "空闲";
+    progressBar.className = working ? "busy" : "";
+    progressSpin.style.display = working ? "" : "none";
+  }
+  // 一行结论式的收尾（成功、失败、等人点头），不转圈。
+  function settle(text, cls) {
+    if (ticker) { clearInterval(ticker); ticker = 0; }
+    progressTextEl.textContent = text;
+    progressBar.className = cls || "";
+    progressSpin.style.display = "none";
+  }
+  function activity(text) {
+    workingLabel = text;
+    renderProgress();
+  }
+
+  function setWorking(on, mode, label) {
+    working = on;
+    parked = false;
+    workingMode = on ? (mode || "chat") : "";
+    if (on) lastMode = workingMode;
+    if (on) { stopping = false; interrupted = false; }
+    workingLabel = label || "";
+    workingSince = Date.now();
+    toolsStarted = 0; toolsDone = 0; lastTool = "";
+    parkedApprovals = 0;
+    stepRows.clear();
+    if (ticker) { clearInterval(ticker); ticker = 0; }
+    if (on) ticker = setInterval(renderProgress, 1000);
+    renderProgress();
+    input.disabled = on;
+    input.placeholder = on ? "这一轮还在跑，跑完再说话…" : "跟这个会话说点什么…";
+    refreshGate();
+    renderButton();
+  }
+
+  // 从“等人点头”回到“在跑”：接着同一条腿跑，工具计数不归零。
+  function resume(label) {
+    working = true;
+    parked = false;
+    workingMode = lastMode;
+    workingLabel = label;
+    workingSince = Date.now();
+    if (!ticker) ticker = setInterval(renderProgress, 1000);
+    renderProgress();
+    input.disabled = true;
+    input.placeholder = "这一轮还在跑，跑完再说话…";
+    refreshGate();
+    renderButton();
+  }
+
+  // 停下来等人批准：不转圈了，但这一轮没结束——按钮和输入框都不能放开，
+  // 否则人会以为已经收工，去点「开始研究」又撞上同一个停住的轮次。
+  function park(text) {
+    endDelta();
+    working = false;
+    workingMode = "";
+    parked = true;
+    if (ticker) { clearInterval(ticker); ticker = 0; }
+    progressTextEl.textContent = text;
+    progressBar.className = "busy";
+    progressSpin.style.display = "none";
+    input.disabled = true;
+    input.placeholder = "在等你批准上面那个请求…";
+    refreshGate();
+    renderButton();
+  }
+
   function refreshGate() {
+    // 跑着、或者停在等人点头，两个按钮都点不动；收工后才照着门恢复。
+    const blocked = working || parked;
+    btnStudy.disabled = blocked;
+    btnStudy.textContent = parked ? "等你批准…"
+      : working && workingMode === "study" ? "正在研究…" : "开始研究";
+    btnDone.disabled = blocked;
     stepStudy.classList.toggle("done", studyDone);
     stepBuild.classList.toggle("locked", !studyDone);
     stepBuild.classList.toggle("ready", studyDone && !!target);
-    btnBuild.disabled = !(studyDone && !!target);
-    btnBuild.title = btnBuild.disabled ? "先完成研究，再点「标记研究完成」" : "";
+    btnBuild.disabled = !(studyDone && !!target) || blocked;
+    btnBuild.textContent = parked ? "等你批准…"
+      : working && workingMode === "build" ? "正在重构…" : "开始重构";
+    btnBuild.title = blocked ? "等这一轮跑完" : (btnBuild.disabled ? "先完成研究，再点「标记研究完成」" : "");
     btnDone.textContent = studyDone ? "研究已完成（点此撤销）" : "标记研究完成";
     gateline.textContent = studyDone
       ? "研究已完成，重构已解锁：可以点「开始重构」了。"
@@ -337,44 +798,78 @@
 
   // The prompts stay English on purpose: the model follows English instructions more
   // reliably, and the page already translates the *user's* side (docs/design/reverse.md §4).
+  const studyDir = () => ".reverse/" + run.study + "/";
+  const buildDir = () => ".reverse/" + run.build + "/";
+  // Research material is not a note and not a rebuild: it gets its own folder inside the study
+  // directory, which create_project makes in advance (docs/design/reverse.md §3).
+  const evidenceDir = () => studyDir() + "evidence/";
+  const keepEvidence = () => " Put every intermediate product — unpacked files, saved scripts, "
+    + "traces and captures — under " + evidenceDir() + "<name>/ (absolute paths where a tool "
+    + "wants one); " + studyDir() + " itself holds the notes and " + buildDir() + " is reserved "
+    + "for the rebuild, so write nothing there.";
   const STUDY = {
-    binary: (t) => "Open the program at " + t + " with core_target_open (it takes an absolute "
-      + "local path), then run core_target_triage to see what it is. Study it with the native "
-      + "tools (sections, strings, functions, call graph, decompilation) and enable further "
-      + "toolsets as needed. Write what you learn into .reverse/study/: 00-overview.md (what it "
-      + "is, how it runs, its stack), 01-architecture.md (structure) and 02-findings.md (key "
-      + "findings, each citing the evidence it rests on). Do not declare the study finished; "
-      + "the user decides that.",
-    apk: (t) => "Open the Android package at " + t + " with core_target_open (it takes an "
-      + "absolute local path). Then use android_package_show for package name, permissions and "
-      + "signature, android_components_list for activities/services/receivers/providers, and "
-      + "android_classes_find / android_class_show / android_method_show / android_resources_read "
-      + "on demand. The bytecode is smali: never claim Java level decompilation. Write what you "
-      + "learn into .reverse/study/: 00-overview.md, 01-architecture.md, 02-findings.md. Do not "
-      + "declare the study finished; the user decides that.",
+    local: (t) => "Open the local target at " + t + " with core_target_open (it takes an "
+      + "absolute local path), then run core_target_triage and follow the toolsets it "
+      + "recommends. If it is an Android package, use android_package_show for package name, "
+      + "permissions and signature, android_components_list for "
+      + "activities/services/receivers/providers, and android_classes_find / android_class_show "
+      + "/ android_method_show / android_resources_read on demand — its bytecode is smali, so "
+      + "never claim Java level decompilation. Otherwise study it with the native tools "
+      + "(sections, strings, functions, call graph, decompilation). Enable further toolsets as "
+      + "needed. Write what you learn into " + studyDir() + ": 00-overview.md (what it is, how it "
+      + "runs, its stack), 01-architecture.md (structure) and 02-findings.md (key findings, each "
+      + "citing the evidence it rests on)." + keepEvidence() + " Do not declare the study "
+      + "finished; the user decides that.",
     url: (t) => "Open the website " + t + " with web_site_open. It does NOT go through "
       + "core_target_open, which only takes local absolute paths. Once open, use web_pages_list, "
       + "web_page_show, web_modules_trace and web_scripts_save to read the page, its scripts and "
       + "the module graph, and web_site_capture to save the evidence (screenshot, rendered HTML, "
-      + "design tokens, assets, links and forms) into a folder. Finish with web_site_close. Write "
-      + "what you learn into .reverse/study/: 00-overview.md, 01-architecture.md, 02-findings.md, "
-      + "naming the capture folder each finding came from. Do not declare the study finished; the "
-      + "user decides that.",
+      + "design tokens, assets, links and forms) into a folder under " + evidenceDir()
+      + ". Finish with web_site_close. Write what you learn into " + studyDir() + ": "
+      + "00-overview.md, 01-architecture.md, 02-findings.md, naming the capture folder each "
+      + "finding came from." + keepEvidence() + " Do not declare the study finished; the user "
+      + "decides that.",
   };
-  const BUILD = "Read every note in .reverse/study/ and rebuild the project it describes: a "
-    + "functionally equivalent implementation written under .reverse/build/. Choose a sensible "
-    + "stack unless the user says otherwise. Then say where it landed and what works.";
+  const BUILD = () => "Read every note in " + studyDir() + " (and follow what the notes point to "
+    + "under " + evidenceDir() + ") and rebuild the project it describes: "
+    + "a functionally equivalent implementation written under " + buildDir() + ". Choose a "
+    + "sensible stack unless the user says otherwise. Then say where it landed and what works.";
+
+  // 同一个项目再点一次「开始研究」不是无操作：页面先问要不要重做。服务端此刻有没有笔记
+  // 才是事实（别的标签页可能刚写过），所以每次都重新问一次 /reverse/run。
+  async function confirmRedo() {
+    const answer = await api("/reverse/run");
+    if (!answer.ok) return true;
+    let fresh = run;
+    try { fresh = await answer.json(); } catch (e) { return true; }
+    if (!fresh.studied) return true;
+    const go = window.confirm(
+      "本项目「" + fresh.project + "」已经做过研究了。\n\n"
+      + "重做会覆盖之前的分析文档（旧的会挪到 .reverse/.trash/ 里，不删）。\n\n确定重做吗？"
+    );
+    if (!go) return false;
+    const wiped = await api("/reverse/study/redo", { method: "POST" });
+    if (!wiped.ok) { row(escape(await wiped.text()), "bad"); return false; }
+    row(escape(await wiped.text()), "note");
+    run = fresh;
+    await loadRun();
+    await loadTree();
+    return true;
+  }
 
   btnStudy.onclick = async () => {
+    if (working) return;
     if (!(await saveTarget())) return;
+    if (!(await confirmRedo())) return;
     // Continuing the study means the conclusion is not settled any more.
     if (studyDone) await setPhase(false);
-    prompt(STUDY[kind](target));
+    prompt(STUDY[kind](target), "study");
   };
   btnBuild.onclick = async () => {
+    if (working) return;
     if (!studyDone) { row("研究还没标记完成，重构不能开始。", "bad"); return; }
     if (!(await saveTarget())) return;
-    prompt(BUILD);
+    prompt(BUILD(), "build");
   };
 
   // ---- the picker: a directory browser the server answers -------------------
@@ -432,7 +927,9 @@
     saveTarget();
   };
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") closePicker();
+    if (event.key !== "Escape") return;
+    if (modal.classList.contains("open")) { closePreview(); return; }
+    closePicker();
   });
 
   // ---- the session's own files ---------------------------------------------
@@ -462,12 +959,27 @@
   async function openFile(path) {
     const answer = await api("/reverse/file/" + path.split("/").map(encodeURIComponent).join("/"));
     previewName.textContent = path;
-    if (!answer.ok) { preview.textContent = path + "：" + answer.status; return; }
-    preview.textContent = await answer.text();
+    previewBody.textContent = "";
+    modal.classList.add("open");
+    if (!answer.ok) { previewBody.textContent = "读不出来：" + answer.status; return; }
+    previewBody.textContent = await answer.text();
   }
+  function closePreview() { modal.classList.remove("open"); }
+  document.getElementById("btn-preview-close").onclick = closePreview;
+  // 点背景关掉，点内容不关：看笔记时想划一下选中几个词。
+  modal.onclick = (event) => { if (event.target === modal) closePreview(); };
 
   // ---- the chat pane: the portal's own socket ------------------------------
   let sessionId = "";
+  // Responses the page waits for (模型清单、换模型) are matched by id, so a reply
+  // never renders as a chat row: the attach keeps id 1, this counter starts at 2.
+  let nextId = 2;
+  const waiting = new Map();
+  function send(method, params, onResult) {
+    const id = nextId++;
+    if (onResult) waiting.set(id, onResult);
+    socket.send(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
+  }
   const socket = new WebSocket(`ws://${location.host}/ws?token=${encodeURIComponent(token)}`);
   socket.onopen = () => {
     socket.send(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "session.attach",
@@ -475,30 +987,447 @@
   };
   socket.onmessage = (event) => {
     const message = JSON.parse(event.data);
+    // 流式片段是通知，不是事件：它先说，最后那条 message.appended 才是记录。
+    if (message.method === "model.delta") { appendDelta(message.params.text || ""); return; }
     if (message.id === 1 && message.result) {
       sessionId = message.result.session_id;
       sessionLabel.textContent = "会话 " + sessionId;
-      row("已连接。先在上面选定目标，再点「开始研究」。", "note");
+      showYolo(message.result.auto_approve);
+      renderButton();
+      send("model.list", { session_id: sessionId }, (listed) => {
+        if (listed.result) showModels(listed.result);
+      });
+      // 这个项目所有的会话都列进下拉框，正在聊的那份选中；再问一句项目记着的
+      // 是不是同一份，不是就说清为什么不接它（reverse-conversation.md）。
+      fillSessionPicker();
+      checkRecorded();
+      replay();
       return;
     }
-    if (message.method === "event") {
-      const data = message.params.data || {};
-      if (message.params.kind === "message.appended") {
-        if (data.role === "user") row("<b>你</b> " + escape(data.text), "you");
-        else if (data.text) row(escape(data.text), "say");
-        if (data.role === "assistant") loadTree(); // 一轮可能写了研究笔记
-      }
-      return;
-    }
+    const callback = waiting.get(message.id);
+    if (callback) { waiting.delete(message.id); callback(message); return; }
+    if (message.method === "event") { renderEvent(message.params.kind, message.params.data || {}); return; }
     if (message.error) row(escape(message.error.message), "bad");
   };
-  socket.onclose = () => row("连接已断开。", "bad");
+  socket.onclose = () => {
+    row("连接已断开。", "bad");
+    if (working) finish("连接断了，这一轮没跑完。", "bad");
+    renderButton();
+  };
 
-  function prompt(text) {
+  // 打开页面先把这个会话的历史摆出来：这个项目记着的那份会话（reverse.md §5），
+  // 所以刷新、重启、隔天再来，看到的都是同一串对话，从第一条开始。
+  // `switched` 是从别处换过来时说的那句：换和连不是一回事，别让人以为自己刷新过。
+  function replay(switched) {
+    send("session.replay", { session_id: sessionId }, (message) => {
+      if (message.error) {
+        row("历史没读回来：" + escape(message.error.message), "bad");
+        row("已连接，但只看到新的。", "note");
+        return;
+      }
+      const events = (message.result && message.result.events) || [];
+      // 重放只摆行：不转进度圈、不开按钮、不算工具次数，那些说的是“此刻”，不是“以前”。
+      for (const envelope of events) renderEvent(envelope.kind, envelope.data || {}, true);
+      renderButton();
+      loadTree();
+      row(events.length
+        ? (switched ? "换到这个会话，重放了 " : "已连接，重放了 ") + events.length
+          + " 条历史。接着说就行。"
+        : (switched
+          ? "换到这个会话，它还是空的。接着说就行。"
+          : "已连接。先在上面选定目标，再点「开始研究」。"), "note");
+    });
+  }
+
+  // ---- 会话：一个项目可以有好几段对话，列出来自己挑 ------------------------
+  // 这个下拉里的每一条都属于这个逆向项目：服务端（`--session-drawer`）在项目自己的
+  // 会话目录里建、开、列，工作目录里 TUI 的那几十段对话根本不在那儿，所以页面不用
+  // 过滤，也没有「看全部」（reverse-conversation.md，sessions-lineage.md §1）。
+  // 切换是 session.open（跟 session.new 一样是服务端换内核），本页不自己读会话目录。
+  function fillSessionPicker() {
+    send("session.list", { limit: 500 }, (message) => {
+      if (message.error) { row("会话列表读不出来：" + escape(message.error.message), "note"); return; }
+      const list = (message.result && message.result.sessions) || [];
+      // 列表为空时也要有一项，不然下拉框是空的、`value` 也跟着变空。
+      if (!list.length) list.push({ id: sessionId, title: "", events: 0, updated_at: 0 });
+      // 服务端给没说过话的会话一个占位标题（`crates/cli/src/session.rs` 的
+      // `session_title`，TUI 的历史列表也用同一个）。这儿换成 id：两段刚开的对话
+      // 都叫「New session」，光看时间分不出谁是谁。
+      const PLACEHOLDER = "New session";
+      const options = [];
+      for (const info of list) {
+        const option = document.createElement("option");
+        option.value = info.id;
+        const title = (info.title || "").trim();
+        const label = (!title || title === PLACEHOLDER) ? "新会话 " + info.id : title.slice(0, 40);
+        const count = info.events ? info.events + " 条 · " : "";
+        option.textContent = label + " · " + count + when(info.updated_at);
+        option.title = info.id + (title ? "\n" + title : "");
+        options.push(option);
+      }
+      sessionPicker.innerHTML = "";
+      for (const option of options) sessionPicker.appendChild(option);
+      sessionPicker.value = sessionId;
+      renderButton();
+    });
+  }
+  // 一个时间戳只用来挑会话，不需要精确到秒：今天说时分，更早说日期。
+  function when(stamp) {
+    if (!stamp) return "时间不明";
+    const at = new Date(stamp < 1e12 ? stamp * 1000 : stamp);
+    if (Number.isNaN(at.getTime())) return "时间不明";
+    const today = new Date();
+    if (at.toDateString() === today.toDateString()) {
+      return at.toTimeString().slice(0, 5);
+    }
+    return at.getMonth() + 1 + "月" + at.getDate() + "日";
+  }
+  // 换了会话之后，页面上所有“这个会话”的账都要清零：钱、工具次数、批准卡片、
+  // 流式行，都是上一段对话的。不清就是在两段对话之间串账。
+  function adoptSession(id, how) {
+    endDelta();
+    sessionId = id;
+    sessionLabel.textContent = "会话 " + id;
+    chatlog.innerHTML = "";
+    stepRows.clear();
+    approvalRows.clear();
+    live = null;
+    working = false;
+    parked = false;
+    parkedApprovals = 0;
+    toolsStarted = 0;
+    toolsDone = 0;
+    lastTool = "";
+    stopping = false;
+    interrupted = false;
+    spend.calls = 0; spend.tokensIn = 0; spend.tokensOut = 0;
+    spend.cacheHit = 0; spend.cacheCheckedIn = 0; spend.usdMicros = 0; spend.bases = {};
+    renderSpend();
+    progressTextEl.textContent = "空闲";
+    progressBar.className = "";
+    progressSpin.style.display = "none";
+    renderButton();
+    // 记下来：下次启动接着这一段（下一页读的就是这个文件），也记进本项目自己的
+    // 会话列表。写完再刷新列表，不然可能读到写之前的。
+    if (how) row(how, "note");
+    replay(true);
+    api("/reverse/session", { method: "POST", body: id })
+      .then((answer) => { if (!answer.ok) row("没能记住这个会话，下次启动还会接上一个。", "note"); })
+      .catch(() => row("没能记住这个会话，下次启动还会接上一个。", "note"))
+      .finally(() => fillSessionPicker());
+  }
+  // 换会话：服务端在同一进程里换内核，旧日志关掉但留着。
+  function switchSession(id) {
+    if (!id || id === sessionId) { sessionPicker.value = sessionId; return; }
+    if (switching) { sessionPicker.value = sessionId; return; }
+    if (working || parked) {
+      // 跑着的时候不让换：这一轮的事件会写进页面已经不看的那个会话里，
+      // 而且流回来的行会挂到一个页面上没有的 id 上（reverse-conversation.md）。
+      sessionPicker.value = sessionId;
+      row("这一轮还在跑（或停着等你批准），先点「停止」再换会话。", "note");
+      return;
+    }
+    switching = true;
+    renderButton();
+    send("session.open", { session_id: sessionId, open: id }, (message) => {
+      switching = false;
+      renderButton();
+      if (message.error) {
+        // 另一个进程正在写那份日志，或者那个 id 已经没日志了：说清楚，留在原地。
+        // 不偷偷另开一份说成同一段对话。
+        row("换不过去：" + escape(message.error.message), "bad");
+        sessionPicker.value = sessionId;
+        return;
+      }
+      adoptSession(message.result.session_id, "换到另一段对话，旧的还在：下次可以从上面选回来。");
+    });
+  }
+  function newSession() {
+    if (switching) return;
+    if (working || parked) { row("这一轮还在跑，先点「停止」再新开。", "note"); return; }
+    switching = true;
+    renderButton();
+    send("session.new", { session_id: sessionId }, (message) => {
+      switching = false;
+      renderButton();
+      if (message.error) { row("新会话开不出来：" + escape(message.error.message), "bad"); return; }
+      adoptSession(message.result.session_id, "新开了一段对话，原来那段还留着。");
+    });
+  }
+
+  // 启动时问一句：这个项目记着哪一段？接上的不是它，就说明那份正被别的进程写着
+  // （reverse.md §5），人得知道自己现在在哪一段对话里。
+  function checkRecorded() {
+    api("/reverse/session").then((answer) => answer.ok ? answer.text() : "")
+      .then((text) => {
+        const recorded = (text || "").trim();
+        if (recorded && recorded !== sessionId) {
+          row("这个项目记着会话 " + escape(recorded) + "，但那份正被另一个进程写着（或已删除），"
+            + "这次接的是 " + escape(sessionId) + "。要回到原来那段，得先停掉那个进程。", "note");
+        }
+      })
+      .catch(() => {});
+  }
+
+  // 每一类事件都翻译成“此刻在干什么”，而不是把协议原文丢给人看。
+  // `quiet` 是重放历史时用的：同样的行照摆，但不说“正在调用”，也不推按钮。
+  function renderEvent(kind, data, quiet) {
+    if (kind === "client.error") {
+      row(escape(data.message), "bad");
+      if (working) finish("这一轮断了：" + data.message, "bad");
+      return;
+    }
+    switch (kind) {
+      case "message.appended":
+        if (data.role === "user") row("<b>你</b> " + escape(data.text), "you");
+        else if (data.text) { endDelta(); row(escape(data.text), "say"); }
+        if (data.role === "assistant" && !quiet) loadTree(); // 一轮可能写了研究笔记
+        if (data.role === "tool") endDelta();
+        break;
+      case "tool.call": beginTool(data, quiet); break;
+      case "tool.result": endTool(data, quiet); break;
+      case "cost.recorded":
+        // 一次模型调用一条：入/出、缓存命中、估算的钱都在这里（cost-accounting.md §4）。
+        addCost(data);
+        break;
+      case "policy.decided":
+        // 放行是常态，说一句只会淹掉真正的进度；要问和拒绝才值得留一行。
+        if (data.verdict !== "allow") row("策略：" + verdictName(data.verdict) + "（" + escape(data.rule) + "）", "note");
+        break;
+      case "approval.requested": askApproval(data, quiet); break;
+      case "approval.decided": {
+        // 这道批准在别处答过了（另一个 tab、TUI）：这里的同一张卡片也收成结论，
+        // 不把一排还能点的按钮留在屏幕上；这一轮也在别处接着跑了，进度跟着走。
+        const el = approvalRows.get(data.request_id);
+        if (el && settleApproval(el, data.granted) && parked) {
+          resume(data.granted ? "别处批准了，接着跑" : "别处拒绝了，接着跑");
+        }
+        break;
+      }
+      case "model.selected":
+        // 路由规则也可能在一轮里换模型：下拉框跟着会话走。
+        modelSelect.value = data.model;
+        break;
+      case "permissions.relaxed":
+        // 开或关都是服务端的事实，这里只跟着显示；说一句，免得人不知道自己在什么模式下。
+        showYolo(data.auto_approve);
+        row(data.auto_approve
+          ? "自动批准已开：删除和把数据发出去仍然会问你。"
+          : "自动批准已关：每个越界动作都会问你。", "note");
+        break;
+      case "turn.interrupted":
+        interrupted = true;
+        row("这一轮被打断了。", "bad");
+        break;
+      case "hook.fired":
+        if (data.verdict !== "allow")
+          row("钩子 " + escape(data.hook_id) + "：" + escape(data.reason || data.verdict), "note");
+        break;
+      default: break;
+    }
+  }
+  function verdictName(verdict) {
+    return { allow: "放行", ask: "要问过你", deny: "拒绝" }[verdict] || verdict;
+  }
+
+  // ---- 聊天区里的进度：流式文字、工具行、批准卡片 ---------------------------
+  // 还在写的那一行：追加文字，光标跟着跳。用户自己往上翻的时候不抢滚动条。
+  function appendDelta(text) {
+    if (!live) {
+      live = document.createElement("div");
+      live.className = "row say live";
+      chatlog.appendChild(live);
+    }
+    live.textContent += text;
+    const nearBottom = chatlog.scrollTop + chatlog.clientHeight > chatlog.scrollHeight - 60;
+    if (nearBottom) chatlog.scrollTop = chatlog.scrollHeight;
+  }
+  function endDelta() {
+    if (live) { live.remove(); live = null; }
+  }
+
+  function shortArgs(args) {
+    let text = "";
+    try { text = JSON.stringify(args || {}); } catch (_) { text = String(args); }
+    return text.length > 160 ? text.slice(0, 160) + "…" : text;
+  }
+
+  // 调工具：先转圈占一行，结果回来贴回同一行，不另起一行。
+  function beginTool(data, quiet) {
+    if (!quiet) { toolsStarted += 1; lastTool = data.tool; }
+    endDelta();
+    const el = document.createElement("div");
+    el.className = "row tool";
+    el.innerHTML = '<span class="spin"></span><span class="mark"></span>'
+      + '<span class="name">' + escape(data.tool) + "</span>"
+      + '<span class="args">' + escape(shortArgs(data.args)) + "</span>";
+    el.title = data.action_class ? "动作类别：" + data.action_class : "";
+    if (quiet) el.querySelector(".spin").remove();
+    chatlog.appendChild(el);
+    chatlog.scrollTop = chatlog.scrollHeight;
+    stepRows.set(data.call_id, el);
+    if (!quiet) activity("正在调用 " + data.tool);
+  }
+
+  function endTool(data, quiet) {
+    if (!quiet) toolsDone += 1;
+    const el = stepRows.get(data.call_id);
+    if (el) {
+      el.classList.add(data.ok ? "ok" : "bad");
+      const spin = el.querySelector(".spin");
+      if (spin) spin.remove();
+      el.querySelector(".mark").textContent = data.ok ? "✓" : "✗";
+      if (data.output) {
+        const details = document.createElement("details");
+        const summary = document.createElement("summary");
+        const lines = data.output.split("\n").filter((line) => line.trim()).length;
+        summary.textContent = (data.ok ? "结果" : "错误") + "（" + lines + " 行）";
+        const pre = document.createElement("pre");
+        pre.textContent = data.output.length > 20000 ? data.output.slice(0, 20000) + "\n…（截断）" : data.output;
+        details.append(summary, pre);
+        // 失败要人看得见，成功的输出折起来，免得把进度挤走。
+        details.open = !data.ok;
+        el.appendChild(details);
+      }
+      stepRows.delete(data.call_id);
+    } else {
+      // 一轮之外的调用（比如刚连上时重放的），照样留一行。
+      row((data.ok ? "✓ " : "✗ ") + escape(data.output || ""), data.ok ? "note" : "bad");
+    }
+    if (!quiet) activity(data.ok ? lastTool + " 回来了，模型接着看" : lastTool + " 报错，模型接着看");
+  }
+
+  // 停在这里等人点头：不给按钮，这一轮就永远停在“没反应”。
+  // 重放历史时不铺这一层：那些问题早就答完了，按钮也不该还能点。
+  function askApproval(data, quiet) {
+    if (!quiet) parkedApprovals += 1;
+    endDelta();
+    const el = document.createElement("div");
+    el.className = "row tool";
+    el.innerHTML = '<span class="mark">?</span><span class="name">' + escape(data.action_class)
+      + "</span><span class=\"args\">" + escape(data.reason || "这个动作要你点头") + "</span>";
+    const allow = document.createElement("button");
+    allow.textContent = "允许一次";
+    const deny = document.createElement("button");
+    deny.textContent = "拒绝";
+    const decide = (granted) => {
+      // 先落定，再发：按钮立刻退场，这一步不再有任何“还能再点一次”的样子。
+      settleApproval(el, granted);
+      // 答应还是拒绝，这一轮都在同一个连接上接着跑：回复回来才算跑完。
+      resume(granted ? "批准了，接着跑" : "拒绝了，接着跑");
+      send("approval.respond", { session_id: sessionId, request_id: data.request_id,
+        granted, scope: "once", reason: "" }, (message) => {
+        if (message.error) {
+          // 另一个 tab（或 TUI）先答了同一个请求：不是出错，卡片早就收好了。
+          if ((message.error.message || "").includes("no approval is pending")) {
+            row("这道批准已经答过了，不用再答。", "note");
+            finish("这道批准已经答过了。", "ok");
+            return;
+          }
+          row("回复批准失败：" + escape(message.error.message), "bad");
+          finish("回复批准失败：" + message.error.message, "bad");
+          return;
+        }
+        if (parkedApprovals > 0) parkedApprovals -= 1;
+        finish(granted ? "批准后这一轮跑完了。" : "拒绝后这一轮跑完了。", "ok");
+      });
+    };
+    allow.onclick = () => decide(true);
+    deny.onclick = () => decide(false);
+    // 重放里的这一问只是记录：不铺按钮，也不把界面按在“等你批准”上。
+    if (!quiet) el.append(allow, deny);
+    approvalRows.set(data.request_id, el);
+    chatlog.appendChild(el);
+    chatlog.scrollTop = chatlog.scrollHeight;
+    if (!quiet) park("停在这里等你批准：" + (data.reason || data.action_class));
+  }
+
+  // 一张批准卡片答完了：按钮换成结论，返回“这次才落定”与否。
+  // 同一个 request_id 只落定一次——本页点了按钮、或同一会话的另一个 tab 点了
+  // （approval.decided 会到），都走这里。
+  function settleApproval(el, granted) {
+    if (el.dataset.decided) return false;
+    el.dataset.decided = granted ? "granted" : "denied";
+    el.classList.remove(granted ? "bad" : "ok");
+    el.classList.add(granted ? "ok" : "bad");
+    el.querySelector(".mark").textContent = granted ? "✓" : "✗";
+    const said = document.createElement("span");
+    said.className = "decided";
+    said.textContent = granted ? "已允许（只这一次）" : "已拒绝";
+    el.querySelectorAll("button").forEach((button) => button.remove());
+    el.appendChild(said);
+    return true;
+  }
+  // 这一轮到此为止：按钮恢复，进度说清结果。
+  function finish(text, cls) {
+    endDelta();
+    setWorking(false);
+    settle(text, cls || "ok");
+  }
+
+  // 模型清单来自服务器：model.list 列出这份配置里的模型，model.select 换掉这个会话用的那个。
+  // 换模型和 TUI 里按数字键一样，是人的选择，会记进事件日志。
+  function showModels(result) {
+    const models = result.models || [];
+    modelSelect.innerHTML = "";
+    for (const offering of models) {
+      const option = document.createElement("option");
+      option.value = offering.name;
+      option.textContent = offering.name;
+      option.title = [offering.provider, offering.model,
+        offering.context_window ? offering.context_window + " 个 token" : ""]
+        .filter(Boolean).join(" · ");
+      modelSelect.appendChild(option);
+    }
+    modelSelect.value = result.selected;
+    modelSelect.disabled = models.length < 2;
+    modelSelect.title = models.length < 2 ? "这份配置只给了一个模型" : "这个会话用哪个模型";
+  }
+  modelSelect.onchange = () => {
+    const name = modelSelect.value;
+    send("model.select", { session_id: sessionId, name }, (message) => {
+      if (message.error) {
+        row("换模型没成：" + escape(message.error.message), "bad");
+        return;
+      }
+      showModels(message.result);
+      row("模型已换成 <b>" + escape(name) + "</b>", "note");
+    });
+  };
+
+  // 发一轮对话。先把自己按灰再发：回复回来的那一刻，这一轮才真的结束。
+  function prompt(text, mode) {
     if (!text) return;
     if (!sessionId) { row("还没连上会话，等一两秒再点。", "bad"); return; }
-    socket.send(JSON.stringify({ jsonrpc: "2.0", id: Date.now(), method: "prompt.submit",
-      params: { session_id: sessionId, text } }));
+    if (working || parked) { row("上一轮还没结束，先处理上面那一轮。", "bad"); return; }
+    const label = mode === "study" ? "正在研究" : mode === "build" ? "正在重构" : "正在想";
+    setWorking(true, mode || "chat", label);
+    send("prompt.submit", { session_id: sessionId, text }, (message) => {
+      if (message.error) {
+        row(escape(message.error.message), "bad");
+        finish("这一轮没跑起来：" + message.error.message, "bad");
+        return;
+      }
+      const took = Math.round((Date.now() - workingSince) / 1000);
+      const tools = toolsDone;
+      // 这一轮是被人按停的（本页按的「停止」，或别处打断的）：收尾就照这个说，
+      // 不要把半个答案说成“跑完了”。
+      const stopped = stopping || interrupted;
+      stopping = false;
+      interrupted = false;
+      if (message.result && message.result.accepted === false) {
+        finish("这一轮被挡下了，理由看上面那行钩子。", "bad");
+        return;
+      }
+      // 有人点头才能继续的请求还挂着：这一轮没结束，只是停住了。
+      if (parkedApprovals > 0) { park("停在这里等你批准上面那个请求。"); return; }
+      if (stopped) {
+        finish("这一轮停了：用了 " + took + " 秒，调了 " + tools + " 次工具。想接着说就说。", "ok");
+        return;
+      }
+      const what = mode === "study" ? "研究这一轮结束" : mode === "build" ? "重构这一轮结束" : "这一轮结束";
+      finish(what + "：用了 " + took + " 秒，调了 " + tools + " 次工具。研究笔记在左边，点开看。", "ok");
+    });
   }
   input.addEventListener("keydown", (event) => {
     if (event.key !== "Enter") return;
@@ -508,9 +1437,54 @@
     prompt(text);
   });
 
-  loadTarget();
-  loadPhase();
-  loadTree();
+  // 停在一个批准上时，光发信号不够：这一轮在等一个答复，没人答它就一直等下去。
+  // 所以先把等着的那道批准拒掉（这一刻 socket 是空的，拒得进去），再让信号在下一个
+  // 决策点收尾。卡片当场收成结论，别处再来的 approval.decided 就不会说成“别处拒的”。
+  function stopParkedApprovals() {
+    for (const [requestId, el] of approvalRows) {
+      if (!settleApproval(el, false)) continue;
+      parked = false;
+      parkedApprovals = 0;
+      send("approval.respond", { session_id: sessionId, request_id: requestId,
+        granted: false, scope: "once", reason: "你按了停止" }, (message) => {
+        if (message.error) row("停止时那道批准没答上：" + escape(message.error.message), "bad");
+        finish("这一轮停了：上面那个动作没有同意。", "ok");
+      });
+    }
+  }
+
+  // 停止走 HTTP，不走会话 socket：服务端跑着这一轮时不会去读下一行请求，一条
+  // JSON-RPC 只能排在它后面——追得上这一轮的只有信号（/reverse/interrupt → SIGINT，
+  // 跟 TUI 里按 Ctrl+C 同一条路）。
+  async function interrupt() {
+    if (!sessionId) return;
+    btnSend.disabled = true;
+    activity("正在停下来…");
+    if (parked) stopParkedApprovals();
+    try {
+      const answer = await api("/reverse/interrupt", { method: "POST" });
+      if (!answer.ok) row("停不下来：" + escape((await answer.text()) || answer.status), "bad");
+      else stopping = true;
+    } catch (error) {
+      row("停不下来：" + escape(String(error)), "bad");
+    }
+    renderButton();
+  }
+  btnSend.onclick = () => {
+    if (working || parked) { interrupt(); return; }
+    const text = input.value.trim();
+    if (!text) { input.focus(); return; }
+    input.value = "";
+    prompt(text);
+  };
+  renderButton();
+
+  loadProjects();
+  loadRun().then(() => {
+    loadTarget();
+    loadPhase();
+    loadTree();
+  });
 })();
 </script>
 </body>

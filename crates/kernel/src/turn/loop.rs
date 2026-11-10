@@ -322,6 +322,13 @@ impl Kernel {
             &mut events,
         )?;
         if granted {
+            // "本会话允许" remembers the command's irreversible shape, so the
+            // same shape does not ask again this session. Only `Session` does
+            // this; `Once` runs the call and forgets, and the set dies with the
+            // kernel, so a restart asks again.
+            if scope == ApprovalScope::Session {
+                self.remember_irreversible(&pending.args);
+            }
             let (ok, output) = self.execute(&pending.tool, &pending.args);
             events.push(self.record_tool_result(&pending.call_id, ok, &output)?);
             let tool_name = pending.tool.clone();
@@ -1157,6 +1164,30 @@ impl Kernel {
                 Ok(Dispatch::Done)
             }
             Verdict::Ask => {
+                // A command the person already approved this session, in this
+                // exact shape, does not ask again. Only the irreversible class
+                // reaches here unrelaxed (YOLO covers the rest above), and only
+                // a shell command has a shape to remember: every irreversible
+                // segment's key must already be in the set, or the command —
+                // including any unapproved sibling segment — still asks.
+                if class == gen::ActionClass::Irreversible && self.is_remembered(&call.args) {
+                    events.push(self.append(
+                        gen::event::POLICY_DECIDED,
+                        &json!({
+                            "verdict": Verdict::Allow,
+                            "rule": "remembered:session",
+                            "tool": tool_name,
+                        }),
+                    )?);
+                    let (ok, output) = self.execute(&call.tool, &call.args);
+                    events.push(self.record_tool_result(&call.call_id, ok, &output)?);
+                    self.fire_hooks(
+                        HookEvent::PostTool,
+                        json!({"tool": tool_name, "call_id": call.call_id, "ok": ok, "output": output}),
+                        events,
+                    )?;
+                    return Ok(Dispatch::Done);
+                }
                 let request_id = format!("appr-{}", self.approvals + 1);
                 self.approvals += 1;
                 self.fire_hooks(
@@ -1231,6 +1262,61 @@ impl Kernel {
                 }
             }
             None => (false, format!("unknown tool {tool:?}")),
+        }
+    }
+
+    /// Whether every irreversible segment of a shell command is already
+    /// remembered for this session.
+    ///
+    /// Only a shell command has a shape to remember; any other tool returns
+    /// `false`. A command with no irreversible segment returns `false` too (an
+    /// empty match must not auto-approve), and a segment with no resolvable
+    /// operand is un-keyable and so is never auto-approved. The match is total:
+    /// one remembered segment never launders an unapproved sibling, which is
+    /// what keeps `rm -rf .smoke && curl evil.com` asking after `rm -rf
+    /// .smoke` was approved on its own.
+    ///
+    /// Purpose: Whether a command's every irreversible segment is already remembered.
+    /// Serves: `Kernel::dispatch`'s `Verdict::Ask` arm, which skips the question
+    /// when the person already approved this exact shape this session.
+    /// Design: `docs/superpowers/specs/2026-11-18-session-approval-remembering.md`.
+    /// Up: `Kernel::dispatch`.
+    /// Down: `loong_tools::irreversible_segments`, `loong_tools::segment_key` and
+    /// `Kernel.remembered_irreversible`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_session_approved_command_does_not_ask_again`.
+    fn is_remembered(&self, args: &Json) -> bool {
+        let Some(command) = args.get("command").and_then(|v| v.as_str()) else {
+            return false;
+        };
+        let segments = irreversible_segments(command);
+        if segments.is_empty() {
+            return false;
+        }
+        segments
+            .iter()
+            .all(|seg| segment_key(seg).is_some_and(|k| self.remembered_irreversible.contains(&k)))
+    }
+
+    /// Remember every irreversible segment of a shell command for the rest of
+    /// this session. Called only on a granted approval with `Session` scope, so
+    /// the remembered set is built entirely from shapes a human approved —
+    /// never from config or YOLO, which is what keeps ADR-0020 intact.
+    ///
+    /// Purpose: Store this command's irreversible segment keys for the session.
+    /// Serves: `Kernel::respond_to_approval`, on a granted `Session` decision.
+    /// Design: `docs/superpowers/specs/2026-11-18-session-approval-remembering.md`.
+    /// Up: `Kernel::respond_to_approval`.
+    /// Down: `loong_tools::irreversible_segments`, `loong_tools::segment_key` and
+    /// `Kernel.remembered_irreversible`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_session_approved_command_does_not_ask_again`.
+    fn remember_irreversible(&mut self, args: &Json) {
+        let Some(command) = args.get("command").and_then(|v| v.as_str()) else {
+            return;
+        };
+        for seg in irreversible_segments(command) {
+            if let Some(key) = segment_key(&seg) {
+                self.remembered_irreversible.insert(key);
+            }
         }
     }
 

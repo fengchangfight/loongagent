@@ -21,7 +21,7 @@ export type ActionClass = "investigate" | "write_workspace" | "out_of_bounds" | 
 export type Verdict = "allow" | "ask" | "deny";
 
 /** How far a granted approval reaches (ADR-0007 §6). */
-export type ApprovalScope = "once" | "action_class" | "project";
+export type ApprovalScope = "once" | "action_class" | "project" | "session";
 
 /** Who produced a conversation message. */
 export type Role = "user" | "assistant" | "tool" | "system";

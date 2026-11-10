@@ -91,6 +91,11 @@ that the person has to be able to trust, so `alarm` is not `rm`.
 - False positives are accepted: `rsync` from a remote host to local asks too,
   because telling the two directions apart from a command line is guesswork and
   a wrong guess in the safe direction only costs a click.
+- A `Session`-scoped approval is the one way one answer authorises more than
+  one execution, and this ADR permits it: the person still answered a prompt,
+  and the answer's reach is the exact command shape they approved, held in
+  memory only, gone when the kernel stops. It never widens the class, and a
+  restart asks again.
 
 ## Alternatives considered
 

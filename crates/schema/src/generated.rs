@@ -51,6 +51,8 @@ pub enum ApprovalScope {
     ActionClass,
     #[serde(rename = "project")]
     Project,
+    #[serde(rename = "session")]
+    Session,
 }
 
 /// Who produced a conversation message.

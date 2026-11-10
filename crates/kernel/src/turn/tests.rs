@@ -310,6 +310,145 @@ fn opting_out_of_prompts_still_asks_before_a_deletion() {
     );
 }
 
+/// Purpose: An irreversible command approved with `Session` scope does not ask again when the identical command is re-issued in the same kernel.
+#[test]
+fn a_session_approved_command_does_not_ask_again() {
+    let t = Temp::new();
+    std::fs::create_dir_all(t.dir.join(".smoke")).unwrap();
+    let model = ScriptedModel::new(vec![
+        response(
+            vec![call("c1", "shell", json!({"command": "rm -rf .smoke"}))],
+            None,
+        ),
+        response(vec![], Some("first done")),
+        response(
+            vec![call("c2", "shell", json!({"command": "rm -rf .smoke"}))],
+            None,
+        ),
+        response(vec![], Some("second done")),
+    ]);
+    let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+
+    let first = k.submit("delete the smoke dir").unwrap();
+    let pending = first.pending_approval.expect("the first deletion asks");
+    let request_id = pending.request_id.clone();
+    k.respond_to_approval(&request_id, true, ApprovalScope::Session, None)
+        .unwrap();
+    assert!(!t.dir.join(".smoke").exists(), "the first approval ran");
+
+    // The identical command comes round again; it must not park for a human.
+    std::fs::create_dir_all(t.dir.join(".smoke")).unwrap();
+    let second = k.submit("delete it again").unwrap();
+    assert!(
+        second.pending_approval.is_none(),
+        "the same command is remembered for the session: {:?}",
+        second.pending_approval
+    );
+    assert!(
+        !t.dir.join(".smoke").exists(),
+        "the remembered command ran without asking"
+    );
+}
+
+/// Purpose: A remembered shape matches only its own operands; a different target still asks.
+#[test]
+fn a_changed_segment_still_asks() {
+    let t = Temp::new();
+    let model = ScriptedModel::new(vec![
+        response(
+            vec![call("c1", "shell", json!({"command": "rm -rf .smoke"}))],
+            None,
+        ),
+        response(vec![], Some("done")),
+        response(
+            vec![call("c2", "shell", json!({"command": "rm -rf other"}))],
+            None,
+        ),
+        response(vec![], Some("done")),
+    ]);
+    let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+
+    let first = k.submit("delete smoke").unwrap();
+    let request_id = first.pending_approval.unwrap().request_id;
+    k.respond_to_approval(&request_id, true, ApprovalScope::Session, None)
+        .unwrap();
+
+    let second = k.submit("delete a different dir").unwrap();
+    assert!(
+        second.pending_approval.is_some(),
+        "rm -rf other is not the remembered rm -rf .smoke, so it asks"
+    );
+}
+
+/// Purpose: A compound command whose irreversible segments are not all remembered still asks, so an approved segment cannot launder an unapproved sibling.
+#[test]
+fn a_compound_command_with_one_new_irreversible_segment_still_asks() {
+    let t = Temp::new();
+    let model = ScriptedModel::new(vec![
+        response(
+            vec![call("c1", "shell", json!({"command": "rm -rf .smoke"}))],
+            None,
+        ),
+        response(vec![], Some("done")),
+        response(
+            vec![call(
+                "c2",
+                "shell",
+                json!({"command": "rm -rf .smoke && git push origin main"}),
+            )],
+            None,
+        ),
+        response(vec![], Some("done")),
+    ]);
+    let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+
+    let first = k.submit("delete smoke").unwrap();
+    let request_id = first.pending_approval.unwrap().request_id;
+    k.respond_to_approval(&request_id, true, ApprovalScope::Session, None)
+        .unwrap();
+
+    let second = k.submit("delete and push").unwrap();
+    assert!(
+        second.pending_approval.is_some(),
+        "the push segment is not remembered, so the whole command asks"
+    );
+}
+
+/// Purpose: The remembered set lives on the kernel; a fresh kernel has none of it, so the same command asks again.
+#[test]
+fn a_fresh_kernel_asks_again() {
+    let t = Temp::new();
+    let model = ScriptedModel::new(vec![
+        response(
+            vec![call("c1", "shell", json!({"command": "rm -rf .smoke"}))],
+            None,
+        ),
+        response(vec![], Some("done")),
+    ]);
+    let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+    let first = k.submit("delete smoke").unwrap();
+    let request_id = first.pending_approval.unwrap().request_id;
+    k.respond_to_approval(&request_id, true, ApprovalScope::Session, None)
+        .unwrap();
+    drop(k);
+
+    // A new kernel over a fresh log has no memory of the approval.
+    let t2 = Temp::new();
+    let model2 = ScriptedModel::new(vec![
+        response(
+            vec![call("c1", "shell", json!({"command": "rm -rf .smoke"}))],
+            None,
+        ),
+        response(vec![], Some("done")),
+    ]);
+    let mut k2 = Kernel::create(&t2.log, KernelConfig::new(&t2.dir), Box::new(model2)).unwrap();
+    let again = k2.submit("delete smoke").unwrap();
+    assert!(
+        again.pending_approval.is_some(),
+        "nothing persists across kernels, so it asks again"
+    );
+}
+
 /// Purpose: A permissions request from outside the turn is applied at the next decision, and recorded before the call it relaxes.
 #[test]
 fn a_permissions_request_is_applied_at_the_next_decision() {

@@ -1590,10 +1590,12 @@ function showApproval(data) {
   if (data.action_class) what.appendChild(node("span", "class", data.action_class));
   if (data.reason) what.appendChild(node("span", "reason", data.reason));
   const approve = node("button", "approve", "Approve");
+  const approveSession = node("button", "approve", "Approve for session");
   const refuse = node("button", "refuse", "Refuse");
-  const answer = (granted) => {
+  const answer = (granted, scope) => {
     box.classList.add("answered");
-    approve.textContent = granted ? "Approved ✓" : "Approve";
+    approve.textContent = granted && scope === "once" ? "Approved ✓" : "Approve";
+    approveSession.textContent = granted && scope === "session" ? "Approved ✓" : "Approve for session";
     refuse.textContent = granted ? "Refuse" : "Refused ✕";
     // Answering resumes the turn, and the resumed turn makes model calls that can take as
     // long as any other: the spinner says so and Stop can end it (web-surface.md §4). This
@@ -1606,7 +1608,10 @@ function showApproval(data) {
       session_id: state.sessionId || "default",
       request_id: data.request_id,
       granted,
-      scope: "once",
+      // "session" is the scope the kernel remembers: it stores the command's
+      // irreversible shape for the rest of the session, so the same shape does
+      // not ask again. "once" runs this call and forgets.
+      scope,
     })
       .catch((e) => notice("error", `approval.respond: ${e.message}`))
       .finally(() => {
@@ -1615,10 +1620,12 @@ function showApproval(data) {
         setThinking(false);
       });
   };
-  approve.onclick = () => answer(true);
-  refuse.onclick = () => answer(false);
+  approve.onclick = () => answer(true, "once");
+  approveSession.onclick = () => answer(true, "session");
+  refuse.onclick = () => answer(false, "once");
   box.appendChild(what);
   box.appendChild(approve);
+  box.appendChild(approveSession);
   box.appendChild(refuse);
   turn.body.appendChild(box);
   turn.panel.open = true;

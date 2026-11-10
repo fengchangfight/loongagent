@@ -36,6 +36,8 @@ use crate::Session;
 pub struct Error(pub String);
 
 impl From<String> for Error {
+    /// Purpose: Wrap a message the transport or a parse produced into the surface's error.
+    /// Contract: the message is kept verbatim; no JSON-RPC code is decided here.
     fn from(message: String) -> Self {
         Error(message)
     }
@@ -119,6 +121,11 @@ pub struct Tab {
 
 impl State {
     /// Purpose: An empty surface; the first `workspace.list` plants the home workspace.
+    /// Serves: `serve_web`, once per listener.
+    /// Design: `docs/design/web-surface.md` §1.
+    /// Up: `serve_web`, which shares it across the tabs.
+    /// Down: `restore_workspaces`, which fills it on first use.
+    /// Verify: `cargo test -p loong-web` (`app::tests`).
     /// Contract: `home` is canonicalised by the caller (`crates/cli/src/web.rs`).
     pub fn new() -> Self {
         State {
@@ -130,6 +137,9 @@ impl State {
     /// Serves: the `workspace.list` and `workspace.add` calls.
     /// Design: `docs/design/web-surface.md` §1 — the list is never destroyed by switching,
     /// and many workspaces may be open at once.
+    /// Up: `restore_workspaces`, `workspace.list` and `workspace.add`.
+    /// Down: the canonicalised path stored in `State::workspaces`.
+    /// Verify: `cargo test -p loong-web` (`many_workspaces_can_be_open`).
     /// Contract: paths are canonicalised; a known dir returns its index.
     pub fn ensure(&mut self, dir: &Path) -> Result<usize, Error> {
         let dir = std::fs::canonicalize(dir)
@@ -145,6 +155,11 @@ impl State {
     }
 
     /// Purpose: Remove a workspace that is not the home one.
+    /// Serves: the `workspace.close` call.
+    /// Design: `docs/design/web-surface.md` §1 — removing never deletes history.
+    /// Up: `workspace.close`.
+    /// Down: `State::workspaces`, and the children map dropped with the entry.
+    /// Verify: `cargo test -p loong-web` (`app::tests`).
     /// Contract: index 0 is the home workspace and stays; a live bridge is dropped with it.
     pub fn close(&mut self, index: usize) -> Result<(), Error> {
         if index == 0 {
@@ -170,6 +185,9 @@ fn workspaces_file() -> PathBuf {
 /// brings them back.
 /// Serves: `workspace.add` and `workspace.close`.
 /// Design: `docs/design/web-surface.md` §1.
+/// Up: the two handlers that changed the list.
+/// Down: `workspaces.json` under the client root.
+/// Verify: `cargo test -p loong-web` (`workspaces_persist_across_a_restart`).
 /// Contract: best-effort and atomic enough for a catalogue; a write failure loses the edit,
 /// never the live state.
 fn persist_workspaces(st: &State) -> Result<(), Error> {
@@ -190,6 +208,9 @@ fn persist_workspaces(st: &State) -> Result<(), Error> {
 /// Purpose: Plant home at index 0, then re-add every workspace the file remembers.
 /// Serves: the first `workspace.list`/`workspace.add` of a fresh surface.
 /// Design: `docs/design/web-surface.md` §1 — the catalogue survives a restart.
+/// Up: every method that walks the workspace list.
+/// Down: `State::ensure`, which appends the directories it reads back.
+/// Verify: `cargo test -p loong-web` (`workspaces_persist_across_a_restart`).
 /// Contract: idempotent — a second call is a no-op; a missing or unreadable file is fine.
 fn restore_workspaces(st: &mut State, home: &Path) -> Result<(), Error> {
     if st.restored {
@@ -323,6 +344,12 @@ fn dispatch_surface(
                 st.workspaces
                     .iter()
                     .enumerate()
+                    // Newest added first: the launch workspace is index 0 and was there
+                    // first, so walking back from the last index puts the workspace the
+                    // user just added at the top. `index` still travels with the entry,
+                    // so what the page shows changes but which workspace a click means
+                    // does not.
+                    .rev()
                     .map(|(i, w)| {
                         json!({
                             "index": i,
@@ -401,6 +428,8 @@ fn dispatch_surface(
                 st.workspaces
                     .iter()
                     .enumerate()
+                    // Newest added first, as in `workspace.list` (web-surface.md §2).
+                    .rev()
                     .map(|(i, w)| {
                         let root = sessions::client_root();
                         let mut sessions = sessions::list(&root, &w.dir);
@@ -634,6 +663,9 @@ fn forward(
 /// not, and return the id the child is bound to.
 /// Serves: `session.open`, `session.new` and `forward`.
 /// Design: `docs/design/web-surface.md` §3 — one child per (workspace, session), on demand.
+/// Up: those three handlers.
+/// Down: `start_session`, the factory that spawns `loongagent server --stdio`.
+/// Verify: `cargo test -p loong-web` (`session_open_reuses_a_live_child`).
 /// Contract: after `Ok`, `workspaces[seat].children[id]` is live; `Some(id)` reuses a live
 /// child for that id, `None` starts a fresh one and returns its minted id.
 fn ensure_child(
@@ -698,7 +730,11 @@ fn reply(
 }
 
 /// Purpose: One JSON-RPC error object down the tab's socket.
-/// Contract: a surface refusal is an error, never a dropped message.
+/// Serves: `handle_ws`, when a request is refused rather than answered.
+/// Design: ADR-0002 — one error shape for every method.
+/// Up: the refusal sites in `handle_ws`.
+/// Down: the tab, as an `error` object rather than a dropped message.
+/// Verify: `cargo test -p loong-web` (`a_websocket_carries_a_request_and_gets_the_answer_back`).
 fn send_error(
     socket: &mut tungstenite::WebSocket<TcpStream>,
     id: Value,
@@ -748,6 +784,7 @@ mod tests {
 
     /// Purpose: a scripted session factory for the dispatch tests; the id the surface
     /// asked for is handed straight back as the child's id.
+    /// Contract: always succeeds, and reuses the requested id or mints `echo`.
     fn echo_factory(
     ) -> impl Fn(&Path, Option<&str>) -> Result<(Arc<Mutex<dyn Session>>, String), String> {
         |_: &Path, session: Option<&str>| {
@@ -761,6 +798,11 @@ mod tests {
 
     /// Purpose: a session factory that records the session id each child was started
     /// for, so the tests can assert two sessions become two children (web-surface.md §3).
+    /// Serves: the `session.open`/`session.new` tests in this module.
+    /// Design: `docs/design/web-surface.md` §3 — one child per session.
+    /// Up: `ensure_child`, handed in as the factory.
+    /// Down: the shared vector of ids the tests inspect.
+    /// Verify: `cargo test -p loong-web` (`session_open_reuses_a_live_child`).
     fn recording_factory() -> (
         impl Fn(&Path, Option<&str>) -> Result<(Arc<Mutex<dyn Session>>, String), String>,
         Arc<Mutex<Vec<Option<String>>>>,
@@ -782,6 +824,11 @@ mod tests {
     }
 
     /// Purpose: a full web surface on loopback with an echo bridge, for the ws tests.
+    /// Serves: every socket test in this module that needs a running surface.
+    /// Design: `docs/design/web-surface.md` §3.
+    /// Up: those tests.
+    /// Down: `serve_web`, on a private listener with a fresh token.
+    /// Verify: `cargo test -p loong-web` (`app::tests`).
     fn start() -> (std::net::SocketAddr, String) {
         let (listener, addr) = bind("127.0.0.1", 0).unwrap();
         let token = crate::random_token().unwrap();
@@ -1201,6 +1248,85 @@ mod tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
+    /// Purpose: the rail lists the workspace added last first and the launch workspace
+    /// last, so a workspace the user just added appears at the top of the list.
+    #[test]
+    fn session_tree_lists_the_newest_workspace_first() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let base = std::env::temp_dir().join(format!("loong-tree-order-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let home_dir = base.join("home");
+        let workspace = base.join("workspace");
+        let first = base.join("first-added");
+        let second = base.join("second-added");
+        for d in [&workspace, &first, &second] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::env::set_var("LOONGAGENT_HOME", &home_dir);
+
+        let (listener, addr) = bind("127.0.0.1", 0).unwrap();
+        let token = crate::random_token().unwrap();
+        let for_server = token.clone();
+        let home = workspace.clone();
+        std::thread::spawn(move || {
+            serve_web(
+                listener,
+                for_server,
+                home,
+                Arc::new(|_: &Path, session: Option<&str>| {
+                    let id = session.unwrap_or("echo").to_string();
+                    Ok((
+                        Arc::new(Mutex::new(Echo(vec![]))) as Arc<Mutex<dyn Session>>,
+                        id,
+                    ))
+                }),
+            )
+        });
+        let request = format!("ws://{addr}/ws?token={token}")
+            .into_client_request()
+            .unwrap();
+        let (mut socket, _) = tungstenite::connect(request).unwrap();
+        for (id, dir) in [(1, &first), (2, &second)] {
+            socket
+                .send(Message::text(
+                    json!({"jsonrpc":"2.0","id":id,"method":"workspace.add",
+                           "params":{"dir":dir}})
+                    .to_string(),
+                ))
+                .unwrap();
+            let _ = socket.read().unwrap();
+        }
+        socket
+            .send(Message::text(
+                json!({"jsonrpc":"2.0","id":3,"method":"session.tree","params":{}}).to_string(),
+            ))
+            .unwrap();
+        let answer = socket.read().unwrap().into_text().unwrap().to_string();
+        let value: Value = serde_json::from_str(&answer).unwrap();
+        let workspaces = value["result"]["workspaces"].as_array().unwrap();
+        let dirs: Vec<String> = workspaces
+            .iter()
+            .map(|w| w["dir"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            dirs,
+            vec![
+                second.display().to_string(),
+                first.display().to_string(),
+                workspace.display().to_string(),
+            ],
+            "the last workspace added is listed first: {workspaces:?}"
+        );
+        // `index` still names the workspace for the calls that take one, so the order
+        // shown on the page never changes which workspace a click means.
+        assert_eq!(workspaces[0]["index"].as_u64(), Some(2));
+        assert_eq!(workspaces[2]["index"].as_u64(), Some(0));
+        assert_eq!(workspaces[2]["home"].as_bool(), Some(true));
+
+        std::env::remove_var("LOONGAGENT_HOME");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
     /// Purpose: `session.tree` returns every workspace with its sessions nested, flagged
     /// live/busy, so the rail can render the two-level tree in one call (web-surface.md §2).
     #[test]
@@ -1270,9 +1396,17 @@ mod tests {
             .and_then(Value::as_array)
             .expect("a workspaces array");
         assert_eq!(workspaces.len(), 2, "{workspaces:?}");
+        // The rail shows the newest workspace first, so find one by the `index` it
+        // carries rather than by where it sits in the array.
+        let at = |idx: u64| -> &Value {
+            workspaces
+                .iter()
+                .find(|w| w["index"].as_u64() == Some(idx))
+                .unwrap_or_else(|| panic!("no workspace of index {idx}: {workspaces:?}"))
+        };
         // Home workspace carries s1; the other carries s9.
-        let find = |idx: usize, id: &str| {
-            workspaces[idx]
+        let find = |idx: u64, id: &str| {
+            at(idx)
                 .get("sessions")
                 .and_then(Value::as_array)
                 .unwrap()
@@ -1282,7 +1416,7 @@ mod tests {
         assert!(find(0, "s1"), "home workspace has s1: {workspaces:?}");
         assert!(find(1, "s9"), "the other workspace has s9: {workspaces:?}");
         // Sessions carry running/busy flags.
-        let s1 = &workspaces[0]["sessions"]
+        let s1 = &at(0)["sessions"]
             .as_array()
             .unwrap()
             .iter()

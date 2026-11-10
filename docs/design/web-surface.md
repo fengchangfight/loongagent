@@ -2,7 +2,7 @@
 
 - **Up:** [design/README.md](README.md) · [design/surfaces.md](surfaces.md)
 - **Authority:** [ADR-0009](../decisions/0009-surfaces.md) · [ADR-0002](../decisions/0002-json-rpc-wire-protocol.md)
-- **Code:** `crates/web/src/lib.rs`, `crates/web/src/app.rs`, `crates/web/src/sessions.rs`, `crates/web/src/rpc.rs`, `crates/web/src/index.html`, `crates/web/src/app.js`, `crates/web/src/style.css`, `crates/cli/src/web.rs`
+- **Code:** `crates/web/src/lib.rs`, `crates/web/src/app.rs`, `crates/web/src/sessions.rs`, `crates/web/src/index.html`, `crates/web/src/app.js`, `crates/web/src/style.css`, `crates/cli/src/web.rs`
 - **Verify:** `cargo test -p loong-web` · `./scripts/check.sh`
 
 The web surface is one thin client more, under ADR-0009: the browser renders and
@@ -31,6 +31,13 @@ directory path and a display title (defaulting to the final path segment).
 Removing a workspace from the list never deletes its directory or its session
 history — the sessions simply stop being grouped under it; the files stay on
 disk and remain openable as ungrouped history.
+
+The rail lists workspaces **newest added first**: the one just added by the
+picker sits at the top, and the home workspace — registered first, so the oldest
+— sits at the bottom. The order is display only. Every `index` travels with its
+entry and is still what the calls take, so reordering the rail never changes
+which workspace a click means; the page looks a workspace up by its `index`, not
+by its position.
 
 A workspace is identified by its canonicalised path (`realpath`, with symlinks,
 `..` and trailing slashes resolved), so two spellings of the same directory do
@@ -104,14 +111,17 @@ Three regions, all fed by the event stream:
   one sends `model.select` (the TUI's picker, ADR-0008, as a control) and folds the
   returned `ModelList` back into the dropdown. A running turn disables the picker
   until the turn ends.
-- **Session rail** — the two-level tree of §2: workspaces, each expanding to its
-  sessions newest first, with new/delete; clicking a session attaches to it. "Newest"
-  is the session's own conversation clock — the latest `time_ms` of a conversational
-  event in its log — so ordering is a function of what was said, never of the act of
-  looking: both the file's mtime and the session-start bookkeeping a resume writes
-  (`skills.loaded`, `model.selected`, `profile.selected`) are excluded. Opening a
-  session therefore leaves the rail exactly where it was, and the "2m ago" label
-  reads the same clock.
+- **Session rail** — the two-level tree of §2: workspaces newest added first, each
+  expanding to its sessions **newest started first**, with new/delete; clicking a
+  session attaches to it. A session is ordered by when it was created — the first
+  `time_ms` in its log; a brand-new session with no event yet takes the log file's
+  own time, so it appears at the top the moment it is made. Creation time cannot
+  move afterwards, so the rail never reshuffles: neither opening a session (which
+  writes the session-start records `skills.loaded`, `model.selected`,
+  `profile.selected`, and touches the file) nor talking in an old one lifts it. The
+  "2m ago" label reads the conversation clock — the latest conversational `time_ms`,
+  those start records excluded — so it says when the session was last spoken in
+  rather than when its file was last written.
 - **Chat** — the transcript, and above the composer a **process panel**: the
   live turn as it happens. Text deltas append to the draft assistant message;
   `tool.called`/`decision.*`/`tool.result` render as step cards with the tool's

@@ -186,7 +186,9 @@ function applyModelList(list) {
 /* ── The banner: workspace ────────────────────────────────────────────── */
 
 function renderWorkspace() {
-  const ws = state.workspaces[state.seat];
+  // The rail lists the newest workspace first, so a workspace is found by the `index`
+  // it carries — never by where it happens to sit in the array.
+  const ws = (state.workspaces || []).find((w) => w.index === state.seat);
   if (!ws) return;
   const dir = ws.dir || "";
   const name = dir.split("/").filter(Boolean).pop() || "/";

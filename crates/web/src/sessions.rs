@@ -35,6 +35,9 @@ pub fn session_dir(root: &Path, workspace: &Path) -> PathBuf {
 /// Serves: `delete` and the catalogue tests.
 /// Design: `docs/design/sessions-lineage.md` §1 — a session is its file, and `default` keeps
 /// the legacy name `session.jsonl`.
+/// Up: `delete`, `known`, and the catalogue tests.
+/// Down: the `<root>/projects/<slug>/<id>.jsonl` path.
+/// Verify: `cargo test -p loong-web` (`layout_matches_the_cli_rule`).
 /// Contract: mirrors `session_path_in` in `crates/cli/src/session.rs`.
 pub fn log_path(root: &Path, workspace: &Path, id: &str) -> PathBuf {
     if id == "default" {
@@ -115,6 +118,9 @@ pub fn delete(root: &Path, workspace: &Path, session_id: &str) -> Result<(), Err
 /// Purpose: The client's root, `$LOONGAGENT_HOME` or `~/.loongagent`.
 /// Serves: the catalogue's callers, so they never name the environment themselves.
 /// Design: `docs/design/sessions-lineage.md` §1.
+/// Up: `list`, `delete` and the tests, which pass the root down.
+/// Down: `loong_config::loongagent_home`.
+/// Verify: `cargo test -p loong-web` (`layout_matches_the_cli_rule`).
 /// Contract: the same root `crates/cli/src/main.rs`'s `config_dir` answers with.
 pub fn client_root() -> PathBuf {
     loong_config::loongagent_home()
@@ -214,7 +220,14 @@ fn summaries_in(dir: &Path) -> Vec<Summary> {
             }
         }
         if created_ms == u64::MAX {
-            created_ms = 0;
+            // A session created a moment ago has no event of its own yet, and a very old
+            // log may predate `time_ms`: the file's own time is the only clock there is.
+            // It is read only when the log carries no clock at all, so the mtime a resume
+            // touches can never reorder a session that has one.
+            created_ms = modified
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
         }
         // A log of nothing but session-start events still needs a clock to sort by.
         if last_ms == 0 {
@@ -241,20 +254,12 @@ fn summaries_in(dir: &Path) -> Vec<Summary> {
             created_ms,
         });
     }
-    // Order by the session's own clock — the newest *conversation* event in its log —
-    // newest first. Two things must not decide the order, because both move when a
-    // session is merely opened: the file's mtime (a resume touches it) and the
-    // session-start events (a resume writes `skills.loaded`). Excluding both makes the
-    // rail a function of the conversation, so clicking a session leaves it in place.
-    // `created_ms` breaks ties for logs that predate `time_ms`, and `id` keeps the order
-    // total. The file's mtime is not a key at all: a resume touches it, so an
-    // mtime-ordered rail reshuffles whenever a session is opened.
-    summaries.sort_by(|a, b| {
-        b.last_ms
-            .cmp(&a.last_ms)
-            .then(b.created_ms.cmp(&a.created_ms))
-            .then(a.id.cmp(&b.id))
-    });
+    // Newest *started* first: the rail is a list of sessions, and a session belongs where
+    // it was created. Creation time cannot move after the fact — not when the session is
+    // merely opened, and not when it is talked in either — so the list the user learned
+    // stays put. Ties (two sessions made in the same millisecond) fall back to the id so
+    // the order is total.
+    summaries.sort_by(|a, b| b.created_ms.cmp(&a.created_ms).then(a.id.cmp(&b.id)));
     summaries
 }
 
@@ -276,6 +281,9 @@ fn is_session_start_event(kind: Option<&str>) -> bool {
 /// Serves: `session_dir`.
 /// Design: `docs/design/sessions-lineage.md` §1 — mirrors `project_slug` in
 /// `crates/cli/src/session.rs`, so a session the TUI wrote is one the browser lists.
+/// Up: `session_dir`, and through it `sessions::list`.
+/// Down: the `projects/<slug>` directory name.
+/// Verify: `cargo test -p loong-web` (`layout_matches_the_cli_rule`).
 /// Contract: the same input gives the same slug in both crates; the test pins a known value.
 fn project_slug(cwd: &Path) -> String {
     let path = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
@@ -336,6 +344,11 @@ pub fn browse(asked: &str, home: &Path) -> Result<String, Error> {
 }
 
 /// Purpose: The directory a `dir` query parameter names, checked against the picker's rules.
+/// Serves: `crate::browse` — the `/api/browse` route the picker calls.
+/// Design: `docs/design/web-surface.md` §5 — the picker lists directories only.
+/// Up: `browse`, with the raw query string.
+/// Down: `std::fs::canonicalize`, then `sessions::browse`.
+/// Verify: `cargo test -p loong-web` (`browse_decodes_path`, `browse_refuses_a_file`).
 /// Contract: defaults to the home directory; must exist and be a directory.
 fn resolve_dir(asked: &str, home: &Path) -> Result<PathBuf, Error> {
     let query = asked.splitn(2, '?').nth(1).unwrap_or("");
@@ -363,6 +376,11 @@ fn resolve_dir(asked: &str, home: &Path) -> Result<PathBuf, Error> {
 }
 
 /// Purpose: Decode the `%XX` and `+` of one query value.
+/// Serves: `resolve_dir`.
+/// Design: `docs/design/web-surface.md` §5 — the picker's query string.
+/// Up: `resolve_dir`, on the `dir=` value.
+/// Down: the decoded path string it canonicalises.
+/// Verify: `cargo test -p loong-web` (`browse_decodes_path`).
 /// Contract: invalid `%` sequences pass through unchanged; a directory path never needs them.
 fn percent_decode(raw: &str) -> String {
     let bytes = raw.as_bytes();
@@ -426,7 +444,11 @@ mod tests {
 
     impl Fixture {
         /// Purpose: Make root and workspace, and plant two session logs.
-        /// Contract: each log carries one user `message.appended`, as a real one does.
+        /// Serves: every `list_*` test in this module.
+        /// Design: `docs/design/web-surface.md` §2 — the rail's ordering tests.
+        /// Up: those tests' bodies.
+        /// Down: `Fixture::plant`, which writes the logs it checks.
+        /// Verify: `cargo test -p loong-web` (`sessions::tests`).
         fn new() -> Self {
             // Unique per test and per call: the tests run in parallel threads.
             let base = std::env::temp_dir().join(format!(
@@ -434,7 +456,6 @@ mod tests {
                 std::process::id(),
                 std::thread::current().id()
             ));
-            let _ = std::fs::remove_dir_all(&base);
             let _ = std::fs::remove_dir_all(&base);
             let fixture = Fixture {
                 root: base.join("home"),
@@ -461,6 +482,12 @@ mod tests {
     }
 
     impl Drop for Fixture {
+        /// Purpose: Delete the temporary client root this fixture made.
+        /// Serves: `Fixture::new` — one test's scratch tree is removed when the test ends.
+        /// Design: `docs/design/web-surface.md` §2 (the tests' own cleanup).
+        /// Up: the test holding the fixture.
+        /// Down: nothing; the removal result is deliberately ignored.
+        /// Verify: `cargo test -p loong-web` (`sessions::tests`).
         fn drop(&mut self) {
             let base = self
                 .root
@@ -480,6 +507,65 @@ mod tests {
         let dir = session_dir(&fixture.root, &fixture.workspace);
         assert!(dir.join("s-old.jsonl").exists(), "{dir:?}");
         assert!(log_path(&fixture.root, &fixture.workspace, "default").ends_with("session.jsonl"));
+    }
+
+    /// Purpose: the newest *created* session sits on top, even when an older one has
+    /// been talked in more recently — the rail is ordered by when a session was started.
+    #[test]
+    fn list_orders_by_creation_not_last_chatter() {
+        let fixture = Fixture::new();
+        // A long conversation started first, last spoken in long after "s-fresh" began.
+        let chatty = log_path(&fixture.root, &fixture.workspace, "s-chatty");
+        std::fs::write(
+            &chatty,
+            format!(
+                "{}\n{}\n",
+                json!({"kind":"message.appended","seq":1,"time_ms":1_000,"id":"e1",
+                       "data":{"role":"user","text":"an old conversation"}}),
+                json!({"kind":"message.appended","seq":2,"time_ms":9_000,"id":"e2",
+                       "data":{"role":"user","text":"still going"}}),
+            ),
+        )
+        .unwrap();
+        // Started later, then left alone.
+        let fresh = log_path(&fixture.root, &fixture.workspace, "s-fresh");
+        std::fs::write(
+            &fresh,
+            format!(
+                "{}\n",
+                json!({"kind":"message.appended","seq":1,"time_ms":5_000,"id":"e1",
+                       "data":{"role":"user","text":"a newer conversation"}}),
+            ),
+        )
+        .unwrap();
+        let ids: Vec<String> = list(&fixture.root, &fixture.workspace)
+            .iter()
+            .filter_map(|e| e.get("id").and_then(Value::as_str).map(str::to_string))
+            .filter(|id| id == "s-chatty" || id == "s-fresh")
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["s-fresh", "s-chatty"],
+            "the session created last is listed first"
+        );
+    }
+
+    /// Purpose: a session created a moment ago is on top straight away, even before its
+    /// child has written a first event — a brand-new log has no clock of its own yet.
+    #[test]
+    fn list_puts_a_brand_new_session_on_top() {
+        let fixture = Fixture::new();
+        let brand_new = log_path(&fixture.root, &fixture.workspace, "s-brand-new");
+        std::fs::write(&brand_new, "").unwrap();
+        let ids: Vec<String> = list(&fixture.root, &fixture.workspace)
+            .iter()
+            .filter_map(|e| e.get("id").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        assert_eq!(
+            ids.first().map(String::as_str),
+            Some("s-brand-new"),
+            "an empty new session must not sink to the bottom: {ids:?}"
+        );
     }
 
     /// Purpose: both planted sessions are listed, newest first, with their titles and counts.

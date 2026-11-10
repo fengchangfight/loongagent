@@ -29,7 +29,13 @@ the action classes, the PDP ladder and the two enforcers are owned by
    with `ok: false` and the rule.
 6. **Answer.** `Kernel::respond_to_approval` writes `approval.decided`, fires
    `permission_decided`, then either runs the same `Kernel::execute` with the same
-   `ExecContext` or writes `tool.result` "denied by the user".
+   `ExecContext` or writes `tool.result` "denied by the user". The answer carries a
+   scope. `Session` is the one scope the kernel acts on: on a granted answer it stores
+   the command's irreversible segment keys in an in-memory set on the kernel, and a
+   later `dispatch` whose every irreversible segment is already remembered skips the
+   ask. The match is total, so one remembered segment never launders an unapproved
+   sibling, and the set dies with the kernel, so a restart asks again (ADR-0020). The
+   other scopes are carried for protocol compatibility and behave as `Once`.
 7. **`/yolo`.** `Kernel::set_auto_approve` writes `permissions.relaxed`; the ask arm
    executes and records a second `policy.decided` (`yolo:<Class>`) and a second
    `tool.call`. The one class it leaves alone is `Irreversible` — a deletion or a

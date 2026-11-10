@@ -282,7 +282,7 @@ fn an_approval_repurposes_the_input_line_and_answers_it() {
     // A menu, not an orange line: the question, then the answers to pick from.
     assert!(shows(&screen, "需要你决定"), "{screen}");
     assert!(shows(&screen, "本次允许"), "{screen}");
-    assert!(shows(&screen, "本项目允许"), "{screen}");
+    assert!(shows(&screen, "本会话允许"), "{screen}");
     assert!(shows(&screen, "拒绝"), "{screen}");
     assert!(shows(&screen, "▸"), "the chosen one is marked: {screen}");
 
@@ -629,7 +629,7 @@ fn a_long_command_does_not_push_the_answers_out_of_the_box() {
         "{} rows: {panel:?}",
         panel.len()
     );
-    for answer in ["本次允许", "本项目允许", "拒绝"] {
+    for answer in ["本次允许", "本会话允许", "拒绝"] {
         assert!(
             panel.iter().any(|line| shows(line, answer)),
             "{answer} left the panel: {panel:?}"
@@ -672,7 +672,7 @@ fn a_command_full_of_cjk_does_not_push_the_answers_out_of_the_box() {
         "{} rows: {panel:?}",
         panel.len()
     );
-    for answer in ["本次允许", "本项目允许", "拒绝"] {
+    for answer in ["本次允许", "本会话允许", "拒绝"] {
         assert!(
             panel.iter().any(|line| shows(line, answer)),
             "{answer} left the panel: {panel:?}"
@@ -709,7 +709,7 @@ fn a_squeezed_panel_gives_up_its_details_before_its_answers() {
             args: "{\"command\":\"ls\"}".to_string(),
         }));
         let screen = draw(&mut app, 80, height);
-        for answer in ["本次允许", "本项目允许", "拒绝"] {
+        for answer in ["本次允许", "本会话允许", "拒绝"] {
             assert!(
                 shows(&screen, answer),
                 "at {height} rows, {answer} is missing:\n{screen}"
@@ -757,7 +757,7 @@ fn the_decision_is_a_menu_that_the_keyboard_drives() {
         Action::Send(ToWorker::Respond {
             request_id: "appr-9".to_string(),
             granted: true,
-            scope: ApprovalScope::Project,
+            scope: ApprovalScope::Session,
         })
     );
 
@@ -958,6 +958,20 @@ fn the_bookkeeping_lines_are_not_drawn_into_the_wall() {
     );
 }
 
+/// Purpose: The second approval option is "本会话允许" and it sends `Session` scope, so the kernel remembers the shape.
+#[test]
+fn the_second_option_of_the_decision_menu_is_for_this_session() {
+    use loong_schema::generated::ApprovalScope;
+    let second = &App::options()[1];
+    assert_eq!(second.0, "本会话允许");
+    assert!(second.1, "it grants");
+    assert_eq!(
+        second.2,
+        ApprovalScope::Session,
+        "the kernel remembers what this scope approves, for the session"
+    );
+}
+
 /// Purpose: Every answer in the decision menu is readable, not just the highlighted one.
 #[test]
 fn the_answers_that_are_not_chosen_are_still_readable() {
@@ -967,7 +981,7 @@ fn the_answers_that_are_not_chosen_are_still_readable() {
     let mut app = App::new("s", "v");
     app.pending = Some("appr-9".to_string());
     assert_eq!(
-        color_of(&mut app, 80, 24, "本项目允许"),
+        color_of(&mut app, 80, 24, "本会话允许"),
         Some(ratatui::style::Color::Reset),
         "an unchosen answer is dimmed, not drawn into the background"
     );
@@ -3912,7 +3926,7 @@ fn the_second_question_of_a_session_reaches_the_screen() {
     let screen = draw(&mut app, 100, 30);
     assert!(shows(&screen, "需要你决定"), "{screen}");
     assert!(screen.contains("write_file"), "{screen}");
-    for answer in ["本次允许", "本项目允许", "拒绝"] {
+    for answer in ["本次允许", "本会话允许", "拒绝"] {
         assert!(shows(&screen, answer), "{answer} is on screen: {screen}");
     }
 }

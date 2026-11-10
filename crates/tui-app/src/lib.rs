@@ -3825,11 +3825,17 @@ impl App {
     /// Purpose: The three answers, in the order they are drawn and selected.
     /// Contract: called by `draw_approval`, `draw`'s decision height and `handle_key`'s menu arms.
     /// The three answers, in the order they are drawn.
+    ///
+    /// The middle answer is "本会话允许": it sends `Session` scope, and the
+    /// kernel remembers the command's irreversible shape for the rest of the
+    /// session. It used to be "本项目允许" sending `Project`, but the kernel
+    /// never read the scope, so that button did exactly what "本次允许" did —
+    /// a label that promised persistence the code did not have.
     fn options() -> [(&'static str, bool, loong_schema::generated::ApprovalScope); 3] {
         use loong_schema::generated::ApprovalScope;
         [
             ("本次允许", true, ApprovalScope::Once),
-            ("本项目允许", true, ApprovalScope::Project),
+            ("本会话允许", true, ApprovalScope::Session),
             ("拒绝", false, ApprovalScope::Once),
         ]
     }

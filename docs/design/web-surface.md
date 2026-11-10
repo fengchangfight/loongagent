@@ -183,12 +183,12 @@ Three regions, all fed by the event stream:
     underneath. `tool.result` attaches to the card whose `call_id` it carries —
     arguments and answer stay one card — showing `ok` or `failed`, the first lines,
     and the whole output one click away.
-  - `policy.decided` is the most numerous event by far, so it is a one-line chip
-    rather than a card: the verdict (`allow` quiet, `ask` amber, `deny` red), the
-    action class and the rule.
-  - `approval.requested` renders an approve/refuse pair answering
-    `approval.respond` with the event's **`data.request_id`** — not the event's own
-    id, which the session does not recognise.
+  - `policy.decided` is the most numerous event by far, so it is a one-line
+    chip: the verdict (`allow` quiet, `ask` amber, `deny` red), the action
+    class and the rule.
+  - `approval.requested` renders three answers — once, for the session
+    (`scope: "session"`, remembered so the same shape does not ask again) and
+    refuse — answering `approval.respond` with the event's **`data.request_id`**.
   - `skill.invoked`, `compaction.applied`, `context.degraded`,
     `approval.decided` and `turn.interrupted` are chips carrying their own facts.
   - Session-start bookkeeping (`skills.loaded`, `profile.selected`, `hook.fired`,

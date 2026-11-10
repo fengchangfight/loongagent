@@ -39,7 +39,7 @@ listed is a violation. The middle column is each crate's own `//!` header.
 | `loong-reverse-mcp-bin` | `loong-reverse-mcp`: the reverse-engineering MCP stdio server loongagent launches. | `loong-reverse-engine`, `loong-reverse-evidence`, `loong-reverse-mcp`, `loong-reverse-platform` |
 | `loong-reverse-platform` | The operating-system layer: starting a program, reading and writing files, sync. | `loong-reverse-evidence` |
 | `loong-reverse-testkit` | Fixtures the vendored tests share: built binaries and bundles to analyse. | — |
-| `loong-reverse-ui` | Serve the reverse study tab — the `.reverse/` tree, previews and page — inside the portal. | `loong-web` |
+| `loong-reverse-ui` | Serve the reverse study tab — the project list, the notes, the files and the page. | `loong-web` |
 | `loong-sandbox` | The policy decision point: allow, ask or deny plus the rule that fired, and never a widening. | `loong-schema` |
 | `loong-schema` | Own the single source of truth for every message on the wire, generated once for Rust and TypeScript. | — |
 | `loong-server` | The local agent server: one session, JSON-RPC over stdio, every event streamed before the response. | `loong-eventlog`, `loong-kernel`, `loong-protocol`, `loong-schema` |

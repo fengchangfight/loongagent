@@ -2,7 +2,7 @@
 
 - **Up:** [design/README.md](README.md) · [04 System overview](../04-system-overview.md)
 - **Authority:** [ADR-0001](../decisions/0001-one-binary-client-server.md) · [ADR-0002](../decisions/0002-json-rpc-wire-protocol.md) · [ADR-0009](../decisions/0009-surfaces.md) · [ADR-0019](../decisions/0019-mid-turn-permissions.md)
-- **Code:** `crates/cli/src/main.rs`, `crates/server/src/lib.rs`, `crates/tui/src/lib.rs`, `crates/tui-app/src/lib.rs`, `crates/tui-app/src/history.rs`, `crates/tui-app/src/mark.rs`, `crates/tui-app/src/commands.rs`, `crates/web/src/lib.rs`
+- **Code:** `crates/cli/src/main.rs`, `crates/server/src/lib.rs`, `crates/tui/src/lib.rs`, `crates/tui-app/src/lib.rs`, `crates/tui-app/src/history.rs`, `crates/tui-app/src/mark.rs`, `crates/tui-app/src/commands.rs`, `crates/web/src/lib.rs`, `crates/web/src/app.rs`, `crates/web/src/sessions.rs`
 - **Verify:** `cargo test -p loongagent -p loong-server -p loong-tui -p loong-tui-app -p loong-web` · `./scripts/check.sh`
 
 The architecture is one local agent server and thin clients that render its event stream and send
@@ -146,18 +146,18 @@ reader is away, a dimmed bar on the page's right edge shows where the transcript
 (`self.scroll` drives ratatui's `ScrollbarState`); it paints over the margin, it vanishes at the
 bottom, and an open fold has no bar, because the fold's rows are not the transcript's coordinates.
 
-## 4. The web: a bridge, not a second agent
+## 4. The web: a portal of thin bridges
 
-`loongagent web` spawns the same server child, then `loong-web` serves one embedded page and
-bridges WebSocket messages to the child's stdio lines. It is deliberately ignorant of the
-protocol — a line in, lines out — so the browser speaks what the TUI speaks, with no routing,
-ledger, policy or second loop. Two properties are local:
-
-- **A token on the handshake.** A loopback bind is not authorisation on its own; any page can
-  open a WebSocket to `127.0.0.1`. The token is 16 bytes from `/dev/urandom`, printed in the URL
-  fragment (never sent to a server) and presented as a query parameter on the socket. A wrong
-  token is refused.
-- **The bind address.** Loopback by default; `--bind` changes it and the token is the only gate.
+`loongagent web` opens a portal that serves one embedded page and keeps a per-workspace server
+child behind it. The page holds the workspace and session state the old bridge page could not:
+a directory picker for workspaces, the sessions of each workspace listed from the on-disk
+catalogue, and a panel that renders the event stream — model toolbar, thinking, tool timeline,
+approvals, usage footer. `loong-web` owns the routing (`workspace.*`, `session.list/open/delete`);
+everything that touches a session is forwarded unchanged to that workspace's server child, so the
+bridge stays ignorant of the turn protocol and the surface rule of §6 holds. Two properties stay
+local: the handshake token from `/dev/urandom`, and the loopback default that `--bind` overrides
+with the token as the only gate. The shape, the protocol and the panel are
+[web-surface.md](web-surface.md)'s.
 
 **One portal, several surfaces.** `Router` (`prefix`, `answer`) plus `serve_with` send a
 connection under a mounted prefix to that surface, keep `/ws` the portal's token-checked socket,

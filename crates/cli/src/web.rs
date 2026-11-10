@@ -77,19 +77,29 @@ impl loong_web::Session for WebSession {
     }
 }
 
-/// Purpose: Resolve settings, spawn the server child, bind a port and serve the page until the process ends.
+/// Purpose: Resolve settings, bind a port and serve the workspace surface until the process ends.
 /// Serves: `loongagent web`.
-/// Design: `docs/design/surfaces.md` §4.
+/// Design: `docs/design/web-surface.md` §§1–3; `docs/design/surfaces.md` §4.
 /// Up: `main.rs`'s `web` arm; no other caller.
-/// Down: `Args::settings_with_pack`, `ChildTransport::spawn`, `loong_web::{random_token, bind, serve}`,
+/// Down: `Args::settings_with_pack`, `ChildTransport::spawn` (per workspace), `loong_web::{random_token, bind, serve_web}`,
 /// and `crate::browser::open_in_browser` for the printed URL.
 /// Verify: `cargo test -p loongagent --test web_surface`.
 pub(crate) fn web(args: Args) -> Result<(), String> {
-    let portal = make_session(&args)?;
+    let home = std::fs::canonicalize(&args.cwd).unwrap_or_else(|_| args.cwd.clone());
     let token = loong_web::random_token()?;
     let (listener, addr) = loong_web::bind(&args.bind, args.port)?;
 
-    for row in portal.settings.explain_all() {
+    // Echo the home workspace's resolved settings, as the single-workspace surface did.
+    let (settings, pack) = args.settings_with_pack()?;
+    if let Some(state) = &pack {
+        eprintln!(
+            "[control] {} {} — profile: {}",
+            state.provenance.issuer,
+            state.provenance.version,
+            state.summary()
+        );
+    }
+    for row in settings.explain_all() {
         eprintln!(
             "[config] {:<28} {:<9} {}",
             row.key,
@@ -97,6 +107,47 @@ pub(crate) fn web(args: Args) -> Result<(), String> {
             row.source
         );
     }
+
+    // One server child per (workspace, session), started when a tab first needs it:
+    // the factory clones the flags into a fresh Args with the workspace's cwd and the
+    // session the caller named (or a freshly minted one), so two sessions in one
+    // directory run as two children that never see each other's kernel
+    // (web-surface.md §3).
+    let start_session = move |dir: &std::path::Path,
+                              session: Option<&str>|
+          -> Result<
+        (
+            std::sync::Arc<std::sync::Mutex<dyn loong_web::Session>>,
+            String,
+        ),
+        String,
+    > {
+        let mut workspace_args = args.clone();
+        workspace_args.cwd = dir.to_path_buf();
+        // Resolve the session to its log path here, on the cli side, so the web crate
+        // never learns the id → file rule. `Some(id)` binds the child to an existing
+        // session; `None` mints a fresh id (web-surface.md §2). The id is returned so
+        // the surface can attach the tab to the child's real session without having
+        // to ask the child (web-surface.md §3).
+        let (path, id) = match session {
+            Some(id) => (crate::session::resolve_session(id, dir)?, id.to_string()),
+            None => {
+                let id = crate::session::new_session_id(dir);
+                let path =
+                    crate::session::session_file_in(&loong_config::loongagent_home(), dir, &id);
+                (path, id)
+            }
+        };
+        workspace_args.session = Some(path);
+        // The path above is already resolved, so the spec/new flags must not make the
+        // child re-derive it.
+        workspace_args.session_spec = None;
+        workspace_args.new_session = false;
+        workspace_args.session_source = SessionSource::Named;
+        let portal = make_session(&workspace_args)?;
+        Ok((portal.session, id))
+    };
+
     let url = format!("http://{addr}/#token={token}");
     println!("loongagent web — open this URL:");
     println!();
@@ -104,9 +155,10 @@ pub(crate) fn web(args: Args) -> Result<(), String> {
     println!();
     println!("The token is in the URL fragment: browsers never send it to a server, and");
     println!("another page cannot open the socket without it. Bound to {addr}.");
+    println!("Workspace: {}", home.display());
     // The URL is printed first, so a machine without an opener still shows the way in.
     crate::browser::open_in_browser(&url);
-    loong_web::serve(portal.session, listener, token);
+    loong_web::serve_web(listener, token, home, std::sync::Arc::new(start_session));
     Ok(())
 }
 
@@ -122,6 +174,7 @@ pub(crate) struct Portal {
     /// Purpose: The session every browser socket shares, behind the one lock `exchange` takes.
     pub(crate) session: std::sync::Arc<std::sync::Mutex<dyn loong_web::Session>>,
     /// Purpose: The resolved settings, for the caller to print.
+    #[allow(dead_code)]
     pub(crate) settings: loong_config::Profile,
     /// Purpose: The server child's process id, for `loong_tui::interrupt`.
     pub(crate) server_pid: u32,

@@ -2,37 +2,40 @@
 //!
 //! # Contract
 //! - **Serves:** a browser surface that speaks exactly what the TUI speaks, with a token on the handshake (surfaces.md §4).
-//! - **Design:** `docs/design/surfaces.md` (ADR-0009).
+//! - **Design:** `docs/design/web-surface.md` (ADR-0009).
 //! - **Upstream:** `loongagent web` serves it; a browser opens the page and the socket.
-//! - **Downstream:** `Session`, `tungstenite`, the TCP listener and the embedded `INDEX` page.
+//! - **Downstream:** `Session`, `tungstenite`, the TCP listener and the embedded page.
 //! - **Verify:** `cargo test -p loong-web` · `./scripts/check.sh`
 //!
 //! The web surface (ADR-0009): the same session, in a browser.
 //!
-//! This layer is deliberately **ignorant of the protocol**: it carries JSON-RPC
-//! lines between a WebSocket and whatever session is behind it, and serves one
-//! self-contained page. That is what the "one brain, many faces" split buys — the
-//! browser speaks exactly what the TUI speaks, the kernel does not know a browser
-//! exists, and there is no second implementation of the loop to keep in step.
-//!
-//! Two things are local to this surface:
-//!
-//! * **A token**, required on the WebSocket handshake. Any page in any tab can
-//!   open `ws://127.0.0.1:<port>`, so a loopback bind is not authorisation on its
-//!   own. The token travels in the URL *fragment* (which browsers never send to a
-//!   server) and is presented as a query parameter on the connection only.
-//! * **The static page**, embedded in the binary so a demo needs no asset server
-//!   and no bundler.
+//! This layer is deliberately **ignorant of the session protocol**: it carries
+//! JSON-RPC lines between a WebSocket and whatever session is behind it, and
+//! serves the page. That is what the "one brain, many faces" split buys — the
+//! browser speaks exactly what the TUI speaks, the kernel does not know a
+//! browser exists, and there is no second implementation of the loop to keep in
+//! step. What *is* local to the surface lives in `app`: the workspaces the
+//! browser can sit on, and the session catalogue it lists, opens and deletes.
 
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tungstenite::{accept_hdr, Message};
 
+pub mod app;
+mod sessions;
+
 /// The page, compiled in: one file, no build step, no CDN.
 pub const INDEX: &str = include_str!("index.html");
+
+/// The page's behaviour, compiled in beside it.
+pub const APP_JS: &str = include_str!("app.js");
+
+/// The page's styling, compiled in beside it.
+pub const STYLE_CSS: &str = include_str!("style.css");
 
 /// Purpose: The site icon, compiled in — one copy for every page this crate serves.
 ///
@@ -140,6 +143,40 @@ pub trait Router: Send + Sync {
 pub fn serve(session: Arc<Mutex<dyn Session>>, listener: TcpListener, token: String) {
     serve_with(session, listener, token, None);
 }
+
+/// Accept connections until the process ends, with the browser workspace layer on the socket.
+/// Purpose: Accept connections until the process ends, seating every tab on the home workspace.
+///
+/// Serves: `loongagent web` — the multi-workspace chat surface (web-surface.md §1).
+/// Design: `docs/design/web-surface.md` §§1–3.
+/// Up: `crates/cli/src/web.rs`.
+/// Down: `handle_web` and `std::thread::spawn`.
+/// Verify: `cargo test -p loong-web` and `cargo test -p loongagent --test web_surface`.
+pub fn serve_web(
+    listener: TcpListener,
+    token: String,
+    home: PathBuf,
+    start_session: Arc<
+        dyn Fn(&std::path::Path, Option<&str>) -> Result<(Arc<Mutex<dyn Session>>, String), String>
+            + Send
+            + Sync,
+    >,
+) {
+    let state = Arc::new(Mutex::new(app::State::new()));
+    for stream in listener.incoming() {
+        let Ok(stream) = stream else { continue };
+        let state = Arc::clone(&state);
+        let token = token.clone();
+        let home = home.clone();
+        let start_session = Arc::clone(&start_session);
+        std::thread::spawn(move || {
+            if let Err(e) = handle_web(stream, state, token, home, start_session) {
+                eprintln!("[web] {e}");
+            }
+        });
+    }
+}
+
 /// Like `serve`, but the connections under the mounted surface's prefix go to it
 /// first; the chat page and the socket stay the portal's either way.
 /// Purpose: Accept connections, giving a mounted surface the ones under its prefix before the portal.
@@ -166,6 +203,30 @@ pub fn serve_with(
             }
         });
     }
+}
+
+/// Purpose: Refuse a request whose token is missing or wrong.
+///
+/// Serves: a loopback surface is not authorisation on its own (reverse.md §4.2).
+/// Design: `docs/design/reverse.md` §4.2.
+/// Up: `handle_routed` for a mounted surface's data route.
+/// Down: the 401 write.
+/// Verify: `cargo test -p loong-web`.
+fn refuse_without_token(mut stream: TcpStream) -> Result<(), String> {
+    // Drain the request first: closing a socket with unread bytes makes the
+    // kernel answer RST, and the client then sees a reset instead of the 401.
+    let mut buffer = [0u8; 4096];
+    let _ = stream.read(&mut buffer);
+    let body = "missing or wrong token; open the URL printed by loongagent reverse";
+    let head = format!(
+        "HTTP/1.1 401 Unauthorized\r\nContent-Type: text/plain; charset=utf-8\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream
+        .write_all(head.as_bytes())
+        .and_then(|_| stream.flush())
+        .map_err(|e| e.to_string())
 }
 
 /// Purpose: Read the token from a request head — `x-loong-token` header or `token` query.
@@ -195,28 +256,50 @@ fn presented_token(head: &str) -> Option<String> {
         .map(|token| token.to_string())
 }
 
-/// Purpose: Refuse a request whose token is missing or wrong.
-///
-/// Serves: a loopback surface is not authorisation on its own (reverse.md §4.2).
-/// Design: `docs/design/reverse.md` §4.2.
-/// Up: `handle_routed` for a mounted surface's data route.
-/// Down: the 401 write.
-/// Verify: `cargo test -p loong-web`.
-fn refuse_without_token(mut stream: TcpStream) -> Result<(), String> {
-    // Drain the request first: closing a socket with unread bytes makes the
-    // kernel answer RST, and the client then sees a reset instead of the 401.
-    let mut buffer = [0u8; 4096];
-    let _ = stream.read(&mut buffer);
-    let body = "missing or wrong token; open the URL printed by loongagent reverse";
-    let head = format!(
-        "HTTP/1.1 401 Unauthorized\r\nContent-Type: text/plain; charset=utf-8\r\n\
-         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    stream
-        .write_all(head.as_bytes())
-        .and_then(|_| stream.flush())
-        .map_err(|e| e.to_string())
+/// Purpose: Route one connection on the workspace surface: the page and assets, the icon,
+/// the workspace picker's directory listing, or the socket.
+/// Serves: `serve_web` for every accepted connection.
+/// Design: `docs/design/web-surface.md` §5.
+/// Up: `serve_web`.
+/// Down: `websocket_web`, `static_page`, `icon`, `asset`, `browse`.
+/// Verify: `cargo test -p loong-web` and `cargo test -p loongagent --test web_surface`.
+fn handle_web(
+    stream: TcpStream,
+    state: Arc<Mutex<app::State>>,
+    token: String,
+    home: PathBuf,
+    start_session: Arc<
+        dyn Fn(&std::path::Path, Option<&str>) -> Result<(Arc<Mutex<dyn Session>>, String), String>
+            + Send
+            + Sync,
+    >,
+) -> Result<(), String> {
+    // Peek (not read): the WebSocket handshake must see the request itself, while
+    // a static request is ours to answer.
+    let mut peek = [0u8; 4096];
+    let peeked = stream.peek(&mut peek).map_err(|e| e.to_string())?;
+    let head = String::from_utf8_lossy(&peek[..peeked]).to_string();
+    let request_line = head.lines().next().unwrap_or_default().to_string();
+    let is_upgrade = head.to_ascii_lowercase().contains("upgrade: websocket");
+    if request_line.contains("/ws") || is_upgrade {
+        return websocket_web(stream, state, token, home, start_session);
+    }
+    let asked = request_line.split_whitespace().nth(1).unwrap_or("");
+    let bare = asked.split('?').next().unwrap_or(asked);
+    match bare {
+        "/app.js" => return asset(stream, APP_JS, "application/javascript; charset=utf-8"),
+        "/style.css" => return asset(stream, STYLE_CSS, "text/css; charset=utf-8"),
+        FAVICON_PATH | "/favicon.ico" => return icon(stream),
+        "/api/browse" => {
+            // The picker lists directories; it carries the token like the study tab's
+            // data routes (web-surface.md §5).
+            if presented_token(&head).as_deref() != Some(token.as_str()) {
+                return refuse_without_token(stream);
+            }
+            return browse(stream, asked, &home);
+        }
+        _ => static_page(stream),
+    }
 }
 
 /// Purpose: Route one connection to the mounted surface, the socket, or the page.
@@ -316,6 +399,52 @@ fn static_page(mut stream: TcpStream) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// Purpose: Answer a GET for one compiled-in asset with its content type.
+/// Serves: `handle_web` for `/app.js` and `/style.css`.
+/// Design: `docs/design/web-surface.md` §5.
+/// Up: `handle_web`.
+/// Down: the TCP writes.
+/// Verify: `cargo test -p loong-web` (`asset_`).
+fn asset(mut stream: TcpStream, body: &str, kind: &str) -> Result<(), String> {
+    let mut buffer = [0u8; 4096];
+    let _ = stream.read(&mut buffer);
+    let head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\n\
+         Cache-Control: no-store\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream
+        .write_all(head.as_bytes())
+        .and_then(|_| stream.write_all(body.as_bytes()))
+        .and_then(|_| stream.flush())
+        .map_err(|e| e.to_string())
+}
+
+/// Purpose: Answer the workspace picker's directory listing.
+/// Serves: `handle_web` for `/api/browse`.
+/// Design: `docs/design/web-surface.md` §5 — the picker lists directories only.
+/// Up: `handle_web`.
+/// Down: `sessions::browse`.
+/// Verify: `cargo test -p loong-web` (`browse_`).
+fn browse(mut stream: TcpStream, asked: &str, home: &std::path::Path) -> Result<(), String> {
+    let mut buffer = [0u8; 4096];
+    let _ = stream.read(&mut buffer);
+    let (status, body) = match sessions::browse(asked, home) {
+        Ok(body) => ("200 OK", body),
+        Err(e) => ("400 Bad Request", json!({"error": e.0}).to_string()),
+    };
+    let head = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json; charset=utf-8\r\n\
+         Content-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream
+        .write_all(head.as_bytes())
+        .and_then(|_| stream.write_all(body.as_bytes()))
+        .and_then(|_| stream.flush())
+        .map_err(|e| e.to_string())
+}
+
 /// Purpose: Accept the WebSocket handshake with the token check, then bridge messages to the session.
 ///
 /// Serves: the browser drives the same JSON-RPC session as the TUI (surfaces.md §4).
@@ -408,6 +537,48 @@ fn websocket(
             _ => {}
         }
     }
+}
+
+/// Purpose: Accept the WebSocket handshake with the token check, then hand the socket to the
+/// workspace bridge.
+/// Serves: `handle_web` when the request upgrades.
+/// Design: `docs/design/web-surface.md` §3.
+/// Up: `handle_web`.
+/// Down: `tungstenite::accept_hdr`, `app::handle_ws`.
+/// Verify: `cargo test -p loong-web` and `cargo test -p loongagent --test web_surface`.
+fn websocket_web(
+    stream: TcpStream,
+    state: Arc<Mutex<app::State>>,
+    token: String,
+    home: PathBuf,
+    start_session: Arc<
+        dyn Fn(&std::path::Path, Option<&str>) -> Result<(Arc<Mutex<dyn Session>>, String), String>
+            + Send
+            + Sync,
+    >,
+) -> Result<(), String> {
+    let mut socket = accept_hdr(stream, |request: &Request, response: Response| {
+        let presented = request
+            .uri()
+            .query()
+            .unwrap_or_default()
+            .split('&')
+            .find_map(|pair| pair.strip_prefix("token="));
+        if presented == Some(token.as_str()) {
+            return Ok(response);
+        }
+        Err(ErrorResponse::from(
+            tungstenite::http::Response::builder()
+                .status(tungstenite::http::StatusCode::UNAUTHORIZED)
+                .body(Some(
+                    "missing or wrong token; open the URL printed by `loongagent web`".to_string(),
+                ))
+                .expect("a static response is valid"),
+        ))
+    })
+    .map_err(|e| format!("websocket handshake refused: {e}"))?;
+
+    app::handle_ws(&mut socket, &state, &home, &*start_session)
 }
 
 /// A session that answers from a script: the web layer's own tests, and a way to
@@ -559,131 +730,109 @@ mod tests {
     fn lines_reach_the_browser_as_the_session_produces_them() {
         /// Purpose: A session that emits two delta lines and then a response, to pin streaming order.
         ///
-        /// Serves: the test that lines reach the browser as they are produced (surfaces.md §4).
+        /// Serves: `lines_reach_the_browser_as_the_session_produces_them`.
         /// Design: `docs/design/surfaces.md` (ADR-0009).
-        /// Up: `lines_reach_the_browser_as_the_session_produces_them`.
+        /// Up: that test only.
         /// Down: `Session::exchange`.
         /// Verify: `cargo test -p loong-web`.
-        struct Trickle;
-        impl Session for Trickle {
-            /// Purpose: Emit two delta lines before the final response.
+        struct Scripted;
+        impl Session for Scripted {
+            /// Purpose: Emit two deltas, then the response, and return — the order is the point.
             ///
-            /// Serves: the streaming test, where the order of the lines is the point (surfaces.md §4).
+            /// Serves: `lines_reach_the_browser_as_the_session_produces_them`.
             /// Design: `docs/design/surfaces.md` (ADR-0009).
-            /// Up: `websocket` through `Session`.
-            /// Down: the sink callback and `json!`.
+            /// Up: that test only.
+            /// Down: the sink calls.
             /// Verify: `cargo test -p loong-web`.
             fn exchange(
                 &mut self,
                 _line: &str,
                 sink: &mut dyn FnMut(String) -> Result<(), String>,
             ) -> Result<(), String> {
-                for piece in ["one", "two"] {
-                    sink(
-                        json!({"jsonrpc": "2.0", "method": "model.delta",
-                                "params": {"turn_id": 1, "text": piece}})
+                sink(
+                    json!({"jsonrpc": "2.0", "method": "model.delta", "params": {"text": "he"}})
                         .to_string(),
-                    )?;
-                }
+                )?;
+                sink(
+                    json!({"jsonrpc": "2.0", "method": "model.delta", "params": {"text": "llo"}})
+                        .to_string(),
+                )?;
                 sink(json!({"jsonrpc": "2.0", "id": 1, "result": {"accepted": true}}).to_string())
             }
         }
-        let (addr, token) = start(Arc::new(Mutex::new(Trickle)));
+
+        let session = Arc::new(Mutex::new(Scripted));
+        let (addr, token) = start(session);
         let request = format!("ws://{addr}/ws?token={token}")
             .into_client_request()
             .unwrap();
         let (mut socket, _) = tungstenite::connect(request).unwrap();
-        socket.send(Message::text("{}")).unwrap();
-        let first = socket.read().unwrap().into_text().unwrap().to_string();
-        let second = socket.read().unwrap().into_text().unwrap().to_string();
-        let third = socket.read().unwrap().into_text().unwrap().to_string();
-        assert!(
-            first.contains("model.delta") && first.contains("one"),
-            "{first}"
-        );
-        assert!(second.contains("two"), "{second}");
-        assert!(
-            third.contains("accepted"),
-            "the response still comes last: {third}"
-        );
+        socket
+            .send(Message::text(
+                json!({"jsonrpc": "2.0", "id": 1, "method": "prompt.submit", "params": {}})
+                    .to_string(),
+            ))
+            .unwrap();
+        let one = socket.read().unwrap().into_text().unwrap().to_string();
+        let two = socket.read().unwrap().into_text().unwrap().to_string();
+        let three = socket.read().unwrap().into_text().unwrap().to_string();
+        assert!(one.contains("\"he\""), "first delta streamed: {one}");
+        assert!(two.contains("\"llo\""), "second delta streamed: {two}");
+        assert!(three.contains("\"id\":1"), "the response last: {three}");
     }
 
-    /// Purpose: Pins that a session failure becomes an event instead of a dead socket.
+    /// Purpose: Pins that a broken exchange is surfaced to the page as an event, not a hang.
     #[test]
-    fn a_session_failure_becomes_an_event_instead_of_a_dead_socket() {
-        /// Purpose: A session whose exchange fails, to pin the error event on the socket.
+    fn a_transport_failure_is_an_event_not_a_hang() {
+        /// Purpose: A session that fails every exchange, to pin the failure notice.
         ///
-        /// Serves: a transport failure reaches the page instead of freezing it (surfaces.md §4).
+        /// Serves: `a_transport_failure_is_an_event_not_a_hang`.
         /// Design: `docs/design/surfaces.md` (ADR-0009).
-        /// Up: `a_session_failure_becomes_an_event_instead_of_a_dead_socket`.
+        /// Up: that test only.
         /// Down: `Session::exchange`.
         /// Verify: `cargo test -p loong-web`.
         struct Broken;
         impl Session for Broken {
-            /// Purpose: Always fail, as a dropped server connection would.
+            /// Purpose: Fail with a message the page can show.
             ///
-            /// Contract: `crates/web/src/lib.rs`.
+            /// Serves: `a_transport_failure_is_an_event_not_a_hang`.
+            /// Design: `docs/design/surfaces.md` (ADR-0009).
+            /// Up: that test only.
+            /// Down: nothing; the error is the output.
+            /// Verify: `cargo test -p loong-web`.
             fn exchange(
                 &mut self,
                 _line: &str,
                 _sink: &mut dyn FnMut(String) -> Result<(), String>,
             ) -> Result<(), String> {
-                Err("the server closed the connection".to_string())
+                Err("the child died".to_string())
             }
         }
-        let (addr, token) = start(Arc::new(Mutex::new(Broken)));
+
+        let session = Arc::new(Mutex::new(Broken));
+        let (addr, token) = start(session);
         let request = format!("ws://{addr}/ws?token={token}")
             .into_client_request()
             .unwrap();
         let (mut socket, _) = tungstenite::connect(request).unwrap();
-        socket.send(Message::text("{}")).unwrap();
-        let notice = socket.read().unwrap().into_text().unwrap().to_string();
-        assert!(notice.contains("client.error"), "{notice}");
-        assert!(
-            notice.contains("the server closed the connection"),
-            "{notice}"
-        );
+        socket
+            .send(Message::text(
+                json!({"jsonrpc": "2.0", "id": 1, "method": "prompt.submit", "params": {}})
+                    .to_string(),
+            ))
+            .unwrap();
+        let line = socket.read().unwrap().into_text().unwrap().to_string();
+        assert!(line.contains("client.error"), "{line}");
+        assert!(line.contains("the child died"), "{line}");
     }
 
-    /// Purpose: Pins that tokens are random hex of a usable length.
+    /// Purpose: Pins that a mounted surface's data routes are token-gated, and its page is not.
     #[test]
-    fn tokens_are_random_hex_of_a_usable_length() {
-        let a = random_token().unwrap();
-        let b = random_token().unwrap();
-        assert_eq!(a.len(), 32);
-        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
-        assert_ne!(a, b, "two tokens must not collide");
-    }
-
-    /// Purpose: Pins that the embedded page speaks the protocol the kernel emits.
-    #[test]
-    fn the_embedded_page_talks_the_protocol() {
-        // The page is the other half of the contract: it must speak JSON-RPC and
-        // render the kinds the kernel emits.
-        for needle in [
-            "session.attach",
-            "prompt.submit",
-            "approval.respond",
-            "message.appended",
-            "tool.call",
-            "approval.requested",
-            // The session offers models; the page lists them and can switch.
-            "model.list",
-            "model.select",
-            "id=\"model\"",
-            "ws",
-        ] {
-            assert!(INDEX.contains(needle), "the page handles {needle}");
-        }
-    }
-
-    /// Purpose: A mounted surface's data routes need the token; its page does not.
-    #[test]
-    fn a_mounted_surface_needs_the_token_for_data_but_not_for_its_page() {
-        /// Purpose: A study-surface stub that echoes whatever it was handed.
+    fn a_mounted_surfaces_data_routes_carry_the_token() {
+        /// Purpose: A study-surface stub that answers its own prefix with plain text.
         ///
-        /// Serves: `a_mounted_surface_needs_the_token_for_data_but_not_for_its_page`.
-        /// Design: `docs/design/reverse.md` §4.2.
+        /// Serves: `a_mounted_surfaces_data_routes_carry_the_token`.
+        /// Design: `docs/design/reverse.md` §4.
         /// Up: that test only.
         /// Down: `Router::answer`.
         /// Verify: `cargo test -p loong-web`.
@@ -708,8 +857,13 @@ mod tests {
             }
         }
 
-        /// Purpose: One GET on a fresh connection, returning the whole response.
-        /// Contract: `crates/web/src/lib.rs`.
+        /// Purpose: Run one GET and return the whole response, for the route assertions.
+        ///
+        /// Serves: the token-gating test.
+        /// Design: `docs/design/reverse.md` §4.
+        /// Up: that test only.
+        /// Down: the TCP round trip.
+        /// Verify: `cargo test -p loong-web`.
         fn get(addr: SocketAddr, request: &str) -> String {
             let mut stream = TcpStream::connect(addr).unwrap();
             stream.write_all(request.as_bytes()).unwrap();
@@ -813,7 +967,7 @@ mod tests {
         // The chat page stays the portal's.
         let mut stream = TcpStream::connect(addr).unwrap();
         stream
-            .write_all(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
             .unwrap();
         let mut body = String::new();
         stream.read_to_string(&mut body).unwrap();
@@ -827,5 +981,78 @@ mod tests {
         socket.send(Message::text("{}")).unwrap();
         let answer = socket.read().unwrap().into_text().unwrap().to_string();
         assert!(answer.contains("accepted"), "{answer}");
+    }
+
+    /// Purpose: The workspace surface serves the page, its assets, and refuses the picker without a token.
+    #[test]
+    fn the_workspace_surface_serves_assets_and_gates_the_picker() {
+        let (listener, addr) = bind("127.0.0.1", 0).unwrap();
+        let token = random_token().unwrap();
+        let for_server = token.clone();
+        let home = std::env::temp_dir();
+        std::thread::spawn(move || {
+            serve_web(
+                listener,
+                for_server,
+                home,
+                Arc::new(|_: &std::path::Path, session: Option<&str>| {
+                    let id = session.unwrap_or("echo").to_string();
+                    Ok((
+                        Arc::new(Mutex::new(Echo(vec![]))) as Arc<Mutex<dyn Session>>,
+                        id,
+                    ))
+                }),
+            )
+        });
+
+        /// Purpose: Run one GET and return the whole response.
+        ///
+        /// Serves: the workspace-surface test's assertions.
+        /// Design: `docs/design/web-surface.md` §5.
+        /// Up: that test only.
+        /// Down: the TCP round trip.
+        /// Verify: `cargo test -p loong-web`.
+        fn get(addr: SocketAddr, request: &str) -> String {
+            let mut stream = TcpStream::connect(addr).unwrap();
+            stream.write_all(request.as_bytes()).unwrap();
+            let mut body = String::new();
+            stream.read_to_string(&mut body).unwrap();
+            body
+        }
+
+        let page = get(
+            addr,
+            "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert!(page.starts_with("HTTP/1.1 200 OK"), "the page: {page}");
+        assert!(page.contains("loongagent"), "{page}");
+
+        let js = get(
+            addr,
+            "GET /app.js HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert!(js.contains("application/javascript"), "{js}");
+        let css = get(
+            addr,
+            "GET /style.css HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert!(css.contains("text/css"), "{css}");
+
+        let refused = get(
+            addr,
+            "GET /api/browse HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert!(refused.starts_with("HTTP/1.1 401"), "no token: {refused}");
+        let listed = get(
+            addr,
+            &format!(
+                "GET /api/browse?token={token} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+            ),
+        );
+        assert!(
+            listed.starts_with("HTTP/1.1 200 OK"),
+            "with token: {listed}"
+        );
+        assert!(listed.contains("\"dirs\""), "{listed}");
     }
 }

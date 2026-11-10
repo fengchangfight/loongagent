@@ -11,7 +11,7 @@
 //!
 //! What lives here is the **PDP** — the part that returns
 //! `allow | ask | deny` **plus the rule that fired**, over the autonomy ladder
-//! (investigate / write-in-workspace / out-of-bounds). Enforcement (PEPs: the OS
+//! (investigate / write-in-workspace / out-of-bounds / irreversible). Enforcement (PEPs: the OS
 //! sandbox, the tool runner, network egress) is deliberately *not* here, so a
 //! decision bug cannot by itself grant access.
 //!
@@ -59,11 +59,13 @@ pub struct Ladder {
     pub investigate: Verdict,
     pub write_workspace: Verdict,
     pub out_of_bounds: Verdict,
+    /// The class YOLO never relaxes (ADR-0020): deletion and data leaving.
+    pub irreversible: Verdict,
 }
 
 impl Default for Ladder {
     /// Built-in defaults: investigate free, workspace writes allowed, anything
-    /// out of bounds explicitly asked. Junior-proof by default.
+    /// out of bounds or irreversible explicitly asked. Junior-proof by default.
     /// Purpose: The junior-proof defaults: investigate and workspace writes allowed, out of bounds asked.
     /// Contract: `crates/sandbox/src/lib.rs`.
     fn default() -> Self {
@@ -71,6 +73,7 @@ impl Default for Ladder {
             investigate: Verdict::Allow,
             write_workspace: Verdict::Allow,
             out_of_bounds: Verdict::Ask,
+            irreversible: Verdict::Ask,
         }
     }
 }
@@ -80,13 +83,14 @@ impl Ladder {
     /// Serves: `Pdp`'s decision and tightening methods.
     /// Design: `docs/design/tools-permissions.md` §3.
     /// Up: `Pdp::tighten_from` and `Pdp::decide`; no caller outside this module.
-    /// Down: the three ladder fields.
+    /// Down: the four ladder fields.
     /// Verify: `cargo test -p loong-sandbox`.
     pub fn get(&self, class: ActionClass) -> Verdict {
         match class {
             ActionClass::Investigate => self.investigate,
             ActionClass::WriteWorkspace => self.write_workspace,
             ActionClass::OutOfBounds => self.out_of_bounds,
+            ActionClass::Irreversible => self.irreversible,
         }
     }
 
@@ -97,6 +101,7 @@ impl Ladder {
             ActionClass::Investigate => self.investigate = verdict,
             ActionClass::WriteWorkspace => self.write_workspace = verdict,
             ActionClass::OutOfBounds => self.out_of_bounds = verdict,
+            ActionClass::Irreversible => self.irreversible = verdict,
         }
     }
 }
@@ -147,7 +152,7 @@ pub struct Ruling {
     pub reason: String,
 }
 
-/// Purpose: The three-slot decision point: an effective ladder and one rule string per slot.
+/// Purpose: The four-slot decision point: an effective ladder and one rule string per slot.
 /// Serves: every tool call's allow/ask/deny decision.
 /// Design: `docs/design/tools-permissions.md` §3.
 /// Up: the kernel's build step and dispatch.
@@ -155,7 +160,7 @@ pub struct Ruling {
 /// Verify: `cargo test -p loong-sandbox`.
 pub struct Pdp {
     effective: Ladder,
-    rules: [String; 3],
+    rules: [String; 4],
 }
 
 impl Default for Pdp {
@@ -172,7 +177,7 @@ impl Pdp {
     /// Serves: the kernel's build step, before any profile value narrows it.
     /// Design: `docs/design/tools-permissions.md` §3.
     /// Up: `Kernel::build` and `Pdp::default`.
-    /// Down: `Ladder::default` and the three rule slots.
+    /// Down: `Ladder::default` and the four rule slots.
     /// Verify: `cargo test -p loong-sandbox`.
     pub fn new() -> Self {
         Self {
@@ -181,6 +186,7 @@ impl Pdp {
                 "builtin:investigate".into(),
                 "builtin:write_workspace".into(),
                 "builtin:out_of_bounds".into(),
+                "builtin:irreversible".into(),
             ],
         }
     }
@@ -192,6 +198,7 @@ impl Pdp {
             ActionClass::Investigate => 0,
             ActionClass::WriteWorkspace => 1,
             ActionClass::OutOfBounds => 2,
+            ActionClass::Irreversible => 3,
         }
     }
 
@@ -270,6 +277,7 @@ fn class_name(class: ActionClass) -> &'static str {
         ActionClass::Investigate => "investigate",
         ActionClass::WriteWorkspace => "write_workspace",
         ActionClass::OutOfBounds => "out_of_bounds",
+        ActionClass::Irreversible => "irreversible",
     }
 }
 
@@ -278,7 +286,7 @@ mod tests {
     use super::*;
 
     #[test]
-    /// Purpose: Pin the built-in ladder: investigate and workspace writes allow, out of bounds ask.
+    /// Purpose: Pin the built-in ladder: investigate and workspace writes allow, out of bounds and irreversible ask.
     fn defaults_are_junior_proof() {
         let p = Pdp::new();
         assert_eq!(p.ladder().investigate, Verdict::Allow);
@@ -287,6 +295,11 @@ mod tests {
             p.ladder().out_of_bounds,
             Verdict::Ask,
             "out of bounds always asks"
+        );
+        assert_eq!(
+            p.ladder().irreversible,
+            Verdict::Ask,
+            "an irreversible action always asks (ADR-0020)"
         );
     }
 
@@ -351,5 +364,31 @@ mod tests {
             p.decide(ActionClass::Investigate, "read").rule,
             "session:investigate"
         );
+    }
+
+    #[test]
+    /// Purpose: Pin the monotonicity of the class YOLO cannot relax: `irreversible` may be denied, never allowed.
+    fn irreversible_can_be_narrowed_but_never_widened() {
+        let mut p = Pdp::new();
+        let err = p
+            .tighten(ActionClass::Irreversible, Verdict::Allow)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            PolicyError::WouldWiden {
+                class: ActionClass::Irreversible,
+                from: Verdict::Ask,
+                to: Verdict::Allow
+            },
+            "no config may talk the class out of asking (ADR-0020 §3)"
+        );
+        assert_eq!(
+            p.decide(ActionClass::Irreversible, "rm -rf src").verdict,
+            Verdict::Ask
+        );
+        p.tighten(ActionClass::Irreversible, Verdict::Deny).unwrap();
+        let r = p.decide(ActionClass::Irreversible, "rm -rf src");
+        assert_eq!(r.verdict, Verdict::Deny);
+        assert_eq!(r.rule, "session:irreversible");
     }
 }

@@ -32,7 +32,8 @@ the action classes, the PDP ladder and the two enforcers are owned by
    `ExecContext` or writes `tool.result` "denied by the user".
 7. **`/yolo`.** `Kernel::set_auto_approve` writes `permissions.relaxed`; the ask arm
    executes and records a second `policy.decided` (`yolo:<Class>`) and a second
-   `tool.call`.
+   `tool.call`. The one class it leaves alone is `Irreversible` — a deletion or a
+   payload leaving the machine still parks (ADR-0020).
 
 The same PEPs apply on allow and on a granted approval; they are tools-permissions §4.
 `recall` is the one call that skips the gate: `dispatch` answers it before the registry

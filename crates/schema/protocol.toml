@@ -45,7 +45,8 @@ doc = "Autonomy classes — allocated per action, not per tool (ADR-0007 §4)."
 variants = [
   { name = "Investigate", wire = "investigate", doc = "read-only; no prompt" },
   { name = "WriteWorkspace", wire = "write_workspace", doc = "edits inside the workspace" },
-  { name = "OutOfBounds", wire = "out_of_bounds", doc = "network, outside the workspace, destructive, credentials" },
+  { name = "OutOfBounds", wire = "out_of_bounds", doc = "network, outside the workspace, credentials" },
+  { name = "Irreversible", wire = "irreversible", doc = "cannot be undone or un-leaked: deletion, data leaving the machine; asked even when prompts are off (ADR-0020)" },
 ]
 
 [[types]]
@@ -217,10 +218,13 @@ fields = [
 [[types]]
 name = "SessionAttachResult"
 kind = "struct"
+doc = "What the client adopts when it attaches: the session, the schema it speaks, how much of the log already exists, whether a question is really waiting, and whether prompts are off."
 fields = [
   { name = "session_id", type = "string" },
   { name = "schema_version", type = "string" },
   { name = "existing_events", type = "u64" },
+  { name = "pending_approval", type = "string", optional = true, doc = "the request id the kernel is holding in memory right now; absent means no question is waiting for an answer, whatever the log's last line says" },
+  { name = "auto_approve", type = "bool", doc = "whether this session is in YOLO mode now; a surface renders its toggle from this and never from its own guess (ADR-0020)" },
 ]
 
 [[types]]
@@ -434,6 +438,29 @@ name = "session.new"
 doc = "Start a fresh session and move this server onto it. Context starts empty; the previous session's log is closed and kept, never deleted — starting a new session must not be a way to lose an old one."
 params = "SessionOnlyParams"
 result = "SessionNewResult"
+
+[[types]]
+name = "SessionOpenParams"
+kind = "struct"
+doc = "Which session to move this server onto. Not `SessionOnlyParams`: the id to open is the whole point of the call."
+fields = [
+  { name = "session_id", type = "string", doc = "the session this server is on now" },
+  { name = "open", type = "string", doc = "the id of an existing session to open instead" },
+]
+
+[[types]]
+name = "SessionOpenResult"
+kind = "struct"
+doc = "The session this server is now on, after `session.open`."
+fields = [
+  { name = "session_id", type = "string" },
+]
+
+[[methods]]
+name = "session.open"
+doc = "Move this server onto a session that already exists, for a surface that lets a person pick one. The same swap as `session.new` — context, stream position and turn counter all belong to the session being opened — and the previous log is closed and kept. A session another process is writing cannot be opened: the error says so rather than starting a second writer."
+params = "SessionOpenParams"
+result = "SessionOpenResult"
 
 [[methods]]
 name = "session.attach"

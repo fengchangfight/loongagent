@@ -429,6 +429,7 @@ impl Profile {
                 ActionClass::Investigate => "investigate",
                 ActionClass::WriteWorkspace => "write_workspace",
                 ActionClass::OutOfBounds => "out_of_bounds",
+                ActionClass::Irreversible => "irreversible",
             }
         );
         let row = self.explain(&key)?;

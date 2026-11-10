@@ -753,7 +753,7 @@ impl LayerValues {
             let class = parse_class(key).ok_or_else(|| {
                 ConfigError::Invalid(format!(
                     "{source}: unknown action class {key:?} \
-                     (investigate | write_workspace | out_of_bounds)"
+                     (investigate | write_workspace | out_of_bounds | irreversible)"
                 ))
             })?;
             let verdict = parse_verdict(verdict).ok_or_else(|| {
@@ -825,7 +825,7 @@ impl LayerValues {
     /// Serves: `resolve_with` and the PDP's allow/ask/deny defaults.
     /// Design: `docs/design/tools-permissions.md` §3; `docs/design/config-routing.md` §1.
     /// Up: `merge::resolve_with`.
-    /// Down: the three `Layer::Builtin` permission rows.
+    /// Down: the four `Layer::Builtin` permission rows.
     /// Verify: `cargo test -p loong-config`.
     pub(super) fn builtin_defaults() -> Self {
         Self {
@@ -842,6 +842,10 @@ impl LayerValues {
                 ),
                 (
                     "permissions.out_of_bounds".to_string(),
+                    Value::Verdict(Verdict::Ask),
+                ),
+                (
+                    "permissions.irreversible".to_string(),
                     Value::Verdict(Verdict::Ask),
                 ),
             ],
@@ -862,6 +866,7 @@ pub(super) fn parse_class(text: &str) -> Option<ActionClass> {
         "investigate" => Some(ActionClass::Investigate),
         "write_workspace" => Some(ActionClass::WriteWorkspace),
         "out_of_bounds" => Some(ActionClass::OutOfBounds),
+        "irreversible" => Some(ActionClass::Irreversible),
         _ => None,
     }
 }

@@ -23,9 +23,12 @@ pub enum ActionClass {
     /// edits inside the workspace
     #[serde(rename = "write_workspace")]
     WriteWorkspace,
-    /// network, outside the workspace, destructive, credentials
+    /// network, outside the workspace, credentials
     #[serde(rename = "out_of_bounds")]
     OutOfBounds,
+    /// cannot be undone or un-leaked: deletion, data leaving the machine; asked even when prompts are off (ADR-0020)
+    #[serde(rename = "irreversible")]
+    Irreversible,
 }
 
 /// PDP verdict, always accompanied by the rule that fired (ADR-0007 §1).
@@ -192,11 +195,16 @@ pub struct SessionAttachParams {
     pub client: String,
 }
 
+/// What the client adopts when it attaches: the session, the schema it speaks, how much of the log already exists, whether a question is really waiting, and whether prompts are off.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionAttachResult {
     pub session_id: String,
     pub schema_version: String,
     pub existing_events: u64,
+    /// the request id the kernel is holding in memory right now; absent means no question is waiting for an answer, whatever the log's last line says
+    pub pending_approval: Option<String>,
+    /// whether this session is in YOLO mode now; a surface renders its toggle from this and never from its own guess (ADR-0020)
+    pub auto_approve: bool,
 }
 
 /// A session's recorded events, oldest first: what a client needs in order to show "what happened before I arrived".
@@ -378,6 +386,21 @@ pub struct SessionNewResult {
     pub session_id: String,
 }
 
+/// Which session to move this server onto. Not `SessionOnlyParams`: the id to open is the whole point of the call.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionOpenParams {
+    /// the session this server is on now
+    pub session_id: String,
+    /// the id of an existing session to open instead
+    pub open: String,
+}
+
+/// The session this server is now on, after `session.open`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionOpenResult {
+    pub session_id: String,
+}
+
 /// Turn this session's approval prompts off or on. The sandbox is a different axis and is untouched (ADR-0007 §5).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PermissionsSetParams {
@@ -490,6 +513,8 @@ pub mod method {
     pub const CONTEXT_EXPLAIN: &str = "context.explain";
     /// Start a fresh session and move this server onto it. Context starts empty; the previous session's log is closed and kept, never deleted — starting a new session must not be a way to lose an old one.
     pub const SESSION_NEW: &str = "session.new";
+    /// Move this server onto a session that already exists, for a surface that lets a person pick one. The same swap as `session.new` — context, stream position and turn counter all belong to the session being opened — and the previous log is closed and kept. A session another process is writing cannot be opened: the error says so rather than starting a second writer.
+    pub const SESSION_OPEN: &str = "session.open";
     /// Attach a thin client to the local agent server (ADR-0009).
     pub const SESSION_ATTACH: &str = "session.attach";
     /// Opt out of approval prompts for this session. Opting out is itself an event, and the interface must show it (ADR-0007 §5).

@@ -97,7 +97,7 @@ fn roundtrip_session_attach_params() {
 #[test]
 fn roundtrip_session_attach_result() {
     roundtrip::<g::SessionAttachResult>(
-        r#"{"session_id": "<string>","schema_version": "<string>","existing_events": 1}"#,
+        r#"{"session_id": "<string>","schema_version": "<string>","existing_events": 1,"pending_approval": "<string>","auto_approve": true}"#,
     );
 }
 
@@ -205,6 +205,16 @@ fn roundtrip_model_select_params() {
 #[test]
 fn roundtrip_session_new_result() {
     roundtrip::<g::SessionNewResult>(r#"{"session_id": "<string>"}"#);
+}
+
+#[test]
+fn roundtrip_session_open_params() {
+    roundtrip::<g::SessionOpenParams>(r#"{"session_id": "<string>","open": "<string>"}"#);
+}
+
+#[test]
+fn roundtrip_session_open_result() {
+    roundtrip::<g::SessionOpenResult>(r#"{"session_id": "<string>"}"#);
 }
 
 #[test]

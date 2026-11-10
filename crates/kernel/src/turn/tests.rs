@@ -271,6 +271,45 @@ fn opting_out_of_prompts_allows_the_action_and_says_so_in_the_log() {
     let _ = std::fs::remove_file(&escape);
 }
 
+/// Purpose: `/yolo` skips the ask for every class but the irreversible one: a deletion still parks for an answer (ADR-0020).
+#[test]
+fn opting_out_of_prompts_still_asks_before_a_deletion() {
+    let t = Temp::new();
+    let victim = t.dir.join("notes.txt");
+    std::fs::write(&victim, "keep me").unwrap();
+    let model = ScriptedModel::new(vec![
+        response(
+            vec![call("c1", "shell", json!({"command": "rm -rf notes.txt"}))],
+            None,
+        ),
+        response(vec![], Some("done")),
+    ]);
+    let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+    k.set_auto_approve(true).unwrap();
+
+    let outcome = k.submit("delete it").unwrap();
+    assert!(
+        outcome.pending_approval.is_some(),
+        "/yolo does not cover deletion, so something must be waiting: {:?}",
+        outcome.pending_approval
+    );
+    let events = loong_eventlog::replay(&t.log).unwrap().events;
+    let policy = events
+        .iter()
+        .filter(|e| e.kind == ev::POLICY_DECIDED)
+        .last()
+        .expect("the decision is recorded");
+    assert_eq!(policy.data["action_class"], "irreversible");
+    assert_eq!(
+        policy.data["verdict"], "ask",
+        "no yolo: override is written for this class"
+    );
+    assert!(
+        victim.exists(),
+        "nothing ran while the question is still open"
+    );
+}
+
 /// Purpose: A permissions request from outside the turn is applied at the next decision, and recorded before the call it relaxes.
 #[test]
 fn a_permissions_request_is_applied_at_the_next_decision() {

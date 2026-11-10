@@ -1,7 +1,7 @@
 # Tools and permissions: one gate, two enforcers
 
 - **Up:** [design/README.md](README.md) · [04 System overview](../04-system-overview.md)
-- **Authority:** [ADR-0004](../decisions/0004-microkernel-extension-model.md) · [ADR-0007](../decisions/0007-permission-sandbox-engine.md) · [ADR-0019](../decisions/0019-mid-turn-permissions.md)
+- **Authority:** [ADR-0004](../decisions/0004-microkernel-extension-model.md) · [ADR-0007](../decisions/0007-permission-sandbox-engine.md) · [ADR-0019](../decisions/0019-mid-turn-permissions.md) · [ADR-0020](../decisions/0020-yolo-never-relaxes-irreversible.md)
 - **Code:** `crates/tools/src/lib.rs`, `crates/sandbox/src/`, `crates/kernel/src/turn/confinement.rs`, `crates/proc/src/lib.rs`
 - **Verify:** `cargo test -p loong-tools -p loong-sandbox` · `./scripts/check.sh`
 
@@ -34,18 +34,17 @@ reports `ToolError::Refused` (bad arguments, outside its remit) or
 `ToolError::Failed` (it ran and failed); both become a `tool.result` with
 `ok: false`, never a failed turn.
 
-One trait, not a built-in fast path: the same code gates and records every tool.
-
 ## 2. The action class comes from the arguments
 
 Autonomy is allocated per **action**, not per tool (ADR-0007 §4). `ActionClass`
-has three values:
+has four values:
 
 | Class | Meaning | Default ruling |
 |---|---|---|
 | `Investigate` | read-only, no side effects | allow |
 | `WriteWorkspace` | edits inside the workspace | allow |
-| `OutOfBounds` | network, outside the workspace, destructive, credentials | ask |
+| `OutOfBounds` | network, outside the workspace, credentials | ask |
+| `Irreversible` | cannot be undone or un-leaked: deletion, data leaving | ask, and YOLO does not relax it (ADR-0020) |
 
 `Tool::action_class(args, cwd)` computes it before anything runs, which is what
 makes "investigate free, write gated" true rather than nominal:
@@ -56,12 +55,15 @@ makes "investigate free, write gated" true rather than nominal:
   write target may not exist yet); inside is `WriteWorkspace`, outside is
   `OutOfBounds`.
 - `classify_command` — a shell tool has no single class, so the command string
-  is read: known read-only verbs with no redirection are `Investigate`, but
-  their arguments are not resolved (`cat /etc/passwd` is `Investigate`); network,
-  privilege and destructive patterns are `OutOfBounds`; a mutating verb whose
-  *absolute* path tokens leave the workspace is `OutOfBounds`; anything else,
-  unknown or mutating, is `WriteWorkspace` — including `touch ../x`, which only
-  the OS sandbox stops.
+  is read. First the two irreversible families, matched on whole command words
+  so `warm` is not `rm`: deleting verbs (`rm`, `git rm`, `find … -delete`) and
+  egress (a payload-bearing `curl`/`wget`, `scp`, `rsync`, `ssh`, `nc`,
+  `git push`, `cargo publish`). Then: known read-only verbs with no redirection
+  are `Investigate`, but their arguments are not resolved (`cat /etc/passwd` is
+  `Investigate`); network, privilege and outside-path patterns are
+  `OutOfBounds`; a mutating verb whose *absolute* path tokens leave the
+  workspace is `OutOfBounds`; anything else, unknown or mutating, is
+  `WriteWorkspace` — including `touch ../x`, which only the OS sandbox stops.
 
 The shell classifier is a **heuristic for allocating autonomy, never a security
 boundary** — the boundary is the PDP plus the confinement. `ReadFile`,
@@ -82,12 +84,9 @@ flowchart LR
     V -- deny --> N["deny"]
 ```
 
-The end-to-end sequence — `tool.call`, `pre_tool`, `policy.decided`, the three arms,
-`approval.requested` and `respond_to_approval` — is
-[flows/tool-approval.md](flows/tool-approval.md).
-
-`Pdp` is a three-slot `Ladder` with a rule string per slot. Its defaults are
-junior-proof: investigate and workspace writes allowed, out of bounds asked.
+`Pdp` is a four-slot `Ladder` with a rule string per slot. Its defaults are
+junior-proof: investigate and workspace writes allowed, out of bounds and
+irreversible asked.
 Configuration narrows the ladder before the first decision
 (`Pdp::tighten_from(class, verdict, source)` in `Kernel::build`), and only
 narrows: the severity order is allow < ask < deny, and a request that would
@@ -107,8 +106,9 @@ The three arms:
 - **Ask** — fire `permission_requested`, write `approval.requested` with an
   `appr-N` id, and park the turn. `Kernel::respond_to_approval` later writes
   `approval.decided` and either runs the call or records a refusal. `/yolo`
-  (`Kernel::set_auto_approve`) turns an ask into an allow, and says so with a
-  second `policy.decided` and a second `tool.call`. The sequence is [tool-approval.md](flows/tool-approval.md).
+  (`Kernel::set_auto_approve`) turns an ask into an allow — for every class but
+  `Irreversible`, which keeps asking (ADR-0020) — and says so with a second
+  `policy.decided` and a second `tool.call`. The sequence is [tool-approval.md](flows/tool-approval.md).
   A `/yolo` asked for while a turn is running reaches the kernel at its next decision
   boundary through the surface's private control channel — [ADR-0019](../decisions/0019-mid-turn-permissions.md).
 - **Deny** — record `tool.result` with `ok: false` and the rule and reason. The
@@ -176,9 +176,10 @@ confinement. The PDP is not in `ExecContext` at all. So:
   that writes outside the workspace.
 - A granted approval does not buy a different policy: `respond_to_approval`
   runs the same `Kernel::execute`, with the same `ExecContext`.
-- `/yolo` relaxes only the ask arm. The sandbox is a different axis and still
-  applies — `Shell::execute` states it in the comment beside the call: the
-  restriction is irreversible and must not leak into the server.
+- `/yolo` relaxes only the ask arm, and not the `irreversible` class. The
+  sandbox is a different axis and still applies — `Shell::execute` states it in
+  the comment beside the call: the restriction is irreversible and must not leak
+  into the server.
 
 The honest limit: the kernel hands a tool the confinement and the built-ins use
 `loong_proc` so it is applied, but nothing in the type system stops a tool from
@@ -197,7 +198,7 @@ by neither the sandbox nor the built-in guards.
 | `write_file` | `WriteWorkspace` | refuses outside the workspace |
 | `edit` | `WriteWorkspace` | exact-string replace; refuses a missing or ambiguous `old_string` and names the lines, because guessing corrupts a file |
 | `grep`, `glob` | `Investigate` | read-only by construction, bounded output |
-| `shell` | `classify_command` | bounded output, timeout, whole process tree killed on timeout |
+| `shell` | `classify_command` | bounded output, timeout, whole process tree killed on timeout; deletion and egress are `Irreversible` |
 | `skill` | `Investigate` | loads a skill's instructions by name |
 | `mcp__<server>__<tool>` | from `mcp.toml` | a server process the kernel starts at build; not covered by `ExecContext` confinement (§4) |
 
@@ -237,10 +238,13 @@ context side of it is [context-ledger.md](context-ledger.md) §5.
 - [ADR-0007](../decisions/0007-permission-sandbox-engine.md) — the ladder, the
   rule that fired, approvals, and why enforcement is at the OS.
 - [ADR-0008](../decisions/0008-configuration-layering.md) — narrowing only.
+- [ADR-0020](../decisions/0020-yolo-never-relaxes-irreversible.md) — why a
+  deletion or a leak still asks when prompts are off.
 - [04 System overview](../04-system-overview.md) §3 item 4 and §5 — the PDP and
   "prompts are not permissions".
 - `crates/kernel/src/turn/tests.rs` —
   `a_granted_approval_still_cannot_escape_the_workspace`,
   `the_pep_still_allows_a_workspace_write_through_the_shell`,
   `the_pep_stops_an_escape_the_classifier_cannot_see`,
-  `opting_out_of_prompts_allows_the_action_and_says_so_in_the_log`.
+  `opting_out_of_prompts_allows_the_action_and_says_so_in_the_log`,
+  `opting_out_of_prompts_still_asks_before_a_deletion`.

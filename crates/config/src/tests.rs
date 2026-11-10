@@ -492,7 +492,11 @@ fn absent_layers_are_skipped_not_invented() {
     assert!(profile.budget_tokens.is_none());
     assert!(profile.skill_dirs.is_empty());
     // …but the built-in ladder is always the baseline of the permission chain.
-    assert_eq!(profile.explain_all().len(), 3);
+    assert_eq!(
+        profile.explain_all().len(),
+        4,
+        "four action classes, one built-in row each"
+    );
     assert!(profile
         .explain_all()
         .iter()

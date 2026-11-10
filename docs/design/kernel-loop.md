@@ -197,7 +197,9 @@ cache still matches.
 
 **`/yolo`.** `Kernel::set_auto_approve` records `permissions.relaxed` and flips
 `Kernel.auto_approve`. The ask arm then executes instead of parking and records
-that the ruling was relaxed; the sandbox is a different axis and still applies.
+that the ruling was relaxed — except for an `Irreversible` ruling, which keeps
+asking, because a deletion or a leak cannot be taken back (ADR-0020). The sandbox
+is a different axis and still applies.
 
 A `/yolo` typed **while the turn is running** arrives through the surface's private
 control channel and waits in `Kernel.permissions_request`.

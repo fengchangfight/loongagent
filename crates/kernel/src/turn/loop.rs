@@ -1078,10 +1078,11 @@ impl Kernel {
                 Ok(Dispatch::Done)
             }
             // Opted out: the ruling is allowed instead of asking, and the event says the
-            // autonomy was relaxed rather than that the policy changed.
-            // Opted out: the ruling is allowed instead of asking, and the event says the
             // autonomy was relaxed rather than that the policy changed (ADR-0007 §5).
-            Verdict::Ask if self.auto_approve => {
+            // The one class the opt-out does not cover is the irreversible one: a
+            // deletion or a leak cannot be taken back, so the question survives YOLO
+            // (ADR-0020 §2).
+            Verdict::Ask if self.auto_approve && class != gen::ActionClass::Irreversible => {
                 events.push(self.append(
                     gen::event::POLICY_DECIDED,
                     &json!({

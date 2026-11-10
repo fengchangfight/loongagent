@@ -15,7 +15,7 @@ export type Millis = number;
 export type Json = JsonValue;
 
 /** Autonomy classes — allocated per action, not per tool (ADR-0007 §4). */
-export type ActionClass = "investigate" | "write_workspace" | "out_of_bounds";
+export type ActionClass = "investigate" | "write_workspace" | "out_of_bounds" | "irreversible";
 
 /** PDP verdict, always accompanied by the rule that fired (ADR-0007 §1). */
 export type Verdict = "allow" | "ask" | "deny";
@@ -143,10 +143,15 @@ export interface SessionAttachParams {
   client: string;
 }
 
+/** What the client adopts when it attaches: the session, the schema it speaks, how much of the log already exists, whether a question is really waiting, and whether prompts are off. */
 export interface SessionAttachResult {
   session_id: string;
   schema_version: string;
   existing_events: number;
+  /** the request id the kernel is holding in memory right now; absent means no question is waiting for an answer, whatever the log's last line says */
+  pending_approval?: string;
+  /** whether this session is in YOLO mode now; a surface renders its toggle from this and never from its own guess (ADR-0020) */
+  auto_approve: boolean;
 }
 
 /** A session's recorded events, oldest first: what a client needs in order to show "what happened before I arrived". */
@@ -310,6 +315,19 @@ export interface SessionNewResult {
   session_id: string;
 }
 
+/** Which session to move this server onto. Not `SessionOnlyParams`: the id to open is the whole point of the call. */
+export interface SessionOpenParams {
+  /** the session this server is on now */
+  session_id: string;
+  /** the id of an existing session to open instead */
+  open: string;
+}
+
+/** The session this server is now on, after `session.open`. */
+export interface SessionOpenResult {
+  session_id: string;
+}
+
 /** Turn this session's approval prompts off or on. The sandbox is a different axis and is untouched (ADR-0007 §5). */
 export interface PermissionsSetParams {
   session_id: string;
@@ -406,6 +424,7 @@ export const METHODS = {
   modelSelect: "model.select",
   contextExplain: "context.explain",
   sessionNew: "session.new",
+  sessionOpen: "session.open",
   sessionAttach: "session.attach",
   permissionsSet: "permissions.set",
   sessionReplay: "session.replay",

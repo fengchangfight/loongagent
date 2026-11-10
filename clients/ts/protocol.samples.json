@@ -83,7 +83,9 @@
     "SessionAttachResult": {
       "session_id": "<string>",
       "schema_version": "<string>",
-      "existing_events": 1
+      "existing_events": 1,
+      "pending_approval": "<string>",
+      "auto_approve": true
     },
     "SessionReplayResult": {
       "events": [
@@ -232,6 +234,13 @@
     "SessionNewResult": {
       "session_id": "<string>"
     },
+    "SessionOpenParams": {
+      "session_id": "<string>",
+      "open": "<string>"
+    },
+    "SessionOpenResult": {
+      "session_id": "<string>"
+    },
     "PermissionsSetParams": {
       "session_id": "<string>",
       "auto_approve": true
@@ -308,6 +317,11 @@
       "name": "session.new",
       "params": "SessionOnlyParams",
       "result": "SessionNewResult"
+    },
+    {
+      "name": "session.open",
+      "params": "SessionOpenParams",
+      "result": "SessionOpenResult"
     },
     {
       "name": "session.attach",

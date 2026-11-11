@@ -357,8 +357,8 @@ struct SessionSummary {
 /// events, no `seq` and no id anyone can resume — so every reader that enumerates sessions
 /// takes this gate first.
 fn is_session_file(path: &Path) -> bool {
-    path.extension().and_then(|e| e.to_str()) == Some("jsonl")
-        && path.file_name().and_then(|n| n.to_str()) != Some(HISTORY_FILE)
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    name.ends_with(".jsonl") && !name.ends_with(".history.jsonl")
 }
 
 /// Purpose: Read every session log in a directory into summaries, counting the child's own events only.
@@ -1344,22 +1344,24 @@ pub(crate) fn default_session_path(cwd: &Path) -> PathBuf {
         .join("session.jsonl")
 }
 
-/// Purpose: The file name a project's prompt history keeps, shared so the listing can tell it from a session.
+/// Purpose: The file name a session's prompt history keeps, so the listing can tell it from a session.
 /// Contract: `session.rs` paths; `history_path` writes it and `is_session_file` excludes it.
 const HISTORY_FILE: &str = "history.jsonl";
 
-/// Purpose: The file a project's prompt history lives in, beside its session files.
+/// Purpose: The file a session's prompt history lives in, beside its session log.
 /// Serves: `tui.rs`'s `full_screen`, which hands it to the screen.
-/// Design: `docs/design/surfaces.md` §3.
+/// Design: `docs/design/sessions-lineage.md` §4; `docs/design/surfaces.md` §3.
 /// Up: `tui.rs`.
-/// Down: `default_session_path` and `HISTORY_FILE`; no further call.
+/// Down: `session_id_of`, `session_dir_in` and `HISTORY_FILE`.
 /// Verify: `cargo test -p loongagent` · `./scripts/check.sh`.
 ///
-/// A project's history, not the user's: a prompt that names this repository's files is
-/// rarely the one wanted in another checkout, and the same directory already holds the
-/// project's sessions.
-pub(crate) fn history_path(cwd: &Path) -> PathBuf {
-    default_session_path(cwd).with_file_name(HISTORY_FILE)
+/// A session's history, not the project's: a prompt typed in one session is rarely the
+/// one wanted in another session, even in the same project. The history file sits beside
+/// the session log, named `<id>.history.jsonl`, so `ls` shows which belongs to which.
+pub(crate) fn history_path(path: &Path) -> PathBuf {
+    let id = session_id_of(path);
+    let dir = path.parent().unwrap_or_else(|| Path::new("")).to_path_buf();
+    dir.join(format!("{id}.{HISTORY_FILE}"))
 }
 
 /// Purpose: A readable directory name for a project path, with a hash so two paths cannot share a conversation.
@@ -1885,7 +1887,7 @@ mod session_tests {
         );
     }
 
-    /// Purpose: The prompt history kept beside a project's sessions is not read as one of them.
+    /// Purpose: The prompt history kept beside a session's log is not read as one of them.
     #[test]
     fn the_prompt_history_beside_the_sessions_is_not_a_session() {
         let root = temp_root("history-not-a-session");
@@ -1894,7 +1896,7 @@ mod session_tests {
         write_session(&dir.join("aaaa1111.jsonl"), &["a real question"]);
         // Exactly what the screen writes: one prompt per line, and no `seq`.
         std::fs::write(
-            dir.join("history.jsonl"),
+            dir.join("aaaa1111.history.jsonl"),
             "{\"prompt\":\"a prompt the person typed\"}\n{\"prompt\":\"another\"}\n",
         )
         .unwrap();
@@ -1912,14 +1914,17 @@ mod session_tests {
         assert!(error.contains("loongagent sessions"), "{error}");
     }
 
-    /// Purpose: Prompt history sits beside the project's sessions, so one checkout's prompts do not leak into another's.
+    /// Purpose: Prompt history sits beside its own session log, so one session's prompts do not leak into another's.
     #[test]
-    fn prompt_history_lives_beside_the_sessions() {
+    fn prompt_history_lives_beside_its_own_session() {
+        let root = temp_root("history-per-session");
         let cwd = Path::new("/tmp/loong-history-project");
-        assert_eq!(
-            history_path(cwd).parent(),
-            default_session_path(cwd).parent()
-        );
-        assert_eq!(history_path(cwd).file_name().unwrap(), "history.jsonl");
+        let session = session_path_in(&root, "k7m2xq3f", cwd);
+        let history = history_path(&session);
+        assert_eq!(history.parent(), session.parent());
+        assert_eq!(history.file_name().unwrap(), "k7m2xq3f.history.jsonl");
+        // Two sessions in the same project get two different history files.
+        let other = session_path_in(&root, "aaaa1111", cwd);
+        assert_ne!(history, history_path(&other));
     }
 }

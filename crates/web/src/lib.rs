@@ -813,6 +813,37 @@ fn files_under_workspace(
         .map_err(|e| e.to_string())
 }
 
+/// Purpose: Answer a request whose exchange failed, so the page can stop the turn it started.
+///
+/// Serves: `websocket`, on a failed `Session::exchange`.
+/// Design: `docs/design/web-composer.md` §5 — nothing may show a turn running whose
+/// only ending was a line that will never arrive.
+/// Up: the failure branch in `websocket`.
+/// Down: the socket write; `serde_json` for the request's id.
+/// Verify: `cargo test -p loong-web` (`a_transport_failure_is_an_event_not_a_hang`).
+/// Contract: sends one JSON-RPC error carrying the request's own id. A line with no id
+/// (a malformed request) is answered with a null id rather than not answered at all.
+fn answer_the_failure(
+    socket: &mut tungstenite::WebSocket<TcpStream>,
+    request: &str,
+    message: &str,
+) -> Result<(), String> {
+    let id = serde_json::from_str::<serde_json::Value>(request)
+        .ok()
+        .and_then(|request| request.get("id").cloned())
+        .unwrap_or(serde_json::Value::Null);
+    let answer = json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {"code": -32603, "message": message}
+    })
+    .to_string();
+    socket
+        .send(Message::text(answer))
+        .and_then(|_| socket.flush())
+        .map_err(|e| e.to_string())
+}
+
 /// Purpose: Accept the WebSocket handshake with the token check, then bridge messages to the session.
 ///
 /// Serves: the browser drives the same JSON-RPC session as the TUI (surfaces.md §4).
@@ -878,8 +909,8 @@ fn websocket(
                 match failure {
                     None => {}
                     Some(e) => {
-                        // A transport failure is an event like any other: the page
-                        // shows it instead of freezing with a dead socket.
+                        // A transport failure is an event like any other, so the turn
+                        // carries a line saying why it did not run...
                         let notice = json!({
                             "jsonrpc": "2.0",
                             "method": "event",
@@ -893,6 +924,11 @@ fn websocket(
                         socket
                             .send(Message::text(notice))
                             .map_err(|e| e.to_string())?;
+                        // ...and it is still an answer to the request, because the page
+                        // settles that request on the line carrying its id: an event
+                        // alone leaves the turn's spinner turning over a turn that
+                        // nothing can end (web-composer.md §5).
+                        answer_the_failure(&mut socket, text.as_str(), &e)?;
                     }
                 }
             }
@@ -1001,6 +1037,118 @@ mod tests {
         let for_server = token.clone();
         std::thread::spawn(move || serve(session, listener, for_server));
         (addr, token)
+    }
+
+    /// Purpose: Pin that the words that streamed in raw are re-rendered before the turn
+    /// closes — the fix for the transcript that showed markdown source: the final
+    /// `message.appended` only re-renders while the draft is still open, so a close
+    /// that drops the draft without rendering leaves the raw text on screen forever.
+    #[test]
+    fn a_closing_turn_renders_its_draft() {
+        // The close itself renders: nothing may null the draft out from under it.
+        let close = APP_JS
+            .split("function closeTurn() {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}").next())
+            .expect("closeTurn is the one place a turn ends");
+        let render = close
+            .find("finishDraft(")
+            .expect("closeTurn must call finishDraft(), or a turn ends on raw markdown");
+        let drop = close
+            .find("state.draft = null")
+            .expect("closeTurn clears the draft it leaves behind");
+        assert!(
+            render < drop,
+            "the draft must be rendered before it is dropped: {close}"
+        );
+        // The finish renders what streamed: the streamed text, not the finished
+        // message, is the fallback when the final event never arrives.
+        let finish = APP_JS
+            .split("function finishDraft(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}").next())
+            .expect("finishDraft is the one place the draft is rendered");
+        assert!(
+            finish.contains("state.draftRaw"),
+            "the fallback renders what streamed: {finish}"
+        );
+        assert!(
+            finish.contains("renderWords("),
+            "the draft is rendered, not left raw: {finish}"
+        );
+    }
+
+    /// Purpose: Pin that a turn ends when the connection does — the socket's close and
+    /// error handlers must fail every request in flight and stop the spinner, because a
+    /// request that can never be answered leaves its promise open forever: the page then
+    /// keeps a `Working…` spinner turning over a turn that already ended, and only a
+    /// reload (which throws that state away) showed the truth.
+    #[test]
+    fn a_lost_connection_ends_the_turn() {
+        let handler = APP_JS
+            .split("function linkLost(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}").next())
+            .expect("linkLost is the one place a dead wire is answered");
+        // The requests first, or the turn's own code never learns its answer is gone.
+        // The map is copied before it is emptied, so clearing cannot lose a request and
+        // a rejecting handler cannot mutate what is being walked.
+        let snapshot = handler
+            .find("[...state.pending.values()]")
+            .expect("the requests in flight are collected before the map is emptied");
+        let clear = handler
+            .find("state.pending.clear()")
+            .expect("the map is emptied so a second close rejects nothing twice");
+        let fail = handler
+            .find("request.reject(")
+            .expect("every request in flight is failed: their promises can never settle");
+        assert!(
+            snapshot < clear && clear < fail,
+            "collect, then clear, then fail each one: {handler}"
+        );
+        assert!(
+            handler.contains("for (const request of inFlight)"),
+            "every collected request is failed, not just the first: {handler}"
+        );
+        // And the turn's own indicators with it.
+        assert!(
+            handler.contains("setThinking(false)"),
+            "a dead wire stops the spinner: {handler}"
+        );
+        assert!(
+            handler.contains("closeTurn()"),
+            "a dead wire closes the turn it leaves open: {handler}"
+        );
+        // Both ways a socket dies take that path, so neither can be forgotten alone.
+        for (event, message) in [
+            ("ws.onclose", "服务器关闭了连接"),
+            ("ws.onerror", "连不上服务器"),
+        ] {
+            let body = APP_JS
+                .split(&format!("{event} = () => {{"))
+                .nth(1)
+                .and_then(|rest| rest.split("\n  };").next())
+                .unwrap_or_else(|| panic!("{event} is handled"));
+            assert!(
+                body.contains("linkLost("),
+                "{event} must end the turn through linkLost: {body}"
+            );
+            assert!(
+                body.contains(message),
+                "{event} still says in words what happened: {body}"
+            );
+        }
+        // The close must not be gated on the very flag it clears: a turn asked to close
+        // while `state.running` is still true is this turn ending, not the next starting.
+        let close = APP_JS
+            .split("function closeTurn() {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}").next())
+            .expect("closeTurn is the one place a turn ends");
+        assert!(
+            !close.contains("state.running"),
+            "closeTurn may not refuse to close a running turn: {close}"
+        );
     }
 
     /// Purpose: Pin that the page only switches on event kinds the schema defines, and
@@ -1483,7 +1631,10 @@ mod tests {
         assert!(three.contains("\"id\":1"), "the response last: {three}");
     }
 
-    /// Purpose: Pins that a broken exchange is surfaced to the page as an event, not a hang.
+    /// Purpose: Pins that a broken exchange is surfaced to the page as an event, not a hang,
+    /// and that the request still gets an answer: the page's promise settles only on the
+    /// answer carrying its id, so an event alone left the turn's spinner turning forever
+    /// over a turn nothing could end.
     #[test]
     fn a_transport_failure_is_an_event_not_a_hang() {
         /// Purpose: A session that fails every exchange, to pin the failure notice.
@@ -1526,6 +1677,17 @@ mod tests {
         let line = socket.read().unwrap().into_text().unwrap().to_string();
         assert!(line.contains("client.error"), "{line}");
         assert!(line.contains("the child died"), "{line}");
+        // The answer to the request itself: without it the page waits forever.
+        let answer = socket.read().unwrap().into_text().unwrap().to_string();
+        assert!(
+            answer.contains("\"id\":1"),
+            "the failure answers the request: {answer}"
+        );
+        assert!(
+            answer.contains("\"error\""),
+            "as an error, so the page can stop the turn: {answer}"
+        );
+        assert!(answer.contains("the child died"), "{answer}");
     }
 
     /// Purpose: Pins that a mounted surface's data routes are token-gated, and its page is not.

@@ -90,7 +90,6 @@ const dom = {
   addCancel: el("add-cancel"),
   addSubmit: el("add-submit"),
   sessionList: el("session-list"),
-  newSession: el("new-session"),
   workspaceBtn: el("workspace-btn"),
   picker: el("picker"),
   filePicker: el("file-picker"),
@@ -135,7 +134,7 @@ function setThinking(on) {
 async function stopTurn() {
   if (!state.running) return;
   dom.stop.disabled = true;
-  setStatus("interrupting…");
+  setStatus("正在中断…");
   try {
     const answer = await fetch(
       `/api/interrupt?token=${encodeURIComponent(state.token)}`,
@@ -148,11 +147,11 @@ async function stopTurn() {
     if (!answer.interrupted) {
       // Nothing was running after all, or there is no process to signal: say so
       // rather than leave a button that appears not to work.
-      setStatus(answer.reason || "nothing to interrupt", "bad");
+      setStatus(answer.reason || "没有可中断的内容", "bad");
       dom.stop.disabled = false;
     }
   } catch (e) {
-    setStatus(`stop failed: ${e.message}`, "bad");
+    setStatus(`停止失败：${e.message}`, "bad");
     dom.stop.disabled = false;
   }
 }
@@ -160,10 +159,30 @@ async function stopTurn() {
 function timeAgo(epochSeconds) {
   if (!epochSeconds) return "";
   const delta = Date.now() / 1000 - epochSeconds;
-  if (delta < 60) return "just now";
-  if (delta < 3600) return `${Math.floor(delta / 60)}m ago`;
-  if (delta < 86400) return `${Math.floor(delta / 3600)}h ago`;
-  return `${Math.floor(delta / 86400)}d ago`;
+  if (delta < 60) return "刚刚";
+  if (delta < 3600) return `${Math.floor(delta / 60)} 分钟前`;
+  if (delta < 86400) return `${Math.floor(delta / 3600)} 小时前`;
+  return `${Math.floor(delta / 86400)} 天前`;
+}
+
+/* The wire is gone: fail everything it owes, and drop the turn's own indicators.
+ *
+ * A request the socket can no longer answer must not sit pending: its promise would
+ * never settle, so the turn's spinner (and Stop) would keep saying a turn is running
+ * that nothing can finish — the page only looked right after a reload, which threw
+ * the stuck state away. Failing the request lets the code waiting on it finish the
+ * usual way, through its own `finally` (web-composer.md §5). */
+function linkLost(why) {
+  setStatus(why, "bad");
+  const inFlight = [...state.pending.values()];
+  state.pending.clear();
+  for (const request of inFlight) request.reject(new Error("连接已断开"));
+  if (state.running) {
+    state.running = false;
+    renderModels();
+    setThinking(false);
+    closeTurn();
+  }
 }
 
 /* ── The socket ───────────────────────────────────────────────────────── */
@@ -171,7 +190,7 @@ function timeAgo(epochSeconds) {
 function connect() {
   const token = (location.hash.match(/token=([0-9a-f]+)/) || [])[1];
   if (!token) {
-    setStatus("no token in the URL — open the URL `loongagent web` printed", "bad");
+    setStatus("网址里没有 token——请用 `loongagent web` 打印的那个网址打开", "bad");
     return;
   }
   state.token = token;
@@ -180,14 +199,14 @@ function connect() {
   state.ws = ws;
 
   ws.onopen = () => {
-    setStatus("connected", "ok");
+    setStatus("已连接", "ok");
     boot();
   };
   ws.onclose = () => {
-    setStatus("the server closed the connection — refresh to retry", "bad");
+    linkLost("服务器关闭了连接——刷新页面重试");
   };
   ws.onerror = () => {
-    setStatus("cannot reach the server — is `loongagent web` still running?", "bad");
+    linkLost("连不上服务器——`loongagent web` 还在运行吗？");
   };
   ws.onmessage = (message) => onLine(message.data);
 }
@@ -234,7 +253,7 @@ async function boot() {
     // The panel below depends on this answer, and so does the warning (web-surface.md §6).
     await checkModels();
   } catch (e) {
-    notice("error", `boot failed: ${e.message}`);
+    notice("error", `启动失败：${e.message}`);
   }
 }
 
@@ -244,7 +263,6 @@ async function refreshSessions() {
   const result = await sendRequest("session.tree", {});
   state.workspaces = result.workspaces || [];
   if (typeof result.seat === "number") state.seat = result.seat;
-  renderWorkspace();
   renderSessions();
 }
 
@@ -286,21 +304,10 @@ function applyModelList(list) {
   renderUsage();
 }
 
-/* ── The rail's workspace button ──────────────────────────────────────── */
+/* ── The rail's "add workspace" button ────────────────────────────────── */
 
-function renderWorkspace() {
-  // The rail lists the newest workspace first, so a workspace is found by the `index`
-  // it carries — never by where it happens to sit in the array.
-  const ws = (state.workspaces || []).find((w) => w.index === state.seat);
-  if (!ws) return;
-  const dir = ws.dir || "";
-  const name = dir.split("/").filter(Boolean).pop() || "/";
-  dom.workspaceBtn.querySelector(".dir-name").textContent = name;
-  dom.workspaceBtn.querySelector(".dir-path").textContent = dir;
-  dom.workspaceBtn.title = dir;
-}
-
-/* The picker: list directories, open one as a workspace. */
+/* The button only opens the picker; the tree below is what shows which workspace
+   the chat sits in. The picker: list directories, open one as a workspace. */
 const picker = {
   cwd: null,
   async open() {
@@ -317,7 +324,7 @@ const picker = {
     const res = await fetch(url);
     const body = await res.json();
     if (!res.ok) {
-      notice("error", body.error || "cannot list that directory");
+      notice("error", body.error || "无法列出那个目录");
       return;
     }
     this.cwd = body.cwd;
@@ -330,7 +337,7 @@ const picker = {
     list.innerHTML = "";
     const dirs = body.dirs || [];
     if (dirs.length === 0) {
-      list.innerHTML = '<div class="empty">No subdirectories here.</div>';
+      list.innerHTML = '<div class="empty">这里没有子目录。</div>';
     }
     for (const d of dirs) {
       const b = document.createElement("button");
@@ -353,7 +360,6 @@ const picker = {
       state.sessionId = null;
       clearChat();
       await refreshSessions();
-      renderWorkspace();
       this.close();
       await refreshModels();
     } catch (e) {
@@ -458,8 +464,8 @@ async function moveModel(delta) {
     const where = result.persisted
       ? "written to local.toml — new sessions start with this order"
       : "this session only";
-    notice("info", `moved ${moved.name} to slot ${moved.to} (${where})`);
-    if (result.warning) notice("warn", `the order could not be written back: ${result.warning}`);
+    notice("info", `已把 ${moved.name} 移到槽位 ${moved.to}（${where}）`);
+    if (result.warning) notice("warn", `顺序没能写回配置：${result.warning}`);
   } catch (e) {
     notice("error", `model.reorder: ${e.message}`);
   }
@@ -538,10 +544,10 @@ function renderYolo() {
   // The same gate the slots carry: adopting a model reloads the live children, and the
   // surface refuses that outright while a turn is running (web-surface.md §6).
   dom.addModel.disabled = state.running;
-  dom.yolo.querySelector(".state").textContent = on ? "ON" : "OFF";
+  dom.yolo.querySelector(".state").textContent = on ? "开" : "关";
   dom.yolo.title = on
-    ? "Approval prompts are OFF for this session: tool calls run without asking (the sandbox still applies). Click to ask again."
-    : "Approval prompts are ON: every tool call asks first. Click to let this session run without asking — the sandbox still applies.";
+    ? "这个会话的审批提示已关闭：工具调用不再询问（沙箱仍然生效）。点击恢复询问。"
+    : "审批提示已开启：每次工具调用都会先询问。点击让这个会话不再询问——沙箱仍然生效。";
 }
 
 async function setYolo(on) {
@@ -558,8 +564,8 @@ async function setYolo(on) {
     notice(
       state.autoApprove ? "warn" : "info",
       state.autoApprove
-        ? "approval prompts are off for this session — the sandbox still applies"
-        : "approval prompts are on again for this session",
+        ? "这个会话的审批提示已关闭——沙箱仍然生效"
+        : "这个会话的审批提示已重新开启",
     );
   } catch (e) {
     state.autoApprove = !on; // nothing was recorded, so nothing changed
@@ -611,20 +617,20 @@ function renderAddHint() {
   const provider = state.providers.find((p) => p.id === id);
   if (!provider) {
     dom.addKey.disabled = false;
-    dom.addKey.placeholder = "paste the key here";
-    dom.addKeyLabel.textContent = "API key";
+    dom.addKey.placeholder = "把密钥粘贴到这里";
+    dom.addKeyLabel.textContent = "API 密钥";
     dom.addHint.textContent =
-      "a key that names its provider (sk-…, sk-ant-…) needs only pasting";
+      "密钥本身带着服务商的名字（sk-…、sk-ant-…），粘贴即可";
     return;
   }
   dom.addKey.disabled = !provider.needs_key;
   dom.addKey.placeholder = provider.needs_key
-    ? `paste the key (it goes to ${provider.key_env})`
-    : "no key needed — this one runs on your machine";
-  dom.addKeyLabel.textContent = provider.needs_key ? "API key" : "API key (not needed)";
+    ? `把密钥粘贴到这里（它会写入 ${provider.key_env}）`
+    : "不需要密钥——这个跑在你自己的机器上";
+  dom.addKeyLabel.textContent = provider.needs_key ? "API 密钥" : "API 密钥（不需要）";
   dom.addHint.textContent = provider.needs_key
-    ? `${provider.label} checks the key before anything is written`
-    : `${provider.label} runs locally; listing it only needs its address to answer`;
+    ? `${provider.label} 会先校验密钥，再写入任何东西`
+    : `${provider.label} 跑在本地，列出它只需要它的地址能应答`;
 }
 
 /* The provider a model row belongs to, or "" for a model this panel must not rewrite:
@@ -642,8 +648,8 @@ function visibleRows() {
 
 function renderPickCount() {
   const ticked = state.modelRows.filter((row) => row.checked).length;
-  dom.pickCount.textContent = `${ticked} of ${state.modelRows.length} ticked`;
-  dom.addSubmit.textContent = ticked === 1 ? "Save 1 model" : `Save ${ticked} models`;
+  dom.pickCount.textContent = `已选 ${ticked} / ${state.modelRows.length}`;
+  dom.addSubmit.textContent = ticked === 1 ? "保存 1 个模型" : `保存 ${ticked} 个模型`;
 }
 
 function renderModelRows() {
@@ -653,8 +659,8 @@ function renderModelRows() {
     const empty = document.createElement("div");
     empty.className = "empty";
     empty.textContent = state.modelRows.length
-      ? "no model matches that filter"
-      : "no models yet — pick a provider above and list its models";
+      ? "没有模型匹配这个筛选"
+      : "还没有模型——先在上方选一个服务商并列出它的模型";
     dom.pickList.appendChild(empty);
     renderPickCount();
     return;
@@ -719,7 +725,7 @@ async function openAddModel() {
     dom.addProvider.innerHTML = "";
     const guess = document.createElement("option");
     guess.value = "";
-    guess.textContent = "— tell it from the key —";
+    guess.textContent = "— 从密钥判断 —";
     dom.addProvider.appendChild(guess);
     for (const provider of list) {
       const option = document.createElement("option");
@@ -728,7 +734,7 @@ async function openAddModel() {
       dom.addProvider.appendChild(option);
     }
   } catch (e) {
-    dom.addStatus.textContent = `cannot list providers: ${e.message}`;
+    dom.addStatus.textContent = `列不出服务商：${e.message}`;
     dom.addStatus.className = "status bad";
   }
   // The list starts from the file, not from a provider: what is configured now is what
@@ -775,13 +781,13 @@ async function listProviderModels() {
   const key = dom.addKey.value.trim();
   const chosen = state.providers.find((p) => p.id === provider);
   if (chosen && chosen.needs_key && !key && !state.providerKeys[provider]) {
-    dom.addStatus.textContent = "paste the key first";
+    dom.addStatus.textContent = "先粘贴密钥";
     dom.addStatus.className = "status bad";
     dom.addKey.focus();
     return;
   }
   dom.addProbe.disabled = true;
-  dom.addStatus.textContent = "asking the provider what it offers…";
+  dom.addStatus.textContent = "正在问服务商它提供哪些模型…";
   dom.addStatus.className = "status";
   try {
     const offered = await sendRequest("model.probe", { provider, key });
@@ -793,7 +799,7 @@ async function listProviderModels() {
     const count = (offered.models || []).length;
     dom.addStatus.textContent =
       offered.summary ||
-      `${offered.label}: ${count} models${offered.curated ? " (from the catalog)" : ""}`;
+      `${offered.label}：${count} 个模型${offered.curated ? "（来自目录）" : ""}`;
     dom.addStatus.className = "status ok";
   } catch (e) {
     dom.addStatus.textContent = e.message;
@@ -838,7 +844,7 @@ function plannedWrites() {
 async function saveModels() {
   const writes = plannedWrites();
   if (writes.length === 0) {
-    dom.addStatus.textContent = "nothing changed";
+    dom.addStatus.textContent = "没有改动";
     dom.addStatus.className = "status";
     return;
   }
@@ -848,10 +854,10 @@ async function saveModels() {
     for (const write of writes) {
       const label =
         state.providers.find((p) => p.id === write.provider)?.label || write.provider;
-      dom.addStatus.textContent = `saving ${label}…`;
+      dom.addStatus.textContent = `正在保存 ${label}…`;
       dom.addStatus.className = "status";
       const result = await sendRequest("model.add", write);
-      done.push(`${result.label || label}: ${(result.models || []).length} models`);
+      done.push(`${result.label || label}：${(result.models || []).length} 个模型`);
     }
     // The surface reloaded every idle child, so this tab's own child is gone: open the
     // session again to get one that has read the new config, or start the first one.
@@ -859,10 +865,10 @@ async function saveModels() {
     if (state.sessionId) await openSession(state.sessionId, state.seat);
     else await newSession();
     dom.addModelDialog.close();
-    setStatus(`saved — ${done.join("; ")}`, "ok");
+    setStatus(`已保存——${done.join("；")}`, "ok");
   } catch (e) {
     dom.addStatus.textContent = done.length
-      ? `${done.join("; ")} — then: ${e.message}`
+      ? `${done.join("；")}——然后：${e.message}`
       : e.message;
     dom.addStatus.className = "status bad";
     dom.addSubmit.disabled = false;
@@ -935,7 +941,7 @@ function renderSessions() {
   list.innerHTML = "";
   const workspaces = state.workspaces || [];
   if (workspaces.length === 0) {
-    list.innerHTML = '<div class="empty">No workspace yet.</div>';
+    list.innerHTML = '<div class="empty">还没有工作区。</div>';
     return;
   }
   for (const w of workspaces) {
@@ -965,8 +971,22 @@ function renderSessions() {
       count.textContent = String(sessions.length);
       head.appendChild(count);
     }
-    head.title = (w.dir || "") + (collapsed ? " — click to expand" : " — click to collapse");
+    head.title = (w.dir || "") + (collapsed ? " — 点击展开" : " — 点击折叠");
     head.onclick = () => toggleCollapsed(w);
+    // The row's own `＋`: a session started here belongs to *this* workspace, so the
+    // button names its target by where it sits rather than by a label (web-surface.md §2,
+    // §4). Same shape as the copy/delete chips below: a `span` inside the row's button,
+    // stopping the click so it does not also fold the workspace.
+    const add = document.createElement("span");
+    add.className = "add";
+    add.textContent = "＋";
+    add.title = `在「${label.textContent}」新建会话`;
+    add.setAttribute("aria-label", add.title);
+    add.onclick = (e) => {
+      e.stopPropagation();
+      newSession(w);
+    };
+    head.appendChild(add);
     list.appendChild(head);
 
     if (collapsed) continue;
@@ -975,7 +995,7 @@ function renderSessions() {
     if (sessions.length === 0) {
       const empty = document.createElement("div");
       empty.className = "empty nested";
-      empty.textContent = w.index === state.seat ? "No sessions — start one with ＋ New." : "No sessions.";
+      empty.textContent = "还没有会话——点这一行的 ＋ 开始一个。";
       list.appendChild(empty);
       continue;
     }
@@ -997,14 +1017,14 @@ function renderSessions() {
       // which a resume refreshes — hence the fallback only for logs that lack the clock.
       const spokenMs = s.last_ms || (s.modified ? s.modified * 1000 : 0);
       meta.textContent =
-        (s.busy ? "running · " : s.running ? "live · " : "") +
-        `${s.turns || 0} turns · ${timeAgo(Math.round(spokenMs / 1000))}`;
+        (s.busy ? "运行中 · " : s.running ? "在线 · " : "") +
+        `${s.turns || 0} 轮 · ${timeAgo(Math.round(spokenMs / 1000))}`;
       row.appendChild(meta);
 
       const copy = document.createElement("span");
       copy.className = "copy";
       copy.textContent = "⧉";
-      copy.title = `Copy this session's id (${s.id})`;
+      copy.title = `复制会话 id（${s.id}）`;
       copy.onclick = (e) => {
         e.stopPropagation();
         copySessionId(s.id, copy);
@@ -1014,7 +1034,7 @@ function renderSessions() {
       const del = document.createElement("span");
       del.className = "delete";
       del.textContent = "✕";
-      del.title = "Delete this session (its log is removed for good)";
+      del.title = "删除这个会话（它的日志会被彻底移除）";
       del.onclick = (e) => {
         e.stopPropagation();
         deleteSession(s.id, s.title, w.index);
@@ -1046,7 +1066,7 @@ async function copySessionId(id, chip) {
     }
     area.remove();
   }
-  setStatus(`session id ${id} — copied`, "ok");
+  setStatus(`会话 id ${id} —— 已复制`, "ok");
   // Confirm on the button itself, where the eye already is.
   chip.textContent = "✓";
   chip.classList.add("copied");
@@ -1056,9 +1076,21 @@ async function copySessionId(id, chip) {
   }, 1200);
 }
 
-async function newSession() {
+/* A fresh session in one workspace: `workspace` is the rail row whose `＋` was clicked,
+ * and its index travels with `session.new` so the surface starts the session there
+ * instead of in the tab's current seat (web-surface.md §2). */
+async function newSession(workspace) {
   try {
-    const result = await sendRequest("session.new", {});
+    const params = {};
+    if (workspace && typeof workspace.index === "number") {
+      params.workspace = workspace.index;
+      // The new row has to be seen: unfold the workspace it lands in, even when the
+      // user had folded it.
+      state.collapsed[workspace.dir] = false;
+      saveCollapsed();
+    }
+    const result = await sendRequest("session.new", params);
+    if (typeof params.workspace === "number") state.seat = params.workspace;
     state.sessionId = result.session_id;
     // A session starts with prompts on; the replay after `session.open` is what
     // re-applies a `permissions.relaxed` this page never saw (web-surface.md §4).
@@ -1066,7 +1098,7 @@ async function newSession() {
     clearChat();
     await refreshSessions();
     await refreshModels();
-    setStatus(`session ${state.sessionId}`, "ok");
+    setStatus(`会话 ${state.sessionId}`, "ok");
   } catch (e) {
     notice("error", `session.new: ${e.message}`);
   }
@@ -1086,11 +1118,10 @@ async function openSession(id, workspaceIndex) {
     // below carries any `permissions.relaxed` it already has (web-surface.md §4).
     state.autoApprove = false;
     clearChat();
-    renderWorkspace();
     await refreshSessions();
     await replay(result.session_id);
     await refreshModels();
-    setStatus(`session ${state.sessionId}`, "ok");
+    setStatus(`会话 ${state.sessionId}`, "ok");
   } catch (e) {
     notice("error", `session.open: ${e.message}`);
   }
@@ -1118,8 +1149,6 @@ async function deleteSession(id, title, workspaceIndex) {
     notice("error", `session.delete: ${e.message}`);
   }
 }
-
-dom.newSession.onclick = () => newSession();
 
 /* ── The transcript ───────────────────────────────────────────────────── */
 
@@ -1193,7 +1222,7 @@ function clearChat() {
 function message(who, text, before) {
   const article = node("div", `msg ${who}`);
   article.appendChild(
-    node("div", "who", who === "user" ? "You" : who === "assistant" ? "loongagent" : who),
+    node("div", "who", who === "user" ? "你" : who === "assistant" ? "loongagent" : who),
   );
   const body = node("div", "text");
   if (who === "assistant") renderWords(body, text);
@@ -1223,7 +1252,7 @@ function openTurn(opts) {
   // A quiet turn is one that arrived outside a prompt: it has nothing to wait for,
   // so it gets no spinner to leave running.
   if (!quiet) summary.appendChild(node("span", "spinner"));
-  summary.appendChild(node("span", "label", quiet ? "Turn" : "Working…"));
+  summary.appendChild(node("span", "label", quiet ? "轮次" : "正在工作…"));
   summary.appendChild(node("span", "meta", ""));
   panel.appendChild(summary);
   const body = node("div", "turn-body");
@@ -1276,6 +1305,10 @@ function bumpTurn(turn) {
 function closeTurn() {
   const turn = state.turn;
   if (!turn) return;
+  // Render what streamed before anything below can drop the draft: the finished
+  // message only re-renders a draft that is still open, so a close that dropped it
+  // first would leave raw markdown on screen forever.
+  finishDraft();
   const spinner = turn.summary.querySelector(".spinner");
   if (spinner) spinner.remove();
   const meta = turn.summary.querySelector(".meta");
@@ -1287,7 +1320,7 @@ function closeTurn() {
   }
   if (meta) meta.textContent = bits.join(" · ");
   const label = turn.summary.querySelector(".label");
-  if (label) label.textContent = "Turn";
+  if (label) label.textContent = "轮次";
   // An exchange that produced nothing at all — a prompt that failed before the
   // session said anything — is not worth a card.
   if (turn.pending && turn.steps === 0 && turn.tools === 0 && turn.body.children.length === 0) {
@@ -1303,9 +1336,6 @@ function closeTurn() {
   // Where the turn an out-of-prompt event belongs: it joins this card instead of
   // opening a new one.
   state.lastTurn = turn;
-  state.draft = null;
-  state.draftArticle = null;
-  state.draftRaw = "";
 }
 
 /* A step: one line of machinery inside the open turn. */
@@ -1357,8 +1387,8 @@ function renderToolCall(data) {
   const callId = data.call_id || "";
   const card = node("details", "step tool");
   const summary = node("summary");
-  summary.appendChild(node("span", "badge tool", "tool"));
-  summary.appendChild(node("strong", "tool-name", data.tool || "tool"));
+  summary.appendChild(node("span", "badge tool", "工具"));
+  summary.appendChild(node("strong", "tool-name", data.tool || "工具"));
   const inline = argsInline(data.args);
   if (inline) summary.appendChild(node("span", "args-inline", inline));
   const outcome = node("span", "outcome", "");
@@ -1395,7 +1425,7 @@ function renderToolResult(data) {
   } else {
     const card = node("details", "step tool");
     const summary = node("summary");
-    summary.appendChild(node("span", `badge ${ok ? "ok" : "failed"}`, ok ? "result" : "failed"));
+    summary.appendChild(node("span", `badge ${ok ? "ok" : "failed"}`, ok ? "结果" : "失败"));
     card.appendChild(summary);
     host = node("div", "result");
     card.appendChild(host);
@@ -1403,13 +1433,13 @@ function renderToolResult(data) {
     turn.steps += 1;
   }
   if (!text) {
-    host.appendChild(node("div", "empty", ok ? "no output" : "failed with no output"));
+    host.appendChild(node("div", "empty", ok ? "没有输出" : "失败了，且没有输出"));
   } else {
     const pre = node("pre", "output");
     pre.textContent = lines.slice(0, limit).join("\n");
     host.appendChild(pre);
     if (lines.length > limit) {
-      const more = node("button", "toggle", `show all ${lines.length} lines ▾`);
+      const more = node("button", "toggle", `显示全部 ${lines.length} 行 ▾`);
       more.onclick = () => {
         pre.textContent = text;
         more.remove();
@@ -1439,6 +1469,21 @@ function appendDraftText(delta) {
   state.draftRaw += delta;
   state.draft.textContent += delta;
   scrollDown();
+}
+
+/* The one place the streaming draft becomes rendered words. The finished
+ * `message.appended` hands its text over; a turn that closes without one — an
+ * interrupt, an error, a line the bridge held back — hands over what streamed
+ * instead, so the bubble never stays raw markdown. Either way the draft is
+ * cleared, and an empty draft renders nothing. */
+function finishDraft(text) {
+  if (!state.draft) return;
+  const draft = state.draft;
+  const words = typeof text === "string" && text.trim() ? text : state.draftRaw;
+  state.draft = null;
+  state.draftArticle = null;
+  state.draftRaw = "";
+  if (words.trim()) renderWords(draft, words);
 }
 
 /* Replay a session's log into the chat (web-surface.md §3). */
@@ -1475,14 +1520,12 @@ function onEvent(env, replayed) {
         else closeTurn();
         message("user", text, pending ? pending.panel : null);
       } else if (role === "assistant") {
-        if (state.draft) {
-          // The finished text supersedes what streamed: render it once, properly.
-          const draft = state.draft;
-          state.draft = null;
-          state.draftArticle = null;
-          state.draftRaw = "";
-          if (text.trim()) renderWords(draft, text);
-        } else if (text.trim()) {
+        // The finished text supersedes what streamed: render it once, properly.
+        // finishDraft renders into the open draft bubble when there is one; without
+        // a draft the message needs a bubble of its own.
+        const streamed = !!state.draft;
+        finishDraft(text);
+        if (!streamed && text.trim()) {
           const turn = ensureTurn();
           const article = node("div", "msg assistant in-turn");
           article.appendChild(node("div", "who", "loongagent"));
@@ -1506,7 +1549,7 @@ function onEvent(env, replayed) {
     case "policy.decided": {
       // The most numerous event by far: a quiet one-line chip, not a card.
       const verdict = data.verdict || "allow";
-      const chip = addStep(`policy ${verdict}`, verdict, verdict);
+      const chip = addStep(`策略 ${verdict}`, verdict, verdict);
       if (data.action_class) chip.appendChild(node("span", "class", data.action_class));
       if (data.rule) chip.appendChild(node("span", "rule", data.rule));
       break;
@@ -1515,19 +1558,19 @@ function onEvent(env, replayed) {
       showApproval(data);
       break;
     case "approval.decided": {
-      const chip = addStep("approval", data.granted ? "approved" : "refused", data.granted ? "ok" : "deny");
+      const chip = addStep("审批", data.granted ? "已批准" : "已拒绝", data.granted ? "ok" : "deny");
       if (data.reason) chip.appendChild(node("span", "rule", data.reason));
       break;
     }
     case "skill.invoked": {
-      const chip = addStep("skill", "skill", "skill");
+      const chip = addStep("技能", "skill", "skill");
       chip.appendChild(node("strong", "tool-name", data.name || "skill"));
       if (data.source) chip.appendChild(node("span", "rule", data.source));
       if (data.error) chip.appendChild(node("span", "rule deny", data.error));
       break;
     }
     case "compaction.applied": {
-      const chip = addStep("compaction", "compaction", "info");
+      const chip = addStep("压缩", "compaction", "info");
       const before = data.tokens_before;
       const after = data.tokens_after;
       if (typeof before === "number" && typeof after === "number") {
@@ -1537,12 +1580,12 @@ function onEvent(env, replayed) {
       break;
     }
     case "context.degraded": {
-      const chip = addStep("warn", "context", "ask");
+      const chip = addStep("警告", "上下文", "ask");
       chip.appendChild(node("span", "class", data.reason || "degraded"));
       break;
     }
     case "turn.interrupted": {
-      const chip = addStep("warn", "interrupted", "deny");
+      const chip = addStep("警告", "已中断", "deny");
       if (data.reason) chip.appendChild(node("span", "rule", data.reason));
       break;
     }
@@ -1586,17 +1629,17 @@ function showApproval(data) {
   const turn = ensureTurn();
   const box = node("div", "approval");
   const what = node("div", "what");
-  what.appendChild(node("div", "headline", "Approval requested"));
+  what.appendChild(node("div", "headline", "请求审批"));
   if (data.action_class) what.appendChild(node("span", "class", data.action_class));
   if (data.reason) what.appendChild(node("span", "reason", data.reason));
-  const approve = node("button", "approve", "Approve");
-  const approveSession = node("button", "approve", "Approve for session");
-  const refuse = node("button", "refuse", "Refuse");
+  const approve = node("button", "approve", "批准");
+  const approveSession = node("button", "approve", "本会话内都批准");
+  const refuse = node("button", "refuse", "拒绝");
   const answer = (granted, scope) => {
     box.classList.add("answered");
-    approve.textContent = granted && scope === "once" ? "Approved ✓" : "Approve";
-    approveSession.textContent = granted && scope === "session" ? "Approved ✓" : "Approve for session";
-    refuse.textContent = granted ? "Refuse" : "Refused ✕";
+    approve.textContent = granted && scope === "once" ? "已批准 ✓" : "批准";
+    approveSession.textContent = granted && scope === "session" ? "已批准 ✓" : "本会话内都批准";
+    refuse.textContent = granted ? "拒绝" : "已拒绝 ✕";
     // Answering resumes the turn, and the resumed turn makes model calls that can take as
     // long as any other: the spinner says so and Stop can end it (web-surface.md §4). This
     // is the request whose 500 used to arrive as "approval.respond: model: transport: HTTP

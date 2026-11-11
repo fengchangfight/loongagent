@@ -58,6 +58,13 @@ window_tokens = 6000           # 每个空闲窗口最多多少 token（估算�
 否则"为什么摘要都是半截的"会变成一个查不出来源的问题。
 （`providers` 现有的 `OpenAiCompat` 因此**不适合**直接当摘要后端 —— 它没有 `think` 开关。）
 
+**答案预算 `num_predict` 是另一处"半截答案"**（2026-10-14 修，`OllamaSummarizer::new`）：
+预算是 400 token 时，345 次归纳里 **92 次**被截断 —— `content` 停在 JSON 字符串中间，报
+`EOF while parsing a string`，整段答案作废、退回 digest。截断位置和提示词大小无关
+（38 字符的 digest 与 9290 字符的都在 ~1850 列被切），说明卡的是**输出预算**，不是
+上下文窗口。现在默认 1024；真再被截断时 `done_reason="length"` 会写进原因
+（`… eval_count=N; raise num_predict`），而不是让人去猜一句 `EOF`。
+
 窄化规则（ADR-0008）：企业层可以**强制** `enabled=false`、`mode="record"`、
 指定 `summarizer.kind` 与可用模型；用户层不能放宽。`window_calls`/`window_tokens`
 同为 narrow-only，取最小值。

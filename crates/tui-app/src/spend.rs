@@ -241,11 +241,15 @@ impl Spend {
         }
         // The last request's input is the provider's own measure of how full the window
         // was. Without a budget there is no honest denominator, so show tokens rather
-        // than invent a percentage.
+        // than invent a percentage. The share is capped at 100%: the provider's count can
+        // exceed the budget (the window fills faster than compaction keeps up, and
+        // compaction measures the *next* request while this measures the *last*), and a
+        // gauge must never read past full.
         if self.last_request_tokens > 0 {
             match budget.filter(|budget| *budget > 0) {
                 Some(budget) => {
-                    let percent = self.last_request_tokens as f64 * 100.0 / budget as f64;
+                    let percent =
+                        (self.last_request_tokens as f64 * 100.0 / budget as f64).min(100.0);
                     line.push_str(&format!(" · 上下文 {percent:.0}%"));
                 }
                 None => line.push_str(&format!(
@@ -375,6 +379,24 @@ mod tests {
 
         let line = spend.usage_line(Some(0)).expect("a row after one call");
         assert!(line.contains("上下文 1,000"), "{line}");
+    }
+
+    /// Purpose: The share never reads over 100% — a full window is 100%, not 110%.
+    #[test]
+    fn the_usage_line_never_shows_over_a_full_window() {
+        // The provider's count can exceed the budget: the window fills faster than
+        // compaction keeps up, and compaction measures the next request while the
+        // count measures the last one. The share is a gauge, and a gauge caps at full.
+        let mut spend = Spend::default();
+        // tokens_in is fixed at 1,000 by the helper; a budget of 500 makes the raw
+        // share 200% — the row must read 100%, never 200%.
+        spend.add(CostEntry::from_event(&cost_event("k3", "unknown", Some(1_000), 0)).unwrap());
+        let line = spend.usage_line(Some(500)).expect("a row after one call");
+        assert!(
+            line.contains("上下文 100%"),
+            "capped at a full window: {line}"
+        );
+        assert!(!line.contains("200%"), "{line}");
     }
 
     /// Purpose: Pin that a total sums calls, counts cache only where it was reported, and keeps models apart.

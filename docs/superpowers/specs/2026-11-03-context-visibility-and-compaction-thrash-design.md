@@ -54,6 +54,12 @@ which is exactly “how full was the window on the last call”.
 - `· 上下文 62%` when `budget` is `Some(n)` with `n > 0`;
 - `· 上下文 62,000` when the budget is unknown or zero.
 
+Both shares — this row's and the context panel's `令牌 used / budget` — are **capped at
+100%**. The provider's count can exceed the budget: the window fills faster than
+compaction sheds, and compaction measures the *next* request while the share measures the
+*last*. A gauge must never read past full; an over-full window reads `100%`, and the
+compaction loop, not the number, says the window is in trouble.
+
 The draw path passes `self.context.as_ref().map(|c| c.budget_tokens)`. The
 worker already refreshes the context after every command; `surface::run` sends
 one `ToWorker::RefreshContext` at startup so the budget is known before the

@@ -3212,6 +3212,68 @@ fn a_call_the_log_names_twice_replays_once() {
     );
 }
 
+/// Purpose: A session cut off mid-tool-call opens with a synthetic result, because a provider rejects an unanswered tool call.
+#[test]
+fn a_session_cut_off_mid_tool_call_opens_with_a_synthetic_result() {
+    // A hard kill (power-off, `kill -9`) lands after the `tool.call` event but before
+    // its `tool.result`. On resume, replay used to rebuild the assistant message with
+    // `tool_calls` but no matching tool message, and the provider answers every later
+    // prompt with `400: an assistant message with tool_calls must be followed by tool
+    // messages`. Replay must close the dangling call with a result that says the
+    // process died before the tool answered.
+    let t = Temp::new();
+    let mut log = loong_eventlog::SessionLog::create(&t.log).unwrap();
+    log.append(
+        gen::event::MESSAGE_APPENDED,
+        serde_json::json!({"role": "user", "text": "build"}),
+    )
+    .unwrap();
+    log.append(
+        gen::event::MESSAGE_APPENDED,
+        serde_json::json!({"role": "assistant", "text": ""}),
+    )
+    .unwrap();
+    log.append(
+        gen::event::TOOL_CALL,
+        serde_json::json!({"call_id": "c1", "tool": "shell", "args": {"command": "ls"}, "action_class": "out_of_bounds"}),
+    )
+    .unwrap();
+    // No `tool.result` — the process died here.
+    drop(log);
+
+    let (model, _seen) = RecordingModel::new(vec![response(vec![], Some("ok"))]);
+    let k = Kernel::open(&t.log, KernelConfig::new(&t.dir), Box::new(model))
+        .expect("a session cut off mid-tool-call still opens");
+
+    let roles: Vec<&str> = k
+        .messages()
+        .iter()
+        .map(|message| match message {
+            ChatMessage::User { .. } => "user",
+            ChatMessage::Assistant { .. } => "assistant",
+            ChatMessage::Tool { .. } => "tool",
+            ChatMessage::System { .. } => "system",
+        })
+        .collect();
+    assert_eq!(
+        roles,
+        vec!["system", "user", "assistant", "tool"],
+        "the dangling call gets a tool result, {roles:?}"
+    );
+    let result = k
+        .messages()
+        .iter()
+        .find_map(|message| match message {
+            ChatMessage::Tool { call_id, output } if call_id == "c1" => Some(output.clone()),
+            _ => None,
+        })
+        .expect("a tool message answering c1");
+    assert!(
+        result.contains("interrupt") || result.contains("died") || result.contains("exited"),
+        "the synthetic result says the call never answered, not a fake success: {result}"
+    );
+}
+
 /// Purpose: A child references its parent and replays the prefix without copying it, labelling inherited history `user from parent`.
 #[test]
 fn a_child_sees_its_parents_prefix_without_copying_it() {

@@ -519,7 +519,19 @@ fn dispatch_surface(
         "session.new" => {
             // A fresh child is started for a freshly minted id; the factory returns
             // that id, so the tab attaches to the child's real session without
-            // asking the child (web-surface.md §2).
+            // asking the child (web-surface.md §2). An optional `workspace` index names
+            // the workspace first, because the rail puts a `＋` on every workspace row
+            // and not only on the one this tab is seated in (web-surface.md §4).
+            if let Some(index) = params.get("workspace").and_then(Value::as_u64) {
+                let index = index as usize;
+                {
+                    let st = lock(state)?;
+                    if index >= st.workspaces.len() {
+                        return Err(Error(format!("no workspace {index}")));
+                    }
+                }
+                tab.seat = index;
+            }
             let session_id = ensure_child(state, tab.seat, home, None, start_session)?;
             tab.attached = Some(session_id.clone());
             // A brand-new session starts on the declaration order, as a fresh tab does.
@@ -1033,8 +1045,8 @@ fn forward(
     match failure {
         None => Ok(()),
         Some(e) => {
-            // A transport failure is an event like any other: the page shows it
-            // instead of freezing with a dead socket.
+            // A transport failure is an event like any other, so the turn carries a
+            // line saying why it did not run...
             let notice = json!({
                 "jsonrpc": "2.0",
                 "method": "event",
@@ -1048,7 +1060,11 @@ fn forward(
             socket
                 .send(Message::text(notice))
                 .map_err(|e| e.to_string())?;
-            Ok(())
+            // ...and it is still an answer to the request: the page settles a request
+            // on the line carrying its id, so an event alone would leave the turn's
+            // spinner turning over a turn that nothing can end
+            // (web-composer.md §5).
+            send_error(socket, id, &e)
         }
     }
 }
@@ -1910,6 +1926,82 @@ mod tests {
         assert!(answer.contains("accepted"), "{answer}");
     }
 
+    /// Purpose: a bridge that dies under a request still answers it — the page settles a
+    /// request on the line carrying its id, so an event alone left the turn's spinner
+    /// turning over a turn nothing could end (web-composer.md §5).
+    #[test]
+    fn a_dead_child_still_answers_the_request() {
+        /// Purpose: A session that fails every exchange, to pin the failure answer.
+        ///
+        /// Serves: `a_dead_child_still_answers_the_request`.
+        /// Design: `docs/design/web-composer.md` §5.
+        /// Up: that test only.
+        /// Down: `Session::exchange`.
+        /// Verify: `cargo test -p loong-web`.
+        struct Broken;
+        impl Session for Broken {
+            /// Purpose: Fail with a message the page can show.
+            /// Contract: always `Err("the child died")`; the sink is never called.
+            fn exchange(
+                &mut self,
+                _line: &str,
+                _sink: &mut dyn FnMut(String) -> Result<(), String>,
+            ) -> Result<(), String> {
+                Err("the child died".to_string())
+            }
+        }
+
+        let (listener, addr) = bind("127.0.0.1", 0).unwrap();
+        let token = crate::random_token().unwrap();
+        let for_server = token.clone();
+        let home = std::env::temp_dir();
+        std::thread::spawn(move || {
+            serve_web(
+                listener,
+                for_server,
+                home,
+                Arc::new(|_: &Path, session: Option<&str>| {
+                    let id = session.unwrap_or("broken").to_string();
+                    Ok((Arc::new(Mutex::new(Broken)) as Arc<Mutex<dyn Session>>, id))
+                }),
+            )
+        });
+
+        let request = format!("ws://{addr}/ws?token={token}")
+            .into_client_request()
+            .unwrap();
+        let (mut socket, _) = tungstenite::connect(request).unwrap();
+        // Seat the tab first, then speak the TUI's `prompt.submit`.
+        socket
+            .send(Message::text(
+                json!({"jsonrpc":"2.0","id":1,"method":"workspace.list","params":{}}).to_string(),
+            ))
+            .unwrap();
+        let _ = socket.read().unwrap();
+        socket
+            .send(Message::text(
+                json!({"jsonrpc":"2.0","id":7,"method":"prompt.submit",
+                       "params":{"session_id":"s","text":"hi"}})
+                .to_string(),
+            ))
+            .unwrap();
+        // The event that says why, then the answer that lets the page stop the turn.
+        let mut answer = String::new();
+        for _ in 0..2 {
+            let line = socket.read().unwrap().into_text().unwrap().to_string();
+            if line.contains("\"id\":7") {
+                answer = line;
+                break;
+            }
+            assert!(line.contains("client.error"), "{line}");
+        }
+        assert!(
+            answer.contains("the child died"),
+            "a failed bridge answers: {answer}"
+        );
+        assert!(answer.contains("\"error\""), "{answer}");
+    }
+
     /// Purpose: the surface lets many workspaces be open at once; there is no cap.
     #[test]
     fn many_workspaces_can_be_open() {
@@ -2422,6 +2514,120 @@ mod tests {
             .clone();
         assert_eq!(s1.get("running").and_then(Value::as_bool), Some(false));
         assert_eq!(s1.get("busy").and_then(Value::as_bool), Some(false));
+
+        std::env::remove_var("LOONGAGENT_HOME");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Purpose: `session.new {workspace}` starts the session in the workspace it names, not
+    /// in the tab's seat, so the `＋` on any rail row adds to that row's workspace.
+    /// Serves: the `session.new` branch of `dispatch_surface`.
+    /// Design: `docs/design/web-surface.md` §2, §4.
+    /// Up: the page's `newSession(w)` in `crates/web/src/app.js`.
+    /// Down: `ensure_child`, `session.tree`.
+    /// Verify: `cargo test -p loong-web` (`session_new_lands_in_the_workspace_it_names`).
+    #[test]
+    fn session_new_lands_in_the_workspace_it_names() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let base = std::env::temp_dir().join(format!("loong-new-seat-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let home_dir = base.join("home");
+        let workspace = base.join("workspace");
+        let other = base.join("other");
+        for d in [&workspace, &other] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::env::set_var("LOONGAGENT_HOME", &home_dir);
+
+        // Every child the surface starts, by the directory it was started in: the fake
+        // session writes no log, so the tree cannot show where the session landed and the
+        // directory the factory was handed is the evidence instead.
+        let started_in: Arc<Mutex<Vec<std::path::PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
+        let record = Arc::clone(&started_in);
+        let (listener, addr) = bind("127.0.0.1", 0).unwrap();
+        let token = crate::random_token().unwrap();
+        let for_server = token.clone();
+        let home = workspace.clone();
+        std::thread::spawn(move || {
+            serve_web(
+                listener,
+                for_server,
+                home,
+                Arc::new(move |dir: &Path, session: Option<&str>| {
+                    record.lock().unwrap().push(dir.to_path_buf());
+                    let id = session.unwrap_or("echo").to_string();
+                    Ok((
+                        Arc::new(Mutex::new(Echo(vec![]))) as Arc<Mutex<dyn Session>>,
+                        id,
+                    ))
+                }),
+            )
+        });
+        let request = format!("ws://{addr}/ws?token={token}")
+            .into_client_request()
+            .unwrap();
+        let (mut socket, _) = tungstenite::connect(request).unwrap();
+        socket
+            .send(Message::text(
+                json!({"jsonrpc":"2.0","id":1,"method":"workspace.add","params":{"dir":other}})
+                    .to_string(),
+            ))
+            .unwrap();
+        let _ = socket.read().unwrap();
+        // The tab is seated on the home workspace (index 0); the `＋` is on the other row.
+        socket
+            .send(Message::text(
+                json!({"jsonrpc":"2.0","id":2,"method":"session.new","params":{"workspace":1}})
+                    .to_string(),
+            ))
+            .unwrap();
+        let answer = socket.read().unwrap().into_text().unwrap().to_string();
+        let value: Value = serde_json::from_str(&answer).unwrap();
+        assert!(
+            value.get("result").is_some(),
+            "a session, not an error: {value}"
+        );
+        let dirs: Vec<String> = started_in
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|d| {
+                d.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            })
+            .collect();
+        assert_eq!(
+            dirs,
+            vec!["other".to_string()],
+            "the one child started is the one workspace the call named, not the seat"
+        );
+        socket
+            .send(Message::text(
+                json!({"jsonrpc":"2.0","id":3,"method":"session.tree","params":{}}).to_string(),
+            ))
+            .unwrap();
+        let answer = socket.read().unwrap().into_text().unwrap().to_string();
+        let value: Value = serde_json::from_str(&answer).unwrap();
+        assert_eq!(
+            value["result"]["seat"].as_u64(),
+            Some(1),
+            "the tab moved to the workspace it added the session to: {value}"
+        );
+        // A workspace index the catalogue does not have is a refusal, not a quiet fallback
+        // to the seat.
+        socket
+            .send(Message::text(
+                json!({"jsonrpc":"2.0","id":4,"method":"session.new","params":{"workspace":9}})
+                    .to_string(),
+            ))
+            .unwrap();
+        let answer = socket.read().unwrap().into_text().unwrap().to_string();
+        let value: Value = serde_json::from_str(&answer).unwrap();
+        assert!(
+            value.get("error").is_some(),
+            "no workspace 9 is an error: {value}"
+        );
 
         std::env::remove_var("LOONGAGENT_HOME");
         std::fs::remove_dir_all(&base).ok();

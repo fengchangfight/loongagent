@@ -108,3 +108,23 @@ socket teardown: the tool that was running finishes, and the turn ends after it.
 The answer to a parked approval resumes the turn too, and that resumed turn is where a
 model call can take as long as any other, so approving also shows the spinner and
 leaves Stop available.
+
+## 5. When the wire dies under a turn
+
+The spinner is a claim: *a turn is running, and this page can end it*. A dead socket
+makes that claim false, so the claim has to go with the socket.
+
+Every request the page sends is one promise settled by the answer carrying its id. When
+the socket closes or errors, no answer can arrive, so those promises would stay open
+forever: the turn's spinner would keep turning, Stop would stay offered, and only a
+reload — which throws the page's state away — would show the turn had ended. So the
+close/error handler **fails every request in flight**, and the code waiting on it
+finishes the ordinary way, through its own `finally`: spinner off, Stop gone, the turn
+closed, and the status line says the connection went away.
+
+The rule to keep: nothing on the page may show a running turn whose only ending was a
+line that will never arrive. It binds the server too: a request whose exchange failed —
+the child died mid-turn, a transport broke — is still **answered**, with a `client.error`
+event for the transcript *and* an error carrying the request's own id, because the event
+alone settles nothing.
+

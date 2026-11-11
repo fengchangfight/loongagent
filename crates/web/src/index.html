@@ -5,7 +5,7 @@
      Up: `crates/web/src/lib.rs`'s `static_page`.
      Down: `app.js` drives every region; `style.css` styles it.
      Verify: `cargo test -p loong-web` (the page-is-served tests). -->
-<html lang="en">
+<html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -27,59 +27,58 @@
   <div class="spacer"></div>
 </header>
 
-<nav id="modelbar" aria-label="Model and approval mode">
-  <span class="bar-label">Model</span>
+<nav id="modelbar" aria-label="模型与审批模式">
+  <span class="bar-label">模型</span>
   <div id="model-slots" role="group"
-       aria-label="Models: alt+n / alt+p switch, ctrl+left / ctrl+right move the current one"></div>
-  <button id="add-model" type="button" title="Add a model: paste a provider's key and it is written to local.toml, the same way `loongagent local add` does it">＋ Add model</button>
-  <span class="keys" aria-hidden="true">alt+n · alt+p switch · ctrl+← → move</span>
+       aria-label="模型：alt+n / alt+p 切换，ctrl+← / ctrl+→ 移动当前模型"></div>
+  <button id="add-model" type="button" title="添加模型：粘贴服务商的密钥，写入 local.toml，和 `loongagent local add` 一样">＋ 添加模型</button>
+  <span class="keys" aria-hidden="true">alt+n · alt+p 切换 · ctrl+← → 移动</span>
   <button id="yolo" type="button" aria-pressed="false"
-          title="Approval prompts are on: every tool call asks first. Click to let this session run without asking — the sandbox still applies.">
-    <span class="dot" aria-hidden="true"></span><span class="word">YOLO</span><span class="state">OFF</span>
+          title="审批提示已开启：每次工具调用都会先询问。点击让这个会话不再询问——沙箱仍然生效。">
+    <span class="dot" aria-hidden="true"></span><span class="word">YOLO</span><span class="state">关</span>
   </button>
 </nav>
 
 <div id="no-models" class="no-models" hidden>
   <span class="mark" aria-hidden="true">!</span>
-  <span class="text">No model is configured yet — the agent cannot answer until there is one.</span>
-  <button id="no-models-add" type="button">Add a model</button>
+  <span class="text">还没有配置模型——在配置好之前，助手无法回答。</span>
+  <button id="no-models-add" type="button">添加模型</button>
 </div>
 
 <dialog id="add-model-dialog" aria-labelledby="add-model-title">
   <form method="dialog">
-    <h2 id="add-model-title">Models</h2>
-    <p class="lede">Tick the models this machine should offer. A key is checked against the
-      provider before anything is written; the key goes to <code>~/.loongagent/env</code> and
-      the ticked models to <code>local.toml</code> — the same two writes
-      <code>loongagent local add</code> makes. Untick one and save to turn it off; its key
-      stays, so it can come back later.</p>
+    <h2 id="add-model-title">模型</h2>
+    <p class="lede">勾选这台机器要提供的模型。密钥会先和服务商校验，然后写入
+      <code>~/.loongagent/env</code>，勾选的模型写入 <code>local.toml</code>——和
+      <code>loongagent local add</code> 做的两件事一样。取消勾选再保存即可关闭；密钥
+      保留，以后还能再用。</p>
     <div class="add-provider">
       <label class="field">
-        <span>Provider</span>
+        <span>服务商</span>
         <select id="add-provider">
-          <option value="">— tell from the key —</option>
+          <option value="">— 从密钥判断 —</option>
         </select>
       </label>
       <label class="field">
-        <span id="add-key-label">API key</span>
+        <span id="add-key-label">API 密钥</span>
         <input id="add-key" type="password" autocomplete="off" spellcheck="false"
-               placeholder="paste the key here">
+               placeholder="把密钥粘贴到这里">
       </label>
-      <button id="add-probe" type="button">List its models</button>
+      <button id="add-probe" type="button">列出它的模型</button>
     </div>
     <p id="add-hint" class="hint"></p>
     <div class="pick-head">
       <input id="pick-filter" type="search" autocomplete="off"
-             placeholder="filter by name…" aria-label="Filter models by name">
-      <button id="pick-all" type="button">Select all</button>
-      <button id="pick-none" type="button">Clear</button>
+             placeholder="按名字筛选…" aria-label="按名字筛选模型">
+      <button id="pick-all" type="button">全选</button>
+      <button id="pick-none" type="button">清空</button>
       <span id="pick-count" class="count"></span>
     </div>
-    <div id="pick-list" class="pick-list" role="group" aria-label="Models"></div>
+    <div id="pick-list" class="pick-list" role="group" aria-label="模型列表"></div>
     <p id="add-status" class="status" aria-live="polite"></p>
     <div class="actions">
-      <button id="add-cancel" type="button">Close</button>
-      <button id="add-submit" type="button" class="primary">Save</button>
+      <button id="add-cancel" type="button">关闭</button>
+      <button id="add-submit" type="button" class="primary">保存</button>
     </div>
   </form>
 </dialog>
@@ -87,21 +86,18 @@
 <div id="body">
 
   <aside id="rail">
-    <!-- The workspace button sits on the list of workspaces, not in the banner: it names
-         the seated workspace and opens the picker that adds one (web-surface.md §1, §4). -->
-    <button id="workspace-btn" title="Add or switch workspace" aria-haspopup="dialog"
-            aria-label="Workspaces: the one this chat is in, and the button that opens another">
-      <span class="icon">📁</span>
-      <span class="dir-name">…</span>
-      <span class="dir-path"></span>
-      <span class="chev">▾</span>
+    <!-- The workspace button sits on the list of workspaces, not in the banner: it says
+         what it does — add one — and opens the picker (web-surface.md §1, §4). Which
+         workspace the chat sits in is the tree's own active row, never this button. -->
+    <button id="workspace-btn" title="打开目录选择器，添加一个工作区" aria-haspopup="dialog"
+            aria-label="添加工作区">
+      <span class="plus">＋</span>
+      <span class="label">添加工作区</span>
     </button>
-    <div class="rail-head">
-      <span>Sessions</span>
-      <button id="new-session" title="New session (this workspace)">＋ New</button>
-    </div>
+    <!-- The tree is built in `app.js`. Each workspace row carries its own `＋ 新会话`,
+         so starting a session names the workspace it lands in (web-surface.md §4). -->
     <div id="session-list">
-      <div class="empty">Loading…</div>
+      <div class="empty">加载中…</div>
     </div>
   </aside>
 
@@ -112,14 +108,14 @@
 
     <div id="composer">
       <div class="wrap">
-        <div id="file-picker" role="listbox" aria-label="Workspace files" hidden></div>
+        <div id="file-picker" role="listbox" aria-label="工作区文件" hidden></div>
         <form id="composer-form">
-          <textarea id="prompt" rows="1" placeholder="Message loongagent…  (Enter to send, Shift+Enter for a newline, @ to name a workspace file)"></textarea>
+          <textarea id="prompt" rows="1" placeholder="给 loongagent 发消息…（回车发送，Shift+回车换行，@ 提及工作区文件）"></textarea>
           <!-- While a turn runs: a spinner that says it is thinking and a Stop button that
                ends it, the TUI's esc (web-surface.md §4). -->
-          <span id="thinking" role="status" hidden><span class="spinner"></span>Thinking…</span>
-          <button id="stop" type="button" title="Stop the running turn (Esc)" hidden>Stop</button>
-          <button id="send" type="submit">Send</button>
+          <span id="thinking" role="status" hidden><span class="spinner"></span>思考中…</span>
+          <button id="stop" type="button" title="停止当前轮次（Esc）" hidden>停止</button>
+          <button id="send" type="submit">发送</button>
         </form>
         <div id="usage">
           <span class="item">入 <b id="u-in">0</b></span>
@@ -138,20 +134,20 @@
 
 </div>
 
-<div id="picker" role="dialog" aria-label="Choose workspace">
+<div id="picker" role="dialog" aria-label="选择工作区">
   <div class="panel">
     <div class="panel-head">
-      <span class="title">Open workspace</span>
-      <button class="close" aria-label="Close">✕</button>
+      <span class="title">打开工作区</span>
+      <button class="close" aria-label="关闭">✕</button>
     </div>
     <div class="crumbs">
-      <button class="up">← up</button>
+      <button class="up">← 上一级</button>
       <span class="path"></span>
     </div>
-    <div class="dirs"><div class="empty">Loading…</div></div>
+    <div class="dirs"><div class="empty">加载中…</div></div>
     <div class="panel-foot">
       <span class="current"></span>
-      <button class="choose">Open this directory</button>
+      <button class="choose">打开这个目录</button>
     </div>
   </div>
 </div>

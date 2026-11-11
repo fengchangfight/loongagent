@@ -333,7 +333,8 @@ pub struct OllamaSummarizer {
     model: String,
     timeout: Duration,
     /// Tokens to allow for the answer. Bounded: a background summariser has no
-    /// business writing an essay.
+    /// business writing an essay. But not so tight that a verbose answer is cut in
+    /// half — see `new`.
     max_tokens: u64,
     /// Requests actually sent, so a budget can be enforced and a cost reported.
     calls: u64,
@@ -341,7 +342,7 @@ pub struct OllamaSummarizer {
 
 impl OllamaSummarizer {
     /// Purpose: A client for one endpoint and model.
-    /// Serves: the measured defaults (`think: false`, a 60 s timeout, 400 answer tokens) in one place.
+    /// Serves: the measured defaults (`think: false`, a 60 s timeout, 1024 answer tokens) in one place.
     /// Design: `docs/context/config.md` §11.
     /// Up: The kernel's `ContextEngine` and the faithfulness/window-cost tests.
     /// Down: `with_timeout`, `with_max_tokens` and the `Summarizer` impl.
@@ -351,7 +352,13 @@ impl OllamaSummarizer {
             base: base.into().trim_end_matches('/').to_string(),
             model: model.into(),
             timeout: Duration::from_secs(60),
-            max_tokens: 400,
+            // 1024, not the earlier 400. Measured over the owner's session stores:
+            // 92 of 345 answers stopped mid-string (`EOF while parsing a string`),
+            // and the stop position did not depend on how big the prompt was — a
+            // 38-character digest and a 9290-character one were both cut at ~1850
+            // columns. A fixed output budget, not the context window. An answer cut
+            // in half is thrown away whole, so the budget has to fit a verbose one.
+            max_tokens: 1024,
             calls: 0,
         }
     }
@@ -442,8 +449,29 @@ impl OllamaSummarizer {
             .ok_or_else(|| {
                 SummarizerError::Malformed("no message.content in the response".to_string())
             })?;
-        let parsed: Value = serde_json::from_str(content.trim())
-            .map_err(|e| SummarizerError::Malformed(format!("content is not JSON: {e}")))?;
+        let parsed: Value = match serde_json::from_str(content.trim()) {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                // "EOF while parsing a string" is what a truncated answer looks like,
+                // and on its own it says nothing a person can act on. When the
+                // endpoint admits it stopped at the budget, say that instead: the
+                // reason is recorded in `producer` and shown in the TUI.
+                if value.get("done_reason").and_then(|r| r.as_str()) == Some("length") {
+                    let spent = value
+                        .get("eval_count")
+                        .and_then(|c| c.as_u64())
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    return Err(SummarizerError::Malformed(format!(
+                        "the answer was cut off at the token budget before it ended \
+                         (done_reason=length, eval_count={spent}); raise num_predict"
+                    )));
+                }
+                return Err(SummarizerError::Malformed(format!(
+                    "content is not JSON: {e}"
+                )));
+            }
+        };
         Synthesis::from_json(&parsed)
     }
 }
@@ -620,5 +648,50 @@ mod tests {
             OllamaSummarizer::parse_response(&body),
             Err(SummarizerError::Malformed(_))
         ));
+    }
+
+    /// Purpose: Pin that an answer cut off at the token budget says so, instead of
+    /// reporting a bare parse error nobody can act on.
+    #[test]
+    fn an_answer_cut_off_at_the_token_budget_says_which_budget() {
+        // Measured in the owner's session stores: the endpoint stops mid-string,
+        // leaving `content` that ends inside a JSON string.
+        let body = json!({
+            "message": {
+                "content": "{\n  \"open_questions\": [],\n  \"why\": \"根因是层叠顺序被调用序覆盖，于是"
+            },
+            "done": true,
+            "done_reason": "length",
+            "eval_count": 1024
+        })
+        .to_string();
+        let err = OllamaSummarizer::parse_response(&body).unwrap_err();
+        let message = err.to_string();
+        // The reason travels into `producer`, so it has to name the cause and the
+        // number a person can raise.
+        assert!(message.contains("cut off"), "{message}");
+        assert!(message.contains("eval_count=1024"), "{message}");
+        assert!(message.contains("num_predict"), "{message}");
+    }
+
+    /// Purpose: Pin that the default answer budget is roomy enough for a real answer,
+    /// so a verbose-but-correct reply is not thrown away as malformed.
+    #[test]
+    fn the_default_answer_budget_leaves_room_for_a_verbose_answer() {
+        let input = DigestInput {
+            request: "配置层叠失效".into(),
+            status: "done".into(),
+            touched_files: vec!["src/config/merge.rs".into()],
+            commands: vec!["cargo".into()],
+            tests: Vec::new(),
+            edits: Vec::new(),
+            rendered: String::new(),
+        };
+        let summarizer = OllamaSummarizer::new("http://127.0.0.1:11434", "qwen2.5:7b-instruct");
+        let body = summarizer.body(&input);
+        let num_predict = body["options"]["num_predict"].as_u64().unwrap();
+        // 400 was measured to cut ~30% of answers mid-JSON (see the module's
+        // `parse_response` comment); the floor here is what keeps that from coming back.
+        assert!(num_predict >= 1024, "num_predict = {num_predict}");
     }
 }

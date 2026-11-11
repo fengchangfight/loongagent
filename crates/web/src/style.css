@@ -112,47 +112,28 @@ body {
 
 #banner .spacer { flex: 1; }
 
-/* The workspace button: the directory the chat stands in, at the head of the rail.
- * It lives here rather than in the banner because the rail is the list of workspaces
- * (web-surface.md §1, §4): one control, one list, and the full width of the rail means
- * a long directory name never has to be truncated to make room for a session row. */
+/* The "add workspace" button at the head of the rail. It lives here rather than in
+ * the banner because the rail is the list of workspaces (web-surface.md §1, §4):
+ * one control, one list. It names no directory — the tree below is what shows which
+ * workspace the chat sits in — so it reads as what it does: add a workspace. */
 #workspace-btn {
   display: flex;
   align-items: center;
-  gap: 7px;
+  justify-content: center;
+  gap: 6px;
   width: calc(100% - 20px);
   margin: 10px 10px 2px;
   padding: 7px 10px;
   background: var(--bg-overlay);
-  border: 1px solid var(--border);
+  border: 1px dashed var(--border);
   border-radius: var(--radius-sm);
   color: var(--text-dim);
   cursor: pointer;
   font: inherit;
   font-size: 12.5px;
-  text-align: left;
 }
 #workspace-btn:hover { border-color: var(--accent); color: var(--text); }
-#workspace-btn .dir-name {
-  color: var(--text);
-  font-weight: 600;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-#workspace-btn .dir-path {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  direction: rtl; /* the tail of a long path matters more than its head */
-  text-align: left;
-  font-size: 11.5px;
-  color: var(--text-faint);
-}
-#workspace-btn .chev { font-size: 10px; opacity: 0.6; }
+#workspace-btn .plus { font-weight: 700; }
 
 /* ── Model bar: every model on one row, the current one unmistakable ───
  *
@@ -238,8 +219,10 @@ body {
 }
 
 /* The YOLO switch states what it is: quiet and outlined while prompts are on,
-   filled amber and bold while the session runs without asking (ADR-0007 §5
-   asks a surface to show the opt-out; hiding it would be the lie this replaces). */
+   filled red and bold while the session runs without asking — red because a turn
+   that never asks is the dangerous state, and the page must not make it look calm
+   (ADR-0007 §5 asks a surface to show the opt-out; hiding it would be the lie this
+   replaces). */
 #yolo {
   margin-left: auto;
   flex: 0 0 auto;
@@ -259,8 +242,8 @@ body {
   cursor: pointer;
   outline: none;
 }
-#yolo:hover:not(:disabled) { border-color: var(--amber); color: #fff; }
-#yolo:focus-visible { box-shadow: 0 0 0 2px var(--amber); }
+#yolo:hover:not(:disabled) { border-color: var(--red); color: #fff; }
+#yolo:focus-visible { box-shadow: 0 0 0 2px var(--red); }
 #yolo .dot {
   width: 7px;
   height: 7px;
@@ -276,12 +259,12 @@ body {
   letter-spacing: 0.04em;
 }
 #yolo.on {
-  background: var(--amber);
-  border-color: var(--amber);
-  color: #1c1206;
+  background: var(--red);
+  border-color: var(--red);
+  color: #2b0605;
 }
-#yolo.on .dot { background: #1c1206; }
-#yolo.on .state { background: #1c1206; color: var(--amber); }
+#yolo.on .dot { background: #2b0605; }
+#yolo.on .state { background: #2b0605; color: #ffb3ad; }
 #yolo:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* ── Body: rail + chat ──────────────────────────────────────────────── */
@@ -566,40 +549,10 @@ body {
   border-right: 1px solid var(--border-soft);
 }
 
-#rail .rail-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 10px 12px 8px;
-  font-size: 11.5px;
-  font-weight: 650;
-  letter-spacing: 0.6px;
-  text-transform: uppercase;
-  color: var(--text-faint);
-}
-
-#new-session {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 3px 8px;
-  background: var(--green-soft);
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  color: var(--green);
-  cursor: pointer;
-  font: inherit;
-  font-size: 12px;
-  font-weight: 600;
-  text-transform: none;
-  letter-spacing: 0;
-}
-#new-session:hover { border-color: var(--green); }
-
 #session-list {
   flex: 1;
   overflow-y: auto;
-  padding: 2px 8px 12px;
+  padding: 6px 8px 12px;
 }
 
 /* Level one of the tree: a workspace header. */
@@ -648,6 +601,24 @@ body {
 }
 .workspace-row:hover { color: var(--text); }
 .workspace-row.active { color: var(--accent); }
+
+/* The row's own new-session button: it sits on the workspace whose sessions it adds to,
+ * so it needs no label of its own (web-surface.md §4). */
+.workspace-row .add {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 0 5px;
+  border-radius: var(--radius-sm);
+  color: var(--text-faint);
+  font-size: 12px;
+  line-height: 15px;
+}
+/* Folded, the row already ends with a count; the two share the right edge. */
+.workspace-row .count + .add { margin-left: 2px; }
+.workspace-row .add:hover {
+  background: var(--green-soft);
+  color: var(--green);
+}
 
 /* Level two: a session row nested under its workspace. */
 .session-row.nested { margin-left: 14px; width: calc(100% - 14px); }

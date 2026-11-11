@@ -19,23 +19,25 @@ eager "default" session waits to collide with the user's first choice.
 ## 1. Workspaces — many, remembered
 
 A **workspace** is a directory the user works in. `loongagent web` registers its launch
-directory as the **home workspace**, and the page opens on it. The rail's workspace button
-(its head, §4) opens a picker (server-side listing, directories only); choosing one
-**adds** a workspace. One control for one list: the button sits on the list it changes.
+directory as the **home workspace**, and the page opens on it. The rail's **add-workspace
+button** (its head, §4) opens a picker (server-side listing, directories only); choosing
+one **adds** a workspace. One control for one list: the button sits on the list it changes.
+It names what it does — `＋ 添加工作区` — rather than the seated workspace: the tree below
+is what shows where the chat sits, and a button that displayed a directory read as a
+workspace *switcher*, which it is not.
 
 Workspaces are **many and persistent**, not one extra per browser: the catalogue lives in
 `workspaces.json` under the config dir, so it survives a restart. Each entry records the
-directory path and a display title (the final path segment by default).
-Removing a workspace never deletes its directory or its history: the sessions
+directory path and a display title (the final path segment by default). Removing a
+workspace never deletes its directory or its history: the sessions
 stop being grouped, the files stay on disk and stay openable as ungrouped history.
 
 The rail lists workspaces **newest added first**: the one just added by the picker on
 top, the home workspace — registered first, so oldest — at the bottom. Display only:
 every `index` travels with its entry and is still what the calls take, so the page looks
-a workspace up by its `index`, never by its position.
-
-A workspace is identified by its canonicalised path (`realpath`, symlinks, `..` and
-trailing slashes resolved), so two spellings of one directory stay one workspace.
+a workspace up by its `index`, never by its position. A workspace is identified by its
+canonicalised path (`realpath`, symlinks, `..` and trailing slashes resolved), so two
+spellings of one directory stay one workspace.
 
 ## 2. The two-level tree — workspace, then its sessions
 
@@ -43,13 +45,13 @@ The left rail is a **two-level tree**: workspaces, and under each the sessions t
 belong to it. A session belongs to the workspace whose canonicalised path matches the
 directory its `.jsonl` lives in — membership is read off the files, never a record.
 
-The catalogue (`sessions.rs`) mirrors what `crates/cli/src/session.rs` reports
-for a directory: id, title, created, modified. New, resume and delete are
-surface operations, and none of them reuses a sibling session's server child
-(§3):
+The catalogue (`sessions.rs`) mirrors `crates/cli/src/session.rs`: id, title, created,
+modified. New, resume and delete are surface operations, and none reuses another
+session's server child (§3):
 
 - **New** — spawn a server child for a fresh session in that workspace, then
-  `session.new` on it. Because the child starts on the new session, it answers
+  `session.new` on it, whose optional `workspace` index names the row the `＋` was clicked
+  in (§4) and moves the tab there. Because the child starts on the new session, it answers
   `session.attach` with the real id; the surface never has to guess it.
 - **Resume** — spawn (or reuse) a server child bound to that session with
   `--session <id>`, then attach. The surface never forwards a bare
@@ -70,23 +72,20 @@ reads the session out of the launch `Args`). Two sessions in the same workspace
 therefore run as two children, **side by side and alive at the same time**.
 
 This is what makes the underlying server's single-session guard irrelevant to
-the page. A `loongagent server` child holds exactly one `session_id` and rejects
+the page: a `loongagent server` child holds exactly one `session_id` and rejects
 any request that names another (`wrong_session`). The surface never asks one
-child to change sessions: to switch sessions it spawns a child for the target
-and attaches there, leaving the previous session's child untouched. Switching
-the rail selection **does not kill a child**, so a turn running in one session
-keeps running while the user reads another — the property the per-workspace
-child could not give.
+child to change sessions: to switch it spawns a child for the target and attaches
+there, leaving the previous session's child untouched. Switching the rail selection
+**does not kill a child**, so a turn running in one session keeps running while the
+user reads another — the property the per-workspace child could not give. A child is
+reclaimed only when its session is deleted or `loongagent web` exits: no idle reaper
+in v1, one child per open session, bounded by what is open.
 
-A child is reclaimed only when its session is deleted or `loongagent web` exits:
-no idle reaper in v1, one child per open session, bounded by what is open.
-
-One browser tab holds one WebSocket; the tab's active session is its
-**attachment**. A session's child is shared across tabs: every tab attached to
-that session receives the same events and deltas (`app.rs` keeps one broadcast
-queue per session child; `handle_line_streaming` already interleaves
-notifications with responses). Two tabs on the *same* session both see the turn;
-a prompt from either is one prompt to the kernel.
+One browser tab holds one WebSocket; the tab's active session is its **attachment**. A
+session's child is shared across tabs: every tab attached to that session receives the same
+events and deltas (`app.rs` keeps one broadcast queue per session child;
+`handle_line_streaming` already interleaves notifications with responses). Two tabs on the
+*same* session both see the turn; a prompt from either is one prompt to the kernel.
 
 Attaching replays the log (`session.replay`) so a late tab catches up, then live events
 continue the stream. The tab computes what the TUI computes — the spend accumulator of
@@ -94,26 +93,29 @@ continue the stream. The tab computes what the TUI computes — the spend accumu
 
 ## 4. The page
 
+The page speaks **Chinese**: its chrome — buttons, empty states, toasts, chips,
+panels, pickers — renders user-facing text in Chinese, while identifiers that name
+things outside the page (model names, paths, the wordmark, `YOLO`) stay as they are.
+
 Three regions, all fed by the event stream:
 
 - **Banner** — favicon, the wordmark in capitals, and the terminal's own inscription
   `⟬ ᛭ 兴云吐雾 ⋄ 隐介藏形 ᛭ ⟭` (`surfaces.md` §3, the TUI's `MARK_SUBLINE`), so the two
   surfaces introduce themselves alike; it sheds runes, then itself, as the window narrows.
-  Then the **model bar**: a flat
-  row of slots, one per `model.list` entry, every model drawn at once. It is the TUI's own
-  bar (ADR-0008, `surfaces.md` §3) rather than a dropdown, because reaching for another
-  model is usually mid-sentence and a menu costs a click and a read. Choosing a slot sends
-  `model.select` and folds the returned `ModelList` back into the row. The selected model
-  is its lit slot and never a hue alone: a filled dot, an accent fill, a double border and
-  a bold name, with `aria-current` for a reader that cannot see the colour. The name is
-  said there once — the row scrolls the lit slot into view rather than printing the same
-  name again beside it. Which one is current is `ModelList.selected` and never a
-  field on an offering, so the lit slot is derived from it and nowhere else. The keys are
-  `alt+n` / `alt+p` and `ctrl+←` / `ctrl+→`, printed on the bar rather than hidden, and they
-  are **two different acts**: the letters switch model, wrapping; the arrows **move the
-  current model one slot**, the TUI's own lever (`surfaces.md` §3) — the lit slot stays lit
-  while the row rearranges around it, so the arrows send `model.reorder`, never
-  `model.select`.
+  Then the **model bar**: a flat row of slots, one per `model.list` entry, every model
+  drawn at once. It is the TUI's own bar (ADR-0008, `surfaces.md` §3) rather than a
+  dropdown, because reaching for another model is usually mid-sentence and a menu costs a
+  click and a read. Choosing a slot sends `model.select` and folds the returned `ModelList`
+  back into the row. The selected model is its lit slot and never a hue alone: a filled
+  dot, an accent fill, a double border and a bold name, with `aria-current` for a reader
+  that cannot see the colour. The name is said there once — the row scrolls the lit slot
+  into view rather than printing the same name again beside it. Which one is current is
+  `ModelList.selected` and never a field on an offering, so the lit slot is derived from
+  it and nowhere else. The keys are `alt+n` / `alt+p` and `ctrl+←` / `ctrl+→`, printed on
+  the bar rather than hidden, and they are **two different acts**: the letters switch
+  model, wrapping; the arrows **move the current model one slot**, the TUI's own lever
+  (`surfaces.md` §3) — the lit slot stays lit while the row rearranges around it, so the
+  arrows send `model.reorder`, never `model.select`.
 
   Which slot holds what the session cannot answer: its child read the profile at startup
   and keeps answering `model.list` in *declaration* order, so the surface remembers the
@@ -134,26 +136,27 @@ Three regions, all fed by the event stream:
   The chord split follows what the browser claims: `Ctrl+N` and `Ctrl+P` are its own,
   `Alt+←/→` are navigation — so the letters sit on Alt, the arrows on Ctrl. A running turn
   disables the slots until it ends; the row's right end carries **＋ Add model**, the panel
-  of §6 beside the row it extends.
-- **YOLO switch** — the banner's right edge shows this session's approval state as a
-  pill that says itself in words: `YOLO OFF` quiet and outlined while prompts are on,
-  `YOLO ON` filled amber while the session lets every tool call through. It draws what
-  the session says, never its own guess: `permissions.relaxed` is the record and
-  `permissions.set`'s answer the confirmation, so an old session shows the opt-out it
+  of §6 beside the row it extends.- **YOLO switch** — the banner's right edge shows this session's approval state as a
+  pill that says itself in words: `YOLO 关` quiet and outlined while prompts are on,
+  `YOLO 开` filled red while the session lets every tool call through — red because a
+  turn that never asks is the dangerous state, and the page must not make it look calm.
+  It draws what the session says, never its own guess: `permissions.relaxed` is the record
+  and `permissions.set`'s answer the confirmation, so an old session shows the opt-out it
   really has (ADR-0007 §5, ADR-0020). A turn owns the session, so the flip waits; the TUI
   reaches a running turn over ADR-0019's control channel, and this surface, which has
   none, keeps the switch disabled rather than show a state it cannot enforce.
 - **Session rail** — the two-level tree of §2: workspaces newest added first, each
   expanding to its sessions **newest started first**, with new/delete/copy. Its head is the
-  **workspace button** of §1, naming the seated workspace and opening the picker. Copy puts
-  the id on the clipboard, because the id names the session to every other surface
-  (`loongagent --resume <id>`) while the row shows a title. Order is creation time —
-  the first `time_ms` in the log, or the file's own time for a session with no event
-  yet, so it appears at the top the moment it is made. That cannot move afterwards: the
-  rail never reshuffles, neither when opening a session (which writes the start
-  records `skills.loaded`, `model.selected`, `profile.selected`) nor when talking in an
-  old one. The "2m ago" label reads the conversation clock — the latest conversational
-  `time_ms`, those start records excluded — so it says when the session was last spoken
+  **add-workspace button** of §1, which opens the picker. Every workspace row also carries
+  its own **＋ 新会话**, so the row is the target and the page says where a session goes by
+  where the button sits; clicking it moves the chat there as it starts. Copy puts the id on
+  the clipboard, because the id names the session to every other surface (`loongagent
+  --resume <id>`) while the row shows a title. Order is creation time — the first `time_ms`
+  in the log, or the file's own time for a session with no event yet, so it appears at the
+  top the moment it is made. That cannot move afterwards: the rail never reshuffles, neither
+  when opening a session (which writes the start records `skills.loaded`, `model.selected`,
+  `profile.selected`) nor when talking in an old one. The "几分钟前" label reads the latest
+  conversational `time_ms`, those start records excluded — when the session was last spoken
   in, not when its file was last written.
 - **Chat** — the transcript, drawn from the session log and nothing else: the user's
   own message arrives as a `message.appended` with `role: "user"` like any other
@@ -199,14 +202,13 @@ Three regions, all fed by the event stream:
   is open and ends with its answer. A replayed turn carries no stopwatch — it is a record
   of the past.
 
-  The transcript is one column against the **left** edge, as wide as the pane less a
-  margin: a centred chat leaves two empty gutters and reads as a document, and the TUI it
-  mirrors has never centred anything. The block reaches the right edge; padding keeps a
-  paragraph inside a comfortable measure.
+  The transcript is one column against the **left** edge, as wide as the pane less a margin:
+  a centred chat leaves two empty gutters and reads as a document, and the TUI it mirrors has
+  never centred anything. The block reaches the right edge; padding keeps a readable measure.
 
 - **Stop** — while a turn runs the composer's row carries a spinner and a **Stop** button
   (`Esc` too): the TUI's `esc`, sent as `POST /api/interrupt` because a busy session reads
-  no line. [web-composer.md](web-composer.md) §4 owns it.
+  no line. [web-composer.md](web-composer.md) §4 owns it, §5 the spinner a dead wire ends.
 
 The transcript's vocabulary is the protocol's, and a test holds the page to it: every
 event kind the page switches on must be one `loong_schema::generated::EVENT_KINDS`
@@ -229,11 +231,9 @@ JSON routes: `/api/browse`, listing subdirectories for the workspace picker,
 §2), and `/api/interrupt` ([web-composer.md](web-composer.md) §4), the one route that is
 not a read — which is why each connection gets its own thread: the socket carrying a turn
 is blocked inside `exchange` until the turn ends. All three stay in the web crate. The
-workspace catalogue of
-§1 is driven over the
-socket (`workspace.list`/`add`/`close`) and persisted internally to
-`workspaces.json` — there is no `/api/workspaces` HTTP route. One surface-local
-socket method, `session.tree`, answers the two-level rail in one call: every
+workspace catalogue of §1 is driven over the socket (`workspace.list`/`add`/`close`) and
+persisted internally to `workspaces.json` — there is no `/api/workspaces` HTTP route. One
+surface-local socket method, `session.tree`, answers the two-level rail in one call: every
 workspace with its sessions nested, each flagged live/busy. §6's `model.*` reads
 are surface-local too, and so is `model.reorder` (§4): an arrangement the bar owns,
 plus a write to `local.toml` on a local profile.

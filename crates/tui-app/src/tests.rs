@@ -1869,6 +1869,22 @@ fn the_panel_shows_the_layers_the_worker_and_the_mode() {
     assert!(shows(&screen, "3 条延后"), "{screen}");
 }
 
+/// Purpose: The panel's share never reads over 100% — a full window is 100%, not 110%.
+#[test]
+fn the_panel_never_shows_over_a_full_window() {
+    // The ledger's estimate can exceed the budget while a turn fills the window faster
+    // than compaction sheds it. The percentage is a gauge, and a gauge caps at full.
+    let mut context = explained();
+    context.context_tokens = 140_000;
+    context.budget_tokens = 128_000;
+    let screen = panel(context);
+    assert!(screen.contains("100%"), "capped at a full window: {screen}");
+    assert!(
+        !screen.contains("109%") && !screen.contains("110%"),
+        "{screen}"
+    );
+}
+
 /// Purpose: A degraded memory states its reason in the panel and marks the bar with `mem degraded`.
 #[test]
 fn a_degraded_memory_says_why_in_the_panel_and_on_the_bar() {
@@ -1886,7 +1902,7 @@ fn a_degraded_memory_says_why_in_the_panel_and_on_the_bar() {
     assert!(screen.contains("connection refused"), "{screen}");
 
     // The bar carries the warning too, so a silent fallback is impossible even
-    // with the panel closed.
+    // with the panel closed — and it carries the reason, not just the fact.
     let (to_app, from_worker) = channel::<FromWorker>();
     let mut app = App::new("s", "v");
     let mut context = explained();
@@ -1895,6 +1911,10 @@ fn a_degraded_memory_says_why_in_the_panel_and_on_the_bar() {
     app.drain(&from_worker);
     let screen = draw(&mut app, 200, 24);
     assert!(shows(&screen, "记忆 ⚠ 降级"), "{screen}");
+    assert!(
+        shows(&screen, "降级：the summariser is unreachable"),
+        "the reason on the bar itself, not only in the panel: {screen}"
+    );
 }
 
 /// Purpose: An engine that is off and one that has produced nothing yet are drawn differently.
@@ -2634,6 +2654,59 @@ fn a_turn_that_ends_on_its_own_is_still_called_finished() {
         app.finished.expect("an ending").outcome,
         Outcome::Done,
         "a turn with no step-limit note is still Done"
+    );
+}
+
+/// Purpose: An idle heartbeat from the worker is not the end of a turn, and writes no tick.
+#[test]
+fn an_idle_heartbeat_is_not_an_ending() {
+    // The complaint this answers: "TUI 还是会隔几秒弹出完成". The worker reports its
+    // state after every command *and* after every ten-second idle tick. Nothing was
+    // running, so there is nothing to end.
+    let mut app = App::new("s-idle", "v");
+    app.logo = false;
+    assert!(
+        app.busy_since.is_none(),
+        "a fresh app has no turn in flight"
+    );
+    let before = app.lines.len();
+
+    fed(&mut app, FromWorker::State { pending: None });
+
+    assert!(
+        app.finished.is_none(),
+        "nothing started, so nothing finished: {:?}",
+        app.finished
+    );
+    assert_eq!(app.lines.len(), before, "an idle heartbeat writes no line");
+}
+
+/// Purpose: The idle heartbeat that follows a finished turn does not finish it a second time.
+#[test]
+fn a_finished_turn_is_not_finished_again_by_the_next_heartbeat() {
+    let mut app = App::new("s-tick-once", "v");
+    app.busy = true;
+    app.busy_since = Some(std::time::Instant::now());
+    fed(&mut app, FromWorker::State { pending: None });
+
+    let after_first = app.lines.len();
+    let first = app.finished.as_ref().map(|finished| finished.line());
+    assert!(first.is_some(), "the turn ended, so there is an ending");
+
+    // Idle now: the worker keeps reporting its state every tick of its clock.
+    for _ in 0..3 {
+        fed(&mut app, FromWorker::State { pending: None });
+    }
+
+    assert_eq!(
+        app.lines.len(),
+        after_first,
+        "the tick is written once per turn, not once per tick of the clock"
+    );
+    assert_eq!(
+        app.finished.as_ref().map(|finished| finished.line()),
+        first,
+        "and the ending on the box is the same one"
     );
 }
 
@@ -6492,11 +6565,8 @@ fn an_idle_worker_refreshes_the_context_after_one_tick() {
     let sent = Arc::clone(&transport.sent);
     let client = Client::new(transport, "s-tick");
     // A short tick, so the test does not wait the production ten seconds.
-    let (_to_worker, _from_worker) = spawn_worker_with_tick(
-        client,
-        0,
-        std::time::Duration::from_millis(50),
-    );
+    let (_to_worker, _from_worker) =
+        spawn_worker_with_tick(client, 0, std::time::Duration::from_millis(50));
 
     // Send nothing. Within a few ticks the worker must have asked for the context on
     // its own — that is what makes a cleared degradation leave the strip by itself.
@@ -6508,5 +6578,8 @@ fn an_idle_worker_refreshes_the_context_after_one_tick() {
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    panic!("an idle worker never re-asked for the context: {}", sent.lock().unwrap().join("\n"));
+    panic!(
+        "an idle worker never re-asked for the context: {}",
+        sent.lock().unwrap().join("\n")
+    );
 }

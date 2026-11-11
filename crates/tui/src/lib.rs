@@ -296,6 +296,11 @@ fn render_event_with(envelope: &Value, full: bool) -> Option<String> {
         // keeps the conversation rather than one bill per model call. The event is still
         // in the log and `Client::costs` still returns it for the spend total.
         gen::event::COST_RECORDED => None,
+        // Startup provenance, not a turn boundary: a managed pack rewrites this entry on
+        // every attach, and because it lands *after* the events replay already read, it
+        // surfaced as a "✓ 完成" tick out of nowhere. It carries which pack the session
+        // runs on; the screen says nothing.
+        gen::event::CONTROL_SYNCED => None,
         gen::event::COMPACTION_APPLIED => Some(format!(
             "· 已压缩：{} → {} 令牌（清理 {} 条工具输出，丢弃 {} 条消息，保留最新 {}）",
             data.get("tokens_before")
@@ -1302,6 +1307,40 @@ mod tests {
         let sent: Value = serde_json::from_str(&client.transport.outbound[0]).unwrap();
         assert_eq!(sent["method"], "session.attach");
         assert_eq!(sent["params"]["cwd"], "/work");
+    }
+
+    /// Purpose: A quiet control-plane provenance event must not read as a finished turn.
+    /// Verify: `cargo test -p loong-tui`.
+    #[test]
+    fn a_control_synced_event_is_provenance_not_a_turn_tick() {
+        // A server started with a managed pack rewrites its log entry on attach: the
+        // new `control.synced` lands *after* every event the replay already read, and
+        // `replay()` collects it — where it used to surface as a "✓ 完成" tick in the
+        // transcript, out of nowhere, seconds after the screen opened. It is provenance
+        // (which pack this session runs on), not a turn boundary, so it renders nothing.
+        let fake = Fake::with(vec![
+            event(
+                1,
+                "control.synced",
+                json!({"issuer": "i", "version": 1, "key_id": "k", "profile": "p",
+                       "from_cache": false, "note": ""}),
+            ),
+            response(
+                1,
+                json!({"session_id": "s-1", "schema_version": gen::SCHEMA_VERSION,
+                       "existing_events": 1, "auto_approve": false}),
+            ),
+        ]);
+        let mut client = Client::new(fake, "unset");
+        client.attach("/work", "tui").unwrap();
+        // Rendering the provenance event directly must produce no line — before the
+        // fix it read as a "✓ 完成" tick out of nowhere.
+        let envelope = json!({
+            "seq": 2, "kind": "control.synced",
+            "data": {"issuer": "i", "version": 1, "key_id": "k", "profile": "p",
+                     "from_cache": false, "note": ""},
+        });
+        assert_eq!(render_event(&envelope), None);
     }
 
     /// Purpose: Pin that a question written to the log before this process started is not offered as answerable.

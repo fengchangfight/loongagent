@@ -2233,7 +2233,10 @@ impl App {
                 let budget = explained.budget_tokens;
                 let used = explained.context_tokens;
                 let percent = if budget > 0 {
-                    format!("{:.0}%", (used as f64 / budget as f64) * 100.0)
+                    // A gauge never reads past full: the ledger's estimate can exceed the
+                    // budget while a turn is filling faster than compaction sheds, and
+                    // "110%" tells the user nothing a capped "100%" does not.
+                    format!("{:.0}%", ((used as f64 / budget as f64) * 100.0).min(100.0))
                 } else {
                     "无上限".to_string()
                 };
@@ -2947,11 +2950,18 @@ impl App {
                     // Recording an ending here put a tick in the transcript while the work
                     // was still to come — the one line that lies about what is happening.
                     let paused = pending.is_some();
+                    // The worker reports its state after every command *and* after every
+                    // ten-second idle tick, so a state report is not an ending by itself.
+                    // The turn's clock says which it is: it is set when a turn is submitted
+                    // and taken when that turn ends, so a report that finds no clock has no
+                    // turn to end. Without this test an idle session grew a "✓ 完成" line
+                    // every ten seconds, out of nothing.
+                    let in_flight = self.busy_since.is_some();
                     self.pending = pending;
                     self.busy = false;
                     self.activity = None;
                     self.streaming.clear();
-                    if !paused {
+                    if !paused && in_flight {
                         // How long the turn took, from the submit to the end. A pause for
                         // a question is part of it: the turn had not ended, and a clock
                         // that restarted afterwards would be timing something else.
@@ -4477,7 +4487,9 @@ impl App {
         }
         // The memory's state belongs on the bar as well as in the panel: "this
         // session's memory is degraded" is worth seeing without opening a debug
-        // view, and a silent fallback is the one thing the design forbids.
+        // view, and a silent fallback is the one thing the design forbids. A degraded
+        // memory carries its reason on the bar itself (`记忆 ⚠ 降级：…`), so the user
+        // never has to open the panel to learn why.
         if let Some(context) = &self.context {
             if !context.memory_mode.is_empty() {
                 hints.push(Span::raw("  "));
@@ -4488,7 +4500,7 @@ impl App {
                     ));
                 } else {
                     hints.push(Span::styled(
-                        "记忆 ⚠ 降级",
+                        format!("记忆 ⚠ 降级：{}", context.memory_degraded),
                         Style::default()
                             .fg(Color::Yellow)
                             .add_modifier(Modifier::BOLD),

@@ -191,6 +191,32 @@ impl Kernel {
                     _ => {}
                 }
             }
+            // A call the log never answers — the process died between writing the
+            // call and writing its result — would otherwise rebuild an assistant
+            // message with `tool_calls` and no tool message, which providers reject
+            // with 400. Close it with a result that says the call never answered.
+            if let Some(slot) = pending.as_mut() {
+                let answered: std::collections::HashSet<&str> =
+                    slot.2.iter().map(|(id, _, _)| id.as_str()).collect();
+                let unanswered: Vec<String> = slot
+                    .1
+                    .iter()
+                    .filter(|call| !answered.contains(call.call_id.as_str()))
+                    .map(|call| call.call_id.clone())
+                    .collect();
+                for call_id in unanswered {
+                    let output = "interrupted: the process exited before this tool answered, so its result was never recorded".to_string();
+                    let seq = self.append(
+                        gen::event::TOOL_RESULT,
+                        &gen::ToolResult {
+                            call_id: call_id.clone(),
+                            ok: false,
+                            output: output.clone(),
+                        },
+                    )?;
+                    slot.2.push((call_id, output, seq));
+                }
+            }
             self.flush_pending(&mut pending)?;
         }
         Ok(())

@@ -1250,6 +1250,32 @@ mod tests {
         }
     }
 
+    /// Purpose: Pins that a replayed approval is drawn answered — a greyed, unclickable
+    /// record of a decision taken, not live buttons whose answer can only 500 against a
+    /// request that no longer exists.
+    #[test]
+    fn a_replayed_approval_is_drawn_answered() {
+        // `onEvent` is the one handler for live and replayed events; it must pass the
+        // flag on, or an approval from the log is drawn as live.
+        assert!(
+            APP_JS.contains("showApproval(data, replayed)"),
+            "onEvent must tell showApproval that the event was replayed"
+        );
+        let approval = APP_JS
+            .split("function showApproval(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("showApproval is the one place an approval renders");
+        assert!(
+            approval.contains("replayed"),
+            "showApproval must take the replayed flag: {approval}"
+        );
+        assert!(
+            approval.contains("answered") && approval.contains("disabled"),
+            "showApproval must draw an answered box: greyed, its buttons disabled: {approval}"
+        );
+    }
+
     /// Purpose: Pins that the page is served without a token because the socket is the gated part.
     #[test]
     fn the_page_is_served_without_a_token() {

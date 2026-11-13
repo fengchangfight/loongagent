@@ -1555,7 +1555,7 @@ function onEvent(env, replayed) {
       break;
     }
     case "approval.requested":
-      showApproval(data);
+      showApproval(data, replayed);
       break;
     case "approval.decided": {
       const chip = addStep("审批", data.granted ? "已批准" : "已拒绝", data.granted ? "ok" : "deny");
@@ -1624,8 +1624,13 @@ function onEvent(env, replayed) {
 
 /* `approval.requested` carries the id the answer must quote: `data.request_id`, not the
  * event's own id — an event id is the log's, and `approval.respond` would not recognise
- * it. */
-function showApproval(data) {
+ * it.
+ *
+ * A replayed request is a record of the past, not a question still open: its turn ended
+ * when the log did, so there is no pending request left to answer and every button would
+ * fail. It is drawn answered — greyed and disabled by the `answered` class — the same way
+ * a request answered in this page is drawn after the click. */
+function showApproval(data, replayed) {
   const turn = ensureTurn();
   const box = node("div", "approval");
   const what = node("div", "what");
@@ -1666,6 +1671,14 @@ function showApproval(data) {
   approve.onclick = () => answer(true, "once");
   approveSession.onclick = () => answer(true, "session");
   refuse.onclick = () => answer(false, "once");
+  if (replayed) {
+    // Nothing to answer: the request left the session when its turn ended. Grey it and
+    // take the buttons out of reach, so the record cannot be mistaken for a question.
+    box.classList.add("answered");
+    [approve, approveSession, refuse].forEach((button) => {
+      button.disabled = true;
+    });
+  }
   box.appendChild(what);
   box.appendChild(approve);
   box.appendChild(approveSession);

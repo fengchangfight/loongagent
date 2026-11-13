@@ -23,8 +23,7 @@ directory as the **home workspace**, and the page opens on it. The rail's **add-
 button** (its head, §4) opens a picker (server-side listing, directories only); choosing
 one **adds** a workspace. One control for one list: the button sits on the list it changes.
 It names what it does — `＋ 添加工作区` — rather than the seated workspace: the tree below
-is what shows where the chat sits, and a button that displayed a directory read as a
-workspace *switcher*, which it is not.
+shows where the chat sits, and a directory on a button read as a workspace *switcher*.
 
 Workspaces are **many and persistent**, not one extra per browser: the catalogue lives in
 `workspaces.json` under the config dir, so it survives a restart. Each entry records the
@@ -192,6 +191,8 @@ Three regions, all fed by the event stream:
   - `approval.requested` renders three answers — once, for the session
     (`scope: "session"`, remembered so the same shape does not ask again) and
     refuse — answering `approval.respond` with the event's **`data.request_id`**.
+    A **replayed** one is drawn answered: greyed, its buttons disabled, because
+    the question died with its turn and a click could only fail.
   - `skill.invoked`, `compaction.applied`, `context.degraded`,
     `approval.decided` and `turn.interrupted` are chips carrying their own facts.
   - Session-start bookkeeping (`skills.loaded`, `profile.selected`, `hook.fired`,
@@ -203,8 +204,8 @@ Three regions, all fed by the event stream:
   of the past.
 
   The transcript is one column against the **left** edge, as wide as the pane less a margin:
-  a centred chat leaves two empty gutters and reads as a document, and the TUI it mirrors has
-  never centred anything. The block reaches the right edge; padding keeps a readable measure.
+  a centred chat reads as a document, and the TUI it mirrors has never centred anything.
+  The block fills to the right edge; padding keeps a readable measure.
 
 - **Stop** — while a turn runs the composer's row carries a spinner and a **Stop** button
   (`Esc` too): the TUI's `esc`, sent as `POST /api/interrupt` because a busy session reads
@@ -218,8 +219,8 @@ defines (or the surface's own `client.error`). The page once handled `tool.calle
 The composer shows the TUI's usage row — 入/出 tokens, calls, cache rate, context share —
 recomputed from `cost.recorded`. The share is the one number no cost event carries: it
 comes from `model.selected`'s `context_tokens`, the window from the active `model.list`
-entry. What the input itself does — `Enter`, `Shift+Enter`, and `@` naming a workspace
-file — is [web-composer.md](web-composer.md)'s.
+entry. What the input does — `Enter`, `Shift+Enter`, `@` naming a workspace file — is
+[web-composer.md](web-composer.md)'s.
 
 ## 5. Wire additions
 
@@ -229,10 +230,9 @@ instead of stdio. The web crate adds HTTP routes for its static assets (`app.js`
 JSON routes: `/api/browse`, listing subdirectories for the workspace picker,
 `/api/files`, the composer's ranked file list behind `@` ([web-composer.md](web-composer.md)
 §2), and `/api/interrupt` ([web-composer.md](web-composer.md) §4), the one route that is
-not a read — which is why each connection gets its own thread: the socket carrying a turn
-is blocked inside `exchange` until the turn ends. All three stay in the web crate. The
-workspace catalogue of §1 is driven over the socket (`workspace.list`/`add`/`close`) and
-persisted internally to `workspaces.json` — there is no `/api/workspaces` HTTP route. One
+not a read — hence a thread per connection: a socket carrying a turn is blocked inside
+`exchange` until it ends. The catalogue of §1 rides the socket (`workspace.list`/`add`/
+`close`) and persists to `workspaces.json`; there is no `/api/workspaces` route. One
 surface-local socket method, `session.tree`, answers the two-level rail in one call: every
 workspace with its sessions nested, each flagged live/busy. §6's `model.*` reads
 are surface-local too, and so is `model.reorder` (§4): an arrangement the bar owns,

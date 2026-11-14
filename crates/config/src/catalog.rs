@@ -260,6 +260,33 @@ pub const PROVIDERS: &[Provider] = &[
         local: false,
     },
     Provider {
+        id: "longcat",
+        label: "LongCat（美团）",
+        // One host, two protocol prefixes, one key: the FAQ answers "可以用同一个 API Key
+        // 吗？" with "可用于 `/openai/` 和 `/anthropic/` 两个接口". So there is no second
+        // *product* to be standing at the wrong door of, unlike Kimi Code, and no
+        // wrong-door hint to give. `/openai/v1` is the base the docs' own examples use
+        // (chat completions at `/openai/v1/chat/completions`, models at
+        // `/openai/v1/models`); the bare host answers nothing.
+        //
+        // Tool calling is undocumented in the parameter reference but load-bearing here:
+        // LongCat ships a Cline setup over this same base, and Cline drives the model with
+        // tool calls, which is the evidence the OpenAI tool fields work at all.
+        base_url: "https://api.longcat.chat/openai/v1",
+        key_env: "LOONG_LONGCAT_KEY",
+        aliases: &["LONGCAT_API_KEY"],
+        lists_models: true,
+        probe_model: None,
+        probe_url: None,
+        wrong_door: None,
+        // The live `/models` answer enumerates `LongCat-2.5` but reports no
+        // `context_length`, so `curated_models` cannot supply the window either. Until
+        // somebody states one, the kernel compacts against nothing; a profile can set
+        // `max_context_size` itself.
+        curated_models: &[],
+        local: false,
+    },
+    Provider {
         id: "zhipu",
         label: "智谱 GLM",
         base_url: "https://open.bigmodel.cn/api/paas/v4",
@@ -610,6 +637,30 @@ mod tests {
         assert_eq!(
             provider("moonshot-intl").unwrap().base_url,
             "https://api.moonshot.ai/v1"
+        );
+    }
+
+    #[test]
+    /// Purpose: Pin LongCat's endpoint, whose `/openai` prefix is the part that is easy to lose.
+    fn longcat_speaks_chat_completions_under_an_openai_prefix() {
+        // Meituan's LongCat serves three protocols from one host: `/openai/v1` for Chat
+        // Completions, `/anthropic/v1` for Messages, and its FAQ says one key opens both.
+        // The OpenAI route is the one this adapter speaks, and `/openai` is the segment a
+        // reader is most likely to drop — the bare host answers nothing.
+        let longcat = provider("longcat").expect("LongCat is a provider of its own");
+        assert_eq!(longcat.base_url, "https://api.longcat.chat/openai/v1");
+        assert_eq!(
+            longcat.models_url().as_deref(),
+            Some("https://api.longcat.chat/openai/v1/models"),
+            "the list route is documented under the same prefix"
+        );
+        assert!(!longcat.local, "a remote vendor is never a free loopback");
+        assert_eq!(
+            expand("longcat/LongCat-2.5")
+                .expect("the shorthand expands")
+                .model,
+            "LongCat-2.5",
+            "the model id keeps its capitals"
         );
     }
 

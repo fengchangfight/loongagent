@@ -116,7 +116,11 @@ pub struct HttpSource;
 
 impl PageSource for HttpSource {
     /// Purpose: GET the URL with the headers a reader sends, and map the reply.
-    /// Contract: `crates/tools/src/web_fetch.rs`.
+    /// Serves: the production path, so one call is one request.
+    /// Design: `docs/design/web-fetch.md` ("The shape of a call").
+    /// Up: `PageSource::get`, called from `WebFetch::execute`.
+    /// Down: `loong_http::get_page`, with `DOWNLOAD_LIMIT` and `TIMEOUT_SECS`.
+    /// Verify: `cargo test -p loong-tools`.
     fn get(&self, url: &str) -> Result<Page, String> {
         let headers = vec![
             ("User-Agent".to_string(), "loongagent/0.1".to_string()),
@@ -194,7 +198,11 @@ impl Tool for WebFetch {
     }
 
     /// Purpose: The schema the provider validates the call against.
-    /// Contract: `crates/tools/src/web_fetch.rs`.
+    /// Serves: a call carrying one required `url` and nothing else.
+    /// Design: `docs/design/web-fetch.md` ("The shape of a call").
+    /// Up: the registry, through `Tool::parameters`.
+    /// Down: `WebFetch::execute`, which reads `url` with `arg_str`.
+    /// Verify: `cargo test -p loong-tools`.
     fn parameters(&self) -> Json {
         json!({
             "type": "object",
@@ -216,7 +224,12 @@ impl Tool for WebFetch {
     }
 
     /// Purpose: Validate, fetch, convert, save, and return the excerpt.
-    /// Contract: `crates/tools/src/web_fetch.rs`.
+    /// Serves: the one call that answers with one of the four endings (ADR-0021 §2).
+    /// Design: `docs/design/web-fetch.md` ("The four endings").
+    /// Up: the kernel's dispatch through `Tool`.
+    /// Down: `validate_url`, `PageSource::get`, `page_kind`, `page_title`, `save`
+    /// and `render`, plus `snippet` and `absolute` on the early returns.
+    /// Verify: `cargo test -p loong-tools`.
     fn execute(&self, args: &Json, ctx: &ExecContext<'_>) -> Result<String, ToolError> {
         let raw = arg_str(args, "url")?;
         let url = validate_url(&raw).map_err(ToolError::Refused)?;
@@ -280,7 +293,11 @@ pub enum PageKind {
 }
 
 /// Purpose: Classify a content type; a missing one is treated as HTML, which is what most servers mean.
-/// Contract: `crates/tools/src/web_fetch.rs`.
+/// Serves: `execute` choosing between convert, keep and refuse.
+/// Design: `docs/design/web-fetch.md` ("The four endings").
+/// Up: `WebFetch::execute`.
+/// Down: `PageKind::Html` feeds `html_to_markdown`; `Plain` keeps the body as it is.
+/// Verify: `cargo test -p loong-tools`.
 pub fn page_kind(content_type: &str) -> PageKind {
     let value = content_type.to_ascii_lowercase();
     if value.contains("html") || value.contains("xml") && !value.contains("text/xml") {
@@ -364,7 +381,11 @@ pub fn validate_url(raw: &str) -> Result<String, String> {
 }
 
 /// Purpose: Recognise a literal loopback, private, link-local or multicast address.
-/// Contract: `crates/tools/src/web_fetch.rs`.
+/// Serves: ADR-0021 §5, so a refusal costs no request.
+/// Design: `docs/design/web-fetch.md` ("Refusals with no request made").
+/// Up: `validate_url`.
+/// Down: nothing.
+/// Verify: `cargo test -p loong-tools`.
 fn is_private_address(host: &str) -> bool {
     if host.contains(':') {
         let host = host.to_ascii_lowercase();
@@ -392,7 +413,11 @@ fn is_private_address(host: &str) -> bool {
 
 /// Make a relative `Location` absolute against the URL that returned it.
 /// Purpose: Report a redirect the model can actually request.
-/// Contract: `crates/tools/src/web_fetch.rs`.
+/// Serves: the redirect reply, which must name a URL the tool can be asked for again.
+/// Design: `docs/design/web-fetch.md` ("The four endings").
+/// Up: `WebFetch::execute`.
+/// Down: nothing.
+/// Verify: `cargo test -p loong-tools`.
 fn absolute(base: &str, location: &str) -> String {
     if location.starts_with("http://") || location.starts_with("https://") {
         return location.to_string();
@@ -426,7 +451,11 @@ fn snippet(body: &str) -> String {
 
 /// The page's `<title>`, decoded and cut to 120 characters.
 /// Purpose: Report the title, which is how a login wall or a 404 page announces itself.
-/// Contract: `crates/tools/src/web_fetch.rs`.
+/// Serves: the `title:` line in what the model reads back.
+/// Design: `docs/design/web-fetch.md` ("What the model reads back").
+/// Up: `WebFetch::execute`.
+/// Down: `decode_entities`.
+/// Verify: `cargo test -p loong-tools`.
 pub fn page_title(html: &str) -> Option<String> {
     let lower = html.to_ascii_lowercase();
     let start = lower.find("<title")?;
@@ -460,7 +489,11 @@ fn save(cwd: &Path, url: &str, text: &str) -> Result<String, String> {
 /// `<host>-<last-path-segment>-<hash8>`, so the file is recognisable by name and
 /// unique by URL: the same URL twice overwrites, two pages of one site do not.
 /// Purpose: A readable, unique filename for a fetched page.
-/// Contract: `crates/tools/src/web_fetch.rs`.
+/// Serves: `save`, so one URL overwrites itself and two pages of one site do not collide.
+/// Design: `docs/design/web-fetch.md` ("What the model reads back").
+/// Up: `save`.
+/// Down: `clean` and `fnv1a`.
+/// Verify: `cargo test -p loong-tools`.
 fn file_stem(url: &str) -> String {
     let without_scheme = url.split("://").nth(1).unwrap_or(url);
     let (authority, path) = match without_scheme.find('/') {
@@ -481,7 +514,11 @@ fn file_stem(url: &str) -> String {
 
 /// Lowercase, keep ASCII alphanumerics and dots, turn the rest into `-`, cap at 40.
 /// Purpose: One filename-safe fragment.
-/// Contract: `crates/tools/src/web_fetch.rs`.
+/// Serves: `file_stem`, so a host or path segment cannot leave the fetch directory.
+/// Design: `docs/design/web-fetch.md` ("What the model reads back").
+/// Up: `file_stem`.
+/// Down: nothing.
+/// Verify: `cargo test -p loong-tools`.
 fn clean(raw: &str) -> String {
     let mapped: String = raw
         .chars()
@@ -512,7 +549,11 @@ fn fnv1a(text: &str) -> u64 {
 /// The result the model reads: a header block, the untrusted-content label, the
 /// excerpt, and — when the page is longer — where the rest is.
 /// Purpose: Build the tool's result string from what the fetch saw.
-/// Contract: `crates/tools/src/web_fetch.rs`.
+/// Serves: the model, which pays for the excerpt and reads the rest by path.
+/// Design: `docs/design/web-fetch.md` ("What the model reads back").
+/// Up: `WebFetch::execute`.
+/// Down: `excerpt`, `commas` and `EXCERPT_CHARS`.
+/// Verify: `cargo test -p loong-tools`.
 fn render(
     url: &str,
     page: &Page,
@@ -567,7 +608,11 @@ fn render(
 
 /// The first `max` characters, and whether there were more.
 /// Purpose: Cut a page to what the context will pay for, on character boundaries.
-/// Contract: `crates/tools/src/web_fetch.rs`.
+/// Serves: a bounded context cost, whatever the page weighs.
+/// Design: `docs/design/web-fetch.md` ("The numbers, and why those numbers").
+/// Up: `render`.
+/// Down: nothing.
+/// Verify: `cargo test -p loong-tools`.
 pub fn excerpt(text: &str, max: usize) -> (String, bool) {
     let cut = text.chars().count() > max;
     (text.chars().take(max).collect(), cut)
@@ -709,7 +754,11 @@ pub fn html_to_markdown(html: &str) -> String {
 
 /// Append text from the page, decoding entities and collapsing whitespace.
 /// Purpose: Text nodes arrive with the wrapping HTML uses and nobody reads.
-/// Contract: `crates/tools/src/web_fetch.rs`.
+/// Serves: `html_to_markdown`, so inline text keeps one space and `pre` keeps its newlines.
+/// Design: `docs/design/web-fetch.md` ("The converter").
+/// Up: `html_to_markdown`.
+/// Down: `decode_entities`.
+/// Verify: `cargo test -p loong-tools`.
 fn push_text(out: &mut String, text: &str, in_pre: bool) {
     let decoded = decode_entities(text);
     if in_pre {
@@ -760,7 +809,11 @@ fn blank_line(out: &mut String) {
 
 /// Collapse the blank-line runs, trim every line's end, and trim the whole.
 /// Purpose: The last pass that makes the output look like a document.
-/// Contract: `crates/tools/src/web_fetch.rs`.
+/// Serves: `html_to_markdown`, whose output must not end in blank-line runs.
+/// Design: `docs/design/web-fetch.md` ("The converter").
+/// Up: `html_to_markdown`.
+/// Down: nothing.
+/// Verify: `cargo test -p loong-tools`.
 fn tidy(raw: &str) -> String {
     let mut lines: Vec<&str> = Vec::new();
     let mut blanks = 0;
@@ -782,7 +835,11 @@ fn tidy(raw: &str) -> String {
 /// Decode the entities a page actually uses: the named five, `&nbsp;`, and
 /// numeric references in decimal and hex.
 /// Purpose: Read `&amp;` as `&`, because that is what the page says.
-/// Contract: `crates/tools/src/web_fetch.rs`.
+/// Serves: `push_text` and `page_title`, so text is decoded once, in one place.
+/// Design: `docs/design/web-fetch.md` ("The converter").
+/// Up: `push_text` and `page_title`.
+/// Down: `number`, for the numeric references.
+/// Verify: `cargo test -p loong-tools`.
 fn decode_entities(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -832,7 +889,11 @@ fn number(entity: &str) -> Option<char> {
 
 /// Pull an attribute out of a tag's body, case-insensitively.
 /// Purpose: Read `href` without a parser.
-/// Contract: `crates/tools/src/web_fetch.rs`.
+/// Serves: `html_to_markdown`'s link handling, which needs the value and nothing else.
+/// Design: `docs/design/web-fetch.md` ("The converter").
+/// Up: `html_to_markdown`.
+/// Down: nothing.
+/// Verify: `cargo test -p loong-tools`.
 fn attr(tag: &str, want: &str) -> Option<String> {
     let lower = tag.to_ascii_lowercase();
     let mut from = 0;
@@ -884,10 +945,16 @@ mod tests {
     }
 
     /// Purpose: A source that answers from memory, so no test touches a socket.
-    /// Contract: `crates/tools/src/web_fetch.rs`.
+    /// Serves: every test in this file that runs the whole tool.
+    /// Design: `docs/design/web-fetch.md` ("The shape of a call").
+    /// Up: `WebFetch::with_source`.
+    /// Down: the `PageSource` impl just below.
+    /// Verify: `cargo test -p loong-tools`.
     struct Fake(Page);
 
     impl PageSource for Fake {
+        /// Purpose: Answer with the page this fake holds, whatever URL is asked for.
+        /// Contract: `crates/tools/src/web_fetch.rs`.
         fn get(&self, _url: &str) -> Result<Page, String> {
             Ok(Page {
                 status: self.0.status,

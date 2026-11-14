@@ -723,6 +723,32 @@ impl PackState {
     }
 }
 
+/// Purpose: The path of the file this process is *running*, for starting another copy of the same
+/// build — not the path it was launched as, which a rebuild can replace or delete under it.
+/// Serves: `ChildTransport::spawn`, the server's startup sandbox proof and `sandbox self-test`.
+/// Design: `docs/design/web-surface.md` §3.
+/// Up: `tui.rs`, `server.rs` and `sandbox.rs`.
+/// Down: `/proc/self/exe` on Linux; `std::env::current_exe` elsewhere.
+/// Verify: `cargo test -p loongagent --test web_surface` (`a_new_session_still_opens`).
+/// One binary, many faces (ADR-0009) means every surface starts a child from its own
+/// file. `current_exe` answers the path the process was *launched* as, and after a
+/// `cargo build` or a `cargo install` that path either names a different build or — when
+/// the old file was removed first — answers `<path> (deleted)`, which no `exec` can open.
+/// A `loongagent web` runs for hours and starts a child per session, so the next session
+/// after a rebuild failed with "spawning the local server: No such file or directory".
+/// On Linux `/proc/self/exe` names the open file itself, so it keeps working and keeps
+/// both sides of the socket on one build.
+pub(crate) fn self_exe() -> Result<PathBuf, String> {
+    #[cfg(target_os = "linux")]
+    {
+        let magic = Path::new("/proc/self/exe");
+        if magic.exists() {
+            return Ok(magic.to_path_buf());
+        }
+    }
+    std::env::current_exe().map_err(|e| e.to_string())
+}
+
 /// Purpose: The client's one root, `$LOONGAGENT_HOME` or `~/.loongagent`.
 /// Contract: `main.rs` path root; `Args::parse`, `profile_base`, `control.rs`, `local.rs`'s `configure_local` and `session.rs` call it.
 /// The client's one root: `$LOONGAGENT_HOME`, else `~/.loongagent` (defined in the

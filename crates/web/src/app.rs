@@ -65,6 +65,12 @@ pub enum SurfaceCall {
     /// `model.configured`, `model.providers` or `model.add` — answered on the socket, with
     /// the tab's children reloaded when a model was adopted (web-surface.md §6).
     Models,
+    /// `permissions.set` reaching a running turn over its control channel — answered on the
+    /// socket, and nothing to forward because the turn already has the ask (web-surface.md §4).
+    Permissions,
+    /// `session.replay` — answered from the session log on the socket, with no child in the
+    /// way, so a busy session still shows its past (web-surface.md §5).
+    Replay,
     /// anything else: straight to the workspace's session bridge.
     Forward,
 }
@@ -83,6 +89,10 @@ pub struct Child {
     /// the process behind the bridge, read once at creation: a Stop button has to end a
     /// turn that holds the bridge's lock, so the pid must not be asked for through it
     pub pid: Option<u32>,
+    /// the private way into this child while a turn holds the bridge, if it has one: the
+    /// permission channel of ADR-0019, kept apart from the bridge for the same reason as the
+    /// pid — asking through the lock would wait for the turn it means to reach
+    pub channel: Option<crate::PermissionChannel>,
 }
 
 /// Purpose: One workspace: its directory and the live session children running there.
@@ -247,6 +257,70 @@ fn restore_workspaces(st: &mut State, home: &Path) -> Result<(), Error> {
     Ok(())
 }
 
+/// The tab's outgoing lines, and the only way anything but the read loop reaches the socket.
+///
+/// A turn runs on a thread of its own (web-surface.md §3), so it cannot hold the socket:
+/// it hands whole lines to this channel instead, and the read loop writes them. One writer
+/// means one place that sends, and a turn that lasts a minute no longer stops the page from
+/// opening a workspace or switching session while it runs.
+/// Purpose: Hand a finished line to the thread that owns the socket.
+///
+/// Serves: `exchange_turn`, `dispatch_surface` and `send_error`, none of which hold the socket.
+/// Design: `docs/design/web-surface.md` §3.
+/// Up: `handle_ws` creates one per tab and hands clones to the turn threads.
+/// Down: `drain`, the only reader, on the read loop's thread.
+/// Verify: `cargo test -p loong-web` (`a_surface_answer_arrives_while_a_turn_is_running`).
+#[derive(Clone)]
+struct Outbox {
+    /// Purpose: The lines waiting for the socket, in the order they were finished.
+    tx: std::sync::mpsc::Sender<Message>,
+}
+
+impl Outbox {
+    /// Purpose: Queue one line for the socket.
+    ///
+    /// Contract: `Err` means the tab is gone, which is how a turn learns to stop writing.
+    fn text(&self, body: String) -> Result<(), String> {
+        self.tx
+            .send(Message::text(body))
+            .map_err(|_| "the browser closed the socket".to_string())
+    }
+}
+
+/// Purpose: Write everything the outbox is holding and return when it is empty.
+///
+/// Serves: `handle_ws`, once per read timeout and once per loop, so a turn's lines go out
+/// while the read loop is idle between browser messages.
+/// Design: `docs/design/web-surface.md` §3.
+/// Up: `handle_ws`.
+/// Down: `WebSocket::send` on the one thread allowed to touch the socket.
+/// Verify: `cargo test -p loong-web`.
+fn drain(
+    socket: &mut tungstenite::WebSocket<TcpStream>,
+    rx: &std::sync::mpsc::Receiver<Message>,
+) -> Result<(), String> {
+    loop {
+        // An empty outbox and a closed one are the same thing here: nothing to write now.
+        let Ok(message) = rx.try_recv() else {
+            return Ok(());
+        };
+        socket
+            .send(message)
+            .and_then(|_| socket.flush())
+            .map_err(|e| format!("sending to the browser: {e}"))?;
+    }
+}
+
+/// Purpose: Say whether a failed read only means "nothing arrived before the timeout".
+///
+/// Contract: a timeout is not a closed tab, so the loop drains and reads again.
+fn would_block(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    )
+}
+
 /// Purpose: Serve one browser tab until it closes: dispatch its messages to the surface or
 /// forward them down its workspace's session bridge.
 /// Serves: `crate::websocket_web`.
@@ -258,16 +332,25 @@ pub fn handle_ws(
     socket: &mut tungstenite::WebSocket<TcpStream>,
     state: &Arc<Mutex<State>>,
     home: &Path,
-    start_session: &dyn Fn(
-        &Path,
-        Option<&str>,
-    ) -> Result<(Arc<Mutex<dyn Session>>, String), String>,
+    start_session: &dyn Fn(&Path, Option<&str>) -> Result<crate::Started, String>,
     models: &dyn crate::ModelSetup,
 ) -> Result<(), String> {
     let mut tab = Tab::default();
+    // One thread reads the socket and one thread writes it — this one. A turn runs
+    // elsewhere and hands its lines to the outbox, so the loop is free between browser
+    // messages; a read that waited forever would starve the outbox, hence the timeout.
+    // `read` keeps a half-received frame across a timeout, so no message is lost.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let out = Outbox { tx };
+    socket
+        .get_ref()
+        .set_read_timeout(Some(std::time::Duration::from_millis(20)))
+        .map_err(|e| format!("timing the browser socket: {e}"))?;
     loop {
+        drain(socket, &rx)?;
         let message = match socket.read() {
             Ok(message) => message,
+            Err(tungstenite::Error::Io(e)) if would_block(&e) => continue,
             Err(tungstenite::Error::ConnectionClosed) | Err(tungstenite::Error::Protocol(_)) => {
                 return Ok(())
             }
@@ -279,7 +362,7 @@ pub fn handle_ws(
                 let request: Value = match serde_json::from_str(line) {
                     Ok(v) => v,
                     Err(e) => {
-                        send_error(socket, Value::Null, &format!("not JSON-RPC: {e}"))?;
+                        send_error(&out, Value::Null, &format!("not JSON-RPC: {e}"))?;
                         continue;
                     }
                 };
@@ -297,7 +380,7 @@ pub fn handle_ws(
                     models,
                     &method,
                     &request,
-                    socket,
+                    &out,
                 ) {
                     Ok(SurfaceCall::Forward) => {
                         if let Err(e) = forward(
@@ -305,23 +388,27 @@ pub fn handle_ws(
                             &mut tab,
                             home,
                             start_session,
-                            socket,
+                            &out,
                             line,
                             &method,
                             id.clone(),
                             request.get("params").unwrap_or(&Value::Null),
                         ) {
-                            send_error(socket, id, &e)?;
+                            send_error(&out, id, &e)?;
                         }
                     }
                     Ok(_) => {}
-                    Err(e) => send_error(socket, id, &e.0)?,
+                    Err(e) => send_error(&out, id, &e.0)?,
                 }
             }
-            Message::Close(_) => return Ok(()),
+            Message::Close(_) => {
+                drain(socket, &rx)?;
+                return Ok(());
+            }
             Message::Ping(payload) => {
                 socket
                     .send(Message::Pong(payload))
+                    .and_then(|_| socket.flush())
                     .map_err(|e| e.to_string())?;
             }
             _ => {}
@@ -341,14 +428,11 @@ fn dispatch_surface(
     state: &Arc<Mutex<State>>,
     tab: &mut Tab,
     home: &Path,
-    start_session: &dyn Fn(
-        &Path,
-        Option<&str>,
-    ) -> Result<(Arc<Mutex<dyn Session>>, String), String>,
+    start_session: &dyn Fn(&Path, Option<&str>) -> Result<crate::Started, String>,
     models: &dyn crate::ModelSetup,
     method: &str,
     request: &Value,
-    socket: &mut tungstenite::WebSocket<TcpStream>,
+    out: &Outbox,
 ) -> Result<SurfaceCall, Error> {
     let id = request.get("id").cloned().unwrap_or(Value::Null);
     let params = request.get("params").cloned().unwrap_or(Value::Null);
@@ -377,7 +461,7 @@ fn dispatch_surface(
                     })
                     .collect::<Vec<_>>()
             };
-            reply(socket, id, json!({"workspaces": list, "seat": tab.seat}))?;
+            reply(out, id, json!({"workspaces": list, "seat": tab.seat}))?;
             Ok(SurfaceCall::Workspaces)
         }
         "workspace.add" => {
@@ -394,7 +478,7 @@ fn dispatch_surface(
             };
             tab.seat = index;
             tab.attached = None;
-            reply(socket, id, json!({"index": index}))?;
+            reply(out, id, json!({"index": index}))?;
             Ok(SurfaceCall::AddWorkspace(dir.to_string()))
         }
         "workspace.switch" => {
@@ -413,7 +497,7 @@ fn dispatch_surface(
                 tab.seat = index;
                 tab.attached = None;
             }
-            reply(socket, id, json!({"index": index}))?;
+            reply(out, id, json!({"index": index}))?;
             Ok(SurfaceCall::SwitchWorkspace(index))
         }
         "workspace.close" => {
@@ -432,7 +516,7 @@ fn dispatch_surface(
                 tab.seat = 0;
                 tab.attached = None;
             }
-            reply(socket, id, json!({"closed": index}))?;
+            reply(out, id, json!({"closed": index}))?;
             Ok(SurfaceCall::CloseWorkspace(index))
         }
         "session.tree" => {
@@ -467,13 +551,13 @@ fn dispatch_surface(
                     })
                     .collect::<Vec<_>>()
             };
-            reply(socket, id, json!({"workspaces": tree, "seat": tab.seat}))?;
+            reply(out, id, json!({"workspaces": tree, "seat": tab.seat}))?;
             Ok(SurfaceCall::Sessions)
         }
         "session.list" => {
             let dir = seat_dir(state, tab.seat)?;
             let entries = sessions::list(&sessions::client_root(), &dir);
-            reply(socket, id, json!({"sessions": entries}))?;
+            reply(out, id, json!({"sessions": entries}))?;
             Ok(SurfaceCall::Sessions)
         }
         "session.open" => {
@@ -505,7 +589,7 @@ fn dispatch_surface(
             // has its own, and carrying the old order over would reorder by accident.
             tab.model_order = None;
             reply(
-                socket,
+                out,
                 id,
                 json!({
                     "session_id": session_id,
@@ -537,7 +621,7 @@ fn dispatch_surface(
             // A brand-new session starts on the declaration order, as a fresh tab does.
             tab.model_order = None;
             reply(
-                socket,
+                out,
                 id,
                 json!({
                     "session_id": session_id,
@@ -565,7 +649,7 @@ fn dispatch_surface(
             if tab.attached.as_deref() == Some(session_id) {
                 tab.attached = None;
             }
-            reply(socket, id, json!({"deleted": session_id}))?;
+            reply(out, id, json!({"deleted": session_id}))?;
             Ok(SurfaceCall::DeleteSession(session_id.to_string()))
         }
         "model.reorder" => {
@@ -635,18 +719,18 @@ fn dispatch_surface(
             if let Some(warning) = warning {
                 answer["warning"] = json!(warning);
             }
-            reply(socket, id, answer)?;
+            reply(out, id, answer)?;
             Ok(SurfaceCall::Models)
         }
         "model.configured" => {
             // Asked before any session exists: a new browser sits with no tab, no child
             // and no `model.list` to consult, and the empty-state warning has to be
             // right then (web-surface.md §6).
-            reply(socket, id, models.configured())?;
+            reply(out, id, models.configured())?;
             Ok(SurfaceCall::Models)
         }
         "model.providers" => {
-            reply(socket, id, models.providers())?;
+            reply(out, id, models.providers())?;
             Ok(SurfaceCall::Models)
         }
         "model.probe" => {
@@ -656,7 +740,7 @@ fn dispatch_surface(
             // cannot be disturbed by it, and no child has to be told about anything
             // (web-surface.md §6).
             let offered = models.probe(provider, key).map_err(Error)?;
-            reply(socket, id, offered)?;
+            reply(out, id, offered)?;
             Ok(SurfaceCall::Models)
         }
         "model.add" => {
@@ -692,8 +776,92 @@ fn dispatch_surface(
             // The file is authoritative again: whatever this tab had arranged is now
             // either written there or beside the point (web-surface.md §6).
             tab.model_order = None;
-            reply(socket, id, answer)?;
+            reply(out, id, answer)?;
             Ok(SurfaceCall::Models)
+        }
+        "permissions.set" => {
+            // A running turn owns the child's connections: a request written down the
+            // ordinary path sits in the pipe until that turn ends, which is why this
+            // switch used to be disabled for the length of one. The surface reaches a
+            // running child over the private control channel instead — the same descriptor
+            // 3 the TUI uses, out of reach of every tool (ADR-0019) — and answers at once,
+            // because the ask is what this reply confirms; `permissions.relaxed` is the
+            // record (ADR-0007 §5, web-surface.md §4).
+            let on = params
+                .get("auto_approve")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| Error("permissions.set needs auto_approve".to_string()))?;
+            let named = params
+                .get("session_id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .or_else(|| tab.attached.clone());
+            let running = match &named {
+                None => None,
+                Some(id) => {
+                    let st = lock(state)?;
+                    st.workspaces
+                        .get(tab.seat)
+                        .and_then(|w| w.children.get(id))
+                        .filter(|child| child.busy.is_some())
+                        .and_then(|child| child.channel.clone())
+                }
+            };
+            // Nothing to reach, or no way in: the request goes down the child as it always
+            // did, and the change lands when the turn ends. Never a lie about a state this
+            // surface cannot enforce (web-surface.md §4). The channel is taken from the
+            // child and not through its bridge, which the running turn is holding.
+            let reached = running.map(|channel| channel(on).is_ok()).unwrap_or(false);
+            if !reached {
+                return Ok(SurfaceCall::Forward);
+            }
+            reply(
+                out,
+                id,
+                json!({
+                    "session_id": named,
+                    "auto_approve": on,
+                    // The turn in flight applies it at its next boundary; the switch shows
+                    // the ask, and the session's `permissions.relaxed` says it landed.
+                    "queued": false,
+                    "applies": "at the running turn's next step",
+                }),
+            )?;
+            Ok(SurfaceCall::Permissions)
+        }
+        "session.replay" => {
+            // The log is the record, and the page owns the rail that reads it for everything
+            // else, so the transcript of a sitting comes from the file too — not from the
+            // session's child. A child answers only when its turn ends, and the one moment a
+            // reader most wants the past is the moment the session is busy writing the
+            // present: switching back to a working session drew an empty chat until the turn
+            // finished (web-surface.md §5). A session no seat has is refused, never guessed.
+            let session_id = params
+                .get("session_id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .or_else(|| tab.attached.clone())
+                .ok_or_else(|| Error("session.replay needs a session_id".to_string()))?;
+            // The tab's own seat first, then the rest: `session.open` may have moved it, and
+            // a `workspace` index in the request names the seat outright.
+            let dirs = {
+                let st = lock(state)?;
+                let mut dirs: Vec<PathBuf> = Vec::with_capacity(st.workspaces.len());
+                if let Some(seat) = st.workspaces.get(tab.seat) {
+                    dirs.push(seat.dir.clone());
+                }
+                for (i, w) in st.workspaces.iter().enumerate() {
+                    if i != tab.seat {
+                        dirs.push(w.dir.clone());
+                    }
+                }
+                dirs
+            };
+            let events = sessions::replay(&sessions::client_root(), &dirs, &session_id)?;
+            reply(out, id, json!({"events": events, "session_id": session_id}))?;
+            Ok(SurfaceCall::Replay)
         }
         _ => Ok(SurfaceCall::Forward),
     }
@@ -756,10 +924,7 @@ fn ask_child(
     state: &Arc<Mutex<State>>,
     tab: &mut Tab,
     home: &Path,
-    start_session: &dyn Fn(
-        &Path,
-        Option<&str>,
-    ) -> Result<(Arc<Mutex<dyn Session>>, String), String>,
+    start_session: &dyn Fn(&Path, Option<&str>) -> Result<crate::Started, String>,
     session_id: &str,
     method: &str,
     params: &Value,
@@ -936,22 +1101,23 @@ fn reload_children(st: &mut State) -> (usize, usize) {
     (restarted, waiting)
 }
 
-/// Purpose: Carry one line down the tab's workspace session and stream every answer line back.
+/// Purpose: Carry one line down the tab's workspace session and stream every answer line
+/// back, on a thread of its own so the socket's read loop stays free.
 /// Serves: `handle_ws`'s forwarding half — the browser speaks exactly what the TUI speaks.
 /// Design: `docs/design/web-surface.md` §3.
 /// Up: `handle_ws`.
-/// Down: `Workspace.session`'s `exchange`.
+/// Down: `exchange_turn` on its own thread, and `ensure_child` here on the loop.
 /// Verify: `cargo test -p loong-web` (`forward_`).
+/// Contract: the child, the session and the busy flag are settled before the thread starts,
+/// so a refused request is still answered on the request's own turn of the loop; the turn
+/// itself reports failure through the outbox as an event plus an error.
 #[allow(clippy::too_many_arguments)]
 fn forward(
     state: &Arc<Mutex<State>>,
     tab: &mut Tab,
     home: &Path,
-    start_session: &dyn Fn(
-        &Path,
-        Option<&str>,
-    ) -> Result<(Arc<Mutex<dyn Session>>, String), String>,
-    socket: &mut tungstenite::WebSocket<TcpStream>,
+    start_session: &dyn Fn(&Path, Option<&str>) -> Result<crate::Started, String>,
+    out: &Outbox,
     line: &str,
     method: &str,
     id: Value,
@@ -989,82 +1155,164 @@ fn forward(
             .map(|c| c.session.clone())
             .ok_or_else(|| "the session has no live child".to_string())?
     };
-    // A prompt keeps this child busy until its response comes back: the page
-    // renders that as "running" and holds further prompts (web-surface.md §3).
-    if method == "prompt.submit" {
-        if let Some(rid) = id.as_u64() {
-            if let Ok(mut st) = state.lock() {
-                if let Some(c) = st
-                    .workspaces
-                    .get_mut(tab.seat)
-                    .and_then(|w| w.children.get_mut(&child_id))
-                {
-                    c.busy = Some(rid);
-                }
-            }
-        }
+    // A prompt keeps this child busy until its response comes back: the page renders
+    // that as "running", and `/api/interrupt` uses it to name the child to signal
+    // (web-surface.md §3).
+    let busy = method == "prompt.submit";
+    if busy {
+        set_busy(state, tab.seat, &child_id, id.as_u64());
     }
-    // Held for the whole exchange: one request at a time reaches the session,
-    // while each line goes out the moment it exists.
-    //
     // A `model.list` answer is the one line the surface edits: the tab may have arranged
     // the slots with ctrl+left / ctrl+right, and the session answers in declaration order
     // because its child read the profile at startup (web-surface.md §4).
-    let arranged = tab.model_order.clone();
+    let turn = Turn {
+        seat: tab.seat,
+        child_id,
+        session,
+        line: line.to_string(),
+        method: method.to_string(),
+        arranged: tab.model_order.clone(),
+        busy,
+    };
+    let state_for_turn = Arc::clone(state);
+    let out = out.clone();
+    // Named before the turn is moved into its thread: a thread that cannot start still
+    // has to clear the busy flag it just set.
+    let seat = turn.seat;
+    let child = turn.child_id.clone();
+    // A turn must not own the loop: the page keeps opening workspaces and switching
+    // sessions while a model writes. One child still answers one request at a time —
+    // its lock does that, on this thread and not on the socket's.
+    std::thread::Builder::new()
+        .name("loong-web-turn".to_string())
+        .spawn(move || exchange_turn(&state_for_turn, &turn, &out, id))
+        .map(|_| ())
+        .map_err(|e| {
+            if busy {
+                set_busy(state, seat, &child, None);
+            }
+            format!("starting the turn: {e}")
+        })
+}
+
+/// One request on its way to a child: everything `exchange_turn` needs, settled before the
+/// thread starts so the loop holds no borrow of the tab.
+/// Purpose: Describe the request a turn thread runs.
+///
+/// Serves: `forward`, which builds it on the loop and `exchange_turn`, which runs it.
+/// Design: `docs/design/web-surface.md` §3.
+/// Up: `forward`.
+/// Down: `exchange_turn`.
+/// Verify: `cargo test -p loong-web` (`forward_`).
+struct Turn {
+    /// Purpose: The workspace the child belongs to, for the busy flag when the turn ends.
+    seat: usize,
+    /// Purpose: The session's id, which every forwarded line carries back to the page.
+    child_id: String,
+    /// Purpose: The session bridge, one per (workspace, session).
+    session: Arc<Mutex<dyn Session>>,
+    /// Purpose: The request line, exactly as the browser wrote it.
+    line: String,
+    /// Purpose: The method, which decides the one reply the surface edits and the busy flag.
+    method: String,
+    /// Purpose: The tab's arrangement, for a `model.list` answer.
+    arranged: Option<Vec<String>>,
+    /// Purpose: Whether this request leaves the child busy, so the end of the turn clears it.
+    busy: bool,
+}
+
+/// Purpose: Run one request against its session off the read loop, streaming every answer
+/// line into the tab's outbox and settling the child's busy flag when it ends.
+///
+/// Serves: `forward`.
+/// Design: `docs/design/web-surface.md` §3.
+/// Up: the thread `forward` starts.
+/// Down: `Session::exchange`, `tag_line` and `Outbox::text`.
+/// Verify: `cargo test -p loong-web` (`a_turn_does_not_block_the_surface`).
+fn exchange_turn(state: &Arc<Mutex<State>>, turn: &Turn, out: &Outbox, id: Value) {
     let mut failure = None;
-    {
-        let socket_ref = &mut *socket;
-        let outcome = match session.lock() {
-            Ok(mut session) => session.exchange(line, &mut |answer| {
-                let answer = match (&arranged, method) {
+    let outcome = match turn.session.lock() {
+        Ok(mut session) => {
+            let varied = &turn.arranged;
+            let method = turn.method.as_str();
+            session.exchange(&turn.line, &mut |answer| {
+                // Straight through, marked with whose line it is so the page can leave
+                // the chat of a session it has switched away from alone
+                // (web-surface.md §3).
+                let answer = match (varied, method) {
                     (Some(order), "model.list") => reorder_reply(&answer, order),
                     _ => answer,
                 };
-                socket_ref
-                    .send(Message::text(answer))
-                    .and_then(|_| socket_ref.flush())
-                    .map_err(|e| format!("sending to the browser: {e}"))
-            }),
-            Err(_) => Err("the session is poisoned".to_string()),
-        };
-        if let Err(e) = outcome {
-            failure = Some(e);
-        }
-    }
-    if method == "prompt.submit" {
-        if let Ok(mut st) = state.lock() {
-            if let Some(c) = st
-                .workspaces
-                .get_mut(tab.seat)
-                .and_then(|w| w.children.get_mut(&child_id))
-            {
-                c.busy = None;
-            }
-        }
-    }
-    match failure {
-        None => Ok(()),
-        Some(e) => {
-            // A transport failure is an event like any other, so the turn carries a
-            // line saying why it did not run...
-            let notice = json!({
-                "jsonrpc": "2.0",
-                "method": "event",
-                "params": {
-                    "seq": 0, "id": "e-local", "parent_id": null,
-                    "kind": "client.error", "ignorable": true,
-                    "time_ms": 0, "data": {"message": e}
-                }
+                out.text(tag_line(&answer, &turn.child_id))
             })
-            .to_string();
-            socket
-                .send(Message::text(notice))
-                .map_err(|e| e.to_string())?;
-            // ...and it is still an answer to the request: the page settles a request
-            // on the line carrying its id, so an event alone would leave the turn's
-            // spinner turning over a turn that nothing can end
-            // (web-composer.md §5).
-            send_error(socket, id, &e)
+        }
+        Err(_) => Err("the session is poisoned".to_string()),
+    };
+    if let Err(e) = outcome {
+        failure = Some(e);
+    }
+    if turn.busy {
+        set_busy(state, turn.seat, &turn.child_id, None);
+    }
+    let Some(e) = failure else {
+        return;
+    };
+    // A transport failure is an event like any other, so the turn carries a line saying
+    // why it did not run...
+    let notice = json!({
+        "jsonrpc": "2.0",
+        "session_id": turn.child_id,
+        "method": "event",
+        "params": {
+            "seq": 0, "id": "e-local", "parent_id": null,
+            "kind": "client.error", "ignorable": true,
+            "time_ms": 0, "data": {"message": e}
+        }
+    })
+    .to_string();
+    // ...and it is still an answer to the request: the page settles a request on the line
+    // carrying its id, so an event alone would leave the turn's spinner turning over a
+    // turn that nothing can end (web-composer.md §5).
+    let _ = out.text(notice);
+    let _ = send_error(out, id, &e);
+}
+
+/// Purpose: Mark one forwarded line with the session that wrote it.
+///
+/// Serves: the page, which drops a line whose `session_id` is not the session it shows, so a
+/// turn left running in one session cannot paint itself into another's chat
+/// (web-surface.md §3).
+/// Design: `docs/design/web-surface.md` §3.
+/// Up: `exchange_turn`.
+/// Down: nothing; the line is the browser's to read.
+/// Verify: `cargo test -p loong-web` (`forward_` and `tag_line_`).
+/// Contract: a line that is not a JSON object is passed through untouched — the page already
+/// knows to ignore what it cannot read, and refusing here would lose the only copy.
+fn tag_line(line: &str, session: &str) -> String {
+    match serde_json::from_str::<Value>(line) {
+        Ok(Value::Object(mut fields)) => {
+            fields.insert("session_id".to_string(), Value::String(session.to_string()));
+            Value::Object(fields).to_string()
+        }
+        _ => line.to_string(),
+    }
+}
+
+/// Purpose: Set or clear the child's busy marker, which the page reads as "running".
+///
+/// Serves: `forward` and `exchange_turn`.
+/// Design: `docs/design/web-surface.md` §3.
+/// Up: `forward` before the thread starts, `exchange_turn` when it ends.
+/// Down: `State::workspaces[seat].children[id].busy`.
+/// Verify: `cargo test -p loong-web` (`busy_`).
+fn set_busy(state: &Arc<Mutex<State>>, seat: usize, child_id: &str, request: Option<u64>) {
+    if let Ok(mut st) = state.lock() {
+        if let Some(c) = st
+            .workspaces
+            .get_mut(seat)
+            .and_then(|w| w.children.get_mut(child_id))
+        {
+            c.busy = request;
         }
     }
 }
@@ -1083,10 +1331,7 @@ fn ensure_child(
     seat: usize,
     home: &Path,
     session: Option<&str>,
-    start_session: &dyn Fn(
-        &Path,
-        Option<&str>,
-    ) -> Result<(Arc<Mutex<dyn Session>>, String), String>,
+    start_session: &dyn Fn(&Path, Option<&str>) -> Result<crate::Started, String>,
 ) -> Result<String, Error> {
     let mut st = lock(state)?;
     if !st.restored {
@@ -1104,7 +1349,11 @@ fn ensure_child(
             return Ok(id.to_string());
         }
     }
-    let (child, id) = start_session(&dir, session).map_err(Error)?;
+    let crate::Started {
+        session: child,
+        session_id: id,
+        channel,
+    } = start_session(&dir, session).map_err(Error)?;
     // Asked now, while nothing else can hold the bridge: `pid()` on a session whose turn
     // is running would wait for that turn to end, which is exactly the wait a Stop button
     // must not have (web-surface.md §4).
@@ -1115,6 +1364,7 @@ fn ensure_child(
             session: child,
             busy: None,
             pid,
+            channel,
         },
     );
     Ok(id)
@@ -1164,17 +1414,15 @@ fn seat_dir(state: &Arc<Mutex<State>>, seat: usize) -> Result<PathBuf, Error> {
 }
 
 /// Purpose: One JSON-RPC result down the tab's socket, answering a surface method.
+/// Serves: `dispatch_surface`, which answers on the loop rather than holding the socket.
+/// Design: `docs/design/web-surface.md` §1–§3.
+/// Up: `dispatch_surface`'s arms.
+/// Down: the tab's outbox.
+/// Verify: `cargo test -p loong-web`.
 /// Contract: the `id` echoes the request's; the result is the method's payload.
-fn reply(
-    socket: &mut tungstenite::WebSocket<TcpStream>,
-    id: Value,
-    result: Value,
-) -> Result<(), Error> {
+fn reply(out: &Outbox, id: Value, result: Value) -> Result<(), Error> {
     let body = json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string();
-    socket
-        .send(Message::text(body))
-        .and_then(|_| socket.flush())
-        .map_err(|e| Error(e.to_string()))
+    out.text(body).map_err(Error)
 }
 
 /// Purpose: One JSON-RPC error object down the tab's socket.
@@ -1183,21 +1431,14 @@ fn reply(
 /// Up: the refusal sites in `handle_ws`.
 /// Down: the tab, as an `error` object rather than a dropped message.
 /// Verify: `cargo test -p loong-web` (`a_websocket_carries_a_request_and_gets_the_answer_back`).
-fn send_error(
-    socket: &mut tungstenite::WebSocket<TcpStream>,
-    id: Value,
-    message: &str,
-) -> Result<(), String> {
+fn send_error(out: &Outbox, id: Value, message: &str) -> Result<(), String> {
     let body = json!({
         "jsonrpc": "2.0",
         "id": id,
         "error": {"code": -32602, "message": message}
     })
     .to_string();
-    socket
-        .send(Message::text(body))
-        .and_then(|_| socket.flush())
-        .map_err(|e| e.to_string())
+    out.text(body)
 }
 
 /// Purpose: Lock the shared state or fail the request cleanly.
@@ -1238,7 +1479,7 @@ mod tests {
     /// Down: the shared vector of ids the tests inspect.
     /// Verify: `cargo test -p loong-web` (`session_open_reuses_a_live_child`).
     fn recording_factory() -> (
-        impl Fn(&Path, Option<&str>) -> Result<(Arc<Mutex<dyn Session>>, String), String>,
+        impl Fn(&Path, Option<&str>) -> Result<crate::Started, String>,
         Arc<Mutex<Vec<Option<String>>>>,
     ) {
         let seen: Arc<Mutex<Vec<Option<String>>>> = Arc::new(Mutex::new(Vec::new()));
@@ -1249,10 +1490,11 @@ mod tests {
                 .unwrap()
                 .push(session.map(|s| s.to_string()));
             let id = session.unwrap_or("echo").to_string();
-            Ok((
-                Arc::new(Mutex::new(Echo(vec![]))) as Arc<Mutex<dyn Session>>,
-                id,
-            ))
+            Ok(crate::Started {
+                session: Arc::new(Mutex::new(Echo(vec![]))) as Arc<Mutex<dyn Session>>,
+                session_id: id,
+                channel: None,
+            })
         };
         (factory, seen)
     }
@@ -1275,13 +1517,33 @@ mod tests {
                 home,
                 Arc::new(|_: &Path, session: Option<&str>| {
                     let id = session.unwrap_or("echo").to_string();
-                    Ok((
-                        Arc::new(Mutex::new(Echo(vec![]))) as Arc<Mutex<dyn Session>>,
-                        id,
-                    ))
+                    Ok(crate::Started {
+                        session: Arc::new(Mutex::new(Echo(vec![]))) as Arc<Mutex<dyn Session>>,
+                        session_id: id,
+                        channel: None,
+                    })
                 }),
             )
         });
+        (addr, token)
+    }
+
+    /// Purpose: a full web surface on loopback whose children the test chooses, for the tests
+    /// that need a child which blocks, or one the surface has to reach out of band.
+    /// Serves: `a_surface_answer_arrives_while_a_turn_is_running`, `yolo_reaches_a_running_child_out_of_band`.
+    /// Design: `docs/design/web-surface.md` §3 and §4.
+    /// Up: those two tests.
+    /// Down: `serve_web`, on a private listener with a fresh token.
+    /// Verify: `cargo test -p loong-web` (`app::tests`).
+    fn start_with<F>(factory: F) -> (std::net::SocketAddr, String)
+    where
+        F: Fn(&Path, Option<&str>) -> Result<crate::Started, String> + Send + Sync + 'static,
+    {
+        let (listener, addr) = bind("127.0.0.1", 0).unwrap();
+        let token = crate::random_token().unwrap();
+        let for_server = token.clone();
+        let home = std::env::temp_dir();
+        std::thread::spawn(move || serve_web(listener, for_server, home, Arc::new(factory)));
         (addr, token)
     }
 
@@ -1303,10 +1565,11 @@ mod tests {
                 home,
                 Arc::new(|_: &Path, session: Option<&str>| {
                     let id = session.unwrap_or("echo").to_string();
-                    Ok((
-                        Arc::new(Mutex::new(Echo(vec![]))) as Arc<Mutex<dyn Session>>,
-                        id,
-                    ))
+                    Ok(crate::Started {
+                        session: Arc::new(Mutex::new(Echo(vec![]))) as Arc<Mutex<dyn Session>>,
+                        session_id: id,
+                        channel: None,
+                    })
                 }),
                 models,
                 Arc::new(|_: u32| {}),
@@ -1586,13 +1849,14 @@ mod tests {
                     std::env::temp_dir(),
                     Arc::new(|_: &Path, session: Option<&str>| {
                         let id = session.unwrap_or("models").to_string();
-                        Ok((
-                            Arc::new(Mutex::new(Models {
+                        Ok(crate::Started {
+                            session: Arc::new(Mutex::new(Models {
                                 names: ["a", "b", "c"].iter().map(|n| n.to_string()).collect(),
                                 selected: "b".to_string(),
                             })) as Arc<Mutex<dyn Session>>,
-                            id,
-                        ))
+                            session_id: id,
+                            channel: None,
+                        })
                     }),
                     Arc::new(setup),
                     Arc::new(|_: u32| {}),
@@ -1697,13 +1961,14 @@ mod tests {
                     std::env::temp_dir(),
                     Arc::new(|_: &Path, session: Option<&str>| {
                         let id = session.unwrap_or("models").to_string();
-                        Ok((
-                            Arc::new(Mutex::new(Models {
+                        Ok(crate::Started {
+                            session: Arc::new(Mutex::new(Models {
                                 names: ["a", "b"].iter().map(|n| n.to_string()).collect(),
                                 selected: "a".to_string(),
                             })) as Arc<Mutex<dyn Session>>,
-                            id,
-                        ))
+                            session_id: id,
+                            channel: None,
+                        })
                     }),
                     Arc::new(OrderSink {
                         saved: Arc::new(Mutex::new(None)),
@@ -1924,6 +2189,9 @@ mod tests {
         let answer = socket.read().unwrap().into_text().unwrap().to_string();
         assert!(answer.contains("\"id\":7"), "{answer}");
         assert!(answer.contains("accepted"), "{answer}");
+        // Every forwarded line names the session that wrote it, so a page showing another
+        // session can leave it alone (web-surface.md §3).
+        assert!(answer.contains("\"session_id\":\"s\""), "{answer}");
     }
 
     /// Purpose: a bridge that dies under a request still answers it — the page settles a
@@ -1962,7 +2230,11 @@ mod tests {
                 home,
                 Arc::new(|_: &Path, session: Option<&str>| {
                     let id = session.unwrap_or("broken").to_string();
-                    Ok((Arc::new(Mutex::new(Broken)) as Arc<Mutex<dyn Session>>, id))
+                    Ok(crate::Started {
+                        session: Arc::new(Mutex::new(Broken)) as Arc<Mutex<dyn Session>>,
+                        session_id: id,
+                        channel: None,
+                    })
                 }),
             )
         });
@@ -2075,10 +2347,11 @@ mod tests {
                 home,
                 Arc::new(|_: &Path, session: Option<&str>| {
                     let id = session.unwrap_or("echo").to_string();
-                    Ok((
-                        Arc::new(Mutex::new(Echo(vec![]))) as Arc<Mutex<dyn Session>>,
-                        id,
-                    ))
+                    Ok(crate::Started {
+                        session: Arc::new(Mutex::new(Echo(vec![]))) as Arc<Mutex<dyn Session>>,
+                        session_id: id,
+                        channel: None,
+                    })
                 }),
             )
         });
@@ -2156,10 +2429,11 @@ mod tests {
                 home,
                 Arc::new(|_: &Path, session: Option<&str>| {
                     let id = session.unwrap_or("echo").to_string();
-                    Ok((
-                        Arc::new(Mutex::new(Echo(vec![]))) as Arc<Mutex<dyn Session>>,
-                        id,
-                    ))
+                    Ok(crate::Started {
+                        session: Arc::new(Mutex::new(Echo(vec![]))) as Arc<Mutex<dyn Session>>,
+                        session_id: id,
+                        channel: None,
+                    })
                 }),
             )
         });
@@ -2214,6 +2488,27 @@ mod tests {
                 .unwrap_or("")
                 .contains("nope"),
             "{error}"
+        );
+
+        // The page's next move is `session.attach`, asking the kernel what it still
+        // waits for: a replayed question is only answerable if this child names it
+        // (web-surface.md §4). It must reach the child rather than be refused by the
+        // surface for naming no session.
+        socket
+            .send(Message::text(
+                json!({"jsonrpc":"2.0","id":4,"method":"session.attach","params":{"cwd":"","client":"web"}}).to_string(),
+            ))
+            .unwrap();
+        let answer = socket.read().unwrap().into_text().unwrap().to_string();
+        let value: Value = serde_json::from_str(&answer).unwrap();
+        assert!(
+            value.get("error").is_none(),
+            "the tab is attached, so the child must answer the question the page asks \
+             at boot: {answer}"
+        );
+        assert!(
+            value.get("result").is_some(),
+            "an attach answer, not a refusal: {answer}"
         );
 
         std::env::remove_var("LOONGAGENT_HOME");
@@ -2364,10 +2659,11 @@ mod tests {
                 home,
                 Arc::new(|_: &Path, session: Option<&str>| {
                     let id = session.unwrap_or("echo").to_string();
-                    Ok((
-                        Arc::new(Mutex::new(Echo(vec![]))) as Arc<Mutex<dyn Session>>,
-                        id,
-                    ))
+                    Ok(crate::Started {
+                        session: Arc::new(Mutex::new(Echo(vec![]))) as Arc<Mutex<dyn Session>>,
+                        session_id: id,
+                        channel: None,
+                    })
                 }),
             )
         });
@@ -2453,10 +2749,11 @@ mod tests {
                 home,
                 Arc::new(|_: &Path, session: Option<&str>| {
                     let id = session.unwrap_or("echo").to_string();
-                    Ok((
-                        Arc::new(Mutex::new(Echo(vec![]))) as Arc<Mutex<dyn Session>>,
-                        id,
-                    ))
+                    Ok(crate::Started {
+                        session: Arc::new(Mutex::new(Echo(vec![]))) as Arc<Mutex<dyn Session>>,
+                        session_id: id,
+                        channel: None,
+                    })
                 }),
             )
         });
@@ -2556,10 +2853,11 @@ mod tests {
                 Arc::new(move |dir: &Path, session: Option<&str>| {
                     record.lock().unwrap().push(dir.to_path_buf());
                     let id = session.unwrap_or("echo").to_string();
-                    Ok((
-                        Arc::new(Mutex::new(Echo(vec![]))) as Arc<Mutex<dyn Session>>,
-                        id,
-                    ))
+                    Ok(crate::Started {
+                        session: Arc::new(Mutex::new(Echo(vec![]))) as Arc<Mutex<dyn Session>>,
+                        session_id: id,
+                        channel: None,
+                    })
                 }),
             )
         });
@@ -2719,10 +3017,12 @@ mod tests {
                 std::env::temp_dir(),
                 Arc::new(move |_: &Path, session: Option<&str>| {
                     let id = session.unwrap_or("stall").to_string();
-                    Ok((
-                        Arc::new(Mutex::new(Stalled(Arc::clone(&gate)))) as Arc<Mutex<dyn Session>>,
-                        id,
-                    ))
+                    Ok(crate::Started {
+                        session: Arc::new(Mutex::new(Stalled(Arc::clone(&gate))))
+                            as Arc<Mutex<dyn Session>>,
+                        session_id: id,
+                        channel: None,
+                    })
                 }),
                 Arc::new(crate::NoModelSetup),
                 Arc::new(move |pid: u32| signalled.lock().unwrap().push(pid)),
@@ -2833,5 +3133,322 @@ mod tests {
         let ended = socket.read().unwrap();
         let ended: Value = serde_json::from_str(ended.to_text().unwrap()).unwrap();
         assert_eq!(ended["id"], json!(3), "{ended}");
+    }
+
+    /// Purpose: prove a busy session still shows its past: the transcript comes from the log,
+    /// answered at once, without waiting for the turn that holds the child.
+    #[test]
+    fn replay_answers_from_the_log_while_a_turn_is_running() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let base = std::env::temp_dir().join(format!("loong-replay-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let home_dir = base.join("home");
+        let workspace = base.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let dir = sessions::session_dir(&home_dir, &workspace);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Two events and a torn tail, which is what a log being written right now looks like.
+        let one = json!({
+            "kind": "message.appended", "seq": 1, "time_ms": 1, "id": "e1",
+            "data": {"role": "user", "text": "what did we decide"}
+        });
+        let two = json!({
+            "kind": "message.appended", "seq": 2, "time_ms": 2, "id": "e2",
+            "data": {"role": "assistant", "text": "the small thing first"}
+        });
+        std::fs::write(
+            dir.join("s1.jsonl"),
+            format!("{one}\n{two}\n{{\"kind\":\"message.ap"),
+        )
+        .unwrap();
+        std::env::set_var("LOONGAGENT_HOME", &home_dir);
+
+        /// A child that never answers, standing in for a turn still writing.
+        /// Purpose: Hold the session's bridge so the replay cannot come from the child.
+        ///
+        /// Serves: `replay_answers_from_the_log_while_a_turn_is_running`.
+        /// Design: `docs/design/web-surface.md` §5.
+        /// Up: the starter this test passes to `start_with`.
+        /// Down: nothing.
+        /// Verify: `cargo test -p loong-web` (`replay_answers_from_the_log_while_a_turn_is_running`).
+        struct Silent;
+
+        impl Session for Silent {
+            /// Purpose: Never answer, so any line the page receives must have come from the log.
+            ///
+            /// Serves: `replay_answers_from_the_log_while_a_turn_is_running`.
+            /// Design: `docs/design/web-surface.md` §5.
+            /// Up: the turn `forward` starts on this session.
+            /// Down: nothing.
+            /// Verify: `cargo test -p loong-web` (`replay_answers_from_the_log_while_a_turn_is_running`).
+            /// Contract: blocks until the socket is closed, then reports the turn as failed.
+            fn exchange(
+                &mut self,
+                _line: &str,
+                _sink: &mut dyn FnMut(String) -> Result<(), String>,
+            ) -> Result<(), String> {
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                Err("the test ended".to_string())
+            }
+        }
+
+        let (addr, token) = start_with(|_: &Path, _: Option<&str>| {
+            Ok(crate::Started {
+                session: Arc::new(Mutex::new(Silent)) as Arc<Mutex<dyn Session>>,
+                session_id: "s1".to_string(),
+                channel: None,
+            })
+        });
+        let (mut socket, _) = tungstenite::connect(
+            format!("ws://{addr}/ws?token={token}")
+                .into_client_request()
+                .unwrap(),
+        )
+        .unwrap();
+        // The planted directory becomes the tab's workspace; the rail does this before it
+        // lists anything, and the seat is what names the log.
+        socket
+            .send(Message::text(
+                json!({"jsonrpc":"2.0","id":1,"method":"workspace.add","params":{"dir":workspace}})
+                    .to_string(),
+            ))
+            .unwrap();
+        let _ = socket.read().unwrap();
+        // Open the session, which starts a child that will never answer...
+        socket
+            .send(Message::text(
+                json!({"jsonrpc":"2.0","id":2,"method":"session.open","params":{"session_id":"","open":"s1"}}).to_string(),
+            ))
+            .unwrap();
+        let opened = socket.read().unwrap().into_text().unwrap().to_string();
+        assert!(opened.contains("\"s1\""), "{opened}");
+        // ...then ask for the transcript the page draws when a session is opened.
+        socket
+            .send(Message::text(
+                json!({"jsonrpc":"2.0","id":3,"method":"session.replay","params":{"session_id":"s1","from_seq":0}})
+                    .to_string(),
+            ))
+            .unwrap();
+        let answer = socket.read().unwrap().into_text().unwrap().to_string();
+        let value: Value = serde_json::from_str(&answer).unwrap();
+        assert_eq!(
+            value["id"],
+            json!(3),
+            "the child answered, not the log: {answer}"
+        );
+        let events = value["result"]["events"]
+            .as_array()
+            .unwrap_or_else(|| panic!("a replay answer carries events: {answer}"));
+        assert_eq!(
+            events.len(),
+            2,
+            "the torn tail must be dropped, not fatal: {answer}"
+        );
+        assert_eq!(events[0]["seq"], json!(1), "{answer}");
+        assert_eq!(
+            events[1]["data"]["text"],
+            json!("the small thing first"),
+            "{answer}"
+        );
+        // A session no seat has is refused rather than guessed at.
+        socket
+            .send(Message::text(
+                json!({"jsonrpc":"2.0","id":4,"method":"session.replay","params":{"session_id":"nope"}})
+                    .to_string(),
+            ))
+            .unwrap();
+        let answer = socket.read().unwrap().into_text().unwrap().to_string();
+        assert!(
+            answer.contains("nope"),
+            "an unknown session is refused: {answer}"
+        );
+
+        std::env::remove_var("LOONGAGENT_HOME");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Purpose: prove a turn no longer owns the socket: a workspace request is answered while a
+    /// model is still writing.
+    #[test]
+    fn a_surface_answer_arrives_while_a_turn_is_running() {
+        /// A child whose turn takes long enough to watch.
+        /// Purpose: Stand in for a model that is still writing.
+        ///
+        /// Serves: `a_surface_answer_arrives_while_a_turn_is_running`.
+        /// Design: `docs/design/web-surface.md` §3.
+        /// Up: the starter this test passes to `start_with`.
+        /// Down: nothing; it answers every request itself.
+        /// Verify: `cargo test -p loong-web` (`a_surface_answer_arrives_while_a_turn_is_running`).
+        struct Working;
+
+        impl Session for Working {
+            /// Purpose: Hold the turn for 400 ms so the surface has to answer around it.
+            /// Contract: answers with the request's own id; the delay is the whole point.
+            fn exchange(
+                &mut self,
+                line: &str,
+                sink: &mut dyn FnMut(String) -> Result<(), String>,
+            ) -> Result<(), String> {
+                let request: Value = serde_json::from_str(line).map_err(|e| e.to_string())?;
+                let id = request.get("id").cloned().unwrap_or(Value::Null);
+                if request.get("method").and_then(Value::as_str) == Some("prompt.submit") {
+                    std::thread::sleep(std::time::Duration::from_millis(400));
+                }
+                sink(json!({"jsonrpc": "2.0", "id": id, "result": {"ok": true}}).to_string())
+            }
+        }
+
+        let (addr, token) = start_with(|_: &Path, _: Option<&str>| {
+            Ok(crate::Started {
+                session: Arc::new(Mutex::new(Working)) as Arc<Mutex<dyn Session>>,
+                session_id: "s-1".to_string(),
+                channel: None,
+            })
+        });
+        let (mut socket, _) = tungstenite::connect(
+            format!("ws://{addr}/ws?token={token}")
+                .into_client_request()
+                .unwrap(),
+        )
+        .unwrap();
+        // The turn starts and holds its child's bridge...
+        socket
+            .send(Message::text(
+                json!({
+                    "jsonrpc": "2.0", "id": 1, "method": "prompt.submit",
+                    "params": {"session_id": "s-1", "text": "hello"}
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        // ...and the page may still ask the surface things: this answer must arrive before
+        // the turn's own, which is 400ms away.
+        socket
+            .send(Message::text(
+                json!({"jsonrpc": "2.0", "id": 2, "method": "workspace.list"}).to_string(),
+            ))
+            .unwrap();
+        let first: Value = serde_json::from_str(socket.read().unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(first["id"], json!(2), "a turn blocked the surface: {first}");
+        let turn: Value = serde_json::from_str(socket.read().unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(turn["id"], json!(1), "{turn}");
+    }
+
+    /// Purpose: prove the YOLO switch reaches a running turn over the control channel instead
+    /// of waiting for it, and that the surface answers at once rather than refusing.
+    #[test]
+    fn yolo_reaches_a_running_child_out_of_band() {
+        /// A child that holds its bridge for the whole turn, the way a real one does.
+        /// A child whose turn does not end until the test lets go.
+        /// Purpose: Hold the bridge for as long as the test needs, so the YOLO switch has to
+        /// be reached out of band.
+        ///
+        /// Serves: `yolo_reaches_a_running_child_out_of_band`.
+        /// Design: `docs/design/web-surface.md` §4; ADR-0019.
+        /// Up: the starter this test passes to `start_with`.
+        /// Down: nothing; it answers only after `open` is released.
+        /// Verify: `cargo test -p loong-web` (`yolo_reaches_a_running_child_out_of_band`).
+        struct Busy {
+            /// Purpose: The test's own release: the turn ends when the sender is dropped.
+            open: Arc<Mutex<std::sync::mpsc::Receiver<()>>>,
+        }
+
+        impl Session for Busy {
+            /// Purpose: Block a prompt until the test lets the turn end.
+            ///
+            /// Serves: `yolo_reaches_a_running_child_out_of_band`, which needs a turn that
+            /// does not end on its own.
+            /// Design: `docs/design/web-surface.md` §4.
+            /// Up: the turn `forward` starts on this session.
+            /// Down: nothing.
+            /// Verify: `cargo test -p loong-web` (`yolo_reaches_a_running_child_out_of_band`).
+            /// Contract: takes the request's id from its own line and waits only on
+            /// `prompt.submit`, so the test can ask the surface other things meanwhile.
+            fn exchange(
+                &mut self,
+                line: &str,
+                sink: &mut dyn FnMut(String) -> Result<(), String>,
+            ) -> Result<(), String> {
+                let request: Value = serde_json::from_str(line).map_err(|e| e.to_string())?;
+                let id = request.get("id").cloned().unwrap_or(Value::Null);
+                if request.get("method").and_then(Value::as_str) == Some("prompt.submit") {
+                    // The turn does not end until the test lets go.
+                    let _ = self.open.lock().unwrap().recv();
+                }
+                sink(json!({"jsonrpc": "2.0", "id": id, "result": {"ok": true}}).to_string())
+            }
+        }
+
+        let (keep, open) = std::sync::mpsc::channel::<()>();
+        let open = Arc::new(Mutex::new(open));
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let asked_by_channel = Arc::clone(&asked);
+        let (addr, token) = start_with(move |_: &Path, _: Option<&str>| {
+            Ok(crate::Started {
+                session: Arc::new(Mutex::new(Busy {
+                    open: Arc::clone(&open),
+                })) as Arc<Mutex<dyn Session>>,
+                session_id: "s-1".to_string(),
+                channel: Some(Arc::new({
+                    let asked = Arc::clone(&asked_by_channel);
+                    move |on: bool| {
+                        asked.lock().unwrap().push(on);
+                        Ok(())
+                    }
+                })),
+            })
+        });
+        let (mut socket, _) = tungstenite::connect(
+            format!("ws://{addr}/ws?token={token}")
+                .into_client_request()
+                .unwrap(),
+        )
+        .unwrap();
+        socket
+            .send(Message::text(
+                json!({
+                    "jsonrpc": "2.0", "id": 1, "method": "prompt.submit",
+                    "params": {"session_id": "s-1", "text": "hello"}
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        // The turn is running and holds the bridge; the switch still has to work.
+        socket
+            .send(Message::text(
+                json!({
+                    "jsonrpc": "2.0", "id": 2, "method": "permissions.set",
+                    "params": {"session_id": "s-1", "auto_approve": true}
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let answer: Value =
+            serde_json::from_str(socket.read().unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(answer["id"], json!(2), "{answer}");
+        assert_eq!(answer["result"]["auto_approve"], json!(true), "{answer}");
+        assert_eq!(
+            answer["result"]["queued"],
+            json!(false),
+            "the switch waited for the turn: {answer}"
+        );
+        assert_eq!(
+            *asked.lock().unwrap(),
+            vec![true],
+            "the child was never asked"
+        );
+        drop(keep);
+    }
+
+    /// Purpose: prove the tab of a line is written down, so a page showing one session can drop
+    /// another's events instead of painting them into the wrong chat.
+    #[test]
+    fn a_forwarded_line_says_which_session_wrote_it() {
+        let tagged = tag_line(r#"{"jsonrpc":"2.0","id":1,"result":{}}"#, "s-1");
+        let read: Value = serde_json::from_str(&tagged).unwrap();
+        assert_eq!(read["session_id"], json!("s-1"), "{tagged}");
+        assert_eq!(read["id"], json!(1), "{tagged}");
+        // A line the surface cannot read is passed through: losing it would lose the only copy.
+        assert_eq!(tag_line("not json", "s-1"), "not json");
     }
 }

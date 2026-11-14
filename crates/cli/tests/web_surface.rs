@@ -37,13 +37,25 @@ fn workspace() -> std::path::PathBuf {
 }
 
 /// Purpose: A model that calls `read_file` once and then answers, so the page sees a tool turn.
-/// Serves: the one test in this file.
+/// Serves: the page test and the replaced-binary test.
 /// Design: `docs/design/config-routing.md` §8.
-/// Up: the test; no other caller.
-/// Down: `std::net::TcpListener` and a reader thread.
+/// Up: the tests; no other caller.
+/// Down: `model_calling`.
 /// Verify: `cargo test -p loongagent --test web_surface`.
 /// A model that calls `read_file` once and then answers.
 fn fake_model() -> (String, std::thread::JoinHandle<()>) {
+    model_calling("read_file", "{\"path\":\"note.txt\"}")
+}
+
+/// Purpose: The same fake model, calling whichever tool a test wants asked about.
+/// Serves: the approval round trip, whose call has to be one the policy asks about.
+/// Design: `docs/design/config-routing.md` §8 and `docs/design/flows/tool-approval.md` §2.
+/// Up: `fake_model` and the approval test.
+/// Down: `std::net::TcpListener` and a reader thread.
+/// Verify: `cargo test -p loongagent --test web_surface` (`an_approval_round_trip`).
+/// The same model, calling the tool and arguments it is handed instead.
+fn model_calling(tool: &str, arguments: &str) -> (String, std::thread::JoinHandle<()>) {
+    let (tool, arguments) = (tool.to_string(), arguments.to_string());
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let handle = std::thread::spawn(move || {
@@ -78,7 +90,7 @@ fn fake_model() -> (String, std::thread::JoinHandle<()>) {
                         } else {
                             json!({"choices": [{"message": {"role": "assistant", "content": null,
                                    "tool_calls": [{"id": "c1", "type": "function",
-                                     "function": {"name": "read_file", "arguments": "{\"path\":\"note.txt\"}"}}]},
+                                     "function": {"name": tool, "arguments": arguments}}]},
                                    "finish_reason": "tool_calls"}],
                                    "usage": {"prompt_tokens": 20, "completion_tokens": 4}})
                         };
@@ -131,7 +143,28 @@ impl Web {
     /// Down: `common::isolated_command` and the child's stdout banner.
     /// Verify: `cargo test -p loongagent --test web_surface`.
     fn start_with(dir: &std::path::Path, base_url: &str, model: Option<&str>) -> Self {
-        let mut command = common::isolated_command();
+        Self::start_at(
+            std::path::Path::new(env!("CARGO_BIN_EXE_loongagent")),
+            dir,
+            base_url,
+            model,
+        )
+    }
+
+    /// Purpose: The same child, but started from the given executable — a copy a test can delete
+    /// underneath it, which is what a rebuild does to a long-running surface.
+    /// Serves: `a_new_session_still_opens_after_the_binary_was_replaced`.
+    /// Design: `docs/design/web-surface.md` §3.
+    /// Up: `start_with` and that test; no other caller.
+    /// Down: `common::isolated_command_at` and the child's stdout banner.
+    /// Verify: `cargo test -p loongagent --test web_surface`.
+    fn start_at(
+        exe: &std::path::Path,
+        dir: &std::path::Path,
+        base_url: &str,
+        model: Option<&str>,
+    ) -> Self {
+        let mut command = common::isolated_command_at(exe);
         command
             .arg("web")
             .arg("--session")
@@ -420,6 +453,176 @@ fn a_browser_can_drive_a_session_with_a_model_behind_it() {
         "a page, not a protocol error"
     );
     assert!(page.contains("loongagent"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Purpose: An approval answered in the page resumes the turn *in front of* it: the decision,
+/// the tool and the model's words arrive before the response, the kernel names the pending
+/// question while it waits, and the log carries the decision once it is taken.
+/// Serves: the three ways the page used to lie about a request — a click that resumed a turn in
+/// silence, a decided question still drawn answerable, and a live one drawn dead.
+/// Design: `docs/design/flows/tool-approval.md` §2 and `docs/design/web-surface.md` §4.
+/// Up: `cargo test -p loongagent --test web_surface`.
+/// Down: the real binary, `fake_model`'s asking variant and the WebSocket client.
+/// Verify: `cargo test -p loongagent --test web_surface` (`an_approval_round_trip`).
+#[test]
+fn an_approval_round_trip_keeps_the_surface_watching() {
+    // A write outside the workspace, which the policy asks about rather than allowing.
+    let (base_url, _model) = model_calling(
+        "write_file",
+        "{\"path\":\"../escape.txt\",\"content\":\"x\"}",
+    );
+    let dir = workspace();
+    let web = Web::start(&dir, &base_url);
+    let mut socket = web.connect();
+
+    let (_, response) = exchange(
+        &mut socket,
+        1,
+        "session.attach",
+        json!({"cwd": "", "client": "web"}),
+    );
+    assert!(response["error"].is_null(), "{response}");
+    let session_id = response["result"]["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // The turn parks on a question, and the browser is told which one it is.
+    let (events, response) = exchange(
+        &mut socket,
+        2,
+        "prompt.submit",
+        json!({"session_id": session_id, "text": "escape the workspace"}),
+    );
+    assert!(response["error"].is_null(), "{response}");
+    let asked = events
+        .iter()
+        .find(|e| e["kind"] == "approval.requested")
+        .expect("the question reaches the browser");
+    let request_id = asked["data"]["request_id"].as_str().unwrap().to_string();
+
+    // The kernel, not the log, says which question is answerable. This is what a refreshed
+    // page asks, and the answer it must not guess: while the kernel waits, this id is live.
+    let (_, response) = exchange(
+        &mut socket,
+        3,
+        "session.attach",
+        json!({"cwd": "", "client": "web"}),
+    );
+    assert_eq!(
+        response["result"]["pending_approval"],
+        json!(request_id),
+        "the kernel names the one question it waits for: {response}"
+    );
+
+    // Answering resumes the turn, and the resumed turn is watched: `approval.decided` greys
+    // the question and the tool's result and the model's words arrive as they happen, not
+    // one silent block after the response.
+    let (events, methods, response) = exchange_verbose(
+        &mut socket,
+        4,
+        "approval.respond",
+        json!({"session_id": session_id, "request_id": request_id, "granted": true, "scope": "once"}),
+    );
+    assert!(response["error"].is_null(), "{response}");
+    let kinds: Vec<&str> = events.iter().map(|e| e["kind"].as_str().unwrap()).collect();
+    assert_eq!(kinds.first(), Some(&"approval.decided"), "{kinds:?}");
+    assert!(kinds.contains(&"tool.result"), "{kinds:?}");
+    let delta = methods
+        .iter()
+        .position(|m| m == "model.delta")
+        .unwrap_or_else(|| panic!("the resumed answer streams: {methods:?}"));
+    assert!(
+        methods[..delta].iter().all(|m| m == "event"),
+        "the work is visible before the words: {methods:?}"
+    );
+
+    // The log records the decision, so a refreshed page can draw the question as a record…
+    let (_, response) = exchange(
+        &mut socket,
+        5,
+        "session.replay",
+        json!({"session_id": session_id, "from_seq": 0}),
+    );
+    assert!(response["error"].is_null(), "{response}");
+    // A replay answers in its result, not on the notification stream: that is the list the
+    // page draws the transcript from.
+    let replayed = response["result"]["events"]
+        .as_array()
+        .expect("replay lists the log");
+    let decided = replayed.iter().any(|envelope| {
+        envelope["kind"] == "approval.decided"
+            && envelope["data"]["request_id"] == json!(request_id)
+    });
+    assert!(decided, "the decision is in the log, not only in memory");
+    // …and the kernel no longer holds it, so the page may retire every open question it finds.
+    let (_, response) = exchange(
+        &mut socket,
+        6,
+        "session.attach",
+        json!({"cwd": "", "client": "web"}),
+    );
+    assert_eq!(
+        response["result"]["pending_approval"],
+        json!(null),
+        "nothing is pending once it is answered: {response}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Purpose: A session opened *after* the surface's own file has been replaced still works — the
+/// child is the running image, not the path a rebuild overwrote.
+/// Serves: the `loongagent web` run that outlives a `cargo build` or a reinstall.
+/// Design: `docs/design/web-surface.md` §3.
+/// Up: `cargo test -p loongagent --test web_surface`.
+/// Down: `Web::start_at`, `std::fs::copy` and `std::fs::remove_file`.
+/// Verify: `cargo test -p loongagent --test web_surface` (`a_new_session_still_opens`).
+/// The page keeps a session per open tab and starts a child for each one, so a web run
+/// outlives the build it was started from: `cargo build` and `cargo install` write a new
+/// file, and the path the running process was launched as stops naming the build it is.
+/// Every session opened after that must still start — the failure it would otherwise
+/// show the browser is "spawning the local server: No such file or directory".
+#[test]
+fn a_new_session_still_opens_after_the_binary_was_replaced() {
+    let (base_url, _model) = fake_model();
+    let dir = workspace();
+    std::fs::write(dir.join("note.txt"), "hi from the workspace\n").unwrap();
+    // The surface runs from a copy of its own, which is what a rebuild replaces under it.
+    let exe = dir.join("loongagent");
+    std::fs::copy(env!("CARGO_BIN_EXE_loongagent"), &exe).expect("a copy of the built binary");
+    let web = Web::start_at(&exe, &dir, &base_url, Some("openai-compat"));
+
+    let mut socket = web.connect();
+    let (_, response) = exchange(&mut socket, 1, "session.new", json!({}));
+    assert!(
+        response["error"].is_null(),
+        "a session while the file is there: {response}"
+    );
+
+    // The rebuild: the path this surface was started from no longer exists.
+    std::fs::remove_file(&exe).expect("the old binary is gone");
+
+    let (_, response) = exchange(&mut socket, 2, "session.new", json!({}));
+    assert!(
+        response["error"].is_null(),
+        "a new session after the binary was replaced: {response}"
+    );
+    let session_id = response["result"]["session_id"]
+        .as_str()
+        .expect("a session id")
+        .to_string();
+    // And the child is a working server, not one that died looking for itself: its own
+    // startup proves the sandbox and then answers a turn.
+    let (_, response) = exchange(
+        &mut socket,
+        3,
+        "prompt.submit",
+        json!({"session_id": session_id, "text": "read note.txt"}),
+    );
+    assert_eq!(response["result"]["accepted"], true, "{response}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

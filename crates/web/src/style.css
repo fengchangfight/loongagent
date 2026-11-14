@@ -1056,7 +1056,25 @@ details.step.tool.failed > summary { background: rgba(248, 81, 73, 0.06); }
   color: var(--text-dim);
 }
 .approval .refuse:hover { border-color: var(--red); color: var(--red); }
+/* A spent or not-yet-openable answer: the buttons are in the transcript but inert, so
+ * they must not look like the green one that still works (web-surface.md §4). */
+.approval button:disabled { opacity: 0.5; cursor: default; }
 .approval.answered { opacity: 0.55; pointer-events: none; }
+/* A question the kernel dropped: a record of something nobody answered. Greyed and out
+ * of reach like an answered one, but dashed and with its own line, so it cannot be read
+ * as a decision (web-surface.md §4). */
+.approval.expired {
+  opacity: 0.55;
+  pointer-events: none;
+  border-style: dashed;
+  background: transparent;
+}
+.approval .expired-note {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
 
 /* ── The composer ───────────────────────────────────────────────────── */
 

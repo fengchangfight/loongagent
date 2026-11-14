@@ -2,8 +2,8 @@
 
 - **Up:** [tools-permissions.md](../tools-permissions.md) · [design/README.md](../README.md)
 - **Authority:** [ADR-0007](../../decisions/0007-permission-sandbox-engine.md) · [ADR-0004](../../decisions/0004-microkernel-extension-model.md) · [ADR-0019](../../decisions/0019-mid-turn-permissions.md)
-- **Code:** `crates/kernel/src/turn/loop.rs`, `crates/tools/src/lib.rs`, `crates/sandbox/`
-- **Verify:** `cargo test -p loong-kernel -p loong-tools -p loong-sandbox` · `./scripts/check.sh`
+- **Code:** `crates/kernel/src/turn/loop.rs`, `crates/tools/src/lib.rs`, `crates/sandbox/`, `crates/tui-app/src/lib.rs`
+- **Verify:** `cargo test -p loong-kernel -p loong-tools -p loong-sandbox -p loong-tui-app` · `./scripts/check.sh`
 
 A registry tool call passes one gate: the model proposes, `Kernel::dispatch` asks
 `Pdp::decide`, and the verdict decides whether `Kernel::execute` runs the tool. This
@@ -107,6 +107,26 @@ sequenceDiagram
 
 The order is fixed: class, `pdp.decide`, `tool.call`, `pre_tool`, the stricter
 `policy.decided`, then execute or ask.
+
+`respond_to_approval` resumes the turn **in front of the surface that answered**: the
+decision, the tool's result and the model's words stream as they happen, through the
+same sink a new turn uses (`respond_to_approval_with`). The surface that asked is the
+surface watching — a resume nobody watches is a click that looks like it did nothing.
+The question stays answerable only while the kernel holds it: `session.attach` reports
+it as `pending_approval`, so a page refreshed onto a parked turn can still answer, and
+a question whose process is gone is a record, not a button (web-surface.md §4).
+
+**The question that cannot be skipped says why.** Under `/yolo` an `irreversible` ask
+carries one more line in the TUI panel: the class in words, that the opt-out does not
+reach this one, and that「本会话允许」answers the same shape from now on. Turning the
+opt-out on says the other half in the transcript — prompts are off, the sandbox still
+applies, writes outside the workspace are still refused, deletions and egress still ask
+— and the slash menu's one-line description says it before the switch is pressed. A
+prompt inside a session that stopped asking otherwise reads as either a defect or the
+agent having escaped its box; naming it is the whole of ADR-0020 §2. The words live in
+`crates/tui-app/src/lib.rs` (`irreversible_note`, the `Yolo` arm's banner) and
+`crates/tui-app/src/commands.rs`; the TUI never decides the class itself, it only reads
+`approval.requested`.
 
 ## 3. Where to read next
 

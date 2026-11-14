@@ -55,6 +55,36 @@ pub const FAVICON: &[u8] = include_bytes!("../assets/favicon.png");
 /// Contract: `crates/web/src/lib.rs`.
 pub const FAVICON_PATH: &str = "/favicon.png";
 
+/// Purpose: Ask a child to turn its permission prompts off or on **now**, while a turn owns
+/// its bridge.
+///
+/// Serves: `permissions.set` arriving mid-turn — the one thing a session cannot answer down
+/// its own `exchange`, because a turn holds that bridge from the prompt to the last event.
+/// Design: `docs/design/web-surface.md` §4; ADR-0019.
+/// Up: `Started::channel`, kept by `Child` beside the pid for the same reason.
+/// Down: the private control channel of the child (descriptor 3, out of every tool's reach).
+/// Verify: `cargo test -p loong-web` (`yolo_`).
+pub type PermissionChannel = std::sync::Arc<dyn Fn(bool) -> Result<(), String> + Send + Sync>;
+
+/// What one starter hands back for one session.
+/// Purpose: Bundle the three things a surface needs about a child it has just started: the
+/// bridge, the id, and the way in that the bridge cannot provide.
+///
+/// Serves: `serve_web`'s starter, read by `ensure_child`.
+/// Design: `docs/design/web-surface.md` §3.
+/// Up: the starter the process owner passes in.
+/// Down: `Child`'s three fields.
+/// Verify: `cargo test -p loong-web` (`session_`).
+pub struct Started {
+    /// Purpose: The bridge every ordinary request goes down.
+    pub session: Arc<Mutex<dyn Session>>,
+    /// Purpose: The id this session answers to, which the surface keys its children by.
+    pub session_id: String,
+    /// Purpose: The way in while a turn holds the bridge; `None` when the child has none — a
+    /// surface served in-process, or a platform with no control channel.
+    pub channel: Option<PermissionChannel>,
+}
+
 /// What the web layer needs from a session: a line in, lines out.
 ///
 /// The lines are exactly what the stdio server writes — events first, then the
@@ -281,9 +311,7 @@ pub fn serve_web(
     token: String,
     home: PathBuf,
     start_session: Arc<
-        dyn Fn(&std::path::Path, Option<&str>) -> Result<(Arc<Mutex<dyn Session>>, String), String>
-            + Send
-            + Sync,
+        dyn Fn(&std::path::Path, Option<&str>) -> Result<Started, String> + Send + Sync,
     >,
 ) {
     serve_web_with_models(
@@ -333,9 +361,7 @@ pub fn serve_web_with_models(
     token: String,
     home: PathBuf,
     start_session: Arc<
-        dyn Fn(&std::path::Path, Option<&str>) -> Result<(Arc<Mutex<dyn Session>>, String), String>
-            + Send
-            + Sync,
+        dyn Fn(&std::path::Path, Option<&str>) -> Result<Started, String> + Send + Sync,
     >,
     models: Arc<dyn ModelSetup>,
     stop: StopSignal,
@@ -449,9 +475,7 @@ fn handle_web(
     token: String,
     home: PathBuf,
     start_session: Arc<
-        dyn Fn(&std::path::Path, Option<&str>) -> Result<(Arc<Mutex<dyn Session>>, String), String>
-            + Send
-            + Sync,
+        dyn Fn(&std::path::Path, Option<&str>) -> Result<Started, String> + Send + Sync,
     >,
     models: Arc<dyn ModelSetup>,
     stop: StopSignal,
@@ -956,9 +980,7 @@ fn websocket_web(
     token: String,
     home: PathBuf,
     start_session: Arc<
-        dyn Fn(&std::path::Path, Option<&str>) -> Result<(Arc<Mutex<dyn Session>>, String), String>
-            + Send
-            + Sync,
+        dyn Fn(&std::path::Path, Option<&str>) -> Result<Started, String> + Send + Sync,
     >,
     models: Arc<dyn ModelSetup>,
 ) -> Result<(), String> {
@@ -1250,29 +1272,152 @@ mod tests {
         }
     }
 
-    /// Purpose: Pins that a replayed approval is drawn answered — a greyed, unclickable
-    /// record of a decision taken, not live buttons whose answer can only 500 against a
-    /// request that no longer exists.
+    /// Purpose: Pins that a question is drawn held and only a decision greys it, so a
+    /// refresh can neither invent an answer nor lose a live question.
     #[test]
-    fn a_replayed_approval_is_drawn_answered() {
-        // `onEvent` is the one handler for live and replayed events; it must pass the
-        // flag on, or an approval from the log is drawn as live.
-        assert!(
-            APP_JS.contains("showApproval(data, replayed)"),
-            "onEvent must tell showApproval that the event was replayed"
-        );
+    fn an_approval_goes_grey_by_its_decision() {
         let approval = APP_JS
             .split("function showApproval(")
             .nth(1)
             .and_then(|rest| rest.split("\n}\n").next())
             .expect("showApproval is the one place an approval renders");
-        assert!(
-            approval.contains("replayed"),
-            "showApproval must take the replayed flag: {approval}"
+        let signature = approval.lines().next().unwrap_or("");
+        assert_eq!(
+            format!("function showApproval({signature}"),
+            "function showApproval(data, replayed) {",
+            "showApproval takes the replay flag, because a replayed box is drawn held"
         );
         assert!(
-            approval.contains("answered") && approval.contains("disabled"),
-            "showApproval must draw an answered box: greyed, its buttons disabled: {approval}"
+            approval.contains("if (replayed) hold(box);")
+                && approval.contains("else openBox(box);"),
+            "a question out of the log is drawn out of reach; one the stream just delivered is \
+             already the kernel's to answer: {approval}"
+        );
+        assert!(
+            approval.contains("box.dataset.request = data.request_id"),
+            "the box carries the id its decisions quote, so the transcript can be walked by it: \
+             {approval}"
+        );
+        let decided = APP_JS
+            .split("function decideBox(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("decideBox is the one place a decision is drawn");
+        assert!(
+            decided.contains("answered") && decided.contains("disabled = true"),
+            "a decided question is a record and takes its buttons out of reach: {decided}"
+        );
+        let find = APP_JS
+            .split("function decideQuestions(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("decideQuestions is how a decision finds its box");
+        assert!(
+            find.contains("#chat .approval") && find.contains("box.dataset.request === requestId"),
+            "a decision finds its question in the transcript, by the id it answers: {find}"
+        );
+        let on = APP_JS
+            .split("case \"approval.decided\": {")
+            .nth(1)
+            .and_then(|rest| rest.split("      case ").next())
+            .expect("approval.decided is drawn in onEvent");
+        assert!(
+            on.contains("decideQuestions(data.request_id"),
+            "the decision must settle the box it answers: {on}"
+        );
+        // And the turn holding a live question stays unfolded: a replayed turn folds shut
+        // as a record, but folding the one with an answerable question would hide the
+        // buttons a refresh has just made reachable.
+        let close = APP_JS
+            .split("function closeTurn() {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}").next())
+            .expect("closeTurn is the one place a turn ends");
+        assert!(
+            close.contains(".approval:not(.answered):not(.expired)"),
+            "a turn holding a live question must not fold shut: {close}"
+        );
+    }
+
+    /// Purpose: Pins that only the kernel can make a question answerable — one pass after
+    /// the log is drawn, `session.attach`'s `pending_approval`, read from the transcript.
+    /// Without it the page guesses, and it guessed wrong in both directions: every
+    /// replayed question clickable and doomed, then every replayed question greyed and a
+    /// live one unanswerable.
+    #[test]
+    fn a_question_only_the_kernel_holds_can_be_answered() {
+        let replay = APP_JS
+            .split("async function replay(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("replay is where the log comes back into the page");
+        assert!(
+            replay.contains("session.attach"),
+            "the kernel's word on what it waits for is `session.attach`'s \
+             `pending_approval`, and it is a read: {replay}"
+        );
+        assert!(
+            replay.contains("pending_approval"),
+            "replay must ask the kernel which question is still live: {replay}"
+        );
+        assert!(
+            replay.contains("if (known) retireQuestions(live);"),
+            "no word from the kernel means no question is retired: a held box is already out \
+             of reach, and a guess here is the bug: {replay}"
+        );
+        let ask = APP_JS
+            .split("function retireQuestions(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("retireQuestions is what replay calls");
+        assert!(
+            ask.contains("#chat .approval") && ask.contains("box.dataset.request"),
+            "the pass walks the transcript by id, so no second register can drift: {ask}"
+        );
+        assert!(
+            ask.contains("openBox(box)"),
+            "the question the kernel still waits for is the one made answerable: {ask}"
+        );
+        assert!(
+            ask.contains("retireBox(box, RETIRED)"),
+            "every other open question is put away: {ask}"
+        );
+        let retire = APP_JS
+            .split("function retireBox(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("retireBox is the one place a dead question is put away");
+        assert!(
+            retire.contains("expired") && retire.contains("disabled"),
+            "a retired question is greyed out of reach: {retire}"
+        );
+        assert!(
+            !retire.contains("answered"),
+            "nobody answered it, so it must not be drawn answered: {retire}"
+        );
+        let why = APP_JS
+            .split("const RETIRED = ")
+            .nth(1)
+            .and_then(|rest| rest.split(";\n").next())
+            .expect("RETIRED is the one line a dead question carries");
+        assert!(
+            why.contains("重新发一次提问"),
+            "the transcript says what to do instead, like the TUI's repl: {why}"
+        );
+        // An answer the kernel refuses is the same fact arriving by the other road: the
+        // box becomes the record it always was.
+        let answer = APP_JS
+            .split("const answer = (granted, scope) => {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n  };").next())
+            .expect("answer is where a click leaves the page");
+        assert!(
+            answer.contains("no approval is pending") && answer.contains("retireBox(box, RETIRED)"),
+            "a refused answer must show a record, not a decision that never happened: {answer}"
+        );
+        assert!(
+            answer.contains("openBox(box)"),
+            "any other failure leaves the question answerable, so the person can retry: {answer}"
         );
     }
 
@@ -1887,10 +2032,11 @@ mod tests {
                 home,
                 Arc::new(|_: &std::path::Path, session: Option<&str>| {
                     let id = session.unwrap_or("echo").to_string();
-                    Ok((
-                        Arc::new(Mutex::new(Echo(vec![]))) as Arc<Mutex<dyn Session>>,
-                        id,
-                    ))
+                    Ok(crate::Started {
+                        session: Arc::new(Mutex::new(Echo(vec![]))) as Arc<Mutex<dyn Session>>,
+                        session_id: id,
+                        channel: None,
+                    })
                 }),
             )
         });
@@ -1972,10 +2118,11 @@ mod tests {
                 served_dir,
                 Arc::new(|_: &std::path::Path, session: Option<&str>| {
                     let id = session.unwrap_or("echo").to_string();
-                    Ok((
-                        Arc::new(Mutex::new(Echo(vec![]))) as Arc<Mutex<dyn Session>>,
-                        id,
-                    ))
+                    Ok(crate::Started {
+                        session: Arc::new(Mutex::new(Echo(vec![]))) as Arc<Mutex<dyn Session>>,
+                        session_id: id,
+                        channel: None,
+                    })
                 }),
             )
         });

@@ -678,6 +678,37 @@ fn a_granted_approval_still_cannot_escape_the_workspace() {
         .contains("outside the workspace"));
 }
 
+/// Purpose: A resumed turn narrates itself to the caller that answered — the model's words reach the sink before the outcome does.
+#[test]
+fn a_resumed_turn_reaches_the_observer() {
+    let t = Temp::new();
+    let doomed = t.dir.join("notes.txt");
+    std::fs::write(&doomed, "x").unwrap();
+    let model = ScriptedModel::new(vec![
+        response(
+            vec![call("c1", "shell", json!({"command": "rm -rf notes.txt"}))],
+            None,
+        ),
+        response(vec![], Some("gone")),
+    ]);
+    let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+    let pending = k.submit("remove it").unwrap().pending_approval.unwrap();
+    let mut heard = String::new();
+    k.respond_to_approval_with(
+        &pending.request_id,
+        true,
+        ApprovalScope::Once,
+        None,
+        &mut |piece| heard.push_str(piece),
+    )
+    .unwrap();
+    // Silent before: the no-op sink the resume used to get. The surface that answered a
+    // question is still the surface watching the turn, and a long silent turn reads as a
+    // click that did nothing.
+    assert_eq!(heard, "gone");
+    assert!(!doomed.exists());
+}
+
 /// Purpose: A session-tightened PDP rule denies an out-of-bounds read without asking, records `session:` as the rule, and feeds the refusal back.
 #[test]
 fn a_tightened_policy_denies_without_asking() {

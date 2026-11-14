@@ -24,8 +24,19 @@ use std::process::Command;
 /// plane configured on this machine supplies the endpoints under test — and spends
 /// real tokens while doing it.
 pub fn isolated_command() -> Command {
+    isolated_command_at(std::path::Path::new(env!("CARGO_BIN_EXE_loongagent")))
+}
+
+/// Purpose: The same isolated environment, but running a copy of the binary at a path of the test's
+/// choosing — so a test can replace or delete that file under a running surface.
+/// Serves: `web_surface.rs` (`a_new_session_still_opens_after_the_binary_was_replaced`).
+/// Design: `docs/design/web-surface.md` §3.
+/// Up: `isolated_command` and that test; no other caller.
+/// Down: `std::process::Command` and the two environment variables it sets.
+/// Verify: `cargo test -p loongagent --tests`.
+pub fn isolated_command_at(program: &std::path::Path) -> Command {
     let base = std::env::temp_dir().join(format!("loongagent-testenv-{}", std::process::id()));
-    let mut command = Command::new(env!("CARGO_BIN_EXE_loongagent"));
+    let mut command = Command::new(program);
     command
         .env("LOONGAGENT_HOME", base.join("loongagent"))
         .env("HOME", base.join("home"));

@@ -114,14 +114,14 @@ also accepts the older English vocabulary, so scrolling back into an old session
 | `! 需要确认 …` | yellow, bold | the person has to answer |
 | `! …` | red, bold | something went wrong |
 | `· 规则：…` | violet | a decision about permission, worth finding later |
-| `· …` | the terminal's own foreground, dimmed | bookkeeping: skills, tokens, compaction |
+| `· …` | grey (`#767676`) | bookkeeping: the `[config]` table a session opens on, skills, tokens |
 | anything else | default | the model's own answer, left alone |
 
-The palette names colours and never invents RGB, because a fixed tone is picked for one
-background and unreadable on the other: that is why the quiet lines are the **terminal's own
-foreground, dimmed**, not `DarkGray` — bright black *is* the background on a dark theme, so those
-lines were drawn into the wall (`MARK_QUIET`). A menu's unchosen answers are `default`, the chosen one
-coloured.
+The palette names colours instead of inventing RGB: a fixed tone is picked for one background and
+unreadable on the other, which is why quiet text is never `DarkGray` — bright black *is* the wall on
+a dark theme (`MARK_QUIET`). Bookkeeping is the exception, in tone not hue: a neutral mid grey
+(`NOTE_INK`, `#767676`, 4.5:1 on white, 4.7:1 on black) has no hue to be wrong about, and dimmed
+text read as conversation under a twenty-row table. A menu's unchosen answers are `default`.
 
 The screen is one page above one fixed prompt: status, keys and usage row are the only bars; the
 mark and conversation scroll between them while the question, menus, prompt and usage stay put.

@@ -771,6 +771,73 @@ fn a_squeezed_panel_gives_up_its_details_before_its_answers() {
     }
 }
 
+/// Purpose: An irreversible question says in words that YOLO does not skip it, and that a session answer remembers the shape.
+#[test]
+fn a_question_yolo_cannot_skip_says_so() {
+    // ADR-0020 §2 asks the interface to say plainly what YOLO does not cover. The class
+    // token alone reads as a label rather than a warning, and a person who turned prompts
+    // off reads a prompt as the switch having failed. So the note names both facts: this
+    // question survives YOLO, and「本会话允许」is how to stop answering the same shape.
+    let ask = |yolo: bool, width: u16, height: u16| {
+        let mut app = App::new("s", "v");
+        app.yolo = yolo;
+        app.pending = Some("appr-9".to_string());
+        app.approval = Some(Box::new(ApprovalInfo {
+            request_id: "appr-9".to_string(),
+            class: "irreversible".to_string(),
+            reason: "shell: deletes or overwrites files".to_string(),
+            tool: "shell".to_string(),
+            args: "{\"command\":\"rm -rf /tmp/a\"}".to_string(),
+        }));
+        draw(&mut app, width, height)
+    };
+
+    let screen = ask(true, 100, 30);
+    assert!(shows(&screen, "不可撤销"), "the class in words: {screen}");
+    assert!(
+        shows(&screen, "yolo 不跳过"),
+        "it says the opt-out does not reach this one: {screen}"
+    );
+    assert!(
+        shows(&screen, "本会话允许") && shows(&screen, "同样形状不再问"),
+        "and how to stop answering this shape: {screen}"
+    );
+
+    // Prompts are on: the remembering hint still helps, but claiming anything about YOLO
+    // would be a sentence about a switch that is off.
+    let screen = ask(false, 100, 30);
+    assert!(shows(&screen, "不可撤销"), "{screen}");
+    assert!(
+        !shows(&screen, "yolo 不跳过"),
+        "no claim about a switch that is off: {screen}"
+    );
+    assert!(shows(&screen, "同样形状不再问"), "{screen}");
+
+    // The note is one more detail row, and a detail row is what gives way first: on a short
+    // terminal all three answers must still be there, or the question is unanswerable.
+    let screen = ask(true, 80, 12);
+    for answer in ["本次允许", "本会话允许", "拒绝"] {
+        assert!(
+            shows(&screen, answer),
+            "{answer} left a short panel:\n{screen}"
+        );
+    }
+}
+
+/// Purpose: Turning YOLO on says in the transcript which two families it still asks about.
+#[test]
+fn yolo_on_says_what_it_still_asks_about() {
+    let mut app = App::new("s", "v");
+    fed(&mut app, FromWorker::Yolo(true));
+    assert!(
+        app.lines.iter().any(|line| shows(line, "确认提示已关闭")
+            && shows(line, "沙箱")
+            && shows(line, "删东西和外发仍然会问")),
+        "what changed, what did not, and what YOLO never covers: {:?}",
+        app.lines
+    );
+}
+
 /// Purpose: The decision panel is drawn after the transcript and before the prompt.
 #[test]
 fn the_decision_comes_after_the_work_it_is_about() {
@@ -1151,27 +1218,36 @@ fn the_thumb_stays_under_the_hand_at_the_bottom() {
     );
 }
 
-/// Purpose: Bookkeeping lines use the terminal's dimmed foreground, not a colour that is the background.
+/// Purpose: Bookkeeping is a neutral mid grey — never `DarkGray`, which is the wall on a dark theme.
 #[test]
-fn the_bookkeeping_lines_are_not_drawn_into_the_wall() {
+fn the_bookkeeping_lines_are_grey_and_never_the_wall() {
     // `DarkGray` is bright black: on a dark theme it *is* the background, so the lines
     // saying which skills loaded and which profile is in use were invisible — reported
-    // from a real screen, where scrolling appeared to grey the notes out. Quiet is the
-    // terminal's own foreground, dimmed, never a named colour that may be the wall.
-    for kind in [LineKind::Note, LineKind::Notice] {
-        let style = style_for(kind);
-        assert_eq!(
-            style.fg,
-            Some(Color::Reset),
-            "{kind:?} must not name a colour"
-        );
-        assert!(style.add_modifier.contains(Modifier::DIM), "{kind:?}");
-    }
+    // from a real screen. Dimming the terminal's own foreground fixed the wall, but the
+    // `[config]` report a fresh session opens on is a table of twenty rows and, dimmed,
+    // it still read as conversation. So bookkeeping takes the one tone this palette
+    // fixes: a neutral mid grey, legible on a light and on a dark background alike.
+    let note = style_for(LineKind::Note);
+    assert_ne!(note.fg, Some(Color::DarkGray), "bright black is the wall");
+    assert_eq!(
+        note.fg,
+        Some(Color::Rgb(0x76, 0x76, 0x76)),
+        "a grey that is grey on either background"
+    );
+    assert!(
+        !note.add_modifier.contains(Modifier::DIM),
+        "a terminal that dims it again would sink it into a dark background"
+    );
+    // Notices keep the terminal's own foreground, dimmed: they report what the screen
+    // just did — copied, mouse released — one line at a time, not a page of provenance.
+    let notice = style_for(LineKind::Notice);
+    assert_eq!(notice.fg, Some(Color::Reset));
+    assert!(notice.add_modifier.contains(Modifier::DIM), "{notice:?}");
     let mut app = App::new("s", "v");
     app.push_lines(vec!["· 可用技能（1）：help".to_string()]);
     assert_eq!(
         color_of(&mut app, 60, 24, "· 可用技能"),
-        Some(ratatui::style::Color::Reset),
+        Some(ratatui::style::Color::Rgb(0x76, 0x76, 0x76)),
         "and that is what reaches the screen"
     );
 }

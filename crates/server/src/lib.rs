@@ -703,32 +703,10 @@ impl Server {
                 self.turns += 1;
                 let turn_id = self.turns;
                 // While this turn runs, its events go out as they happen and its deltas
-                // go out as they arrive. `last_sent` travels with the sink so the final
-                // response does not repeat what was already streamed.
-                let sent = Rc::new(std::cell::Cell::new(self.last_sent));
-                {
-                    let out = self.connection.clone().unwrap_or_else(|| Out::memory().0);
-                    let sent = Rc::clone(&sent);
-                    self.kernel.set_event_sink(Some(Box::new(
-                        move |event: &gen::EventEnvelope| {
-                            match serde_json::to_value(event) {
-                                Ok(value) => out.line(&Notification::event(&value).to_line()),
-                                Err(_) => return,
-                            }
-                            sent.set(sent.get().max(event.seq));
-                        },
-                    )));
-                }
-                let deltas = self.connection.clone().unwrap_or_else(|| Out::memory().0);
-                let outcome = self.kernel.submit_with(&params.text, &mut |piece| {
-                    let notification = Notification::new(
-                        gen::notification::MODEL_DELTA,
-                        serde_json::json!({"turn_id": turn_id, "text": piece}),
-                    );
-                    deltas.line(&notification.to_line());
+                // go out as they arrive (see `run_turn`).
+                let outcome = self.run_turn(turn_id, |kernel, on_delta| {
+                    kernel.submit_with(&params.text, on_delta)
                 });
-                self.kernel.set_event_sink(None);
-                self.last_sent = self.last_sent.max(sent.get());
                 match outcome {
                     Ok(outcome) => {
                         // A `user_prompt_submit` hook can refuse the turn before
@@ -755,12 +733,21 @@ impl Server {
                     turn_id: self.turns,
                     accepted: params.granted,
                 };
-                match self.kernel.respond_to_approval(
-                    &params.request_id,
-                    params.granted,
-                    params.scope,
-                    params.reason.as_deref(),
-                ) {
+                // Answering a question resumes the turn, and the resumed turn runs here
+                // as any other turn does: through `run_turn`, so the decision and the
+                // work after it reach the surface as they happen. A resume with nobody
+                // watching is a click that looks like it did nothing.
+                let turn_id = self.turns;
+                let outcome = self.run_turn(turn_id, |kernel, on_delta| {
+                    kernel.respond_to_approval_with(
+                        &params.request_id,
+                        params.granted,
+                        params.scope,
+                        params.reason.as_deref(),
+                        on_delta,
+                    )
+                });
+                match outcome {
                     Ok(_) => self.respond(id, result, "approval.respond"),
                     Err(e) => self.fail(id, e),
                 }
@@ -772,6 +759,50 @@ impl Server {
             )
             .to_line()],
         }
+    }
+
+    /// Purpose: Run one turn in front of this connection — its events streamed the moment
+    /// they are written and the model's deltas the moment they arrive.
+    /// Serves: `prompt.submit` and `approval.respond`, the two requests that make a turn
+    /// run; both run it here so a turn has exactly one way of being watched.
+    /// Design: `docs/design/surfaces.md` §4 (the stream) and
+    /// `docs/design/flows/tool-approval.md` §2 (the resume keeps its observer).
+    /// Up: those two arms only.
+    /// Down: `Kernel::set_event_sink`, and whichever of `Kernel::submit_with` or
+    /// `Kernel::respond_to_approval_with` the caller hands in.
+    /// Verify: `cargo test -p loong-server approval_respond_streams_the_resumed_turn`.
+    /// Contract: `last_sent` is advanced as far as the sink got, so the response that
+    /// follows does not repeat what was already streamed.
+    fn run_turn<T>(
+        &mut self,
+        turn_id: u64,
+        run: impl FnOnce(&mut Kernel, &mut dyn FnMut(&str)) -> Result<T, KernelError>,
+    ) -> Result<T, KernelError> {
+        let sent = Rc::new(std::cell::Cell::new(self.last_sent));
+        {
+            let out = self.connection.clone().unwrap_or_else(|| Out::memory().0);
+            let sent = Rc::clone(&sent);
+            self.kernel
+                .set_event_sink(Some(Box::new(move |event: &gen::EventEnvelope| {
+                    match serde_json::to_value(event) {
+                        Ok(value) => out.line(&Notification::event(&value).to_line()),
+                        Err(_) => return,
+                    }
+                    sent.set(sent.get().max(event.seq));
+                })));
+        }
+        let deltas = self.connection.clone().unwrap_or_else(|| Out::memory().0);
+        let mut on_delta = |piece: &str| {
+            let notification = Notification::new(
+                gen::notification::MODEL_DELTA,
+                serde_json::json!({"turn_id": turn_id, "text": piece}),
+            );
+            deltas.line(&notification.to_line());
+        };
+        let result = run(&mut self.kernel, &mut on_delta);
+        self.kernel.set_event_sink(None);
+        self.last_sent = self.last_sent.max(sent.get());
+        result
     }
 
     /// Purpose: Move this server onto another session — the swap both `session.new` and
@@ -1634,6 +1665,84 @@ mod tests {
         assert!(kinds.contains(&"tool.result"));
         assert_eq!(out.last().unwrap()["result"]["accepted"], false);
         assert!(!escape.exists());
+    }
+
+    /// Purpose: Pin that the turn an answer resumes is watched — its decision, its work
+    /// and its words reach the client that answered, before the answer's own response.
+    /// Verify: `cargo test -p loong-server approval_respond_streams_the_resumed_turn`.
+    #[test]
+    fn approval_respond_streams_the_resumed_turn() {
+        let t = Temp::new();
+        let doomed = t.0.join("notes.txt");
+        std::fs::write(&doomed, "x").unwrap();
+        let model = scripted(
+            vec![ToolCallRequest {
+                call_id: "c1".into(),
+                tool: "shell".into(),
+                args: json!({"command": "rm -rf notes.txt"}),
+            }],
+            Some("understood"),
+        );
+        let kernel = Kernel::create(
+            t.0.join("s.jsonl"),
+            KernelConfig::new(&t.0),
+            Box::new(model),
+        )
+        .unwrap();
+        let mut server = Server::new(kernel, "s-local");
+        let parked = lines_of(
+            &mut server,
+            &Request::new(
+                2,
+                gen::method::PROMPT_SUBMIT,
+                json!({"session_id": "s-local", "text": "escape"}),
+            )
+            .to_line(),
+        );
+        let request_id = parked
+            .iter()
+            .find(|v| v["method"] == "event" && v["params"]["kind"] == "approval.requested")
+            .expect("the client is told an approval is pending")["params"]["data"]["request_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let out = lines_of(
+            &mut server,
+            &Request::new(
+                3,
+                gen::method::APPROVAL_RESPOND,
+                json!({
+                    "session_id": "s-local",
+                    "request_id": request_id,
+                    "granted": true,
+                    "scope": "once",
+                }),
+            )
+            .to_line(),
+        );
+        // The response is the last line; everything the resumed turn produced is already
+        // in front of it, because the resume ran in front of this connection.
+        let answer_at = out
+            .iter()
+            .position(|v| v.get("result").is_some())
+            .expect("one response");
+        assert_eq!(answer_at, out.len() - 1, "responses come last");
+        let streamed: Vec<&str> = out[..answer_at]
+            .iter()
+            .map(|v| {
+                v["params"]["kind"]
+                    .as_str()
+                    .or_else(|| v["method"].as_str())
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(streamed[0], "approval.decided", "the decision first");
+        assert!(
+            streamed.contains(&"model.delta"),
+            "the resumed model answer streams, not just lands: {streamed:?}"
+        );
+        assert!(streamed.contains(&"tool.result"));
+        assert!(!doomed.exists(), "the granted call ran");
     }
 
     /// Purpose: Pin that attach names the question its own kernel holds, and that a resumed kernel claims none.

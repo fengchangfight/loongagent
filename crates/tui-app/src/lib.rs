@@ -526,6 +526,17 @@ const MARK_INK: Color = Color::Cyan;
 const MARK_ACCENT: Color = Color::Magenta;
 /// The sayings: the terminal's own foreground, dimmed. Present, not shouting.
 const MARK_QUIET: Style = Style::new().fg(Color::Reset).add_modifier(Modifier::DIM);
+/// The bookkeeping's ink: a **neutral mid grey**, the one tone the transcript fixes.
+///
+/// A fresh session opens on the report the server prints — one `[config]` row per key, the
+/// hooks, MCP servers and skills it found — which is the loudest thing on an empty screen and
+/// the least important: where a setting came from, not what was said. The terminal's own
+/// foreground dimmed (`MARK_QUIET`) kept those lines off the wall but a twenty-row table still
+/// read as conversation. A *named* grey cannot answer that: `DarkGray` is bright black, which
+/// is the background on a dark theme, and `Gray` is the foreground on both. A mid grey has no
+/// hue to be picked for one background, and `#767676` stays readable on either — 4.5:1 on
+/// white, 4.7:1 on black — which is why this one RGB is worth naming.
+const NOTE_INK: Color = Color::Rgb(0x76, 0x76, 0x76);
 /// The prompt band's background, shared by the band's own drawing and the selection's
 /// painting so the two never drift: a pale yellow that keeps the terminal's own ink
 /// (dark on a light theme, light on a dark one) readable, distinct from any of the
@@ -607,10 +618,11 @@ pub enum LineKind {
 /// The palette. Muted on purpose: a transcript where everything shouts is harder to read
 /// than one where only the things that matter are loud.
 ///
-/// "Muted" is the terminal's own foreground dimmed, never a named dark colour. `DarkGray`
-/// is bright black, which is *the background* on a dark theme — the bookkeeping lines that
-/// say which skills loaded and which profile is in use were drawn into the wall. The
-/// foreground the person actually configured cannot be the same as the wall they put it on.
+/// "Muted" is grey, and grey is where the trap is: `DarkGray` is bright black, which is
+/// *the background* on a dark theme — the bookkeeping lines that say which skills loaded and
+/// which profile is in use were drawn into the wall. The foreground the person actually
+/// configured cannot be the same as the wall they put it on, so bookkeeping takes `NOTE_INK`
+/// instead: a neutral mid grey, readable on either background and quieter than any answer.
 pub fn style_for(kind: LineKind) -> Style {
     match kind {
         LineKind::User => Style::default().fg(Color::Cyan),
@@ -624,7 +636,7 @@ pub fn style_for(kind: LineKind) -> Style {
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
         LineKind::Policy => Style::default().fg(MARK_ACCENT),
-        LineKind::Note => MARK_QUIET,
+        LineKind::Note => Style::default().fg(NOTE_INK),
         LineKind::Problem => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         LineKind::Notice => MARK_QUIET,
         LineKind::Stopped => Style::default()
@@ -1904,6 +1916,15 @@ impl App {
                     Span::raw("  "),
                     Span::styled(clip(tool, room), Style::default().fg(MARK_INK)),
                 ]));
+                if *class == "irreversible" {
+                    details.push(Line::from(Span::styled(
+                        one_line(
+                            &Self::irreversible_note(self.yolo),
+                            width.saturating_sub(4) as usize,
+                        ),
+                        MARK_QUIET,
+                    )));
+                }
                 if !reason.is_empty() {
                     details.push(Line::from(Span::styled(
                         one_line(reason, width.saturating_sub(4) as usize),
@@ -1942,6 +1963,19 @@ impl App {
             Span::styled(" 需要你决定 ".to_string(), Style::default()),
             Style::default(),
         )
+    }
+
+    /// Purpose: The one sentence an irreversible question carries — what YOLO does not cover, and how to stop answering this shape.
+    /// Contract: called by `approval_lines` when the class is `irreversible`; ADR-0020 §2.
+    /// Verify: `cargo test -p loong-tui-app a_question_yolo_cannot_skip_says_so`.
+    fn irreversible_note(yolo: bool) -> String {
+        // A person who turned prompts off reads a prompt either as a bug or as the agent
+        // having escaped its box. Naming the class and the opt-out in words is the price of
+        // keeping the one question that must survive it (ADR-0020 §2, §3).
+        match yolo {
+            true => "不可撤销 — yolo 不跳过这条；选「本会话允许」同样形状不再问".to_string(),
+            false => "不可撤销 — 选「本会话允许」同样形状不再问".to_string(),
+        }
     }
 
     /// Purpose: The command menu as document lines.
@@ -2901,7 +2935,7 @@ impl App {
                         "⚠ 确认提示已{}{}",
                         if on { "关闭" } else { "打开" },
                         if on {
-                            " — 沙箱仍然生效；工作区之外的写入照样被拒"
+                            " — 沙箱仍然生效；工作区之外的写入照样被拒；删东西和外发仍然会问"
                         } else {
                             ""
                         }

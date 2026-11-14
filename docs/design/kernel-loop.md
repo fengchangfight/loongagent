@@ -169,14 +169,12 @@ by that message.
 
 ## 5. Interruption, approval and resume
 
-**Interruption.** `Kernel.interrupted` is an `AtomicBool`. `Kernel::interruptor`
-hands it to the server's signal handler; `Kernel::use_interruptor` lets the server
-adopt a process-wide flag again after `/new`. The loop reads it only at a step
-boundary. `Kernel::submit_with` clears it at the start of every new turn: a stop
-asked once belongs to that turn. `Kernel::respond_to_approval` deliberately does
-*not* clear it, because an approval resumes the same turn, so a stop asked while
-the question was open still stands. A stopped turn appends `turn.interrupted` and
-returns `interrupted: true` with no answer.
+**Interruption.** `Kernel.interrupted` is an `AtomicBool`. `Kernel::interruptor` hands it
+to the server's signal handler; `Kernel::use_interruptor` lets the server adopt a
+process-wide flag again after `/new`. The loop reads it only at a step boundary. `Kernel::submit_with` clears it at the start of every new turn: a stop
+asked once belongs to that turn. `Kernel::respond_to_approval` deliberately does *not*
+clear it, because an approval resumes the same turn, so a stop asked while the
+question was open still stands. A stop appends `turn.interrupted` and returns no answer.
 
 **Approval.** A `Verdict::Ask` parks the call instead of blocking: `dispatch`
 appends `approval.requested` with an id (`appr-N`) and returns `Dispatch::Pending`;
@@ -185,8 +183,9 @@ appends `approval.requested` with an id (`appr-N`) and returns `Dispatch::Pendin
 `Kernel::respond_to_approval` checks the id, appends `approval.decided`, fires the
 `permission_decided` hooks, and then either runs the call and records `tool.result`
 (plus the `post_tool` hooks) or records a failed result saying the user denied it.
-It then calls `Kernel::run` again, so the model sees the decision as ordinary
-history. An id mismatch, or an answer with nothing pending, is
+It then calls `Kernel::run` again with the caller's delta sink
+(`respond_to_approval_with`), so the surface that answered watches the rest of the
+turn. An id mismatch, or an answer with nothing pending, is
 `KernelError::OutOfOrder`. An id is unique in the **log**, not just in the
 process: `Kernel::build` seeds `Kernel.approvals` from the index's count of
 `approval.requested`, so a resumed session continues at `appr-10` instead of

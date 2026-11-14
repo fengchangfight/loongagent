@@ -116,7 +116,7 @@ pub(crate) fn serve(args: Args) -> Result<(), String> {
         ),
         Err(e) => return Err(format!("a skill is broken: {e}")),
     }
-    if let Ok(exe) = std::env::current_exe() {
+    if let Ok(exe) = self_exe() {
         match loong_sandbox::sandbox::self_test(&exe, &args.cwd).result {
             loong_sandbox::SelfTest::Enforced { mechanism, .. } => {
                 eprintln!("[sandbox] filesystem boundary enforced by {mechanism}");

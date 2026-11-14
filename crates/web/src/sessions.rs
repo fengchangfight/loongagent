@@ -47,6 +47,41 @@ pub fn log_path(root: &Path, workspace: &Path, id: &str) -> PathBuf {
     }
 }
 
+/// Purpose: Whatever one session's log holds, read as the page's transcript: the events of
+/// the sitting, in the order they were written, without asking the session's child.
+///
+/// Serves: `crate::app`'s `session.replay` answer.
+/// Design: `docs/design/web-surface.md` §5 — the log is the record, so a surface reads it
+/// itself; a child would answer only when its turn ends, and the point of replaying is to
+/// see the past of a session that is still busy now.
+/// Up: `dispatch_surface`.
+/// Down: `log_path`, then the JSONL lines themselves.
+/// Verify: `cargo test -p loong-web` (`replay_`).
+/// Contract: a line that does not parse is skipped, not fatal — the last line of a log being
+/// written right now is often half a line, and one torn tail must not empty the transcript.
+/// `Err` means no seat the tab can see has such a session.
+pub fn replay(root: &Path, workspaces: &[PathBuf], session_id: &str) -> Result<Vec<Value>, Error> {
+    if session_id.is_empty() {
+        return Err(Error("session.replay needs a session_id".to_string()));
+    }
+    let found = workspaces
+        .iter()
+        .map(|workspace| log_path(root, workspace, session_id))
+        .find(|path| path.exists())
+        .ok_or_else(|| Error(format!("no session {session_id} in this workspace")))?;
+    let text = std::fs::read_to_string(&found)
+        .map_err(|e| Error(format!("cannot read {}: {e}", found.display())))?;
+    let events = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        // One bad line is one lost event, not a lost sitting: a log being appended to has a
+        // torn tail, and a reader that gave up on the whole file would show nothing at all.
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|event| event.is_object())
+        .collect();
+    Ok(events)
+}
+
 /// Purpose: The sessions of one workspace, newest first, as the page's rail renders them.
 /// Serves: `crate::app`'s `session.list` answer.
 /// Design: `docs/design/web-surface.md` §2.

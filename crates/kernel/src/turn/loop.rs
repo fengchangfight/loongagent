@@ -292,6 +292,28 @@ impl Kernel {
         scope: ApprovalScope,
         reason: Option<&str>,
     ) -> Result<TurnOutcome, KernelError> {
+        self.respond_to_approval_with(request_id, granted, scope, reason, &mut |_| {})
+    }
+
+    /// Answer a pending approval while narrating the resumed turn to whoever asked.
+    ///
+    /// Purpose: Record the decision and run the rest of the turn with the model's own
+    /// words reachable as they arrive, exactly as `submit_with` does for a new turn.
+    /// Serves: a surface that answered the question and must therefore keep watching —
+    /// the resumed turn can be long, and a silent one reads as a click that did nothing.
+    /// Design: `docs/design/kernel-loop.md` §5, `docs/design/flows/tool-approval.md` §2.
+    /// Up: `Server`'s `approval.respond` handler, through `respond_to_approval`.
+    /// Down: `Kernel::run` with the caller's sink; the same body as
+    /// `respond_to_approval`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_resumed_turn_reaches_the_observer`.
+    pub fn respond_to_approval_with(
+        &mut self,
+        request_id: &str,
+        granted: bool,
+        scope: ApprovalScope,
+        reason: Option<&str>,
+        on_delta: &mut dyn FnMut(&str),
+    ) -> Result<TurnOutcome, KernelError> {
         let Some(pending) = self.pending.take() else {
             return Err(KernelError::OutOfOrder("no approval is pending".into()));
         };
@@ -347,9 +369,11 @@ impl Kernel {
             };
             events.push(self.record_tool_result(&pending.call_id, false, &output)?);
         }
-        // Resuming after an approval has no observer: the surface that answered the
-        // question already has the flow, and a new one would have to attach first.
-        self.run(events, &mut |_| {})
+        // The same observer the prompt had: answering a question does not hand the
+        // rest of the turn to nobody. A surface that asked and answered is watching,
+        // and the resumed turn's own deltas and events must reach it as they happen —
+        // the bug was a click that resumed a whole turn in silence.
+        self.run(events, on_delta)
     }
 
     // ------------------------------------------------------------- the loop
@@ -366,7 +390,7 @@ impl Kernel {
     /// Serves: a background worker that must not enrich context in the middle of a
     /// turn.
     /// Design: `docs/design/kernel-loop.md` §2.
-    /// Up: `Kernel::submit_with` and `Kernel::respond_to_approval`.
+    /// Up: `Kernel::submit_with` and `Kernel::respond_to_approval_with`.
     /// Down: `Kernel::run_inner`, `ContextEngine::set_foreground_busy`.
     /// Verify: `cargo test -p loong-kernel turn::`.
     fn run(

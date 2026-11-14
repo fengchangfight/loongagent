@@ -126,40 +126,37 @@ pub(crate) fn web(args: Args) -> Result<(), String> {
     // session the caller named (or a freshly minted one), so two sessions in one
     // directory run as two children that never see each other's kernel
     // (web-surface.md §3).
-    let start_session = move |dir: &std::path::Path,
-                              session: Option<&str>|
-          -> Result<
-        (
-            std::sync::Arc<std::sync::Mutex<dyn loong_web::Session>>,
-            String,
-        ),
-        String,
-    > {
-        let mut workspace_args = args.clone();
-        workspace_args.cwd = dir.to_path_buf();
-        // Resolve the session to its log path here, on the cli side, so the web crate
-        // never learns the id → file rule. `Some(id)` binds the child to an existing
-        // session; `None` mints a fresh id (web-surface.md §2). The id is returned so
-        // the surface can attach the tab to the child's real session without having
-        // to ask the child (web-surface.md §3).
-        let (path, id) = match session {
-            Some(id) => (crate::session::resolve_session(id, dir)?, id.to_string()),
-            None => {
-                let id = crate::session::new_session_id(dir);
-                let path =
-                    crate::session::session_file_in(&loong_config::loongagent_home(), dir, &id);
-                (path, id)
-            }
+    let start_session =
+        move |dir: &std::path::Path, session: Option<&str>| -> Result<loong_web::Started, String> {
+            let mut workspace_args = args.clone();
+            workspace_args.cwd = dir.to_path_buf();
+            // Resolve the session to its log path here, on the cli side, so the web crate
+            // never learns the id → file rule. `Some(id)` binds the child to an existing
+            // session; `None` mints a fresh id (web-surface.md §2). The id is returned so
+            // the surface can attach the tab to the child's real session without having
+            // to ask the child (web-surface.md §3).
+            let (path, id) = match session {
+                Some(id) => (crate::session::resolve_session(id, dir)?, id.to_string()),
+                None => {
+                    let id = crate::session::new_session_id(dir);
+                    let path =
+                        crate::session::session_file_in(&loong_config::loongagent_home(), dir, &id);
+                    (path, id)
+                }
+            };
+            workspace_args.session = Some(path);
+            // The path above is already resolved, so the spec/new flags must not make the
+            // child re-derive it.
+            workspace_args.session_spec = None;
+            workspace_args.new_session = false;
+            workspace_args.session_source = SessionSource::Named;
+            let portal = make_session(&workspace_args)?;
+            Ok(loong_web::Started {
+                session: portal.session,
+                session_id: id,
+                channel: portal.channel,
+            })
         };
-        workspace_args.session = Some(path);
-        // The path above is already resolved, so the spec/new flags must not make the
-        // child re-derive it.
-        workspace_args.session_spec = None;
-        workspace_args.new_session = false;
-        workspace_args.session_source = SessionSource::Named;
-        let portal = make_session(&workspace_args)?;
-        Ok((portal.session, id))
-    };
 
     let url = format!("http://{addr}/#token={token}");
     println!("loongagent web — open this URL:");
@@ -354,6 +351,9 @@ pub(crate) struct Portal {
     pub(crate) settings: loong_config::Profile,
     /// Purpose: The server child's process id, for `loong_tui::interrupt`.
     pub(crate) server_pid: u32,
+    /// Purpose: The private way into that child while a turn holds its bridge, or `None` where
+    /// the platform has no control channel (`loong_web::PermissionChannel`).
+    pub(crate) channel: Option<loong_web::PermissionChannel>,
 }
 
 /// Purpose: Build the kernel-backed `Session` shared by every socket, with the
@@ -384,6 +384,9 @@ pub(crate) fn make_session(args: &Args) -> Result<Portal, String> {
             }
         });
     }
+    // Taken before the transport goes into the session: this is the one handle that does not
+    // wait for a running turn, and the reason the page's YOLO switch works mid-turn.
+    let channel = transport.permission_channel();
     let session: std::sync::Arc<std::sync::Mutex<dyn loong_web::Session>> =
         std::sync::Arc::new(std::sync::Mutex::new(WebSession {
             transport,
@@ -393,5 +396,6 @@ pub(crate) fn make_session(args: &Args) -> Result<Portal, String> {
         session,
         settings,
         server_pid,
+        channel,
     })
 }

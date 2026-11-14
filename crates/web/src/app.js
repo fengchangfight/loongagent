@@ -16,6 +16,7 @@
 const state = {
   ws: null,              // the socket to the surface
   seq: 0,                // next request id
+  drawnTo: 0,            // the highest event seq this transcript already holds
   pending: new Map(),    // id → {resolve, reject}
   token: null,
 
@@ -233,6 +234,10 @@ function onLine(raw) {
     else resolve(msg.result);
     return;
   }
+  // Every forwarded line names the session that wrote it. A turn left running in one
+  // session goes on writing while the tab shows another, and its events must not land in
+  // this chat: the transcript on screen is one session's (web-surface.md §3).
+  if (msg.session_id && state.sessionId && msg.session_id !== state.sessionId) return;
   // A notification: a session event or a model delta.
   if (msg.method === "event" && msg.params) {
     onEvent(msg.params);
@@ -523,6 +528,23 @@ function wireShortcuts() {
   });
 }
 
+/* Whether the session on screen has a turn in flight.
+ *
+ * "Running" belongs to a session, not to the page: a tab that switches away from a
+ * working session must not carry its spinner into an idle one, where Stop would end
+ * somebody else's turn — and switching back must show the spinner again, because that
+ * turn really is still going. The surface keeps the flag per child, and `session.tree`
+ * is where the rail already reads it from (web-surface.md §3). */
+function busySession(id) {
+  if (!id) return false;
+  for (const w of state.workspaces) {
+    for (const s of w.sessions || []) {
+      if (s.id === id) return !!s.busy;
+    }
+  }
+  return false;
+}
+
 /* ── YOLO: the session's approval prompts, off or on ──────────────────── */
 
 /* ADR-0007 §5: opting out is itself shown. The switch says its own state in
@@ -531,16 +553,19 @@ function wireShortcuts() {
  * It draws what the session says, never its own guess: `permissions.relaxed` is
  * the record and `permissions.set`'s answer is the confirmation, so opening an
  * old session shows the opt-out that session really has (web-surface.md §4,
- * ADR-0020). A turn owns the session, so the flip waits for it to end: the TUI
- * reaches a running turn over the private control channel of ADR-0019, and this
- * surface, which has none, disables the switch for the length of a turn instead
- * of showing a state it cannot enforce. */
+ * ADR-0020). A turn owns the session, but the flip no longer waits for it to end: the
+ * surface reaches a running turn over the same private control channel the TUI uses
+ * (ADR-0019), and answers at once. The answer says when it lands — `queued: false` means
+ * the running turn applies it at its next step, and its own `permissions.relaxed` is the
+ * record — so the switch never claims a state that is not in the log yet. On a platform
+ * with no channel the surface forwards the request and the flip lands when the turn ends,
+ * which is what the switch says then (web-surface.md §4). */
 
 function renderYolo() {
   const on = state.autoApprove;
   dom.yolo.classList.toggle("on", on);
   dom.yolo.setAttribute("aria-pressed", on ? "true" : "false");
-  dom.yolo.disabled = !state.sessionId || state.running;
+  dom.yolo.disabled = !state.sessionId;
   // The same gate the slots carry: adopting a model reloads the live children, and the
   // surface refuses that outright while a turn is running (web-surface.md §6).
   dom.addModel.disabled = state.running;
@@ -551,7 +576,7 @@ function renderYolo() {
 }
 
 async function setYolo(on) {
-  if (!state.sessionId || state.running || on === state.autoApprove) return;
+  if (!state.sessionId || on === state.autoApprove) return;
   state.autoApprove = on; // the round trip only; the answer below is what stays
   renderYolo();
   try {
@@ -561,11 +586,15 @@ async function setYolo(on) {
     });
     state.autoApprove = !!result.auto_approve;
     renderYolo();
+    // A flip that reached the running turn applies at its next step, not before: say
+    // when, rather than let the switch look like it did nothing for a while.
+    const later = result.queued === false;
+    const when = later ? "（正在跑的回合会在下一步应用）" : "";
     notice(
       state.autoApprove ? "warn" : "info",
-      state.autoApprove
+      (state.autoApprove
         ? "这个会话的审批提示已关闭——沙箱仍然生效"
-        : "这个会话的审批提示已重新开启",
+        : "这个会话的审批提示已重新开启") + when,
     );
   } catch (e) {
     state.autoApprove = !on; // nothing was recorded, so nothing changed
@@ -1095,9 +1124,11 @@ async function newSession(workspace) {
     // A session starts with prompts on; the replay after `session.open` is what
     // re-applies a `permissions.relaxed` this page never saw (web-surface.md §4).
     state.autoApprove = false;
+    state.running = false;
     clearChat();
     await refreshSessions();
     await refreshModels();
+    setThinking(false);
     setStatus(`会话 ${state.sessionId}`, "ok");
   } catch (e) {
     notice("error", `session.new: ${e.message}`);
@@ -1105,7 +1136,8 @@ async function newSession(workspace) {
 }
 
 async function openSession(id, workspaceIndex) {
-  if (state.running) return;
+  // Switching is not a prompt and does not touch the session that is working: the tab
+  // moves, the turn it left behind keeps going on its own child (web-surface.md §3).
   try {
     // The surface binds a child to this session (starting one if none is live) and
     // attaches the tab; there is no "current session" to name, so none is sent.
@@ -1117,8 +1149,13 @@ async function openSession(id, workspaceIndex) {
     // Whatever the previous session was, this one's record decides: the replay
     // below carries any `permissions.relaxed` it already has (web-surface.md §4).
     state.autoApprove = false;
+    state.running = false;
     clearChat();
     await refreshSessions();
+    // The session on screen decides the indicators: if it is the one still working, say so.
+    state.running = busySession(state.sessionId);
+    setThinking(state.running);
+    renderModels();
     await replay(result.session_id);
     await refreshModels();
     setStatus(`会话 ${state.sessionId}`, "ok");
@@ -1208,6 +1245,8 @@ function renderWords(container, text) {
 
 function clearChat() {
   dom.messages.innerHTML = "";
+  // A cleared transcript holds no events, so nothing is a duplicate of it any more.
+  state.drawnTo = 0;
   state.turn = null;
   state.lastTurn = null;
   state.draft = null;
@@ -1331,7 +1370,13 @@ function closeTurn() {
     state.draftRaw = "";
     return;
   }
-  if (turn.replayed) turn.panel.open = false;
+  // A replayed turn folds shut as a record — unless it still holds a question no decision
+  // has settled: that question is the turn's live content, and folding it would hide the
+  // buttons a refreshed page has just made clickable again (web-surface.md §4). A retired
+  // question is a record like the rest, so it does not hold the turn open.
+  if (turn.replayed && !turn.body.querySelector(".approval:not(.answered):not(.expired)")) {
+    turn.panel.open = false;
+  }
   state.turn = null;
   // Where the turn an out-of-prompt event belongs: it joins this card instead of
   // opening a new one.
@@ -1497,14 +1542,102 @@ async function replay(id) {
   } finally {
     state.replaying = false;
   }
-  // The log has no "turn over" event: the last turn ends where the log does.
+  // Asked *after* the log is drawn, because `session.attach` reports the kernel's state
+  // now: `pending_approval` is the one question this page is allowed to make answerable,
+  // and every other open one is a record of a process that is gone. It is a read:
+  // nothing is recorded and nothing is streamed (sessions-lineage.md §5).
+  let live = null;
+  let known = false;
+  try {
+    // `cwd` is the directory this tab stands in; the surface does not read it, but the
+    // call carries it so a log read from a script and from the page look the same.
+    const seat = state.workspaces.find((w) => w.index === state.seat);
+    const attached = await sendRequest("session.attach", {
+      cwd: (seat && seat.dir) || "",
+      client: "web",
+    });
+    live = attached.pending_approval || null;
+    known = true;
+  } catch (e) {
+    // Without the kernel's word nothing is retired: a question drawn `held` is already
+    // out of reach, and inventing "the process is gone" for one would be the same guess
+    // that made this wrong before.
+    notice(
+      "warn",
+      `session.attach: ${e.message} —— 没能确认这个会话还在等哪个问题，刷新页面再看一次`,
+    );
+  }
+  // The log has no "turn over" event: the last turn ends where the log does — after the
+  // dead questions are put away, so a turn whose only question is a record folds shut.
+  if (known) retireQuestions(live);
   closeTurn();
   scrollDown();
 }
 
+/* Answering a question is one rule, and the kernel is the only one who can say yes.
+ *
+ * The log carries `approval.requested` and, if the person answered, `approval.decided`.
+ * It carries no "and now nobody is waiting": that fact lives in `Kernel.pending`, in
+ * memory, in the process that asked. So the log alone can tell a *record* from an *open
+ * question*, never an *answerable* one from a dead one — and a page that guesses gets it
+ * wrong in both directions. It has done, twice: every replayed question was drawn
+ * clickable and every click was doomed, then every replayed question was greyed and a
+ * page refreshed on a live question could never answer it.
+ *
+ * So the page does not guess. A question is drawn *held* (buttons there, out of reach),
+ * and `retireQuestions` — one pass, after the log is drawn — splits them three ways by
+ * what is actually known:
+ *   - `answered`: the log holds its decision. A record, greys, stays.
+ *   - `live`: `session.attach` named it — the kernel is waiting on this one right now.
+ *     Its buttons come into reach. A question arriving on the live stream is live by
+ *     construction, so it is let through the same door (`openBox`).
+ *   - everything else open: the process that asked it is gone, so a click could only
+ *     return `no approval is pending`. Retired with one line saying so.
+ * The pass walks the transcript and matches ids there, so one box is one row of the
+ * transcript and no second register can drift out of step with it. */
+function retireQuestions(live) {
+  for (const box of document.querySelectorAll("#chat .approval")) {
+    if (box.classList.contains("answered")) continue;
+    if (box.dataset.request && box.dataset.request === live) {
+      openBox(box);
+      continue;
+    }
+    if (!box.classList.contains("held")) continue; /* already spent by its own click */
+    retireBox(box, RETIRED);
+  }
+}
+
+/* Put a question out of reach where it sits, with the line that says why. Dashed and
+ * greyed rather than marked answered: nobody decided it. */
+function retireBox(box, why) {
+  box.classList.remove("held");
+  box.classList.add("expired");
+  for (const button of box.querySelectorAll("button")) {
+    button.disabled = true;
+  }
+  const what = box.querySelector(".what");
+  if (what && !box.querySelector(".expired-note")) {
+    what.appendChild(node("span", "expired-note", why));
+  }
+}
+
+/* The one line a dead question carries. */
+const RETIRED = "这个问题是之前那个进程问的，那个进程已经不在了，所以现在没法再答 —— 重新发一次提问即可";
+
 /* ── Events: one handler for live and replayed ones ───────────────────── */
 
 function onEvent(env, replayed) {
+  // A log line and the live stream can carry the same event: switching away from a busy
+  // session and back replays what was written while the tab looked elsewhere, and lines
+  // already queued for this socket may still arrive afterwards. `seq` is the log's own
+  // order and only grows, so the highest one drawn says what is already on screen — the
+  // replayed line and the streamed line for one event are the same event, drawn once
+  // (web-surface.md §5). A surface-made notice carries `seq: 0` and is never a duplicate.
+  const seq = typeof env.seq === "number" ? env.seq : 0;
+  if (seq > 0) {
+    if (seq <= state.drawnTo) return;
+    state.drawnTo = seq;
+  }
   const kind = env.kind;
   const data = env.data || {};
   switch (kind) {
@@ -1558,6 +1691,10 @@ function onEvent(env, replayed) {
       showApproval(data, replayed);
       break;
     case "approval.decided": {
+      // The decision that settles a question: this tab's, another tab's, or one replayed
+      // from the log after a refresh. The box is found by the request it answers, so a
+      // replayed log greys exactly the questions that were answered.
+      decideQuestions(data.request_id, !!data.granted, data.scope);
       const chip = addStep("审批", data.granted ? "已批准" : "已拒绝", data.granted ? "ok" : "deny");
       if (data.reason) chip.appendChild(node("span", "rule", data.reason));
       break;
@@ -1626,13 +1763,15 @@ function onEvent(env, replayed) {
  * event's own id — an event id is the log's, and `approval.respond` would not recognise
  * it.
  *
- * A replayed request is a record of the past, not a question still open: its turn ended
- * when the log did, so there is no pending request left to answer and every button would
- * fail. It is drawn answered — greyed and disabled by the `answered` class — the same way
- * a request answered in this page is drawn after the click. */
+ * A question goes grey when its decision arrives, and only then — `decideBox`, which the
+ * click, a replayed log and another tab's answer all come through. Answerability is a
+ * different fact and has its own one door: see `retireQuestions`. */
 function showApproval(data, replayed) {
   const turn = ensureTurn();
   const box = node("div", "approval");
+  // The request id travels with the box: the retirement pass and each decision find boxes
+  // by it in the transcript, so one box is one row and there is no second register.
+  box.dataset.request = data.request_id || "";
   const what = node("div", "what");
   what.appendChild(node("div", "headline", "请求审批"));
   if (data.action_class) what.appendChild(node("span", "class", data.action_class));
@@ -1641,14 +1780,17 @@ function showApproval(data, replayed) {
   const approveSession = node("button", "approve", "本会话内都批准");
   const refuse = node("button", "refuse", "拒绝");
   const answer = (granted, scope) => {
-    box.classList.add("answered");
-    approve.textContent = granted && scope === "once" ? "已批准 ✓" : "批准";
-    approveSession.textContent = granted && scope === "session" ? "已批准 ✓" : "本会话内都批准";
-    refuse.textContent = granted ? "拒绝" : "已拒绝 ✕";
+    // The click spends the buttons at once — one question takes one answer — but the
+    // decision is drawn only once the kernel has taken it. Grey "已批准 ✓" laid down on a
+    // guess is the same lie as a replayed question drawn answered.
+    [approve, approveSession, refuse].forEach((button) => {
+      button.disabled = true;
+    });
     // Answering resumes the turn, and the resumed turn makes model calls that can take as
-    // long as any other: the spinner says so and Stop can end it (web-surface.md §4). This
-    // is the request whose 500 used to arrive as "approval.respond: model: transport: HTTP
-    // 500" with the tool already run and no way to end what followed.
+    // long as any other: the spinner says so and Stop can end it (web-surface.md §4). The
+    // server runs that resume in front of this connection exactly as it runs a new turn,
+    // so `approval.decided` greys this box the moment it is recorded and the rest of the
+    // turn streams into the transcript as it happens — not one silent block at the end.
     state.running = true;
     renderModels();
     setThinking(true);
@@ -1661,31 +1803,87 @@ function showApproval(data, replayed) {
       // not ask again. "once" runs this call and forgets.
       scope,
     })
-      .catch((e) => notice("error", `approval.respond: ${e.message}`))
+      // The decision itself arrives as the event the resume streams; this is the same
+      // fact in the answer, for the case where the event was lost on the way.
+      .then(() => decideBox(box, granted, scope))
+      .catch((e) => {
+        notice("error", `approval.respond: ${e.message}`);
+        if (String(e.message).includes("no approval is pending")) {
+          // The kernel does not hold this question, so it was never ours to answer: the
+          // box becomes the record it always was, and the line says why.
+          retireBox(box, RETIRED);
+        } else {
+          // Anything else — a broken socket, a locked session — leaves the question open,
+          // so the buttons come back and the user can try again.
+          openBox(box);
+        }
+      })
       .finally(() => {
         state.running = false;
         renderModels();
         setThinking(false);
+        // The answer's response is the resumed turn's end, exactly as `submit`'s response
+        // is a new turn's: the events of the resume belong to a card, and that card ends
+        // here. A question the resume parks on opens its own box in it.
+        closeTurn();
       });
   };
   approve.onclick = () => answer(true, "once");
   approveSession.onclick = () => answer(true, "session");
   refuse.onclick = () => answer(false, "once");
-  if (replayed) {
-    // Nothing to answer: the request left the session when its turn ended. Grey it and
-    // take the buttons out of reach, so the record cannot be mistaken for a question.
-    box.classList.add("answered");
-    [approve, approveSession, refuse].forEach((button) => {
-      button.disabled = true;
-    });
-  }
   box.appendChild(what);
   box.appendChild(approve);
   box.appendChild(approveSession);
   box.appendChild(refuse);
   turn.body.appendChild(box);
+  // Held means "there are buttons here and the kernel has not said this one is yours":
+  // a question replayed from the log is not answerable until `retireQuestions` asks, and
+  // a question arriving on the live stream is — the kernel just asked it.
+  if (replayed) hold(box);
+  else openBox(box);
   turn.panel.open = true;
   scrollDown();
+}
+
+/* The record of a decision, wherever it was made: greyed by `answered`, and the button
+ * that was taken says so. */
+function decideBox(box, granted, scope) {
+  box.classList.remove("held");
+  box.classList.remove("expired");
+  // A decision outranks the page's earlier guess: this question was put away as dead and
+  // was not — another tab answered it, or the kernel recorded it late.
+  const note = box.querySelector(".expired-note");
+  if (note && note.parentElement) note.parentElement.removeChild(note);
+  box.classList.add("answered");
+  const buttons = box.querySelectorAll("button");
+  if (buttons[0]) buttons[0].textContent = granted && scope === "once" ? "已批准 ✓" : "批准";
+  if (buttons[1]) {
+    buttons[1].textContent = granted && scope === "session" ? "已批准 ✓" : "本会话内都批准";
+  }
+  if (buttons[2]) buttons[2].textContent = granted ? "拒绝" : "已拒绝 ✕";
+  for (const button of buttons) button.disabled = true;
+}
+
+/* A decision finds its question in the transcript, by the id the question carried — the
+ * same road for this tab's click, a decision replayed from the log, and one made in
+ * another tab on the same session. */
+function decideQuestions(requestId, granted, scope) {
+  if (!requestId) return;
+  for (const box of document.querySelectorAll("#chat .approval")) {
+    if (box.dataset.request === requestId) decideBox(box, granted, scope);
+  }
+}
+
+/* A question with buttons that reach nothing yet: drawn, not answerable. */
+function hold(box) {
+  box.classList.add("held");
+  for (const button of box.querySelectorAll("button")) button.disabled = true;
+}
+
+/* The kernel named this question: its buttons are the answer it waits for. */
+function openBox(box) {
+  box.classList.remove("held");
+  for (const button of box.querySelectorAll("button")) button.disabled = false;
 }
 
 /* ── Usage: the TUI's own five numbers, in the browser ────────────────── */
@@ -1908,6 +2106,9 @@ async function submit() {
   }
   dom.prompt.value = "";
   dom.prompt.style.height = "auto";
+  // The answer to this prompt may arrive after the tab has moved to another session,
+  // and it ends *that* turn, not whatever is on screen by then (web-surface.md §3).
+  const asked = state.sessionId;
   state.running = true;
   renderModels();
   setThinking(true);
@@ -1924,10 +2125,12 @@ async function submit() {
   } catch (e) {
     notice("error", `prompt.submit: ${e.message}`);
   } finally {
-    state.running = false;
-    renderModels();
-    setThinking(false);
-    closeTurn();
+    if (asked === state.sessionId) {
+      state.running = false;
+      renderModels();
+      setThinking(false);
+      closeTurn();
+    }
   }
 }
 

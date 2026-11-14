@@ -27,6 +27,11 @@ pub(crate) struct ChildTransport {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
+    /// The write end of the private control channel, kept here as well as in the closure the
+    /// screen calls: a surface with no screen (the web page) reaches a running turn through
+    /// `permission_channel`, and neither copy can be taken from the other.
+    #[cfg(unix)]
+    control: Option<std::sync::Arc<std::os::unix::net::UnixStream>>,
 }
 
 impl ChildTransport {
@@ -40,11 +45,43 @@ impl ChildTransport {
         self.child.id()
     }
 
+    /// Purpose: Hand out the private way into this child, so a surface with no screen can turn
+    /// its permission prompts off or on while a turn owns the child's stdin.
+    ///
+    /// Serves: `web::make_session`, whose page has a YOLO switch and no keyboard to reach the
+    /// terminal's own `/yolo`.
+    /// Design: `docs/design/web-surface.md` §4; ADR-0019.
+    /// Up: `web::make_session`.
+    /// Down: the write end of the control channel, kept beside the closure the TUI calls.
+    /// Verify: `cargo test -p loongagent --test web_surface`.
+    /// Contract: `None` where the platform has no descriptor inheritance, and the page then
+    /// keeps the queued behaviour it had before there was a channel.
+    #[cfg(unix)]
+    pub(crate) fn permission_channel(&self) -> Option<loong_web::PermissionChannel> {
+        let write = std::sync::Arc::clone(self.control.as_ref()?);
+        // The ask only asks: `permissions.relaxed` in the session log is what says the turn
+        // applied it. A write that fails means the turn that owned the channel is gone.
+        Some(std::sync::Arc::new(move |on: bool| ask_yolo(&write, on)))
+    }
+
+    /// Purpose: The same hand-out on a platform with no control channel: there is none.
+    ///
+    /// Serves: `web::make_session`, which has to compile here too.
+    /// Design: `docs/design/web-surface.md` §4.
+    /// Up: `web::make_session`.
+    /// Down: nothing — this platform has no descriptor to write on.
+    /// Verify: `cargo build --workspace` on Windows.
+    /// Contract: always `None`; the caller keeps the queued behaviour it had before.
+    #[cfg(not(unix))]
+    pub(crate) fn permission_channel(&self) -> Option<loong_web::PermissionChannel> {
+        None
+    }
+
     /// Purpose: Start the same binary as `server --stdio`, carrying this run's session layer to it, and optionally pipe its diagnostics.
     /// Serves: `full_screen`, `repl`, `headless` and `web`.
     /// Design: `docs/design/surfaces.md` §3 (each surface spawns its own child).
     /// Up: `full_screen`, `repl`, `headless` and `web`; no other caller.
-    /// Down: `std::process::Command`, `LOONGAGENT_SERVER_BIN` and a reader thread when notes are captured.
+    /// Down: `std::process::Command`, `crate::self_exe`, `LOONGAGENT_SERVER_BIN` and a reader thread when notes are captured.
     /// Verify: `cargo test -p loongagent --test tui_surface`.
     /// `capture_notes` pipes the server's stderr instead of inheriting it: a
     /// full-screen UI owns the terminal, so diagnostics must be drawn, not dumped.
@@ -52,13 +89,24 @@ impl ChildTransport {
         args: &Args,
         capture_notes: bool,
     ) -> Result<(Self, Option<Receiver<String>>, Option<Box<dyn Fn(bool)>>), String> {
-        // Same binary by default; overridable so a *test* binary can point at the
-        // built server (an integration test's current_exe is the test harness).
+        // Same build by default, from the *image* rather than the launch path: a surface
+        // that outlives a rebuild (`loongagent web`) must still start its next child
+        // (web-surface.md §3). Overridable so a *test* binary can point at the built
+        // server (an integration test's own image is the test harness).
         let exe = match std::env::var_os("LOONGAGENT_SERVER_BIN") {
             Some(path) => PathBuf::from(path),
-            None => std::env::current_exe().map_err(|e| e.to_string())?,
+            None => crate::self_exe()?,
         };
-        let mut command = Command::new(exe);
+        let mut command = Command::new(&exe);
+        // The child *is* this build, but `ps` should still name it the way a person
+        // typed it, not `/proc/self/exe`.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            if let Ok(launched_as) = std::env::current_exe() {
+                command.arg0(launched_as);
+            }
+        }
         // Windows: the server leads its own process group, which is how `interrupt()`
         // aims a console control event at it alone (`GenerateConsoleCtrlEvent` takes a
         // group id, and a `CTRL_C_EVENT` could not be limited to one group). Unix needs
@@ -163,7 +211,16 @@ impl ChildTransport {
                 Stdio::inherit()
             })
             .spawn()
-            .map_err(|e| format!("spawning the local server: {e}"))?;
+            // A path that is gone is the failure worth naming: the error number alone
+            // ("os error 2") leaves the person with nothing to do about it.
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => format!(
+                    "spawning the local server from {}: {e} — that file is gone; \
+                     restart loongagent",
+                    exe.display()
+                ),
+                _ => format!("spawning the local server: {e}"),
+            })?;
         let stdin = child.stdin.take().ok_or("no stdin on the server child")?;
         let stdout = BufReader::new(child.stdout.take().ok_or("no stdout on the server child")?);
         let notes = if capture_notes {
@@ -187,8 +244,10 @@ impl ChildTransport {
         // that owns the connection is already gone. The `permissions.relaxed` event is
         // the confirmation; the write only asks.
         #[cfg(unix)]
+        let control_write = std::sync::Arc::new(control_write);
+        #[cfg(unix)]
         let control: Option<Box<dyn Fn(bool)>> = {
-            let write = std::sync::Arc::new(control_write);
+            let write = std::sync::Arc::clone(&control_write);
             Some(Box::new(move |on: bool| {
                 use std::io::Write;
                 let line = if on { "yolo on\n" } else { "yolo off\n" };
@@ -202,6 +261,8 @@ impl ChildTransport {
                 child,
                 stdin,
                 stdout,
+                #[cfg(unix)]
+                control: Some(control_write),
             },
             notes,
             control,
@@ -413,4 +474,48 @@ pub(crate) fn full_screen(args: Args) -> Result<(), String> {
     println!("session {}", closed.session);
     println!("reopen:  loongagent resume {}", closed.session);
     closed.outcome
+}
+
+/// Purpose: Write the control channel's own line for one YOLO flip — the line the server reads
+/// (`crates/server/src/lib.rs`, `the_control_channel_leaves_a_permissions_request_for_the_kernel`).
+///
+/// Serves: `ChildTransport::permission_channel`, so the web page and the screen say the same
+/// words down the same private descriptor (ADR-0019).
+/// Design: `docs/design/web-surface.md` §4.
+/// Up: `permission_channel`'s closure.
+/// Down: the write end of the socketpair the spawning process kept.
+/// Verify: `cargo test -p loongagent --bin loongagent a_yolo_flip`.
+/// Contract: `Err` means the child and its channel are gone; the caller falls back to the
+/// request that waits for the turn.
+#[cfg(unix)]
+fn ask_yolo(write: &std::os::unix::net::UnixStream, on: bool) -> Result<(), String> {
+    use std::io::Write;
+    let line = if on { "yolo on\n" } else { "yolo off\n" };
+    // A `&UnixStream` is itself a `Write`, which keeps the channel shared by reference.
+    let mut sink = write;
+    sink.write_all(line.as_bytes())
+        .map_err(|e| format!("the control channel: {e}"))
+}
+
+#[cfg(all(test, unix))]
+mod yolo_tests {
+    use super::*;
+    use std::io::Read;
+
+    /// Purpose: prove the CLI writes the exact bytes the server's reader expects.
+    #[test]
+    fn a_yolo_flip_writes_the_line_the_server_reads() {
+        let (write, mut read) = std::os::unix::net::UnixStream::pair().unwrap();
+        ask_yolo(&write, true).unwrap();
+        ask_yolo(&write, false).unwrap();
+        let wanted = b"yolo on\nyolo off\n";
+        let mut heard = Vec::new();
+        let mut buf = [0u8; 32];
+        while heard.len() < wanted.len() {
+            let n = read.read(&mut buf).unwrap();
+            assert!(n > 0, "the channel closed before the flip was written");
+            heard.extend_from_slice(&buf[..n]);
+        }
+        assert_eq!(heard, wanted);
+    }
 }

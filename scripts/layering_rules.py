@@ -31,7 +31,7 @@ ALLOWED = {
     "loong-manifest": set(),
     "loong-providers": {"loong-schema", "loong-http"},
     "loong-sandbox": {"loong-schema"},
-    "loong-tools": {"loong-schema", "loong-proc"},
+    "loong-tools": {"loong-schema", "loong-proc", "loong-http"},
     "loong-hooks": {"loong-schema", "loong-http", "loong-proc", "loong-manifest"},
     "loong-mcp": {"loong-schema", "loong-protocol", "loong-http", "loong-tools", "loong-manifest"},
     "loong-skills": {"loong-schema", "loong-tools"},

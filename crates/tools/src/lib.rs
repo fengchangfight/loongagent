@@ -2,9 +2,9 @@
 //!
 //! # Contract
 //! - **Serves:** the kernel's registry and dispatch, the MCP adapter and the skill tool.
-//! - **Design:** `docs/design/tools-permissions.md` §1–§6.
+//! - **Design:** `docs/design/tools-permissions.md` §1–§6; `docs/design/web-fetch.md` for `web_fetch`.
 //! - **Upstream:** the kernel's build step, `loong-mcp` and `loong-skills`.
-//! - **Downstream:** `loong_proc` for children, and the kernel's `ExecContext`.
+//! - **Downstream:** `loong_proc` for children, `loong_http` for `web_fetch`'s one request, and the kernel's `ExecContext`.
 //! - **Verify:** `cargo test -p loong-tools` · `./scripts/check.sh`
 //!
 //! Tools behind one uniform, MCP-shaped interface — built-ins included
@@ -19,6 +19,7 @@
 
 pub mod deferred;
 pub mod search;
+pub mod web_fetch;
 
 use deferred::DeferredTool;
 use loong_schema::generated::{ActionClass, Json};
@@ -164,11 +165,11 @@ impl Registry {
     }
 
     /// The registry a fresh session starts with.
-    /// Purpose: The registry a fresh session starts with: read, write, edit, grep, glob and shell.
+    /// Purpose: The registry a fresh session starts with: read, write, edit, grep, glob, shell and web_fetch.
     /// Serves: the kernel's build step before MCP and skill tools are added.
     /// Design: `docs/design/tools-permissions.md` §6.
     /// Up: the kernel's build step.
-    /// Down: `new`, `register` and the six built-in types.
+    /// Down: `new`, `register` and the seven built-in types.
     /// Verify: `cargo test -p loong-tools`.
     pub fn with_builtins() -> Self {
         let mut r = Self::new();
@@ -178,6 +179,7 @@ impl Registry {
         r.register(Grep);
         r.register(Glob);
         r.register(Shell::default());
+        r.register(web_fetch::WebFetch::default());
         r
     }
 
@@ -1390,10 +1392,18 @@ mod tests {
         let r = Registry::with_builtins();
         assert_eq!(
             r.names(),
-            vec!["edit", "glob", "grep", "read_file", "shell", "write_file"]
+            vec![
+                "edit",
+                "glob",
+                "grep",
+                "read_file",
+                "shell",
+                "web_fetch",
+                "write_file"
+            ]
         );
         let specs = r.specs();
-        assert_eq!(specs.len(), 6);
+        assert_eq!(specs.len(), 7);
         assert!(specs
             .iter()
             .any(|(n, d, _)| n == "read_file" && !d.is_empty()));

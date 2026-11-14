@@ -2289,6 +2289,7 @@ name = "loong-tools"
 version = "0.0.1"
 dependencies = [
  "glob",
+ "loong-http",
  "loong-proc",
  "loong-schema",
  "regex",

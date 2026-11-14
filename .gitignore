@@ -60,7 +60,7 @@ logs/
 #                    that directory is also the skill/command scan root and a
 #                    frontmatter-less markdown file there is a broken command.
 #
-# Its **subdirectories** are state (`projects/`, `control/`), never configuration.
+# Its **subdirectories** are state (`projects/`, `control/`, `fetch/`), never configuration.
 .loongagent/*.jsonl
 .loongagent/*.sqlite
 .loongagent/*.sqlite-*
@@ -70,6 +70,9 @@ logs/
 .loongagent/env
 .loongagent/projects/
 .loongagent/control/
+# `fetch/`: the pages `web_fetch` read, converted to text — one file per URL, kept so
+# `read_file` and `grep` can read a page again without a second request (ADR-0021).
+.loongagent/fetch/
 
 # Personal instruction files, wherever a workspace keeps one.
 AGENTS.local.md

@@ -19,7 +19,7 @@ listed is a violation. The middle column is each crate's own `//!` header.
 | `loong-control` | The control-plane client and server: fetch and verify a profile pack, cache it, and serve it. | `loong-config`, `loong-http`, `loong-pack` |
 | `loong-eventlog` | Write and read the append-only JSONL event log that is one session's source of truth. | `loong-schema` |
 | `loong-hooks` | Lifecycle hooks: the deterministic veto channel around the loop, allow / ask / deny only (ADR-0007 §7). | `loong-http`, `loong-manifest`, `loong-proc`, `loong-schema` |
-| `loong-http` | Carry one JSON request over HTTP/1.1, plain or TLS, with bounded timeouts and a streamed reply. | — |
+| `loong-http` | Carry one HTTP request — a JSON POST or a page GET — over HTTP/1.1, plain or TLS, with bounded timeouts and a bounded reply. | — |
 | `loong-index` | Answer tree, search and count queries from a disposable SQLite copy of the JSONL log. | `loong-eventlog`, `loong-schema` |
 | `loong-kernel` | The fixed kernel (ADR-0004): the model+tool loop and the context ledger that is its only write path. | `loong-config`, `loong-context`, `loong-eventlog`, `loong-hooks`, `loong-index`, `loong-mcp`, `loong-providers`, `loong-sandbox`, `loong-schema`, `loong-skills`, `loong-tools` |
 | `loong-manifest` | Gate repository manifests behind a human trust decision and a change-detection hash. | — |
@@ -44,7 +44,7 @@ listed is a violation. The middle column is each crate's own `//!` header.
 | `loong-schema` | Own the single source of truth for every message on the wire, generated once for Rust and TypeScript. | — |
 | `loong-server` | The local agent server: one session, JSON-RPC over stdio, every event streamed before the response. | `loong-eventlog`, `loong-kernel`, `loong-protocol`, `loong-schema` |
 | `loong-skills` | Skills and commands: markdown content loaded by description and expanded only on invoke. | `loong-schema`, `loong-tools` |
-| `loong-tools` | Tools behind one interface, with autonomy allocated per action and confinement on children that go through `ExecContext`/`loong_proc` (ADR-0004, ADR-0007). | `loong-proc`, `loong-schema` |
+| `loong-tools` | Tools behind one interface, with autonomy allocated per action and confinement on children that go through `ExecContext`/`loong_proc` (ADR-0004, ADR-0007). | `loong-http`, `loong-proc`, `loong-schema` |
 | `loong-tui` | The terminal client: render the server's event stream and send intents, holding no agent logic. | `loong-protocol`, `loong-schema` |
 | `loong-tui-app` | The full-screen terminal surface: the state machine, layout and palette behind ratatui's screen. | `loong-schema`, `loong-tui` |
 | `loong-web` | Serve the embedded browser page and bridge WebSocket lines to the same JSON-RPC server. | `loong-config`, `loong-schema` |

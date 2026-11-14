@@ -11,8 +11,7 @@ a single chokepoint: the kernel computes an action class for each call, asks one
 policy decision point (PDP) for allow / ask / deny plus the rule that fired, and
 only then runs the tool. Enforcement does not trust that decision alone — a
 write guard inside the tool and an OS sandbox on its children are the enforcers.
-This is the "prompts are not permissions" promise of [04](../04-system-overview.md)
-§5 in code.
+This is the "prompts are not permissions" promise of [04](../04-system-overview.md) §5 in code.
 
 ## 1. One interface, built-ins included
 
@@ -200,6 +199,7 @@ by neither the sandbox nor the built-in guards.
 | `grep`, `glob` | `Investigate` | read-only by construction, bounded output |
 | `shell` | `classify_command` | bounded output, timeout, whole process tree killed on timeout; deletion and egress are `Irreversible` |
 | `skill` | `Investigate` | loads a skill's instructions by name |
+| `web_fetch` | `OutOfBounds` | one GET of an `http(s)` URL, never a loopback or private host; HTML becomes text, saved under `.loongagent/fetch/`, and the model reads an excerpt ([web-fetch.md](web-fetch.md)) |
 | `mcp__<server>__<tool>` | from `mcp.toml` | a server process the kernel starts at build; not covered by `ExecContext` confinement (§4) |
 
 **`recall` is the exception.** It is not in the `Registry` and it never reaches

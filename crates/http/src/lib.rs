@@ -1,14 +1,15 @@
-//! Purpose: Carry one JSON request over HTTP/1.1, plain or TLS, with bounded timeouts and a streamed reply.
+//! Purpose: Carry one HTTP request — a JSON POST or a page GET — over HTTP/1.1, plain or TLS, with bounded timeouts and a bounded reply.
 //!
 //! # Contract
-//! - **Serves:** the wire beneath provider calls, HTTP hooks, the context summarizer and the control client, so none owns a transport (config-routing.md §8).
-//! - **Design:** `docs/design/config-routing.md` §8 (providers); `docs/design/control-plane.md` (the control client).
-//! - **Upstream:** `loong-providers`' adapter and probe, the HTTP hook kind, `loong-context`'s summarizer and `loong-control`'s client.
+//! - **Serves:** the wire beneath provider calls, HTTP hooks, the context summarizer, the control client, the MCP HTTP transport and `web_fetch`, so none owns a transport (config-routing.md §8, web-fetch.md).
+//! - **Design:** `docs/design/config-routing.md` §8 (providers); `docs/design/control-plane.md` (the control client); `docs/design/web-fetch.md` (the page GET).
+//! - **Upstream:** `loong-providers`' adapter and probe, the HTTP hook kind, `loong-context`'s summarizer, `loong-control`'s client, `loong-mcp`'s transport and `loong-tools`' `web_fetch`.
 //! - **Downstream:** `TcpStream`, rustls, and the `Transport` / `BodyReader` readers.
 //! - **Verify:** `cargo test -p loong-http` · `./scripts/check.sh`
 //!
-//! The smallest HTTP/1.1 client that can carry a JSON POST — shared by the
-//! provider adapters and the HTTP hook kind, so neither owns a transport.
+//! The smallest HTTP/1.1 client that can carry a JSON POST and a page GET —
+//! shared by the provider adapters, the HTTP hook kind, the MCP transport and
+//! `web_fetch`, so none of them owns a transport.
 //!
 //! `http://` for a local or intranet endpoint, `https://` for everything else:
 //! TLS is rustls with the `ring` backend and the webpki root store, so a hosted
@@ -242,6 +243,141 @@ pub fn get_json(
         )));
     }
     Ok(response)
+}
+
+/// One GET of a web page: its status, every response header, and the body as
+/// text — capped, because a page is written by a stranger.
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// Purpose: A page GET's status, headers and decoded text, with whether the cap cut it.
+///
+/// Serves: `web_fetch` needs the status, the content type, the `Location` of a redirect and the text (web-fetch.md).
+/// Design: `docs/design/web-fetch.md`; `docs/decisions/0021-web-fetch-is-an-out-of-bounds-read.md`.
+/// Up: `get_page` returns it; `loong-tools`' `web_fetch` reads it.
+/// Down: `read_head` and `page_text`.
+/// Verify: `cargo test -p loong-http`.
+pub struct PageReply {
+    pub status: u16,
+    /// Lowercased header names, in the order the server sent them.
+    pub headers: Vec<(String, String)>,
+    /// Lossy UTF-8 of at most the caller's byte limit.
+    pub body: String,
+    /// Whether the server's body was longer than that limit.
+    pub truncated: bool,
+}
+
+impl PageReply {
+    /// Purpose: The first header with this name, matched case-insensitively.
+    /// Serves: `web_fetch` reading `location`, `content-type`, `content-encoding` and `content-length`.
+    /// Design: `docs/design/web-fetch.md`.
+    /// Up: `loong-tools`' `web_fetch`.
+    /// Down: the `headers` field.
+    /// Verify: `cargo test -p loong-http`.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        let name = name.to_ascii_lowercase();
+        self.headers
+            .iter()
+            .find(|(header, _)| *header == name)
+            .map(|(_, value)| value.as_str())
+    }
+}
+
+/// The bytes a page GET will hand back, and whether there were more of them.
+/// Lossy on purpose: a page is not required to be valid UTF-8, and a tool that
+/// refused an `latin-1` page would fail on real documentation. A multi-byte
+/// character split by the cap becomes one replacement character, which is then
+/// trimmed, so the excerpt never ends on a `�`.
+/// Purpose: Decode at most `limit` bytes of a body and say whether it was cut.
+///
+/// Serves: one place where a page's bytes become text, tested without a socket.
+/// Design: `docs/design/web-fetch.md`.
+/// Up: `get_page`.
+/// Down: `String::from_utf8_lossy`.
+/// Verify: `cargo test -p loong-http`.
+pub fn page_text(bytes: &[u8], limit: usize) -> (String, bool) {
+    let truncated = bytes.len() > limit;
+    let head = &bytes[..bytes.len().min(limit)];
+    let mut text = String::from_utf8_lossy(head).to_string();
+    while text.ends_with('\u{FFFD}') {
+        text.pop();
+    }
+    (text, truncated)
+}
+
+/// GET a web page: the response whatever its status, the headers, and at most
+/// `limit` bytes of body. `Accept-Encoding: identity` is sent so nothing comes
+/// back compressed — this client does not decompress, and a gzip body decoded as
+/// text is worse than an honest refusal.
+/// Purpose: GET a URL as a page: status, headers, and at most `limit` bytes of text.
+///
+/// Serves: the only network path a `web_fetch` call takes (web-fetch.md).
+/// Design: `docs/design/web-fetch.md`; `docs/decisions/0021-web-fetch-is-an-out-of-bounds-read.md`.
+/// Up: `loong-tools`' `web_fetch`.
+/// Down: `open`, `parse_http_url`, `read_head` and `page_text`.
+/// Verify: `cargo test -p loong-http`.
+pub fn get_page(
+    url: &str,
+    extra_headers: &[(String, String)],
+    limit: usize,
+    timeout: Duration,
+) -> Result<PageReply, HttpError> {
+    let mut stream = open(url, timeout)?;
+    let (host, port, path, tls) = parse_http_url(url)?;
+    let authority = if (tls && port == 443) || (!tls && port == 80) {
+        host.clone()
+    } else {
+        format!("{host}:{port}")
+    };
+    let mut head = format!(
+        "GET {path} HTTP/1.1\r\nHost: {authority}\r\n\
+         Accept: text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5\r\n\
+         Accept-Encoding: identity\r\nConnection: close\r\n"
+    );
+    for (name, value) in extra_headers {
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
+    head.push_str("\r\n");
+    stream
+        .write_all(head.as_bytes())
+        .map_err(|e| err(format!("sending the request: {e}")))?;
+    stream
+        .flush()
+        .map_err(|e| err(format!("sending the request: {e}")))?;
+
+    let (status, _content_type, headers, mut reader) = read_head(&mut stream)?;
+    let reply = PageReply {
+        status,
+        headers,
+        body: String::new(),
+        truncated: false,
+    };
+    if let Some(encoding) = reply.header("content-encoding") {
+        let encoding = encoding.to_ascii_lowercase();
+        if encoding != "identity" {
+            return Err(err(format!(
+                "the server sent a {encoding}-compressed body, which this client does not decompress"
+            )));
+        }
+    }
+    let mut bytes = Vec::new();
+    let mut chunk = [0u8; 8192];
+    while bytes.len() <= limit {
+        let read = reader
+            .read(&mut chunk)
+            .map_err(|e| err(format!("reading the response: {e}")))?;
+        if read == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..read]);
+    }
+    // The cap is on bytes; the loop reads past it by at most one chunk, which is
+    // how `page_text` can tell a body that fit from one that did not.
+    let (body, truncated) = page_text(&bytes, limit);
+    Ok(PageReply {
+        status,
+        headers: reply.headers,
+        body,
+        truncated,
+    })
 }
 
 /// POST a JSON body and read the whole response. `timeout` bounds both the
@@ -1145,5 +1281,65 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.0.contains("connecting"), "{err}");
+    }
+
+    /// Purpose: Pins that a page GET keeps a redirect's `Location` instead of following it.
+    #[test]
+    fn a_page_get_returns_the_headers_including_a_redirect() {
+        let (url, server) = fake_server(
+            "HTTP/1.1 302 Found\r\nContent-Type: text/html\r\n\
+             Location: https://example.com/next\r\nContent-Length: 5\r\n\
+             Connection: close\r\n\r\nhello",
+        );
+        let reply = get_page(&url, &[], 4096, Duration::from_secs(5)).unwrap();
+        assert_eq!(reply.status, 302);
+        assert_eq!(reply.header("location"), Some("https://example.com/next"));
+        assert_eq!(reply.body, "hello");
+        assert!(!reply.truncated);
+        let sent = server.join().unwrap();
+        assert!(sent.starts_with("GET /v1 HTTP/1.1"), "{sent}");
+        assert!(
+            sent.to_ascii_lowercase()
+                .contains("accept-encoding: identity"),
+            "an uncompressed body is what this client can read: {sent}"
+        );
+    }
+
+    /// Purpose: Pins that a body longer than the cap comes back cut and flagged.
+    #[test]
+    fn a_page_get_flags_a_body_over_the_cap() {
+        let (url, server) = fake_server(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 11\r\n\
+             Connection: close\r\n\r\nhello world",
+        );
+        let reply = get_page(&url, &[], 5, Duration::from_secs(5)).unwrap();
+        assert_eq!(reply.body, "hello");
+        assert!(reply.truncated);
+        server.join().unwrap();
+    }
+
+    /// Purpose: Pins that a compressed body is refused rather than decoded as text.
+    #[test]
+    fn a_compressed_body_is_refused() {
+        let (url, server) = fake_server(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Encoding: gzip\r\n\
+             Content-Length: 3\r\nConnection: close\r\n\r\nabc",
+        );
+        let error = get_page(&url, &[], 4096, Duration::from_secs(5)).unwrap_err();
+        assert!(error.0.contains("gzip"), "{error}");
+        server.join().unwrap();
+    }
+
+    /// Purpose: Pins the byte cap: lossy on invalid UTF-8, no trailing replacement character.
+    #[test]
+    fn page_text_decodes_lossily_and_never_ends_on_a_split_character() {
+        let (text, truncated) = page_text("héllo".as_bytes(), 2);
+        assert_eq!(text, "h");
+        assert!(truncated);
+        let (whole, truncated) = page_text("héllo".as_bytes(), 64);
+        assert_eq!(whole, "héllo");
+        assert!(!truncated);
+        let (latin1, _) = page_text(&[b'a', 0xff, b'b'], 8);
+        assert!(latin1.starts_with('a') && latin1.ends_with('b'), "{latin1}");
     }
 }

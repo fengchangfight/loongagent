@@ -670,6 +670,11 @@ impl Kernel {
                             // asks for permission on the first of them — breaks its own session.
                             // Say they did not run; the model re-issues what it still wants.
                             for skipped in &response.tool_calls[at + 1..] {
+                                // The call goes into the log before its answer, so the
+                                // answer still has a question after a resume: a `tool`
+                                // message the assistant turn never offered is a request
+                                // the provider rejects.
+                                events.extend(self.record_skipped_call(skipped)?);
                                 events.push(self.record_skipped_result(
                                     &skipped.call_id,
                                     &format!(

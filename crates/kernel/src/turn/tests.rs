@@ -120,6 +120,46 @@ fn kinds(log: &Path) -> Vec<String> {
         .collect()
 }
 
+/// Purpose: The call ids of `tool` messages that no assistant message in the prompt offered.
+///
+/// Serves: the two replay tests that pin a resumable conversation; a provider refuses
+/// a `tool` message whose `tool_call_id` is not in the assistant turn before it.
+/// Design: `docs/design/flows/resume-fork.md` §2.
+/// Up: `turn::tests` only.
+/// Down: `ChatMessage::Tool` and `ChatMessage::Assistant`.
+/// Verify: `cargo test -p loong-kernel turn::tests::a_result_with_no_recorded_call_is_not_replayed`.
+fn orphans(messages: &[ChatMessage]) -> Vec<String> {
+    let offered: Vec<&str> = messages
+        .iter()
+        .flat_map(|message| match message {
+            ChatMessage::Assistant { tool_calls, .. } => tool_calls
+                .iter()
+                .map(|call| call.call_id.as_str())
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        })
+        .collect();
+    messages
+        .iter()
+        .filter_map(|message| match message {
+            ChatMessage::Tool { call_id, .. } if !offered.contains(&call_id.as_str()) => {
+                Some(call_id.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Purpose: How many `tool` messages the prompt carries.
+///
+/// Contract: `turn::tests` fixtures; see [`orphans`].
+fn answered(messages: &[ChatMessage]) -> usize {
+    messages
+        .iter()
+        .filter(|message| matches!(message, ChatMessage::Tool { .. }))
+        .count()
+}
+
 /// Purpose: An allowed `read_file` runs, the model reads its output, and the turn ends with the answer — the baseline the loop is measured against.
 #[test]
 fn a_tool_runs_and_the_turn_finishes() {
@@ -1671,6 +1711,85 @@ fn a_message_that_stops_for_an_approval_still_answers_every_call_it_made() {
                 if call_id == "c2" && output.contains("not run")
         )),
         "and the one that did not run says so: {last:?}"
+    );
+}
+
+/// Purpose: A turn parked for an approval keeps the calls it skipped in the log, so a resume still answers them.
+#[test]
+fn a_turn_that_stops_for_an_approval_replays_the_calls_it_skipped() {
+    // The same batched message as the test above, but the person answers in a **new
+    // process**: the reply to the skipped call lives only in the log. A log that keeps
+    // the answer and not the call replays as a `tool` message the provider cannot place
+    // — the 400 that names the call — and as a batch that lost why it stopped.
+    let t = Temp::new();
+    std::fs::write(t.dir.join("a.txt"), "x").unwrap();
+    let (model, _seen) = RecordingModel::new(vec![response(
+        vec![
+            call("c1", "read_file", json!({"path": "/etc/hostname"})),
+            call("c2", "read_file", json!({"path": "a.txt"})),
+        ],
+        None,
+    )]);
+    let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+    let asked = k.submit("read both").unwrap();
+    assert!(
+        asked.pending_approval.is_some(),
+        "the first call asks about /etc/hostname"
+    );
+    drop(k);
+
+    let (model, seen) = RecordingModel::new(vec![response(vec![], Some("done"))]);
+    let mut k = Kernel::open(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+    k.submit("carry on").unwrap();
+
+    let sent = seen.lock().unwrap();
+    let last = sent.last().expect("the model was called");
+    assert!(
+        orphans(last).is_empty(),
+        "every tool message answers a call the assistant made: {:?} {last:?}",
+        orphans(last)
+    );
+    assert_eq!(
+        answered(last),
+        2,
+        "both answers survive the resume: {last:?}"
+    );
+    assert!(
+        last.iter().any(|message| matches!(
+            message,
+            ChatMessage::Tool { call_id, output }
+                if call_id == "c2" && output.contains("not run")
+        )),
+        "and the one that did not run still says so: {last:?}"
+    );
+}
+
+/// Purpose: A logged result whose call was never recorded is dropped on replay, not sent as an unplaceable tool message.
+#[test]
+fn a_result_with_no_recorded_call_is_not_replayed() {
+    // A tool the registry does not know is answered without a `tool.call` event (there is
+    // no call to classify), so the log holds a result with no question. Sending it is the
+    // 400 this fixes: an assistant turn may not be followed by a `tool` message whose
+    // `tool_call_id` it never offered.
+    let t = Temp::new();
+    let (model, _seen) = RecordingModel::new(vec![
+        response(vec![call("c1", "no_such_tool", json!({}))], None),
+        response(vec![], Some("done")),
+    ]);
+    let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+    k.submit("call something unknown").unwrap();
+    drop(k);
+
+    let (model, seen) = RecordingModel::new(vec![response(vec![], Some("hello"))]);
+    let mut k = Kernel::open(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+    k.submit("carry on").unwrap();
+
+    let sent = seen.lock().unwrap();
+    let last = sent.last().expect("the model was called");
+    assert!(
+        orphans(last).is_empty(),
+        "no tool message without its call: {:?} {last:?}",
+        orphans(last)
     );
 }
 

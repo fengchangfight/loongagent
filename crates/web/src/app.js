@@ -51,17 +51,21 @@ const state = {
   draftRaw: "",          // what has streamed into it, re-rendered once the text is final
   calls: new Map(),      // tool call_id → {card, out, outcome}, so a result joins its call
   replaying: false,      // a replay is running: its turns carry no stopwatch
-  usage: { in: 0, out: 0, cached: 0, calls: 0, ctx: 0, win: 0, cost: 0 },
+  usage: { in: 0, out: 0, cached: 0, calls: 0, ctx: 0, budget: 0, cost: 0 },
 
   // Which workspaces are collapsed in the rail, by dir. Only entries the user
   // toggled by hand are stored; the rest follow the default (non-seat collapsed).
   collapsed: {},
+
+  // Which view the main area shows: the chat, or the token tables (web-stats.md §1).
+  view: "chat",
 };
 
 /* ── DOM handles ──────────────────────────────────────────────────────── */
 
 const el = (id) => document.getElementById(id);
 const dom = {
+  chat: el("chat"),
   messages: el("messages"),
   transcript: el("transcript"),
   prompt: el("prompt"),
@@ -94,6 +98,15 @@ const dom = {
   workspaceBtn: el("workspace-btn"),
   picker: el("picker"),
   filePicker: el("file-picker"),
+  statsBtn: el("stats-btn"),
+  stats: el("stats"),
+  statsCovered: el("stats-covered"),
+  statsRefresh: el("stats-refresh"),
+  statsTotals: el("stats-totals"),
+  statsNote: el("stats-note"),
+  statsModels: el("stats-models"),
+  statsWorkspaces: el("stats-workspaces"),
+  statsSessions: el("stats-sessions"),
 };
 
 /* ── Small helpers ────────────────────────────────────────────────────── */
@@ -301,12 +314,7 @@ function markSelected(list) {
 
 function applyModelList(list) {
   state.models = markSelected(list);
-  const active = state.models.find((m) => m.active);
-  // The context window is a property of the model, not of any event: read it from the
-  // list so the usage row can show the share of it in use.
-  if (active && active.context_window) state.usage.win = active.context_window;
   renderModels();
-  renderUsage();
 }
 
 /* ── The rail's "add workspace" button ────────────────────────────────── */
@@ -378,6 +386,194 @@ dom.picker.querySelector(".close").onclick = () => picker.close();
 dom.picker.onclick = (e) => {
   if (e.target === dom.picker) picker.close();
 };
+
+/* ── The statistics view ──────────────────────────────────────────────── */
+
+/* The banner's 统计 swaps the chat for the tables, and swaps it back (web-stats.md §1).
+ *
+ * It is a view and not a fourth region: the rail, the open session and a running turn all
+ * keep their state, because looking at the bill is not leaving the conversation. What the
+ * tables show is `stats.usage`'s answer — every log on this machine summed by model, by
+ * workspace and by session — so the page never adds anything up itself. */
+function setView(view) {
+  state.view = view;
+  const stats = view === "stats";
+  dom.stats.hidden = !stats;
+  dom.chat.hidden = stats;
+  dom.statsBtn.textContent = stats ? "← 会话" : "统计";
+  dom.statsBtn.setAttribute("aria-pressed", stats ? "true" : "false");
+  if (stats) loadStats();
+}
+
+/* Ask the surface for the bill and draw it.
+ *
+ * Each open re-asks instead of keeping the last answer: a turn that ran while the chat was
+ * showing has written more since, and a number kept from the last look would be a number
+ * that lies (web-stats.md §2). */
+async function loadStats() {
+  dom.statsNote.textContent = "正在读日志…";
+  try {
+    const answer = await sendRequest("stats.usage", {});
+    renderStats(answer);
+  } catch (e) {
+    dom.statsNote.textContent = `读不到统计：${e.message}`;
+    dom.statsNote.className = "stats-note bad";
+  }
+}
+
+/* Render one answer of `stats.usage`.
+ *
+ * Every table is already sorted by the surface — bill first, tokens second (web-stats.md
+ * §1) — so this only draws. The columns are the same in all three tables, so a reader can
+ * compare a model's row with a session's without learning a second layout. */
+function renderStats(answer) {
+  const totals = answer.totals || {};
+  const covered = answer.covered || {};
+  const calls = totals.calls || 0;
+
+  dom.statsCovered.textContent = covered.until_ms
+    ? `${day(covered.since_ms)} — ${day(covered.until_ms)} · ${covered.projects} 个工作区 · ${covered.sessions} 个会话`
+    : "还没有任何模型调用";
+
+  // The headline, in the order the question is asked: how many, how much, how cached,
+  // and what it cost.
+  dom.statsTotals.textContent = "";
+  for (const [label, value] of [
+    ["调用", String(calls)],
+    ["入", bigTokens(totals.tokens_in || 0)],
+    ["出", bigTokens(totals.tokens_out || 0)],
+    ["缓存率", cacheRate(totals)],
+    ["费用", money(totals.usd_micros || 0)],
+  ]) {
+    const chip = node("span", "chip");
+    chip.appendChild(node("span", "label", label));
+    chip.appendChild(node("b", "", value));
+    dom.statsTotals.appendChild(chip);
+  }
+
+  // A zero that means "free" and a zero that means "nobody knows" must not read the same
+  // (web-stats.md §4).
+  const notes = [];
+  if (!calls) {
+    notes.push("这台机器还没有任何模型调用的记录——先聊一句，再回来看。");
+  } else {
+    if (totals.local_free_calls) {
+      notes.push(`${totals.local_free_calls} 次由本地模型回答，本来就不计费`);
+    }
+    if (totals.unpriced_calls) {
+      notes.push(`${totals.unpriced_calls} 次没有价格记录，费用只能算作 $0`);
+    }
+    if (!totals.cache_reported_calls) {
+      notes.push("服务商没有报告缓存用量，所以缓存率是 —");
+    }
+    notes.push("数字来自本机所有会话日志，每次打开都重读一遍。");
+  }
+  dom.statsNote.textContent = notes.join("；");
+  dom.statsNote.className = "stats-note";
+
+  statsTable(dom.statsModels, ["模型", "调用", "入", "出", "缓存率", "费用"], answer.models || [], (row) => [
+    nameCell(row.model),
+    row.calls,
+    bigTokens(row.tokens_in),
+    bigTokens(row.tokens_out),
+    cacheRate(row),
+    cost(row),
+  ]);
+  statsTable(dom.statsWorkspaces, ["工作区", "会话", "入", "出", "缓存率", "费用"], answer.workspaces || [], (row) => [
+    nameCell(row.workspace),
+    row.sessions,
+    bigTokens(row.tokens_in),
+    bigTokens(row.tokens_out),
+    cacheRate(row),
+    cost(row),
+  ]);
+  statsTable(dom.statsSessions, ["会话", "工作区", "入", "出", "缓存率", "费用", "最近"], answer.sessions || [], (row) => [
+    nameCell(row.title || row.session_id),
+    node("span", "sub", row.workspace || ""),
+    bigTokens(row.tokens_in),
+    bigTokens(row.tokens_out),
+    cacheRate(row),
+    cost(row),
+    node("span", "sub", row.last_ms ? timeAgo(row.last_ms / 1000) : ""),
+  ]);
+}
+
+/* The first cell of every table: the name the reader is looking for, and what it is. */
+function nameCell(text) {
+  const cell = node("span", "key", text || "未记录");
+  return cell;
+}
+
+/* One table: a header row, then one row per entry. A cell is a node or a plain value. */
+function statsTable(table, head, rows, cells) {
+  table.textContent = "";
+  const headRow = node("tr");
+  for (const title of head) headRow.appendChild(node("th", "", title));
+  const thead = node("thead");
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+  const body = node("tbody");
+  for (const row of rows) {
+    const tr = node("tr");
+    for (const cell of cells(row)) {
+      const td = node("td");
+      if (cell instanceof Node) td.appendChild(cell);
+      else td.textContent = String(cell);
+      tr.appendChild(td);
+    }
+    body.appendChild(tr);
+  }
+  table.appendChild(body);
+}
+
+/* A token count over a whole machine: billions are the normal case here, so this reads
+ * 1.04B rather than 1040305.4k, which the per-session `tokens` above was never asked for. */
+function bigTokens(n) {
+  if (typeof n !== "number") return "—";
+  if (n >= 1e9) return `${(n / 1e9).toFixed(2)}B`;
+  if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
+  return tokens(n);
+}
+
+/* What a row cost, saying which kind of zero it is.
+ *
+ * A model with no price in `local.toml` records `price_basis: unknown` and `$0` — the
+ * same dollars as a local model that really is free, and the two must not read the same
+ * (web-stats.md §4). So an all-unpriced row prints "—" and an all-free row prints "免费". */
+function cost(row) {
+  const calls = row.calls || 0;
+  if (calls && (row.unpriced_calls || 0) >= calls) return "—";
+  if (calls && (row.local_free_calls || 0) >= calls) return "免费";
+  return money(row.usd_micros);
+}
+
+/* A bill in dollars: cents are enough to read, and a fraction of a cent is not lost. */
+function money(micros) {
+  const usd = micros / 1e6;
+  if (!usd) return "$0";
+  return usd < 0.01 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`;
+}
+
+/* Cache hits over what the provider actually billed as prompt tokens.
+ *
+ * Zero hits over reported numbers is a 0% rate, and no reported numbers is not a rate at
+ * all — so one reads "0%" and the other "—" (web-stats.md §2). */
+function cacheRate(row) {
+  const total = (row.cache_hit || 0) + (row.cache_miss || 0);
+  return total > 0 ? `${Math.round((row.cache_hit / total) * 100)}%` : "—";
+}
+
+/* The day of an epoch-ms instant, in the reader's own timezone. */
+function day(ms) {
+  if (!ms) return "—";
+  const date = new Date(ms);
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const dateOfMonth = String(date.getDate()).padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${dateOfMonth}`;
+}
+
+dom.statsBtn.onclick = () => setView(state.view === "stats" ? "chat" : "stats");
+dom.statsRefresh.onclick = () => loadStats();
 
 /* ── The model bar: slots on screen, not a dropdown ───────────────────── */
 
@@ -1128,6 +1324,7 @@ async function newSession(workspace) {
     clearChat();
     await refreshSessions();
     await refreshModels();
+    refreshContext();
     setThinking(false);
     setStatus(`会话 ${state.sessionId}`, "ok");
   } catch (e) {
@@ -1158,6 +1355,9 @@ async function openSession(id, workspaceIndex) {
     renderModels();
     await replay(result.session_id);
     await refreshModels();
+    // Not awaited: a session opened while a turn runs cannot answer until that turn ends, and
+    // the numerator moves on its own — the denominator lands when the child can speak.
+    refreshContext();
     setStatus(`会话 ${state.sessionId}`, "ok");
   } catch (e) {
     notice("error", `session.open: ${e.message}`);
@@ -1735,10 +1935,9 @@ function onEvent(env, replayed) {
         if (state.models.length > 0) renderModels();
         else refreshModels();
       }
-      if (typeof data.context_tokens === "number") {
-        state.usage.ctx = data.context_tokens;
-        renderUsage();
-      }
+      // The window, and so the default budget, follows the model: the share's denominator is
+      // re-read here and nowhere else, since no event carries it (cost-accounting.md §4).
+      refreshContext();
       break;
     }
     case "permissions.relaxed":
@@ -1893,15 +2092,39 @@ function recordCost(data) {
   u.calls += 1;
   u.in += data.tokens_in || 0;
   u.out += data.tokens_out || 0;
-  // `cache_hit_tokens` and `usd_micros` are what `cost.recorded` carries; the context
-  // share is not on this event at all — `model.selected` reports it.
+  // The context share's numerator is the prompt the provider itself counted on the call
+  // just made, so it moves with every cost event (cost-accounting.md §4). The old page took
+  // it from `model.selected`, an estimate the kernel writes once per session: the share then
+  // sat at 0.4% of a 1M window while the context ran to 85k.
+  u.ctx = data.tokens_in || 0;
   u.cached += data.cache_hit_tokens || 0;
   u.cost += (data.usd_micros || 0) / 1e6;
   renderUsage();
 }
 
 function resetUsage() {
-  state.usage = { in: 0, out: 0, cached: 0, calls: 0, ctx: 0, win: 0, cost: 0 };
+  state.usage = { in: 0, out: 0, cached: 0, calls: 0, ctx: 0, budget: 0, cost: 0 };
+  renderUsage();
+}
+
+/* Ask the kernel for the budget the share divides by.
+ *
+ * `ContextExplain.budget_tokens` is the cap compaction measures against
+ * (`docs/design/context-ledger.md` §3) — not the model's window, which says what the model can
+ * hold and nothing about when the context gets cleaned. It moves only when the model or the
+ * config does, so this is asked at attach and after a model change, never per call. */
+async function refreshContext() {
+  if (!state.sessionId) {
+    state.usage.budget = 0;
+    renderUsage();
+    return;
+  }
+  try {
+    const explained = await sendRequest("context.explain", { session_id: state.sessionId });
+    state.usage.budget = (explained && explained.budget_tokens) || 0;
+  } catch {
+    /* the session may not be up yet; the row keeps whatever it last heard */
+  }
   renderUsage();
 }
 
@@ -1914,12 +2137,18 @@ function renderUsage() {
   el("u-rate").textContent = u.in > 0 ? `${Math.round((u.cached / u.in) * 100)}%` : "—";
   el("u-calls").textContent = String(u.calls);
   const ctx = el("u-ctx");
-  if (u.win > 0) {
-    const share = (u.ctx / u.win) * 100;
+  // A gauge never reads past full: the provider's count can exceed the budget, because the
+  // window fills faster than compaction sheds (cost-accounting.md §4).
+  if (u.budget > 0) {
+    const share = Math.min(100, (u.ctx / u.budget) * 100);
     ctx.textContent = `${share.toFixed(1)}%`;
     ctx.className = share > 80 ? "warn" : "";
+  } else if (u.ctx > 0) {
+    ctx.textContent = fmt(u.ctx);
+    ctx.className = "";
   } else {
     ctx.textContent = "—";
+    ctx.className = "";
   }
   el("u-cost").textContent = `$${u.cost.toFixed(4)}`;
 }

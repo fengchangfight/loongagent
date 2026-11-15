@@ -25,6 +25,11 @@
     <span class="subline" aria-hidden="true"><span class="orn">⟬ ᛭</span><span class="half">兴云吐雾</span><span class="orn sep">⋄</span><span class="half">隐介藏形</span><span class="orn">᛭ ⟭</span></span>
   </div>
   <div class="spacer"></div>
+  <!-- The bill, beside the chat it is about: the statistics view is a switch, not a
+       fourth region of the page, so the rail and the open session keep their state
+       (web-stats.md §1). -->
+  <button id="stats-btn" type="button" aria-pressed="false"
+          title="这台机器所有会话的 token 统计：按模型、按工作区、按会话">统计</button>
 </header>
 
 <nav id="modelbar" aria-label="模型与审批模式">
@@ -130,6 +135,26 @@
     </div>
 
     <div id="status"></div>
+  </main>
+
+  <!-- The statistics view: the same session logs the chat writes, summed (web-stats.md
+       §1–§2). Built in `app.js`; the banner's 统计 is the only way in and out. -->
+  <main id="stats" hidden aria-label="token 统计">
+    <div class="stats-head">
+      <h1>Token 统计</h1>
+      <span class="covered" id="stats-covered"></span>
+      <button id="stats-refresh" type="button" title="重新读一遍所有会话日志">刷新</button>
+    </div>
+    <div class="stats-scroll">
+      <div class="stats-totals" id="stats-totals"></div>
+      <p class="stats-note" id="stats-note"></p>
+      <h2>按模型</h2>
+      <table class="stats-table" id="stats-models"></table>
+      <h2>按工作区</h2>
+      <table class="stats-table" id="stats-workspaces"></table>
+      <h2>按会话</h2>
+      <table class="stats-table" id="stats-sessions"></table>
+    </div>
   </main>
 
 </div>

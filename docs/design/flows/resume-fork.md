@@ -39,6 +39,11 @@ the session that repeated. Each file is read with `replay_lenient` up to its
   calls are known.
 - `tool.call` / `tool.result`: attached to the held assistant turn and flushed
   together by `flush_pending` → `push_assistant` / `push_tool_result`.
+- A `tool.result` whose `tool.call` the log never recorded is **dropped**: the
+  provider rejects a `tool` message whose `tool_call_id` the assistant turn did not
+  offer, and one unplaceable answer must not make the session unopenable. The other
+  direction is closed too — a `tool.call` with no result gets an "interrupted"
+  result, because a call with no answer is refused as well.
 - `compaction.applied`: `replay_compaction` re-applies the recorded `kept_tokens`,
   `cleared_tool_outputs` and `dropped_messages`.
 

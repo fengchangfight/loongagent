@@ -169,8 +169,18 @@ impl Kernel {
                         // comes first in the conversation, and it must carry every call
                         // this turn made — not just the first.
                         if let Some(slot) = pending.as_mut() {
-                            slot.2
-                                .push((result.call_id.clone(), result.output.clone(), event.seq));
+                            // A result whose call the log never recorded has nowhere to
+                            // go in the conversation: the provider rejects a `tool`
+                            // message whose `tool_call_id` the assistant turn did not
+                            // offer, which is how a session became unopenable. Keep the
+                            // answer out rather than the whole session shut.
+                            if slot.1.iter().any(|known| known.call_id == result.call_id) {
+                                slot.2.push((
+                                    result.call_id.clone(),
+                                    result.output.clone(),
+                                    event.seq,
+                                ));
+                            }
                         }
                     }
                     gen::event::COMPACTION_APPLIED => {

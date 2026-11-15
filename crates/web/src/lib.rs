@@ -28,6 +28,7 @@ use tungstenite::{accept_hdr, Message};
 pub mod app;
 mod files;
 mod sessions;
+mod stats;
 
 /// The page, compiled in: one file, no build step, no CDN.
 pub const INDEX: &str = include_str!("index.html");
@@ -2231,6 +2232,58 @@ mod tests {
         assert!(
             APP_JS.contains("function takeFile(") && APP_JS.contains("closeFilePicker();"),
             "taking a row leaves `@path ` in the message and closes the list"
+        );
+    }
+
+    /// Purpose: Pins that the context share moves with the last request and is measured
+    /// against a budget, so it cannot freeze on the one estimate `model.selected` carried.
+    #[test]
+    fn the_context_share_follows_the_last_request() {
+        let cost = APP_JS
+            .split("function recordCost(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("recordCost is the one place a cost event is folded in");
+        assert!(
+            cost.contains("u.ctx = data.tokens_in"),
+            "the numerator is the prompt the provider itself counted, and every call reports \
+             it: {cost}"
+        );
+
+        let selected = APP_JS
+            .split("\"model.selected\": {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }\n").next())
+            .expect("model.selected is handled once");
+        assert!(
+            !selected.contains("context_tokens"),
+            "`context_tokens` is a ledger estimate taken when the model was chosen — once a \
+             session — so a share built from it never moves: {selected}"
+        );
+
+        assert!(
+            APP_JS.contains("sendRequest(\"context.explain\""),
+            "the denominator is the budget the kernel compacts against, and `context.explain` \
+             is where the page reads it"
+        );
+        assert!(
+            APP_JS.contains("budget_tokens"),
+            "the denominator is `ContextExplain.budget_tokens`, not the model window: a window \
+             is what the model can hold, never what compaction measures"
+        );
+
+        let usage = APP_JS
+            .split("function renderUsage(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("renderUsage draws the row");
+        assert!(
+            usage.contains("u.budget > 0") && usage.contains("Math.min(100,"),
+            "a share needs a budget to divide by, and must never read past full: {usage}"
+        );
+        assert!(
+            usage.contains("fmt(u.ctx)"),
+            "with no budget the row says tokens rather than a made-up percentage: {usage}"
         );
     }
 }

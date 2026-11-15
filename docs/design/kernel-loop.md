@@ -85,9 +85,9 @@ each renewal, so an approval resume still spends what the turn has left:
    turn returns the text.
 8. **Tool calls.** The loop records the assistant message once, then calls
    `Kernel::dispatch` for each call in order. A dispatch that parks the turn returns
-   `Dispatch::Pending`; the remaining calls in the same message are answered with
-   `tool.result` events saying they did not run, because a provider requires one
-   result for every call it was shown.
+   `Dispatch::Pending`; the remaining calls get a `tool.call` and a `tool.result` saying
+   they did not run — a provider requires one result per call, and a resume needs the
+   call to place that result.
 
 If a segment runs out and the turn may not (or cannot usefully) renew, it
 appends one assistant `message.appended` with a "stopped after N steps" note and

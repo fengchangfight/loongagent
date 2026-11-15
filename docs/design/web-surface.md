@@ -218,26 +218,25 @@ defines (or the surface's own `client.error`) — the page once handled `tool.ca
 `turn.completed`, which the protocol never sends, silently dropping every tool call.
 
 The composer shows the TUI's usage row — 入/出 tokens, calls, cache rate, context share —
-recomputed from `cost.recorded`; the share is the one number no cost event carries, so it
-comes from `model.selected`'s `context_tokens`, the window from the active `model.list`
-entry. What the input does — `Enter`, `Shift+Enter`, `@` naming a workspace file — is
-[web-composer.md](web-composer.md)'s.
+counted as [cost-accounting.md](cost-accounting.md) §4 counts it: the last request's
+`tokens_in` over `context.explain`'s `budget_tokens`, read at attach and on a model
+change, capped at 100%, tokens when there is no budget. What the input does — `Enter`,
+`Shift+Enter`, `@` naming a workspace file — is [web-composer.md](web-composer.md)'s.
 
 ## 5. Wire additions
 
 No new session protocol methods: the surface speaks the TUI's JSON-RPC over WebSocket
 instead of stdio. The web crate adds HTTP routes for its static assets (`app.js`,
 `style.css`, `/favicon.ico` from the bundled `assets/favicon.png`) and three surface-local
-JSON routes: `/api/browse`, listing subdirectories for the workspace picker,
-`/api/files`, the composer's ranked file list behind `@` ([web-composer.md](web-composer.md)
-§2), and `/api/interrupt` ([web-composer.md](web-composer.md) §4), the one route that is
-not a read — a thread per connection, as the socket has, so neither waits on the other. The catalogue of §1 rides the socket (`workspace.list`/`add`/
-`close`) and persists to `workspaces.json`; there is no `/api/workspaces` route. One
-surface-local socket method, `session.tree`, answers the two-level rail in one call: every
-workspace with its sessions nested, each flagged live/busy. `session.replay` is
-surface-local too, read from the log and not from the child (§3). §6's `model.*` reads are
-surface-local, and so is `model.reorder` (§4): an arrangement the bar owns, plus a write to
-`local.toml` on a local profile.
+JSON routes: `/api/browse`, listing subdirectories for the workspace picker, `/api/files`,
+the composer's ranked file list behind `@` ([web-composer.md](web-composer.md) §2), and
+`/api/interrupt` ([web-composer.md](web-composer.md) §4), the one route that is not a read —
+a thread per connection like the socket's, so neither waits on the other. §1's catalogue
+rides the socket (`workspace.list`/`add`/`close`) and persists to `workspaces.json`; there
+is no `/api/workspaces` route. Surface-local socket methods are `session.tree`, the rail in
+one call with every workspace's sessions nested and flagged live/busy, `session.replay`
+(§3), §6's `model.*` reads, `model.reorder` (§4), and `stats.usage` — every log's
+`cost.recorded` summed for the banner's 统计 view ([web-stats.md](web-stats.md)).
 
 `--session` and `--new` no longer pre-select a session: the surface starts empty, and the
 launch directory is all `loongagent web` fixes.

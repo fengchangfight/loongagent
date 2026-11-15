@@ -128,6 +128,7 @@ file that does not exist yet.
 | [design/web-surface.md](design/web-surface.md) | The web portal: workspaces and sessions in the page, a per-workspace server child, and the panel that renders the event stream | Living |
 | [design/web-models.md](design/web-models.md) | The model panel: the warning before it, the probe that lists a provider's models, and the one write that keeps `local.toml` | Living |
 | [design/web-composer.md](design/web-composer.md) | The composer: `Enter` and `Shift+Enter`, the `@` picker that names a workspace file, what the box does not carry, and the spinner a dead wire ends | Living |
+| [design/web-stats.md](design/web-stats.md) | The token statistics page: the sums of `cost.recorded` cut by model, workspace and session, and why the first version has no filter and no cache | Living |
 | [design/tui-selection.md](design/tui-selection.md) | The TUI's in-app mouse selection: what a drag selects, where a cell maps, and how release copies | Living |
 | human-written/ | The human's own notes — input, never edited by an agent (`AGENTS.md`, `scripts/check-human-written.sh`) | — |
 | [crate-map.md](crate-map.md) | The workspace's crates and the dependency edges allowed between them — generated from `scripts/layering_rules.py`, so it must never be hand-edited | Generated |

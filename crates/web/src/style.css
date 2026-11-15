@@ -1434,3 +1434,151 @@ details.step.tool.failed > summary { background: rgba(248, 81, 73, 0.06); }
   #rail { display: none; }
   #banner .mark span { display: none; }
 }
+
+/* ── Token statistics ───────────────────────────────────────────────── */
+
+/* The banner switch: the one control that opens the tables and the same one that closes
+ * them, so "where am I" and "how do I get back" are one button (web-stats.md §1). */
+#stats-btn {
+  padding: 5px 12px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+#stats-btn:hover { color: var(--text); border-color: var(--accent); }
+#stats-btn[aria-pressed="true"] {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* The view itself: a sibling of #chat in the same flex row, so the rail stays put and the
+ * two views never share the screen — `setView` flips the `hidden` attribute on each, and
+ * `hidden` wins over the `display` below exactly as it does for the spinner. */
+#stats {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+#stats[hidden] { display: none; }
+#chat[hidden] { display: none; }
+#stats .stats-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 14px 22px 10px;
+  border-bottom: 1px solid var(--border-soft);
+}
+#stats .stats-head h1 {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+}
+#stats .stats-head .covered {
+  color: var(--text-faint);
+  font-size: 12px;
+}
+#stats .stats-head button {
+  margin-left: auto;
+  padding: 4px 12px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+#stats .stats-head button:hover { color: var(--text); border-color: var(--accent); }
+
+#stats .stats-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 22px 48px;
+}
+
+.stats-totals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.stats-totals .chip {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 8px 13px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+}
+.stats-totals .chip .label {
+  color: var(--text-faint);
+  font-size: 12px;
+}
+.stats-totals .chip b {
+  font-size: 15px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* What the numbers cannot say about themselves: free versus unpriced, a cache nobody
+ * reported, and that every open re-reads the logs (web-stats.md §2, §4). */
+.stats-note {
+  margin: 12px 0 4px;
+  color: var(--text-faint);
+  font-size: 12px;
+  line-height: 1.6;
+}
+/* The read failed: the answer never arrived, which is not the same as a machine with no
+ * calls — the same red `#status.bad` uses (web-stats.md §2). */
+.stats-note.bad { color: var(--red); }
+
+#stats h2 {
+  margin: 22px 0 8px;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+.stats-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+.stats-table th {
+  padding: 6px 8px;
+  text-align: right;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text-faint);
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.stats-table td {
+  padding: 7px 8px;
+  text-align: right;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border-soft);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.stats-table th:first-child,
+.stats-table td:first-child { text-align: left; }
+.stats-table td:first-child { color: var(--text); }
+.stats-table td .key {
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.stats-table td .sub {
+  color: var(--text-faint);
+  font-size: 11.5px;
+}
+.stats-table tbody tr:hover { background: var(--bg-raised); }

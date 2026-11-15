@@ -791,6 +791,37 @@ impl Kernel {
         self.append_tool_result(call_id, false, output)
     }
 
+    /// Purpose: Record the `tool.call` behind a skipped result, so a resume can still place it.
+    ///
+    /// Serves: a conversation that survives a resume, with every answer under its call.
+    /// Design: `docs/design/kernel-loop.md` §2 step 8; `docs/design/flows/resume-fork.md` §2.
+    /// Up: `Kernel::run_inner`, in the loop that skips the calls after a parked approval.
+    /// Down: `Kernel::append` with the class the tool itself gives the args.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_turn_that_stops_for_an_approval_replays_the_calls_it_skipped`.
+    /// Nothing ran, so no verdict is made; a tool the registry does not know gets no
+    /// call event, exactly as when it is dispatched, and replay drops a result it
+    /// cannot place.
+    fn record_skipped_call(&mut self, call: &ToolCallRequest) -> Result<Option<u64>, KernelError> {
+        let looked_up = self.tools.get(&call.tool).map(|tool| {
+            (
+                tool.name().to_string(),
+                tool.action_class(&call.args, &self.config.cwd),
+            )
+        });
+        let Some((tool, action_class)) = looked_up else {
+            return Ok(None);
+        };
+        Ok(Some(self.append(
+            gen::event::TOOL_CALL,
+            &gen::ToolCall {
+                call_id: call.call_id.clone(),
+                tool,
+                args: call.args.clone(),
+                action_class,
+            },
+        )?))
+    }
+
     /// Purpose: Append the `tool.result` event and its ledger/message pair, for both result paths.
     ///
     /// Serves: one write path, so the counted and skipped results cannot drift apart.

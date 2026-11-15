@@ -24,6 +24,7 @@ use serde_json::{json, Value};
 use tungstenite::Message;
 
 use crate::sessions;
+use crate::stats;
 use crate::Session;
 
 /// Purpose: The surface-side error a tab receives as a JSON-RPC error object.
@@ -71,6 +72,9 @@ pub enum SurfaceCall {
     /// `session.replay` — answered from the session log on the socket, with no child in the
     /// way, so a busy session still shows its past (web-surface.md §5).
     Replay,
+    /// `stats.usage` — answered from every log on the machine, with no child in the way
+    /// either: the bill outlives the turn (web-stats.md §2).
+    Stats,
     /// anything else: straight to the workspace's session bridge.
     Forward,
 }
@@ -862,6 +866,23 @@ fn dispatch_surface(
             let events = sessions::replay(&sessions::client_root(), &dirs, &session_id)?;
             reply(out, id, json!({"events": events, "session_id": session_id}))?;
             Ok(SurfaceCall::Replay)
+        }
+        "stats.usage" => {
+            // The bill is a fact about the whole home, not about this tab: a session the TUI
+            // wrote yesterday is part of what this month cost, so the answer reads every slug
+            // directory under the client root, and the seats only name the ones they own
+            // (web-stats.md §3). No child is asked, and nothing is cached: a resumed session
+            // writes more, and a kept number would be the number that lies (§2).
+            let dirs = {
+                let mut st = lock(state)?;
+                restore_workspaces(&mut st, home)?;
+                st.workspaces
+                    .iter()
+                    .map(|w| w.dir.clone())
+                    .collect::<Vec<_>>()
+            };
+            reply(out, id, stats::usage(&sessions::client_root(), &dirs))?;
+            Ok(SurfaceCall::Stats)
         }
         _ => Ok(SurfaceCall::Forward),
     }
@@ -2160,6 +2181,63 @@ mod tests {
             workspaces[0].get("home").and_then(Value::as_bool),
             Some(true)
         );
+
+        std::env::remove_var("LOONGAGENT_HOME");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Purpose: `stats.usage` answers from the logs, with no session child in the way.
+    #[test]
+    fn dispatch_stats_answers_from_the_logs() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let base = std::env::temp_dir().join(format!("loong-stats-answer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let home_dir = base.join("home");
+        let dir = home_dir.join("projects").join("somewhere-0000abcd");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("LOONGAGENT_HOME", &home_dir);
+        // One session log in the layout the CLI writes (sessions-lineage.md §1).
+        let log = [
+            json!({"kind": "session.start", "seq": 1, "time_ms": 1_000, "id": "e1",
+                   "data": {"cwd": "/work/place"}}),
+            json!({"kind": "message.appended", "seq": 2, "time_ms": 1_100, "id": "e2",
+                   "data": {"role": "user", "text": "how much did this cost"}}),
+            json!({"kind": "cost.recorded", "seq": 3, "time_ms": 1_200, "id": "e3",
+                   "data": {"profile": "default", "model": "opus", "tokens_in": 120,
+                            "tokens_out": 40, "cache_hit_tokens": 20, "cache_miss_tokens": 100,
+                            "cache_reported": true, "usd_micros": 42,
+                            "price_basis": "list-peak"}}),
+        ]
+        .iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+        std::fs::write(dir.join("s-1.jsonl"), log + "\n").unwrap();
+
+        let (addr, token) = start();
+        let request = format!("ws://{addr}/ws?token={token}")
+            .into_client_request()
+            .unwrap();
+        let (mut socket, _) = tungstenite::connect(request).unwrap();
+        socket
+            .send(Message::text(
+                json!({"jsonrpc":"2.0","id":1,"method":"stats.usage","params":{}}).to_string(),
+            ))
+            .unwrap();
+        let line = socket.read().unwrap().into_text().unwrap().to_string();
+        let value: Value = serde_json::from_str(&line).unwrap();
+        let result = value.get("result").expect("a result, not an error");
+        assert_eq!(result["totals"]["calls"], 1, "{result}");
+        assert_eq!(result["totals"]["tokens_in"], 120, "{result}");
+        assert_eq!(result["totals"]["usd_micros"], 42, "{result}");
+        // The workspace the log ran in, not the slug (web-stats.md §3).
+        assert_eq!(result["workspaces"][0]["workspace"], "place", "{result}");
+        // The title, so a row is recognisable without its id.
+        assert_eq!(
+            result["sessions"][0]["title"], "how much did this cost",
+            "{result}"
+        );
+        assert_eq!(result["models"][0]["model"], "opus", "{result}");
 
         std::env::remove_var("LOONGAGENT_HOME");
         std::fs::remove_dir_all(&base).ok();

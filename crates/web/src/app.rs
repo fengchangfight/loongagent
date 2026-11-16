@@ -20,6 +20,7 @@ use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use loong_schema::PermissionMode;
 use serde_json::{json, Value};
 use tungstenite::Message;
 
@@ -791,10 +792,23 @@ fn dispatch_surface(
             // 3 the TUI uses, out of reach of every tool (ADR-0019) — and answers at once,
             // because the ask is what this reply confirms; `permissions.relaxed` is the
             // record (ADR-0007 §5, web-surface.md §4).
-            let on = params
-                .get("auto_approve")
-                .and_then(Value::as_bool)
-                .ok_or_else(|| Error("permissions.set needs auto_approve".to_string()))?;
+            // Two spellings, one meaning: `mode` is today's, `auto_approve` is what a
+            // client written before ADR-0022 sends. Naming neither is a client bug, so it
+            // is refused rather than guessed.
+            let mode = match (
+                params.get("mode").and_then(Value::as_str),
+                params.get("auto_approve").and_then(Value::as_bool),
+            ) {
+                (Some(text), _) => PermissionMode::parse(text)
+                    .ok_or_else(|| Error(format!("unknown permission mode {text:?}")))?,
+                (None, Some(true)) => PermissionMode::Yolo,
+                (None, Some(false)) => PermissionMode::Ask,
+                (None, None) => {
+                    return Err(Error(
+                        "permissions.set needs either `mode` or `auto_approve`".to_string(),
+                    ))
+                }
+            };
             let named = params
                 .get("session_id")
                 .and_then(Value::as_str)
@@ -816,7 +830,9 @@ fn dispatch_surface(
             // did, and the change lands when the turn ends. Never a lie about a state this
             // surface cannot enforce (web-surface.md §4). The channel is taken from the
             // child and not through its bridge, which the running turn is holding.
-            let reached = running.map(|channel| channel(on).is_ok()).unwrap_or(false);
+            let reached = running
+                .map(|channel| channel(mode).is_ok())
+                .unwrap_or(false);
             if !reached {
                 return Ok(SurfaceCall::Forward);
             }
@@ -825,7 +841,8 @@ fn dispatch_surface(
                 id,
                 json!({
                     "session_id": named,
-                    "auto_approve": on,
+                    "auto_approve": mode.skips_prompts(),
+                    "mode": mode.as_str(),
                     // The turn in flight applies it at its next boundary; the switch shows
                     // the ask, and the session's `permissions.relaxed` says it landed.
                     "queued": false,
@@ -3469,8 +3486,8 @@ mod tests {
                 session_id: "s-1".to_string(),
                 channel: Some(Arc::new({
                     let asked = Arc::clone(&asked_by_channel);
-                    move |on: bool| {
-                        asked.lock().unwrap().push(on);
+                    move |mode: PermissionMode| {
+                        asked.lock().unwrap().push(mode);
                         Ok(())
                     }
                 })),
@@ -3512,7 +3529,7 @@ mod tests {
         );
         assert_eq!(
             *asked.lock().unwrap(),
-            vec![true],
+            vec![PermissionMode::Yolo],
             "the child was never asked"
         );
         drop(keep);

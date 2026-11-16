@@ -17,6 +17,7 @@
 //! step. What *is* local to the surface lives in `app`: the workspaces the
 //! browser can sit on, and the session catalogue it lists, opens and deletes.
 
+use loong_schema::PermissionMode;
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -65,7 +66,8 @@ pub const FAVICON_PATH: &str = "/favicon.png";
 /// Up: `Started::channel`, kept by `Child` beside the pid for the same reason.
 /// Down: the private control channel of the child (descriptor 3, out of every tool's reach).
 /// Verify: `cargo test -p loong-web` (`yolo_`).
-pub type PermissionChannel = std::sync::Arc<dyn Fn(bool) -> Result<(), String> + Send + Sync>;
+pub type PermissionChannel =
+    std::sync::Arc<dyn Fn(PermissionMode) -> Result<(), String> + Send + Sync>;
 
 /// What one starter hands back for one session.
 /// Purpose: Bundle the three things a surface needs about a child it has just started: the
@@ -1483,6 +1485,14 @@ mod tests {
         assert!(
             INDEX.contains("id=\"yolo\""),
             "the banner carries the session's approval switch"
+        );
+        assert!(
+            INDEX.contains("id=\"god\""),
+            "the banner carries the third mode, beside the switch it extends (ADR-0022)"
+        );
+        assert!(
+            APP_JS.contains("mode: mode"),
+            "the button speaks the mode spelling, not only the boolean"
         );
         for wanted in [
             "ctrlKey",

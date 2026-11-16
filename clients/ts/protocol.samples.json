@@ -243,10 +243,12 @@
     },
     "PermissionsSetParams": {
       "session_id": "<string>",
+      "mode": "<string>",
       "auto_approve": true
     },
     "PermissionsState": {
-      "auto_approve": true
+      "auto_approve": true,
+      "mode": "<string>"
     },
     "SessionForked": {
       "origin": "<string>",
@@ -258,7 +260,8 @@
     },
     "PermissionsRelaxed": {
       "auto_approve": true,
-      "reason": "<string>"
+      "reason": "<string>",
+      "mode": "<string>"
     },
     "SkillsLoaded": {
       "count": 1,

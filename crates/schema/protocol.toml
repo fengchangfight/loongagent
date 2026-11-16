@@ -472,22 +472,24 @@ result = "SessionAttachResult"
 [[types]]
 name = "PermissionsSetParams"
 kind = "struct"
-doc = "Turn this session's approval prompts off or on. The sandbox is a different axis and is untouched (ADR-0007 §5)."
+doc = "Set this session's approval mode. The sandbox is a different axis and is untouched (ADR-0007 §5, ADR-0022)."
 fields = [
   { name = "session_id", type = "string" },
-  { name = "auto_approve", type = "bool", doc = "true: rulings that would ask are allowed instead, and the override is recorded" },
+  { name = "mode", type = "string", optional = true, doc = "`ask`, `yolo` or `god`: `god` also allows the irreversible class, refusing two shapes outright instead of asking (ADR-0022)" },
+  { name = "auto_approve", type = "bool", optional = true, doc = "the pre-ADR-0022 spelling: true is `yolo`, false is `ask`. A client sends `mode` or this, never both" },
 ]
 
 [[types]]
 name = "PermissionsState"
 kind = "struct"
 fields = [
-  { name = "auto_approve", type = "bool" },
+  { name = "auto_approve", type = "bool", doc = "true when any mode but `ask` is on, so a client written before ADR-0022 still reads the switch" },
+  { name = "mode", type = "string", optional = true, doc = "the mode itself, for a client that knows there are three" },
 ]
 
 [[methods]]
 name = "permissions.set"
-doc = "Opt out of approval prompts for this session. Opting out is itself an event, and the interface must show it (ADR-0007 §5)."
+doc = "Set how much this session may do without asking (ADR-0022). Opting out is itself an event, and the interface must show it (ADR-0007 §5)."
 params = "PermissionsSetParams"
 result = "PermissionsState"
 
@@ -543,10 +545,11 @@ ignorable = false
 [[types]]
 name = "PermissionsRelaxed"
 kind = "struct"
-doc = "Approval prompts were turned off or on for this session. ADR-0007 §5: opting out is itself an event, and it travels with the session."
+doc = "Approval prompts were turned off or on for this session, and how far. ADR-0007 §5: opting out is itself an event, and it travels with the session."
 fields = [
   { name = "auto_approve", type = "bool" },
   { name = "reason", type = "string" },
+  { name = "mode", type = "string", optional = true, doc = "absent in an event written before ADR-0022; the reader then takes `auto_approve ? yolo : ask`" },
 ]
 
 [[events]]

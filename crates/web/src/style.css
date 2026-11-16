@@ -223,8 +223,8 @@ body {
    that never asks is the dangerous state, and the page must not make it look calm
    (ADR-0007 §5 asks a surface to show the opt-out; hiding it would be the lie this
    replaces). */
+#god,
 #yolo {
-  margin-left: auto;
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
@@ -242,14 +242,25 @@ body {
   cursor: pointer;
   outline: none;
 }
+/* The GOD button sits left of YOLO and pushes the pair to the right edge: the two
+   stops belong together, and the further one must be reachable but not the nearest
+   thing to the cursor (web-surface.md §4). */
+#god {
+  margin-left: auto;
+}
+#god:hover:not(:disabled),
 #yolo:hover:not(:disabled) { border-color: var(--red); color: #fff; }
+#god:focus-visible,
 #yolo:focus-visible { box-shadow: 0 0 0 2px var(--red); }
+#yolo { margin-left: 6px; }
+#god .dot,
 #yolo .dot {
   width: 7px;
   height: 7px;
   border-radius: 50%;
   background: var(--text-dim);
 }
+#god .state,
 #yolo .state {
   padding: 0 4px;
   border-radius: 3px;
@@ -258,14 +269,25 @@ body {
   font-size: 10px;
   letter-spacing: 0.04em;
 }
+#god.on,
 #yolo.on {
   background: var(--red);
   border-color: var(--red);
   color: #2b0605;
 }
+#god.on .dot,
 #yolo.on .dot { background: #2b0605; }
+#god.on .state,
 #yolo.on .state { background: #2b0605; color: #ffb3ad; }
+#god:disabled,
 #yolo:disabled { opacity: 0.5; cursor: not-allowed; }
+/* One press away from the switch beside it, and not undone by accident: the first
+   press only arms the button, for three seconds, in the same red the on-state uses. */
+#god.arming {
+  border-color: var(--red);
+  color: #fff;
+  background: #2b0605;
+}
 
 /* ── Body: rail + chat ──────────────────────────────────────────────── */
 

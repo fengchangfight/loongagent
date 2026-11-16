@@ -326,6 +326,11 @@ fn opting_out_of_prompts_still_asks_before_a_deletion() {
     ]);
     let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
     k.set_auto_approve(true).unwrap();
+    assert_eq!(
+        k.mode(),
+        loong_schema::PermissionMode::Yolo,
+        "the two-mode setter still means yolo, never god"
+    );
 
     let outcome = k.submit("delete it").unwrap();
     assert!(
@@ -347,6 +352,113 @@ fn opting_out_of_prompts_still_asks_before_a_deletion() {
     assert!(
         victim.exists(),
         "nothing ran while the question is still open"
+    );
+}
+
+/// Purpose: `/god` allows an irreversible action — the prompt YOLO still raised — and the log says the relaxation went that far (ADR-0022).
+#[test]
+fn god_mode_allows_an_irreversible_action_and_says_so() {
+    let t = Temp::new();
+    std::fs::create_dir_all(t.dir.join(".smoke")).unwrap();
+    let model = ScriptedModel::new(vec![
+        response(
+            vec![call("c1", "shell", json!({"command": "rm -rf .smoke"}))],
+            None,
+        ),
+        response(vec![], Some("done")),
+    ]);
+    let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+    k.set_mode(loong_schema::PermissionMode::God).unwrap();
+
+    let outcome = k.submit("delete it").unwrap();
+    assert!(
+        outcome.pending_approval.is_none(),
+        "god does not ask about a deletion inside the workspace: {:?}",
+        outcome.pending_approval
+    );
+    assert!(!t.dir.join(".smoke").exists(), "the deletion actually ran");
+    let events = loong_eventlog::replay(&t.log).unwrap().events;
+    let ruling = events
+        .iter()
+        .filter(|e| e.kind == ev::POLICY_DECIDED)
+        .find(|e| e.data["rule"] == "god:irreversible")
+        .expect("the log says the relaxation was god, not yolo");
+    assert_eq!(ruling.data["verdict"], "allow");
+    let relaxed = events
+        .iter()
+        .find(|e| e.kind == gen::event::PERMISSIONS_RELAXED)
+        .expect("opting out is itself an event");
+    assert_eq!(relaxed.data["mode"], "god");
+    assert_eq!(relaxed.data["auto_approve"], true);
+}
+
+/// Purpose: God refuses `rm -rf /` outright: no prompt, one deny, and a tool result the model can read (ADR-0022 §2).
+#[test]
+fn god_mode_refuses_a_deletion_outside_the_workspace() {
+    let t = Temp::new();
+    let model = ScriptedModel::new(vec![
+        response(
+            vec![call("c1", "shell", json!({"command": "rm -rf /"}))],
+            None,
+        ),
+        response(vec![], Some("done")),
+    ]);
+    let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+    k.set_mode(loong_schema::PermissionMode::God).unwrap();
+
+    let outcome = k.submit("nuke it").unwrap();
+    assert!(outcome.pending_approval.is_none(), "a gate does not ask");
+    let events = loong_eventlog::replay(&t.log).unwrap().events;
+    let rulings: Vec<_> = events
+        .iter()
+        .filter(|e| e.kind == ev::POLICY_DECIDED)
+        .collect();
+    assert_eq!(rulings.len(), 1, "one decision, and it is the refusal");
+    assert_eq!(rulings[0].data["verdict"], "deny");
+    assert_eq!(rulings[0].data["rule"], "god:deny:delete-outside");
+    assert!(
+        !events
+            .iter()
+            .any(|e| e.kind == gen::event::APPROVAL_REQUESTED),
+        "nothing was asked"
+    );
+    let result = events
+        .iter()
+        .filter(|e| e.kind == ev::TOOL_RESULT)
+        .last()
+        .expect("the model is told why");
+    assert!(
+        result.data["output"]
+            .as_str()
+            .unwrap()
+            .contains("god:deny:delete-outside"),
+        "{:?}",
+        result.data
+    );
+}
+
+/// Purpose: God relaxes nothing a tightened policy denied, because it changes questions and never prohibitions (ADR-0022 §1).
+#[test]
+fn god_mode_does_not_override_a_tightened_policy() {
+    let t = Temp::new();
+    std::fs::create_dir_all(t.dir.join(".smoke")).unwrap();
+    let model = ScriptedModel::new(vec![
+        response(
+            vec![call("c1", "shell", json!({"command": "rm -rf .smoke"}))],
+            None,
+        ),
+        response(vec![], Some("done")),
+    ]);
+    let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+    k.pdp_mut()
+        .tighten(ActionClass::Irreversible, Verdict::Deny)
+        .unwrap();
+    k.set_mode(loong_schema::PermissionMode::God).unwrap();
+
+    k.submit("delete it").unwrap();
+    assert!(
+        t.dir.join(".smoke").exists(),
+        "the tightened deny held under god"
     );
 }
 
@@ -509,7 +621,7 @@ fn a_permissions_request_is_applied_at_the_next_decision() {
     let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
 
     // The surface's private control channel leaves the request; the turn applies it.
-    *k.permissions_requestor().lock().unwrap() = Some(true);
+    *k.permissions_requestor().lock().unwrap() = Some(loong_schema::PermissionMode::Yolo);
     let outcome = k.submit("write outside").unwrap();
     assert!(
         outcome.pending_approval.is_none(),
@@ -588,7 +700,7 @@ fn a_permissions_request_during_a_model_call_still_allows_the_call() {
     /// Verify: `cargo test -p loong-kernel`.
     struct AsksMidCall {
         inner: ScriptedModel,
-        slot: std::sync::Arc<std::sync::Mutex<Option<bool>>>,
+        slot: super::PermissionRequestSlot,
         fired: bool,
     }
     impl Model for AsksMidCall {
@@ -600,7 +712,7 @@ fn a_permissions_request_during_a_model_call_still_allows_the_call() {
         ) -> Result<CompletionResponse, ModelError> {
             if !self.fired {
                 self.fired = true;
-                *self.slot.lock().unwrap() = Some(true);
+                *self.slot.lock().unwrap() = Some(loong_schema::PermissionMode::Yolo);
             }
             self.inner.complete(request)
         }

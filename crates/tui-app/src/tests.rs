@@ -538,12 +538,75 @@ fn typing_a_slash_offers_the_commands_this_screen_answers() {
     let screen = draw(&mut app, 100, 24);
     assert!(shows(&screen, "命令"), "the menu is named: {screen}");
     for command in [
-        "/new", "/exit", "/yolo", "/copy", "/mouse", "/logo", "/expand", "/cost", "/left", "/right",
+        "/new", "/exit", "/yolo", "/god", "/copy", "/mouse", "/logo", "/expand", "/cost", "/left",
+        "/right",
     ] {
         assert!(screen.contains(command), "{command} is offered: {screen}");
     }
     // And it is still a normal prompt buffer under the menu.
     assert_eq!(app.input, "/");
+}
+
+/// Purpose: `/god` turns god on from either resting mode and off again, and `/yolo` lands on yolo from god (ADR-0022 §6.1).
+#[test]
+fn the_god_command_toggles_god_mode() {
+    // Each pair is (starting mode, command, mode after).
+    for (from, command, want) in [
+        (PermissionMode::Ask, "/god", PermissionMode::God),
+        (PermissionMode::Yolo, "/god", PermissionMode::God),
+        (PermissionMode::God, "/god", PermissionMode::Ask),
+        (PermissionMode::God, "/yolo", PermissionMode::Yolo),
+        (PermissionMode::Yolo, "/yolo", PermissionMode::Ask),
+    ] {
+        let mut app = App::new("s", "v");
+        app.mode = from;
+        type_text(&mut app, command);
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            Action::Send(ToWorker::Mode(want)),
+            "{command} from {from:?}"
+        );
+    }
+}
+
+/// Purpose: God says so in the title and in the status, distinguishably from yolo: a session that never asks must never look calm (ADR-0007 §5, ADR-0022 §5).
+#[test]
+fn god_has_a_mark_of_its_own() {
+    let mut app = App::new("s", "v");
+    let ask = draw(&mut app, 110, 24);
+    app.mode = PermissionMode::Yolo;
+    let yolo = draw(&mut app, 110, 24);
+    app.mode = PermissionMode::God;
+    let god = draw(&mut app, 110, 24);
+
+    assert!(shows(&god, "⚡ GOD"), "the title carries the mark: {god}");
+    assert!(
+        shows(&god, "越界删除、密钥外发直接拒绝"),
+        "and says what it will not do: {god}"
+    );
+    assert!(!shows(&god, "免确认"), "god is not yolo: {god}");
+    assert!(shows(&yolo, "⚠ 免确认"), "{yolo}");
+    assert!(!shows(&yolo, "GOD"), "yolo is not god: {yolo}");
+    assert!(!shows(&ask, "GOD") && !shows(&ask, "免确认"), "{ask}");
+
+    // And while a turn runs the mark rides in front of the work, where YOLO's does:
+    // the one state that must never be invisible is the one nobody looks at.
+    app.busy = true;
+    app.busy_since = Some(std::time::Instant::now());
+    let working = draw(&mut app, 110, 24);
+    assert!(shows(&working, "⚡ GOD · "), "{working}");
+}
+
+/// Purpose: A session in god mode never shows the approval sheet, because the kernel stops parking: the questions it kept are gone.
+#[test]
+fn god_mode_shows_no_approval_sheet() {
+    let mut app = App::new("s", "v");
+    app.mode = PermissionMode::God;
+    let screen = draw(&mut app, 110, 24);
+    assert!(
+        !shows(&screen, "确认"),
+        "there is nothing to confirm in god mode: {screen}"
+    );
 }
 
 /// Purpose: A prefix narrows the menu and the title says what the one match will do, so `/yo` is not invisible.
@@ -600,7 +663,7 @@ fn enter_completes_a_prefix_before_it_runs() {
     assert_eq!(app.input, "/yolo");
     assert_eq!(
         app.handle_key(key(KeyCode::Enter)),
-        Action::Send(ToWorker::Yolo(true)),
+        Action::Send(ToWorker::Mode(PermissionMode::Yolo)),
         "the completed name runs on the next enter, as it always did"
     );
 }
@@ -780,7 +843,11 @@ fn a_question_yolo_cannot_skip_says_so() {
     // question survives YOLO, and「本会话允许」is how to stop answering the same shape.
     let ask = |yolo: bool, width: u16, height: u16| {
         let mut app = App::new("s", "v");
-        app.yolo = yolo;
+        app.mode = if yolo {
+            PermissionMode::Yolo
+        } else {
+            PermissionMode::Ask
+        };
         app.pending = Some("appr-9".to_string());
         app.approval = Some(Box::new(ApprovalInfo {
             request_id: "appr-9".to_string(),
@@ -828,7 +895,7 @@ fn a_question_yolo_cannot_skip_says_so() {
 #[test]
 fn yolo_on_says_what_it_still_asks_about() {
     let mut app = App::new("s", "v");
-    fed(&mut app, FromWorker::Yolo(true));
+    fed(&mut app, FromWorker::Mode(PermissionMode::Yolo));
     assert!(
         app.lines.iter().any(|line| shows(line, "确认提示已关闭")
             && shows(line, "沙箱")
@@ -2559,18 +2626,18 @@ fn yolo_is_a_command_and_is_never_invisible() {
     type_text(&mut app, "/yolo");
     assert_eq!(
         app.handle_key(key(KeyCode::Enter)),
-        Action::Send(ToWorker::Yolo(true)),
+        Action::Send(ToWorker::Mode(PermissionMode::Yolo)),
         "the command asks the server, which records the opt-out"
     );
     assert!(app.input.is_empty());
 
     // Until the server answers, the state is unchanged: the interface does not
     // pretend a permission it does not have.
-    assert!(!app.yolo);
+    assert_eq!(app.mode, PermissionMode::Ask);
     let (to_app, from_worker) = channel::<FromWorker>();
-    to_app.send(FromWorker::Yolo(true)).unwrap();
+    to_app.send(FromWorker::Mode(PermissionMode::Yolo)).unwrap();
     app.drain(&from_worker);
-    assert!(app.yolo);
+    assert_eq!(app.mode, PermissionMode::Yolo);
     assert!(
         app.lines
             .iter()
@@ -2605,16 +2672,20 @@ fn yolo_during_a_turn_flips_at_once_and_tells_the_server() {
         Action::None,
         "nothing is queued for the worker"
     );
-    assert!(app.yolo, "the screen shows the change at once");
+    assert_eq!(
+        app.mode,
+        PermissionMode::Yolo,
+        "the screen shows the change at once"
+    );
     assert_eq!(
         *asked.borrow(),
-        vec![true],
+        vec![PermissionMode::Yolo],
         "and the running turn was told now, not after it ends"
     );
     assert!(app.input.is_empty());
 
     // The event is the confirmation, and it is still recorded in the transcript.
-    fed(&mut app, FromWorker::Yolo(true));
+    fed(&mut app, FromWorker::Mode(PermissionMode::Yolo));
     assert!(
         app.lines.iter().any(|line| shows(line, "确认提示已关闭")),
         "the log line still arrives: {:?}",
@@ -2630,17 +2701,21 @@ fn yolo_without_a_control_channel_still_goes_through_the_worker() {
     type_text(&mut app, "/yolo");
     assert_eq!(
         app.handle_key(key(KeyCode::Enter)),
-        Action::Send(ToWorker::Yolo(true)),
+        Action::Send(ToWorker::Mode(PermissionMode::Yolo)),
         "the platform without a channel keeps the queued path rather than a lie"
     );
-    assert!(!app.yolo, "nothing is claimed before the server answers");
+    assert_eq!(
+        app.mode,
+        PermissionMode::Ask,
+        "nothing is claimed before the server answers"
+    );
 }
 
 /// Purpose: A running turn under YOLO still shows the spinner and clock; the warning rides in front instead of replacing them.
 #[test]
 fn a_running_turn_under_yolo_still_shows_that_it_is_working() {
     let mut app = App::new("s", "v");
-    app.yolo = true;
+    app.mode = PermissionMode::Yolo;
     app.busy = true;
     app.busy_since = Some(std::time::Instant::now());
     app.activity = Some("shell: cargo test".to_string());
@@ -2790,7 +2865,7 @@ fn a_finished_turn_is_not_finished_again_by_the_next_heartbeat() {
 #[test]
 fn a_finished_turn_under_yolo_still_says_it_finished() {
     let mut app = App::new("s", "v");
-    app.yolo = true;
+    app.mode = PermissionMode::Yolo;
     app.busy = true;
     app.busy_since = Some(std::time::Instant::now());
     fed(&mut app, FromWorker::State { pending: None });
@@ -2807,7 +2882,7 @@ fn a_finished_turn_under_yolo_still_says_it_finished() {
 #[test]
 fn a_question_under_yolo_still_says_it_is_a_question() {
     let mut app = App::new("s", "v");
-    app.yolo = true;
+    app.mode = PermissionMode::Yolo;
     app.pending = Some("appr-1".to_string());
     let screen = draw(&mut app, 110, 24);
     let titles = box_titles(&screen);
@@ -2826,7 +2901,7 @@ fn a_question_under_yolo_still_says_it_is_a_question() {
 #[test]
 fn a_command_under_yolo_keeps_its_hint() {
     let mut app = App::new("s", "v");
-    app.yolo = true;
+    app.mode = PermissionMode::Yolo;
     type_text(&mut app, "/yol");
     let screen = draw(&mut app, 110, 24);
     let titles = box_titles(&screen);
@@ -4342,7 +4417,7 @@ fn a_permissions_event_during_a_turn_confirms_the_immediate_yolo() {
     app.busy = true;
     app.busy_since = Some(std::time::Instant::now());
     // The screen already flipped; the event is what makes it trustworthy.
-    app.yolo = true;
+    app.mode = PermissionMode::Yolo;
     to_worker.send(ToWorker::Submit("go".to_string())).unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while std::time::Instant::now() < deadline

@@ -18,6 +18,7 @@
 use loong_protocol::{Notification, Request, Response};
 use loong_schema::generated as gen;
 use loong_schema::generated::{ApprovalScope, Json};
+use loong_schema::PermissionMode;
 use serde_json::{json, Value};
 
 /// Purpose: Whatever carries protocol lines: a child process's pipes, a socket or a test double.
@@ -822,18 +823,19 @@ impl<T: Transport> Client<T> {
             .collect())
     }
 
-    /// Purpose: Turn this session's approval prompts off or on.
-    /// Serves: `crates/tui-app`'s `/yolo` and worker.
-    /// Design: `docs/design/surfaces.md` §3.
+    /// Set how much this session may do without asking (ADR-0022).
+    ///
+    /// Purpose: Send the chosen mode and report the one the server adopted.
+    /// Serves: `crates/tui-app`'s `/yolo`, `/god` and its worker.
+    /// Design: `docs/design/surfaces.md` §3; ADR-0022.
     /// Up: `crates/tui-app/src/worker.rs`.
     /// Down: `Client::call` and `PermissionsState`.
     /// Verify: `cargo test -p loong-tui`.
-    /// Turn this session's approval prompts off or on. The sandbox is a different axis and
-    /// is untouched (ADR-0007 §5).
-    pub fn set_auto_approve(&mut self, on: bool) -> Result<bool, String> {
+    pub fn set_mode(&mut self, mode: PermissionMode) -> Result<PermissionMode, String> {
         let params = gen::PermissionsSetParams {
             session_id: self.session_id.clone(),
-            auto_approve: on,
+            mode: Some(mode.as_str().to_string()),
+            auto_approve: None,
         };
         let (_, result) = self.call(
             gen::method::PERMISSIONS_SET,
@@ -841,7 +843,28 @@ impl<T: Transport> Client<T> {
         )?;
         let state: gen::PermissionsState =
             serde_json::from_value(result).map_err(|e| format!("permissions.set: {e}"))?;
-        Ok(state.auto_approve)
+        Ok(state
+            .mode
+            .as_deref()
+            .and_then(PermissionMode::parse)
+            .unwrap_or(mode))
+    }
+
+    /// Purpose: The two-mode spelling of `set_mode`, kept so an on/off caller keeps
+    /// one meaning: `true` is `yolo`, never `god`.
+    /// Contract: `set_mode(if on { Yolo } else { Ask })`, reported as the switch.
+    /// Serves: a caller that only knows on/off.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `crates/tui-app`.
+    /// Down: `Client::set_mode`.
+    /// Verify: `cargo test -p loong-tui`.
+    pub fn set_auto_approve(&mut self, on: bool) -> Result<bool, String> {
+        let mode = if on {
+            PermissionMode::Yolo
+        } else {
+            PermissionMode::Ask
+        };
+        Ok(self.set_mode(mode)?.skips_prompts())
     }
 
     /// Purpose: The session so far, rendered the way live events are.

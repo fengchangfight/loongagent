@@ -12,6 +12,7 @@ use super::*;
 use crate::control::{cached_pack_state, connect, load_control};
 use crate::local::{configure_local, session_needs_a_model, spawn_model_health};
 use crate::session::{history_path, session_intro};
+use loong_schema::PermissionMode;
 
 // ---------------------------------------------------------------- the client
 
@@ -46,10 +47,10 @@ impl ChildTransport {
     }
 
     /// Purpose: Hand out the private way into this child, so a surface with no screen can turn
-    /// its permission prompts off or on while a turn owns the child's stdin.
+    /// its permission mode while a turn owns the child's stdin.
     ///
-    /// Serves: `web::make_session`, whose page has a YOLO switch and no keyboard to reach the
-    /// terminal's own `/yolo`.
+    /// Serves: `web::make_session`, whose page has the YOLO and GOD buttons and no keyboard
+    /// to reach the terminal's own `/yolo` or `/god`.
     /// Design: `docs/design/web-surface.md` §4; ADR-0019.
     /// Up: `web::make_session`.
     /// Down: the write end of the control channel, kept beside the closure the TUI calls.
@@ -61,7 +62,9 @@ impl ChildTransport {
         let write = std::sync::Arc::clone(self.control.as_ref()?);
         // The ask only asks: `permissions.relaxed` in the session log is what says the turn
         // applied it. A write that fails means the turn that owned the channel is gone.
-        Some(std::sync::Arc::new(move |on: bool| ask_yolo(&write, on)))
+        Some(std::sync::Arc::new(move |mode: PermissionMode| {
+            ask_mode(&write, mode)
+        }))
     }
 
     /// Purpose: The same hand-out on a platform with no control channel: there is none.
@@ -88,7 +91,14 @@ impl ChildTransport {
     pub(crate) fn spawn(
         args: &Args,
         capture_notes: bool,
-    ) -> Result<(Self, Option<Receiver<String>>, Option<Box<dyn Fn(bool)>>), String> {
+    ) -> Result<
+        (
+            Self,
+            Option<Receiver<String>>,
+            Option<Box<dyn Fn(PermissionMode)>>,
+        ),
+        String,
+    > {
         // Same build by default, from the *image* rather than the launch path: a surface
         // that outlives a rebuild (`loongagent web`) must still start its next child
         // (web-surface.md §3). Overridable so a *test* binary can point at the built
@@ -246,16 +256,15 @@ impl ChildTransport {
         #[cfg(unix)]
         let control_write = std::sync::Arc::new(control_write);
         #[cfg(unix)]
-        let control: Option<Box<dyn Fn(bool)>> = {
+        let control: Option<Box<dyn Fn(PermissionMode)>> = {
             let write = std::sync::Arc::clone(&control_write);
-            Some(Box::new(move |on: bool| {
+            Some(Box::new(move |mode: PermissionMode| {
                 use std::io::Write;
-                let line = if on { "yolo on\n" } else { "yolo off\n" };
-                let _ = (&*write).write_all(line.as_bytes());
+                let _ = (&*write).write_all(format!("mode {mode}\n").as_bytes());
             }))
         };
         #[cfg(not(unix))]
-        let control: Option<Box<dyn Fn(bool)>> = None;
+        let control: Option<Box<dyn Fn(PermissionMode)>> = None;
         Ok((
             Self {
                 child,
@@ -484,13 +493,16 @@ pub(crate) fn full_screen(args: Args) -> Result<(), String> {
 /// Design: `docs/design/web-surface.md` §4.
 /// Up: `permission_channel`'s closure.
 /// Down: the write end of the socketpair the spawning process kept.
-/// Verify: `cargo test -p loongagent --bin loongagent a_yolo_flip`.
+/// Verify: `cargo test -p loongagent --bin loongagent a_mode_flip`.
 /// Contract: `Err` means the child and its channel are gone; the caller falls back to the
 /// request that waits for the turn.
 #[cfg(unix)]
-fn ask_yolo(write: &std::os::unix::net::UnixStream, on: bool) -> Result<(), String> {
+fn ask_mode(
+    write: &std::os::unix::net::UnixStream,
+    mode: loong_schema::PermissionMode,
+) -> Result<(), String> {
     use std::io::Write;
-    let line = if on { "yolo on\n" } else { "yolo off\n" };
+    let line = format!("mode {mode}\n");
     // A `&UnixStream` is itself a `Write`, which keeps the channel shared by reference.
     let mut sink = write;
     sink.write_all(line.as_bytes())
@@ -498,17 +510,22 @@ fn ask_yolo(write: &std::os::unix::net::UnixStream, on: bool) -> Result<(), Stri
 }
 
 #[cfg(all(test, unix))]
-mod yolo_tests {
+mod mode_tests {
     use super::*;
     use std::io::Read;
 
     /// Purpose: prove the CLI writes the exact bytes the server's reader expects.
     #[test]
-    fn a_yolo_flip_writes_the_line_the_server_reads() {
+    fn a_mode_flip_writes_the_lines_the_server_reads() {
         let (write, mut read) = std::os::unix::net::UnixStream::pair().unwrap();
-        ask_yolo(&write, true).unwrap();
-        ask_yolo(&write, false).unwrap();
-        let wanted = b"yolo on\nyolo off\n";
+        for mode in [
+            loong_schema::PermissionMode::God,
+            loong_schema::PermissionMode::Yolo,
+            loong_schema::PermissionMode::Ask,
+        ] {
+            ask_mode(&write, mode).unwrap();
+        }
+        let wanted = b"mode god\nmode yolo\nmode ask\n";
         let mut heard = Vec::new();
         let mut buf = [0u8; 32];
         while heard.len() < wanted.len() {

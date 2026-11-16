@@ -16,9 +16,10 @@
 //! needs no agent logic to render what happened (ADR-0009) — and no client can
 //! see a decision that was not also written to the log.
 
-use loong_kernel::{Kernel, KernelError};
+use loong_kernel::{Kernel, KernelError, PermissionRequestSlot};
 use loong_protocol::{codes, Notification, Request, Response};
 use loong_schema::generated as gen;
+use loong_schema::PermissionMode;
 use serde_json::Value;
 use std::cell::RefCell;
 use std::io::{BufRead, Write};
@@ -322,7 +323,7 @@ pub struct Server {
 struct PermissionsChannel {
     /// What the reader thread leaves for the kernel: `Some(true|false)` is a request not
     /// yet applied at a decision boundary.
-    slot: std::sync::Arc<std::sync::Mutex<Option<bool>>>,
+    slot: PermissionRequestSlot,
     /// The read end of the private pipe, inherited from the surface that spawned us.
     fd: i32,
 }
@@ -355,11 +356,7 @@ impl Server {
     /// Up: `crates/cli/src/server.rs`; the surface passed the descriptor when it spawned us.
     /// Down: `run_stdio` (the reader thread) and `Kernel::use_permissions_requester`.
     /// Verify: `cargo test -p loong-server`.
-    pub fn with_permissions(
-        mut self,
-        slot: std::sync::Arc<std::sync::Mutex<Option<bool>>>,
-        fd: i32,
-    ) -> Self {
+    pub fn with_permissions(mut self, slot: PermissionRequestSlot, fd: i32) -> Self {
         self.permissions = Some(PermissionsChannel { slot, fd });
         self
     }
@@ -605,22 +602,51 @@ impl Server {
                 if let Some(bad) = self.wrong_session(&id, &params.session_id) {
                     return vec![bad];
                 }
-                match self.kernel.set_auto_approve(params.auto_approve) {
+                // Two spellings, one meaning: `mode` is today's, `auto_approve` is
+                // what a client written before ADR-0022 sends. Naming neither is a
+                // bug in the client, so it is refused rather than guessed.
+                let mode = match (params.mode.as_deref(), params.auto_approve) {
+                    (Some(text), _) => match PermissionMode::parse(text) {
+                        Some(mode) => mode,
+                        None => {
+                            return vec![Response::err(
+                                id,
+                                codes::INVALID_PARAMS,
+                                format!("unknown permission mode {text:?} (ask, yolo or god)"),
+                            )
+                            .to_line()]
+                        }
+                    },
+                    (None, Some(true)) => PermissionMode::Yolo,
+                    (None, Some(false)) => PermissionMode::Ask,
+                    (None, None) => {
+                        return vec![Response::err(
+                            id,
+                            codes::INVALID_PARAMS,
+                            "permissions.set needs either `mode` or `auto_approve`".to_string(),
+                        )
+                        .to_line()]
+                    }
+                };
+                match self.kernel.set_mode(mode) {
                     Ok(()) => {
                         // Said out loud, because a session that stops asking is a session
-                        // whose log has to say why (ADR-0007 §5).
+                        // whose log has to say why (ADR-0007 §5, ADR-0022).
                         eprintln!(
-                            "approval prompts {}",
-                            if params.auto_approve {
-                                "off (YOLO)"
-                            } else {
-                                "on"
+                            "permission mode {}",
+                            match mode {
+                                PermissionMode::Ask => "ask (prompts on)",
+                                PermissionMode::Yolo => {
+                                    "yolo (prompts off, irreversible still asks)"
+                                }
+                                PermissionMode::God => "god (prompts off, two shapes refused)",
                             }
                         );
                         self.respond(
                             id,
                             gen::PermissionsState {
-                                auto_approve: params.auto_approve,
+                                auto_approve: mode.skips_prompts(),
+                                mode: Some(mode.as_str().to_string()),
                             },
                             "permissions.set",
                         )
@@ -1042,10 +1068,11 @@ impl Server {
 /// Serves: `Server::run_stdio`, which starts it when the surface passed a descriptor.
 /// Design: `docs/design/flows/tool-approval.md`; `docs/design/surfaces.md` §3.
 /// Up: `Server::run_stdio`.
-/// Down: `PermissionsChannel::slot`, read by `Kernel::apply_requested_permissions`.
+/// Down: `PermissionsChannel::slot` (a `PermissionRequestSlot`), read by
+/// `Kernel::apply_requested_permissions`.
 /// Verify: `cargo test -p loong-server`.
 #[cfg(unix)]
-fn spawn_permissions_reader(fd: i32, slot: std::sync::Arc<std::sync::Mutex<Option<bool>>>) {
+fn spawn_permissions_reader(fd: i32, slot: PermissionRequestSlot) {
     use std::io::BufRead;
     use std::os::unix::io::FromRawFd;
     std::thread::spawn(move || {
@@ -1063,13 +1090,18 @@ fn spawn_permissions_reader(fd: i32, slot: std::sync::Arc<std::sync::Mutex<Optio
             }
         }
         for line in std::io::BufReader::new(pipe).lines().map_while(Result::ok) {
-            let on = match line.trim() {
-                "yolo on" => true,
-                "yolo off" => false,
+            // The `yolo on|off` words are the pre-ADR-0022 spelling and stay readable,
+            // so an older surface keeps working; `mode <name>` is today's.
+            let mode = match line.trim() {
+                "yolo on" => PermissionMode::Yolo,
+                "yolo off" => PermissionMode::Ask,
+                "mode god" => PermissionMode::God,
+                "mode yolo" => PermissionMode::Yolo,
+                "mode ask" => PermissionMode::Ask,
                 _ => continue,
             };
             if let Ok(mut pending) = slot.lock() {
-                *pending = Some(on);
+                *pending = Some(mode);
             }
         }
     });
@@ -2412,7 +2444,7 @@ mod tests {
         )
         .unwrap();
         // The surface's reader thread left this between two turns.
-        *kernel.permissions_requestor().lock().unwrap() = Some(true);
+        *kernel.permissions_requestor().lock().unwrap() = Some(PermissionMode::Yolo);
         let mut server = Server::new(kernel, "s");
         let lines = lines_of(
             &mut server,
@@ -2432,6 +2464,117 @@ mod tests {
         );
     }
 
+    /// Purpose: The one answer line in a batch that may also carry streamed events.
+    /// Contract: test helper for the tests that read parsed lines; `reply` does the
+    /// same for raw lines.
+    fn answer(values: &[Value]) -> Value {
+        values
+            .iter()
+            .find(|value| value.get("result").is_some() || value.get("error").is_some())
+            .cloned()
+            .unwrap_or(Value::Null)
+    }
+
+    /// Purpose: `permissions.set` with `mode: "god"` reaches the kernel and the answer says god, not just "on" (ADR-0022).
+    #[test]
+    fn a_god_request_reaches_the_kernel_and_is_answered_with_the_mode() {
+        let t = Temp::new();
+        let kernel = Kernel::create(
+            t.0.join("god.jsonl"),
+            KernelConfig::new(&t.0),
+            Box::new(scripted(vec![], Some("hi"))),
+        )
+        .unwrap();
+        let mut server = Server::new(kernel, "s");
+        let lines = lines_of(
+            &mut server,
+            &Request::new(
+                2,
+                gen::method::PERMISSIONS_SET,
+                json!({"session_id": "s", "mode": "god"}),
+            )
+            .to_line(),
+        );
+        let value = answer(&lines);
+        assert_eq!(value["result"]["mode"], "god", "{value}");
+        assert_eq!(
+            value["result"]["auto_approve"], true,
+            "an older client still reads the switch: {value}"
+        );
+    }
+
+    /// Purpose: The pre-ADR-0022 spelling still works and still means yolo, so an older surface keeps working.
+    #[test]
+    fn a_legacy_auto_approve_request_is_yolo() {
+        let t = Temp::new();
+        let kernel = Kernel::create(
+            t.0.join("legacy.jsonl"),
+            KernelConfig::new(&t.0),
+            Box::new(scripted(vec![], Some("hi"))),
+        )
+        .unwrap();
+        let mut server = Server::new(kernel, "s");
+        let lines = lines_of(
+            &mut server,
+            &Request::new(
+                2,
+                gen::method::PERMISSIONS_SET,
+                json!({"session_id": "s", "auto_approve": true}),
+            )
+            .to_line(),
+        );
+        let value = answer(&lines);
+        assert_eq!(value["result"]["mode"], "yolo", "{value}");
+        assert_eq!(value["result"]["auto_approve"], true);
+    }
+
+    /// Purpose: A request that names neither a mode nor the boolean is refused rather than guessed.
+    #[test]
+    fn a_permissions_request_without_a_mode_is_refused() {
+        let t = Temp::new();
+        let kernel = Kernel::create(
+            t.0.join("nomode.jsonl"),
+            KernelConfig::new(&t.0),
+            Box::new(scripted(vec![], Some("hi"))),
+        )
+        .unwrap();
+        let mut server = Server::new(kernel, "s");
+        let lines = lines_of(
+            &mut server,
+            &Request::new(2, gen::method::PERMISSIONS_SET, json!({"session_id": "s"})).to_line(),
+        );
+        assert_eq!(
+            answer(&lines)["error"]["code"],
+            codes::INVALID_PARAMS as i64
+        );
+    }
+
+    /// Purpose: A word this build does not know is refused, not quietly treated as ask.
+    #[test]
+    fn an_unknown_mode_is_refused() {
+        let t = Temp::new();
+        let kernel = Kernel::create(
+            t.0.join("badmode.jsonl"),
+            KernelConfig::new(&t.0),
+            Box::new(scripted(vec![], Some("hi"))),
+        )
+        .unwrap();
+        let mut server = Server::new(kernel, "s");
+        let lines = lines_of(
+            &mut server,
+            &Request::new(
+                2,
+                gen::method::PERMISSIONS_SET,
+                json!({"session_id": "s", "mode": "root"}),
+            )
+            .to_line(),
+        );
+        assert_eq!(
+            answer(&lines)["error"]["code"],
+            codes::INVALID_PARAMS as i64
+        );
+    }
+
     /// Purpose: The private control channel turns a line into a permissions request the kernel can apply.
     #[cfg(unix)]
     #[test]
@@ -2441,7 +2584,7 @@ mod tests {
         let (write, read) = std::os::unix::net::UnixStream::pair().unwrap();
         let slot = std::sync::Arc::new(std::sync::Mutex::new(None));
         spawn_permissions_reader(read.into_raw_fd(), std::sync::Arc::clone(&slot));
-        let wait_for = |wanted: Option<bool>| {
+        let wait_for = |wanted: Option<PermissionMode>| {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
             while *slot.lock().unwrap() != wanted && std::time::Instant::now() < deadline {
                 std::thread::sleep(std::time::Duration::from_millis(1));
@@ -2449,9 +2592,19 @@ mod tests {
             assert_eq!(*slot.lock().unwrap(), wanted);
         };
 
+        // The three modes the surfaces send today.
+        for (line, mode) in [
+            ("mode god\n", PermissionMode::God),
+            ("mode yolo\n", PermissionMode::Yolo),
+            ("mode ask\n", PermissionMode::Ask),
+        ] {
+            (&write).write_all(line.as_bytes()).unwrap();
+            wait_for(Some(mode));
+        }
+        // And the pre-ADR-0022 words, which still mean what they meant.
         (&write).write_all(b"yolo on\n").unwrap();
-        wait_for(Some(true));
+        wait_for(Some(PermissionMode::Yolo));
         (&write).write_all(b"yolo off\n").unwrap();
-        wait_for(Some(false));
+        wait_for(Some(PermissionMode::Ask));
     }
 }

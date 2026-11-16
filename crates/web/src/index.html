@@ -38,6 +38,10 @@
        aria-label="模型：alt+n / alt+p 切换，ctrl+← / ctrl+→ 移动当前模型"></div>
   <button id="add-model" type="button" title="添加模型：粘贴服务商的密钥，写入 local.toml，和 `loongagent local add` 一样">＋ 添加模型</button>
   <span class="keys" aria-hidden="true">alt+n · alt+p 切换 · ctrl+← → 移动</span>
+  <button id="god" type="button" aria-pressed="false"
+          title="GOD：连删除和外发也不再询问。工作区之外的删除和密钥外发会被直接拒绝，不弹窗（ADR-0022）。">
+    <span class="dot" aria-hidden="true"></span><span class="word">GOD</span><span class="state">关</span>
+  </button>
   <button id="yolo" type="button" aria-pressed="false"
           title="审批提示已开启：每次工具调用都会先询问。点击让这个会话不再询问——沙箱仍然生效。">
     <span class="dot" aria-hidden="true"></span><span class="word">YOLO</span><span class="state">关</span>

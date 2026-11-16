@@ -49,6 +49,11 @@ pub const COMMANDS: &[Command] = &[
         description: "关掉确认提示，删东西和外发仍然会问",
     },
     Command {
+        name: "/god",
+        aliases: &[],
+        description: "连删除和外发也不问；越界删除、密钥外发直接拒绝",
+    },
+    Command {
         name: "/expand",
         aliases: &[],
         description: "把上一条工具结果完整展开",

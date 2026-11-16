@@ -219,12 +219,14 @@ fn roundtrip_session_open_result() {
 
 #[test]
 fn roundtrip_permissions_set_params() {
-    roundtrip::<g::PermissionsSetParams>(r#"{"session_id": "<string>","auto_approve": true}"#);
+    roundtrip::<g::PermissionsSetParams>(
+        r#"{"session_id": "<string>","mode": "<string>","auto_approve": true}"#,
+    );
 }
 
 #[test]
 fn roundtrip_permissions_state() {
-    roundtrip::<g::PermissionsState>(r#"{"auto_approve": true}"#);
+    roundtrip::<g::PermissionsState>(r#"{"auto_approve": true,"mode": "<string>"}"#);
 }
 
 #[test]
@@ -241,7 +243,9 @@ fn roundtrip_turn_interrupted() {
 
 #[test]
 fn roundtrip_permissions_relaxed() {
-    roundtrip::<g::PermissionsRelaxed>(r#"{"auto_approve": true,"reason": "<string>"}"#);
+    roundtrip::<g::PermissionsRelaxed>(
+        r#"{"auto_approve": true,"reason": "<string>","mode": "<string>"}"#,
+    );
 }
 
 #[test]
@@ -310,7 +314,9 @@ fn declared_events_match_the_envelope_table() {
 #[test]
 fn every_event_payload_roundtrips() {
     roundtrip::<g::TurnInterrupted>(r#"{"reason": "<string>"}"#);
-    roundtrip::<g::PermissionsRelaxed>(r#"{"auto_approve": true,"reason": "<string>"}"#);
+    roundtrip::<g::PermissionsRelaxed>(
+        r#"{"auto_approve": true,"reason": "<string>","mode": "<string>"}"#,
+    );
     roundtrip::<g::SessionForked>(
         r#"{"origin": "<string>","parent_session": "<string>","parent_seq": 1}"#,
     );

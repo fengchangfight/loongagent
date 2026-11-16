@@ -100,12 +100,25 @@ pub(crate) fn spawn_worker_with_tick<T: Transport + Send + 'static>(
                         // the confirmation the screen waits for before it can trust its
                         // own optimistic flip.
                         if kind_of(params) == loong_schema::generated::event::PERMISSIONS_RELAXED {
-                            if let Some(on) = params
-                                .get("data")
-                                .and_then(|data| data.get("auto_approve"))
-                                .and_then(|on| on.as_bool())
-                            {
-                                let _ = events.send(FromWorker::Yolo(on));
+                            // `mode` is today's spelling; an event written before ADR-0022
+                            // carries only the boolean, and says yolo by it.
+                            let mode = params.get("data").and_then(|data| {
+                                match data.get("mode").and_then(|m| m.as_str()) {
+                                    Some(name) => PermissionMode::parse(name),
+                                    None => data
+                                        .get("auto_approve")
+                                        .and_then(|on| on.as_bool())
+                                        .map(|on| {
+                                            if on {
+                                                PermissionMode::Yolo
+                                            } else {
+                                                PermissionMode::Ask
+                                            }
+                                        }),
+                                }
+                            });
+                            if let Some(mode) = mode {
+                                let _ = events.send(FromWorker::Mode(mode));
                             }
                         }
                         let kind = params.get("kind").and_then(|k| k.as_str()).unwrap_or("");
@@ -150,9 +163,9 @@ pub(crate) fn spawn_worker_with_tick<T: Transport + Send + 'static>(
                     granted,
                     scope,
                 } => client.respond(&request_id, granted, scope, None),
-                ToWorker::Yolo(on) => match client.set_auto_approve(on) {
-                    Ok(state) => {
-                        let _ = events.send(FromWorker::Yolo(state));
+                ToWorker::Mode(mode) => match client.set_mode(mode) {
+                    Ok(confirmed) => {
+                        let _ = events.send(FromWorker::Mode(confirmed));
                         Ok(Vec::new())
                     }
                     Err(e) => Err(e),

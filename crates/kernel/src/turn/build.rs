@@ -521,7 +521,7 @@ impl Kernel {
             selected_model,
             config,
             messages: Vec::new(),
-            auto_approve: false,
+            mode: loong_schema::PermissionMode::Ask,
             event_sink: None,
             interrupted: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             permissions_request: std::sync::Arc::new(std::sync::Mutex::new(None)),

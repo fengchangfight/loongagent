@@ -25,6 +25,7 @@ use loong_sandbox::landlock::WorkspacePolicy;
 use loong_sandbox::Pdp;
 use loong_schema::generated as gen;
 use loong_schema::generated::{ActionClass, ApprovalScope, Json, Role, Verdict};
+use loong_schema::PermissionMode;
 use loong_skills::{parse_invocation, Origin, PromptFetcher, Skill, SkillSet, SkillTool};
 use loong_tools::{
     irreversible_segments, segment_key, Confinement, ExecContext, NoConfinement, Registry,
@@ -33,6 +34,17 @@ use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
+
+/// The one-slot mailbox a surface's control channel writes a mode into.
+///
+/// Purpose: Name the slot once, so the kernel, the server and the TUI agree on it.
+/// Serves: `Kernel::permissions_requestor`, `Kernel::use_permissions_requester`,
+/// `Server::with_permissions`.
+/// Design: `docs/design/kernel-loop.md` §5 (ADR-0019).
+/// Up: `crates/server`.
+/// Down: `loong_schema::PermissionMode`.
+/// Verify: `cargo test -p loong-kernel turn::tests::a_permissions_request_is_applied_at_the_next_decision`.
+pub type PermissionRequestSlot = std::sync::Arc<std::sync::Mutex<Option<PermissionMode>>>;
 
 mod build;
 mod compaction;
@@ -512,10 +524,11 @@ pub struct Kernel {
     messages: Vec<ChatMessage>,
     /// Called for every event the moment it is written (the server's liveness hook).
     event_sink: Option<Box<dyn FnMut(&gen::EventEnvelope)>>,
-    /// Approval prompts are off for this session (ADR-0007 §5: YOLO is a visible opt-out,
-    /// and opting out is itself an event). The sandbox is a different axis and is
-    /// untouched: an out-of-bounds *write* still cannot leave the workspace.
-    auto_approve: bool,
+    /// How much autonomy this session has been granted, and the only place that
+    /// decides it (ADR-0007 §5: an opt-out is a visible event; ADR-0022: three
+    /// stops). The sandbox is a different axis and is untouched: an out-of-bounds
+    /// *write* still cannot leave the workspace, whatever the mode.
+    mode: PermissionMode,
     /// Set from outside — a signal handler, in practice — to stop the running turn at the
     /// next step boundary. Cooperative on purpose: a tool that has begun finishes, and the
     /// turn stops between steps rather than in the middle of one.
@@ -524,7 +537,7 @@ pub struct Kernel {
     /// control channel. It cannot write the log (the turn is the only writer), so it
     /// leaves the request here and the turn applies it at the next decision boundary,
     /// recording `permissions.relaxed` itself and in order.
-    permissions_request: std::sync::Arc<std::sync::Mutex<Option<bool>>>,
+    permissions_request: PermissionRequestSlot,
     /// Ledger entry per message, in lockstep with `messages` (ADR-0006: the
     /// ledger decides, the wire view follows).
     entry_of: Vec<Option<u64>>,

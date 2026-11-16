@@ -97,7 +97,7 @@ pub fn run<T: Transport + Send + 'static>(
     notes: Option<Receiver<String>>,
     intro: Vec<String>,
     interrupt: Option<Box<dyn Fn()>>,
-    permissions: Option<Box<dyn Fn(bool)>>,
+    permissions: Option<Box<dyn Fn(loong_schema::PermissionMode)>>,
     health: Option<Receiver<ModelHealth>>,
 ) -> RunOutcome {
     use ratatui::backend::CrosstermBackend;

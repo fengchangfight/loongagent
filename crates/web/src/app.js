@@ -25,10 +25,10 @@ const state = {
   sessionId: null,       // the session the chat shows
   models: [],            // from model.list, each with the derived `active`
 
-  // Whether this session is in YOLO mode. The log is the record: the last
-  // `permissions.relaxed` says what is true, and `permissions.set`'s answer says
-  // what the flip to it became (ADR-0007 §5, web-surface.md §4).
-  autoApprove: false,
+  // Which permission mode this session is in: "ask", "yolo" or "god". The log is the
+  // record: the last `permissions.relaxed` says what is true, and `permissions.set`'s
+  // answer says what the flip to it became (ADR-0007 §5, ADR-0022, web-surface.md §4).
+  mode: "ask",
 
   // The models the profile declares, asked at boot before any session exists, and the
   // provider catalogue the add-model panel lists (web-surface.md §6).
@@ -77,6 +77,7 @@ const dom = {
   modelbar: el("modelbar"),
   modelSlots: el("model-slots"),
   yolo: el("yolo"),
+  god: el("god"),
   addModel: el("add-model"),
   noModels: el("no-models"),
   noModelsAdd: el("no-models-add"),
@@ -758,48 +759,85 @@ function busySession(id) {
  * which is what the switch says then (web-surface.md §4). */
 
 function renderYolo() {
-  const on = state.autoApprove;
-  dom.yolo.classList.toggle("on", on);
-  dom.yolo.setAttribute("aria-pressed", on ? "true" : "false");
+  const mode = state.mode;
+  const yolo = mode === "yolo";
+  const god = mode === "god";
+  dom.yolo.classList.toggle("on", yolo);
+  dom.yolo.setAttribute("aria-pressed", yolo ? "true" : "false");
   dom.yolo.disabled = !state.sessionId;
+  dom.god.classList.toggle("on", god);
+  dom.god.setAttribute("aria-pressed", god ? "true" : "false");
+  dom.god.disabled = !state.sessionId;
   // The same gate the slots carry: adopting a model reloads the live children, and the
   // surface refuses that outright while a turn is running (web-surface.md §6).
   dom.addModel.disabled = state.running;
-  dom.yolo.querySelector(".state").textContent = on ? "开" : "关";
-  dom.yolo.title = on
+  dom.yolo.querySelector(".state").textContent = yolo ? "开" : "关";
+  dom.yolo.title = yolo
     ? "这个会话的审批提示已关闭：工具调用不再询问（沙箱仍然生效）。点击恢复询问。"
     : "审批提示已开启：每次工具调用都会先询问。点击让这个会话不再询问——沙箱仍然生效。";
+  dom.god.querySelector(".state").textContent = god ? "开" : "关";
+  dom.god.title = god
+    ? "GOD 已开启：删除和外发不再询问；工作区之外的删除和密钥外发会被直接拒绝。点击恢复询问。"
+    : "GOD：连删除和外发也不再询问。工作区之外的删除和密钥外发会被直接拒绝，不弹窗（ADR-0022）。";
 }
 
-async function setYolo(on) {
-  if (!state.sessionId || on === state.autoApprove) return;
-  state.autoApprove = on; // the round trip only; the answer below is what stays
+/** What each mode says when it lands, so the page never leaves the change unexplained. */
+const MODE_NOTICE = {
+  ask: ["info", "这个会话的审批提示已重新开启"],
+  yolo: ["warn", "这个会话的审批提示已关闭——沙箱仍然生效"],
+  god: ["warn", "GOD：删除和外发不再询问；越界删除和密钥外发会被直接拒绝"],
+};
+
+async function setMode(mode) {
+  if (!state.sessionId || mode === state.mode) return;
+  const before = state.mode;
+  state.mode = mode; // the round trip only; the answer below is what stays
   renderYolo();
   try {
     const result = await sendRequest("permissions.set", {
       session_id: state.sessionId,
-      auto_approve: on,
+      mode: mode,
     });
-    state.autoApprove = !!result.auto_approve;
+    state.mode = result.mode || mode;
     renderYolo();
     // A flip that reached the running turn applies at its next step, not before: say
     // when, rather than let the switch look like it did nothing for a while.
     const later = result.queued === false;
     const when = later ? "（正在跑的回合会在下一步应用）" : "";
-    notice(
-      state.autoApprove ? "warn" : "info",
-      (state.autoApprove
-        ? "这个会话的审批提示已关闭——沙箱仍然生效"
-        : "这个会话的审批提示已重新开启") + when,
-    );
+    const [kind, words] = MODE_NOTICE[state.mode] || MODE_NOTICE.ask;
+    notice(kind, words + when);
   } catch (e) {
-    state.autoApprove = !on; // nothing was recorded, so nothing changed
+    state.mode = before; // nothing was recorded, so nothing changed
     renderYolo();
     notice("error", `permissions.set: ${e.message}`);
   }
 }
 
-dom.yolo.onclick = () => setYolo(!state.autoApprove);
+dom.yolo.onclick = () => setMode(state.mode === "yolo" ? "ask" : "yolo");
+
+// God is one press away from the switch beside it and is not undone by accident, so the
+// first press only arms the button for three seconds; the second press within that
+// window turns it on (web-surface.md §4).
+let godArms = null;
+dom.god.onclick = () => {
+  if (state.mode === "god") {
+    setMode("ask");
+    return;
+  }
+  if (godArms) {
+    clearTimeout(godArms);
+    godArms = null;
+    dom.god.classList.remove("arming");
+    setMode("god");
+    return;
+  }
+  dom.god.classList.add("arming");
+  notice("warn", "再按一次 GOD 开启：删除和外发不再询问");
+  godArms = setTimeout(() => {
+    godArms = null;
+    dom.god.classList.remove("arming");
+  }, 3000);
+};
 
 /* ── Models: one list, ticked, saved ──────────────────────────────────── */
 
@@ -1319,7 +1357,7 @@ async function newSession(workspace) {
     state.sessionId = result.session_id;
     // A session starts with prompts on; the replay after `session.open` is what
     // re-applies a `permissions.relaxed` this page never saw (web-surface.md §4).
-    state.autoApprove = false;
+    state.mode = "ask";
     state.running = false;
     clearChat();
     await refreshSessions();
@@ -1345,7 +1383,7 @@ async function openSession(id, workspaceIndex) {
     state.sessionId = result.session_id;
     // Whatever the previous session was, this one's record decides: the replay
     // below carries any `permissions.relaxed` it already has (web-surface.md §4).
-    state.autoApprove = false;
+    state.mode = "ask";
     state.running = false;
     clearChat();
     await refreshSessions();
@@ -1377,7 +1415,7 @@ async function deleteSession(id, title, workspaceIndex) {
     await sendRequest("session.delete", { session_id: id });
     if (state.sessionId === id) {
       state.sessionId = null;
-      state.autoApprove = false; // no session, no prompts to be off (web-surface.md §4)
+      state.mode = "ask"; // no session, no prompts to be off (web-surface.md §4)
       clearChat();
       renderModels();
     }
@@ -1943,7 +1981,9 @@ function onEvent(env, replayed) {
     case "permissions.relaxed":
       // The record of the flip, whether replayed or live. The button draws this
       // and nothing else, so a page that lost the answer still tells the truth.
-      state.autoApprove = !!data.auto_approve;
+      // `mode` is today's spelling; an event written before ADR-0022 carries only the
+      // boolean, and says yolo by it.
+      state.mode = data.mode || (data.auto_approve ? "yolo" : "ask");
       renderYolo();
       break;
     case "client.error":

@@ -1144,6 +1144,39 @@ impl Kernel {
         if let Some(tighter) = tighten(&ruling, &report) {
             ruling = tighter;
         }
+        // God mode keeps two refusals where it removed the question (ADR-0022 §2,
+        // §3). Deciding this *before* the ruling is recorded keeps the log to one
+        // decision, and that decision is a deny — not a prompt, because there is
+        // nothing a click could add. The model gets a reason it can act on, so a
+        // command rewritten inside the gates runs.
+        if self.mode == PermissionMode::God
+            && ruling.verdict == Verdict::Ask
+            && class == gen::ActionClass::Irreversible
+        {
+            let command = call
+                .args
+                .get("command")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if let Some(refusal) = loong_tools::god_refusal(command, &self.config.cwd) {
+                events.push(self.append(
+                    gen::event::POLICY_DECIDED,
+                    &gen::PolicyDecided {
+                        action_class: class,
+                        verdict: Verdict::Deny,
+                        rule: refusal.rule().to_string(),
+                    },
+                )?);
+                let said = refusal.to_string();
+                events.push(self.record_tool_result(&call.call_id, false, &said)?);
+                self.fire_hooks(
+                    HookEvent::PostTool,
+                    json!({"tool": tool_name, "call_id": call.call_id, "ok": false, "output": said}),
+                    events,
+                )?;
+                return Ok(Dispatch::Done);
+            }
+        }
         events.push(self.append(
             gen::event::POLICY_DECIDED,
             &gen::PolicyDecided {
@@ -1168,15 +1201,15 @@ impl Kernel {
             }
             // Opted out: the ruling is allowed instead of asking, and the event says the
             // autonomy was relaxed rather than that the policy changed (ADR-0007 §5).
-            // The one class the opt-out does not cover is the irreversible one: a
-            // deletion or a leak cannot be taken back, so the question survives YOLO
-            // (ADR-0020 §2).
-            Verdict::Ask if self.auto_approve && class != gen::ActionClass::Irreversible => {
+            // YOLO leaves the irreversible class asked, because a deletion or a leak
+            // cannot be taken back (ADR-0020 §2). God covers that class too, and keeps
+            // two refusals in its place instead of a question (ADR-0022 §2, §3).
+            Verdict::Ask if self.relaxes(class) => {
                 events.push(self.append(
                     gen::event::POLICY_DECIDED,
                     &json!({
                         "verdict": Verdict::Allow,
-                        "rule": format!("yolo:{class:?}"),
+                        "rule": self.relaxed_rule(class),
                         "tool": tool_name,
                     }),
                 )?);
@@ -1305,6 +1338,38 @@ impl Kernel {
     /// what keeps `rm -rf .smoke && curl evil.com` asking after `rm -rf
     /// .smoke` was approved on its own.
     ///
+    /// Whether this mode turns a question into an allow, for this action class.
+    ///
+    /// Purpose: The one place the three modes are told apart for a ruling.
+    /// Serves: `Kernel::dispatch`'s ask arm.
+    /// Design: `docs/design/kernel-loop.md` §5; ADR-0020, ADR-0022.
+    /// Up: `Kernel::dispatch`.
+    /// Down: `loong_schema::PermissionMode`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::god_mode_allows_an_irreversible_action_and_says_so`.
+    fn relaxes(&self, class: gen::ActionClass) -> bool {
+        match self.mode {
+            PermissionMode::Ask => false,
+            PermissionMode::Yolo => class != gen::ActionClass::Irreversible,
+            PermissionMode::God => true,
+        }
+    }
+
+    /// The rule a relaxed ruling is recorded under.
+    ///
+    /// Purpose: Say in the log which mode relaxed the ruling, so a replayed session
+    /// does not read god as yolo.
+    /// Serves: `Kernel::dispatch`'s ask arm.
+    /// Design: `docs/design/kernel-loop.md` §5; ADR-0022 §2.
+    /// Up: `Kernel::dispatch`.
+    /// Down: nothing.
+    /// Verify: `cargo test -p loong-kernel turn::tests::god_mode_allows_an_irreversible_action_and_says_so`.
+    fn relaxed_rule(&self, class: gen::ActionClass) -> String {
+        match (self.mode, class) {
+            (PermissionMode::God, gen::ActionClass::Irreversible) => "god:irreversible".to_string(),
+            _ => format!("yolo:{class:?}"),
+        }
+    }
+
     /// Purpose: Whether a command's every irreversible segment is already remembered.
     /// Serves: `Kernel::dispatch`'s `Verdict::Ask` arm, which skips the question
     /// when the person already approved this exact shape this session.
@@ -1349,41 +1414,73 @@ impl Kernel {
         }
     }
 
-    /// Turn approval prompts off or on. Recorded, because a session that never asks is a
-    /// session whose log has to say why (ADR-0007 §5).
+    /// Record and adopt a permission mode. The record comes first: a session that stops
+    /// asking has to say why, and how far, in its own log (ADR-0007 §5, ADR-0022).
     ///
-    /// Purpose: Set the session's auto-approve flag and keep the log honest about it.
-    /// Serves: a person who asks for `/yolo` and can still see afterwards that the
-    /// ask step was relaxed.
-    /// Design: `docs/design/kernel-loop.md` §5.
-    /// Up: `Server`'s `permissions.set` handler.
-    /// Down: `Kernel::append` (`permissions.relaxed`), `Kernel::auto_approve`.
-    /// Verify: `cargo test -p loong-kernel turn::tests::opting_out_of_prompts_allows_the_action_and_says_so_in_the_log`.
-    pub fn set_auto_approve(&mut self, on: bool) -> Result<(), KernelError> {
-        if self.auto_approve == on {
+    /// Purpose: Set the session's mode and keep the log honest about it.
+    /// Serves: a person who asks for `/god` or `/yolo` and can still see afterwards
+    /// how much autonomy the session had.
+    /// Design: `docs/design/kernel-loop.md` §5; ADR-0022.
+    /// Up: `Server`'s `permissions.set` handler, `Kernel::apply_requested_permissions`.
+    /// Down: `Kernel::append` (`permissions.relaxed`), `Kernel::mode`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::god_mode_allows_an_irreversible_action_and_says_so`.
+    pub fn set_mode(&mut self, mode: PermissionMode) -> Result<(), KernelError> {
+        if self.mode == mode {
             return Ok(());
         }
-        self.auto_approve = on;
+        self.mode = mode;
         self.append(
             gen::event::PERMISSIONS_RELAXED,
             &gen::PermissionsRelaxed {
-                auto_approve: on,
-                reason: "the person asked for it with /yolo".to_string(),
+                auto_approve: mode.skips_prompts(),
+                reason: match mode {
+                    PermissionMode::Ask => "the person asked for the prompts back".to_string(),
+                    PermissionMode::Yolo => "the person asked for it with /yolo".to_string(),
+                    PermissionMode::God => "the person asked for it with /god".to_string(),
+                },
+                mode: Some(mode.as_str().to_string()),
             },
         )?;
         Ok(())
     }
 
-    /// Purpose: Whether an `ask` ruling is being treated as an allow.
+    /// Purpose: The two-mode spelling of `set_mode`, kept so a caller that only knows
+    /// on/off keeps one meaning: `true` is `yolo`, never `god`.
     ///
-    /// Serves: a status surface that must show the session is in `/yolo` mode.
+    /// Serves: an older client, and any in-tree caller that only turns prompts on or off.
     /// Design: `docs/design/kernel-loop.md` §5.
-    /// Up: a surface or status reader (no in-tree caller; `Kernel::dispatch`
-    /// reads `self.auto_approve` directly).
-    /// Down: `Kernel::set_auto_approve` is the only setter.
+    /// Up: `Server`'s legacy `auto_approve` field.
+    /// Down: `Kernel::set_mode`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::opting_out_of_prompts_allows_the_action_and_says_so_in_the_log`.
+    pub fn set_auto_approve(&mut self, on: bool) -> Result<(), KernelError> {
+        self.set_mode(if on {
+            PermissionMode::Yolo
+        } else {
+            PermissionMode::Ask
+        })
+    }
+
+    /// Purpose: The mode the next decision will use.
+    ///
+    /// Serves: a status surface that must show the session's mode, and the dispatch
+    /// arm that reads it.
+    /// Design: `docs/design/kernel-loop.md` §5.
+    /// Up: `Kernel::dispatch`, `Server`'s `permissions.set` answer.
+    /// Down: `Kernel::set_mode` is the only setter.
+    /// Verify: `cargo test -p loong-kernel turn::tests::god_mode_allows_an_irreversible_action_and_says_so`.
+    pub fn mode(&self) -> PermissionMode {
+        self.mode
+    }
+
+    /// Purpose: Whether an `ask` ruling is being treated as an allow at all.
+    /// Contract: `self.mode().skips_prompts()`, for a caller that only knows on/off.
+    /// Serves: an older client reading `permissions.set`'s answer.
+    /// Design: `docs/design/kernel-loop.md` §5.
+    /// Up: `Server`'s `permissions.set` answer.
+    /// Down: `Kernel::mode`.
     /// Verify: `cargo test -p loong-kernel turn::tests::opting_out_of_prompts_allows_the_action_and_says_so_in_the_log`.
     pub fn auto_approve(&self) -> bool {
-        self.auto_approve
+        self.mode.skips_prompts()
     }
 
     /// Purpose: Hand out the slot a control channel writes a permissions request into.
@@ -1393,7 +1490,7 @@ impl Kernel {
     /// Up: `Server::with_permissions` and the server's `session.new` handler.
     /// Down: `Kernel::permissions_request`, read by `apply_requested_permissions`.
     /// Verify: `cargo test -p loong-kernel turn::tests::a_permissions_request_is_applied_at_the_next_decision`.
-    pub fn permissions_requestor(&self) -> std::sync::Arc<std::sync::Mutex<Option<bool>>> {
+    pub fn permissions_requestor(&self) -> PermissionRequestSlot {
         std::sync::Arc::clone(&self.permissions_request)
     }
 
@@ -1404,10 +1501,7 @@ impl Kernel {
     /// Up: `Server::with_permissions` and the server's `session.new` handler.
     /// Down: `Kernel::permissions_request`.
     /// Verify: `cargo test -p loong-kernel turn::tests::a_permissions_request_is_applied_at_the_next_decision`.
-    pub fn use_permissions_requester(
-        &mut self,
-        slot: std::sync::Arc<std::sync::Mutex<Option<bool>>>,
-    ) {
+    pub fn use_permissions_requester(&mut self, slot: PermissionRequestSlot) {
         self.permissions_request = slot;
     }
 
@@ -1424,8 +1518,8 @@ impl Kernel {
             .lock()
             .ok()
             .and_then(|mut slot| slot.take());
-        if let Some(on) = asked {
-            self.set_auto_approve(on)?;
+        if let Some(mode) = asked {
+            self.set_mode(mode)?;
         }
         Ok(())
     }

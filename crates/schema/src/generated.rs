@@ -403,17 +403,22 @@ pub struct SessionOpenResult {
     pub session_id: String,
 }
 
-/// Turn this session's approval prompts off or on. The sandbox is a different axis and is untouched (ADR-0007 §5).
+/// Set this session's approval mode. The sandbox is a different axis and is untouched (ADR-0007 §5, ADR-0022).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PermissionsSetParams {
     pub session_id: String,
-    /// true: rulings that would ask are allowed instead, and the override is recorded
-    pub auto_approve: bool,
+    /// `ask`, `yolo` or `god`: `god` also allows the irreversible class, refusing two shapes outright instead of asking (ADR-0022)
+    pub mode: Option<String>,
+    /// the pre-ADR-0022 spelling: true is `yolo`, false is `ask`. A client sends `mode` or this, never both
+    pub auto_approve: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PermissionsState {
+    /// true when any mode but `ask` is on, so a client written before ADR-0022 still reads the switch
     pub auto_approve: bool,
+    /// the mode itself, for a client that knows there are three
+    pub mode: Option<String>,
 }
 
 /// A session's own record that it is a child: which session it came from, how, and where in that session. ADR-0015's second tree level. The child stores none of the parent's events — it references them.
@@ -433,11 +438,13 @@ pub struct TurnInterrupted {
     pub reason: String,
 }
 
-/// Approval prompts were turned off or on for this session. ADR-0007 §5: opting out is itself an event, and it travels with the session.
+/// Approval prompts were turned off or on for this session, and how far. ADR-0007 §5: opting out is itself an event, and it travels with the session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PermissionsRelaxed {
     pub auto_approve: bool,
     pub reason: String,
+    /// absent in an event written before ADR-0022; the reader then takes `auto_approve ? yolo : ask`
+    pub mode: Option<String>,
 }
 
 /// What the workspace offered as skills/commands (T-18). Names and descriptions enter context; bodies do not.
@@ -519,7 +526,7 @@ pub mod method {
     pub const SESSION_OPEN: &str = "session.open";
     /// Attach a thin client to the local agent server (ADR-0009).
     pub const SESSION_ATTACH: &str = "session.attach";
-    /// Opt out of approval prompts for this session. Opting out is itself an event, and the interface must show it (ADR-0007 §5).
+    /// Set how much this session may do without asking (ADR-0022). Opting out is itself an event, and the interface must show it (ADR-0007 §5).
     pub const PERMISSIONS_SET: &str = "permissions.set";
     /// Replay the session's own log, so an attaching client is not blind to its past. A read: it records nothing.
     pub const SESSION_REPLAY: &str = "session.replay";

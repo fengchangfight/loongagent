@@ -328,15 +328,20 @@ export interface SessionOpenResult {
   session_id: string;
 }
 
-/** Turn this session's approval prompts off or on. The sandbox is a different axis and is untouched (ADR-0007 §5). */
+/** Set this session's approval mode. The sandbox is a different axis and is untouched (ADR-0007 §5, ADR-0022). */
 export interface PermissionsSetParams {
   session_id: string;
-  /** true: rulings that would ask are allowed instead, and the override is recorded */
-  auto_approve: boolean;
+  /** `ask`, `yolo` or `god`: `god` also allows the irreversible class, refusing two shapes outright instead of asking (ADR-0022) */
+  mode?: string;
+  /** the pre-ADR-0022 spelling: true is `yolo`, false is `ask`. A client sends `mode` or this, never both */
+  auto_approve?: boolean;
 }
 
 export interface PermissionsState {
+  /** true when any mode but `ask` is on, so a client written before ADR-0022 still reads the switch */
   auto_approve: boolean;
+  /** the mode itself, for a client that knows there are three */
+  mode?: string;
 }
 
 /** A session's own record that it is a child: which session it came from, how, and where in that session. ADR-0015's second tree level. The child stores none of the parent's events — it references them. */
@@ -354,10 +359,12 @@ export interface TurnInterrupted {
   reason: string;
 }
 
-/** Approval prompts were turned off or on for this session. ADR-0007 §5: opting out is itself an event, and it travels with the session. */
+/** Approval prompts were turned off or on for this session, and how far. ADR-0007 §5: opting out is itself an event, and it travels with the session. */
 export interface PermissionsRelaxed {
   auto_approve: boolean;
   reason: string;
+  /** absent in an event written before ADR-0022; the reader then takes `auto_approve ? yolo : ask` */
+  mode?: string;
 }
 
 /** What the workspace offered as skills/commands (T-18). Names and descriptions enter context; bodies do not. */

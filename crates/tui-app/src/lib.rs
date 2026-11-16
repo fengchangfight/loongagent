@@ -25,6 +25,7 @@ pub mod commands;
 pub mod history;
 pub mod mention;
 pub mod spend;
+use loong_schema::PermissionMode;
 use loong_tui::{Client, Transport};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -61,8 +62,8 @@ pub enum ToWorker {
     ExpandAt {
         at: usize,
     },
-    /// Turn approval prompts off or on for this session.
-    Yolo(bool),
+    /// Set how much this session may do without asking (ADR-0022).
+    Mode(loong_schema::PermissionMode),
     /// Ask which models this session offers. The session's own configuration, so it is
     /// a read: nothing is recorded for asking.
     RefreshModels,
@@ -92,8 +93,8 @@ pub enum FromWorker {
     Context(Box<loong_schema::generated::ContextExplain>),
     /// Something is waiting for a decision, with the detail needed to make one.
     Approval(Box<ApprovalInfo>),
-    /// Approval prompts were turned off or on.
-    Yolo(bool),
+    /// The permission mode the server confirmed (ADR-0022).
+    Mode(loong_schema::PermissionMode),
     /// The session's models, and which one a switch landed on.
     Models(Box<loong_schema::generated::ModelList>),
     /// A new session is running, under this id. The old one is closed and kept.
@@ -1004,19 +1005,20 @@ pub struct App {
     /// so nothing is lost by taking it. `/mouse` hands the mouse back to the terminal and
     /// keeps the wheel-to-arrow rule off, so the wheel cannot walk the prompt's history.
     pub mouse: bool,
-    /// True while approval prompts are off for this session — the interface must show
-    /// it, because the dangerous state is one where nobody notices it is on (ADR-0007 §5).
-    pub yolo: bool,
+    /// How much autonomy this session has been granted — the interface must show it,
+    /// because the dangerous state is one where nobody notices how far it goes
+    /// (ADR-0007 §5, ADR-0022).
+    pub mode: loong_schema::PermissionMode,
     /// The pending decision, and which choice is highlighted.
     pub approval: Option<Box<ApprovalInfo>>,
     pub choice: usize,
     /// How to ask the server to stop the running turn. `None` when the surface has no
     /// process to signal: the interface then says so instead of pretending.
     pub interrupt: Option<Box<dyn Fn()>>,
-    /// How to change approval prompts while a turn owns the connection. `None` when the
-    /// surface has no private control channel (Windows, today): `/yolo` then waits for
-    /// the worker like any other command.
-    pub set_permissions: Option<Box<dyn Fn(bool)>>,
+    /// How to change the permission mode while a turn owns the connection. `None` when
+    /// the surface has no private control channel (Windows, today): `/yolo` and `/god`
+    /// then wait for the worker like any other command.
+    pub set_permissions: Option<Box<dyn Fn(loong_schema::PermissionMode)>>,
     /// How to write a new slot order back to the profile. `None` when the models did
     /// not come from a writable local file (a managed profile) or in the tests: the
     /// bar then keeps the order for this run only.
@@ -1147,7 +1149,7 @@ impl App {
             stopping: false,
             step_limited: false,
             error: None,
-            yolo: false,
+            mode: PermissionMode::Ask,
             approval: None,
             choice: 0,
             logo: true,
@@ -1919,7 +1921,7 @@ impl App {
                 if *class == "irreversible" {
                     details.push(Line::from(Span::styled(
                         one_line(
-                            &Self::irreversible_note(self.yolo),
+                            &Self::irreversible_note(self.mode),
                             width.saturating_sub(4) as usize,
                         ),
                         MARK_QUIET,
@@ -1965,16 +1967,26 @@ impl App {
         )
     }
 
-    /// Purpose: The one sentence an irreversible question carries — what YOLO does not cover, and how to stop answering this shape.
-    /// Contract: called by `approval_lines` when the class is `irreversible`; ADR-0020 §2.
+    /// Purpose: The one sentence an irreversible question carries — what YOLO does not
+    /// cover, and how to stop answering this shape.
+    /// Serves: `App::approval_lines`, which calls it when the class is `irreversible`.
+    /// Design: `docs/decisions/0020-yolo-never-relaxes-irreversible.md` §2; ADR-0022 §2.
+    /// Up: `App::approval_lines`.
+    /// Down: the answer row of the question.
     /// Verify: `cargo test -p loong-tui-app a_question_yolo_cannot_skip_says_so`.
-    fn irreversible_note(yolo: bool) -> String {
+    fn irreversible_note(mode: loong_schema::PermissionMode) -> String {
         // A person who turned prompts off reads a prompt either as a bug or as the agent
         // having escaped its box. Naming the class and the opt-out in words is the price of
         // keeping the one question that must survive it (ADR-0020 §2, §3).
-        match yolo {
-            true => "不可撤销 — yolo 不跳过这条；选「本会话允许」同样形状不再问".to_string(),
-            false => "不可撤销 — 选「本会话允许」同样形状不再问".to_string(),
+        let tail = "选「本会话允许」同样形状不再问";
+        match mode {
+            PermissionMode::Ask => format!("不可撤销 — {tail}"),
+            PermissionMode::Yolo => {
+                format!("不可撤销 — yolo 不跳过这条；{tail}")
+            }
+            // God allows an irreversible call unless a gate refuses it (ADR-0022 §3), so this
+            // question should not arrive; if it does, say so instead of claiming god asks.
+            PermissionMode::God => format!("不可撤销 — god 本不该再问这条；{tail}"),
         }
     }
 
@@ -2200,6 +2212,7 @@ impl App {
                                 "回车把上一条工具结果完整展开（tab 在折叠之间走）".to_string()
                             }
                             "/yolo" => "回车关闭确认提示（沙箱仍然生效）".to_string(),
+                            "/god" => "回车连删除和外发也不问；越界与密钥直接拒绝".to_string(),
                             "/copy" => "回车复制整段记录".to_string(),
                             "/new" | "/clear" | "/reset" => {
                                 "回车开始新会话 — 这一条会存盘，上下文不带走".to_string()
@@ -2244,9 +2257,15 @@ impl App {
             }
             // Nothing to report but the relaxed session itself. This one keeps the full
             // sentence, because there is room for it; every other state carries the short
-            // mark in front, so the warning is never the price of the status.
-            None if self.yolo => (
+            // mark in front, so the warning is never the price of the status. God gets a
+            // sentence of its own: it is a different promise from YOLO's, and the one
+            // thing the person must be able to read is which of the two is on.
+            None if self.mode == PermissionMode::Yolo => (
                 "⚠ 免确认 — 确认提示已关，沙箱仍然生效（/yolo 恢复）".to_string(),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            None if self.mode == PermissionMode::God => (
+                "⚡ GOD — 不问删除与外发；越界删除、密钥外发直接拒绝（/god 恢复）".to_string(),
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             ),
             None => ("输入".to_string(), Style::default()),
@@ -2383,7 +2402,8 @@ impl App {
         // The table owns the names and the aliases, so a spelling the menu offers is
         // a spelling this dispatcher knows. It does not own what each one *does*:
         // that stays here, next to the action it asks for.
-        match commands::primary(trimmed)? {
+        let command = commands::primary(trimmed)?;
+        match command {
             "/exit" => {
                 self.input.clear();
                 self.cursor = 0;
@@ -2419,18 +2439,26 @@ impl App {
             // to end — the very wait `/yolo` exists to prevent. With the private control
             // channel the change goes now: the screen flips at once, the kernel applies
             // it at its next decision boundary, and `permissions.relaxed` confirms it.
-            "/yolo" => {
+            // Each command owns one stop and neither is a hidden third state: `/god`
+            // turns god on from either resting mode and off again, `/yolo` lands on yolo
+            // from god (ADR-0022 §6.1).
+            "/yolo" | "/god" => {
                 self.input.clear();
                 self.cursor = 0;
-                let target = !self.yolo;
+                let target = match (command, self.mode) {
+                    ("/god", PermissionMode::God) => PermissionMode::Ask,
+                    ("/god", _) => PermissionMode::God,
+                    (_, PermissionMode::Yolo) => PermissionMode::Ask,
+                    (_, _) => PermissionMode::Yolo,
+                };
                 if self.busy && self.set_permissions.is_some() {
-                    self.yolo = target;
+                    self.mode = target;
                     if let Some(tell) = &self.set_permissions {
                         tell(target);
                     }
                     return Some(Action::None);
                 }
-                Some(Action::Send(ToWorker::Yolo(target)))
+                Some(Action::Send(ToWorker::Mode(target)))
             }
             // A fresh session. `/clear` is the same thing and not a screen wipe: the
             // context is what people mean when they ask for a clean start, and clearing
@@ -2929,17 +2957,21 @@ impl App {
                         "· 新会话 {id} —— 上一条已存盘，用 `loongagent --session <id>` 可以回去"
                     )]);
                 }
-                Ok(FromWorker::Yolo(on)) => {
-                    self.yolo = on;
-                    self.push_lines(vec![format!(
-                        "⚠ 确认提示已{}{}",
-                        if on { "关闭" } else { "打开" },
-                        if on {
-                            " — 沙箱仍然生效；工作区之外的写入照样被拒；删东西和外发仍然会问"
-                        } else {
-                            ""
+                Ok(FromWorker::Mode(mode)) => {
+                    self.mode = mode;
+                    self.push_lines(vec![match mode {
+                        PermissionMode::Ask => "· 确认提示已打开".to_string(),
+                        PermissionMode::Yolo => {
+                            "⚠ 确认提示已关闭 — 沙箱仍然生效；工作区之外的写入照样被拒；\
+                             删东西和外发仍然会问"
+                                .to_string()
                         }
-                    )]);
+                        PermissionMode::God => {
+                            "⚡ GOD — 删除和外发不再问；工作区之外的删除、密钥外发直接拒绝\
+                             （/god 恢复）"
+                                .to_string()
+                        }
+                    }]);
                 }
                 Ok(FromWorker::Approval(info)) => {
                     // A new question resets the highlighted answer: carrying a previous
@@ -4179,20 +4211,47 @@ impl App {
         Line::from(Span::styled(format!("▸ {}", line.trim_start()), style))
     }
 
-    /// Purpose: The warning that stays in front of the prompt title while approval prompts are off.
-    /// Contract: called by `draw`'s title arms; reads `App::yolo`.
+    /// Purpose: The warning that stays in front of the prompt title while prompts are off,
+    /// with a different mark for each mode, so god never reads as yolo.
+    /// Contract: called by `draw`'s title arms; reads `App::mode`.
+    /// Serves: `App::status` and every title arm.
+    /// Design: `docs/design/surfaces.md` §3; ADR-0022 §5.
+    /// Up: `App::status`, `App::draw`.
+    /// Down: `App::mode`.
+    /// Verify: `cargo test -p loong-tui-app god_has_a_mark_of_its_own`.
     fn yolo_mark(&self) -> &'static str {
-        if self.yolo {
-            "⚠ 免确认 · "
-        } else {
-            ""
+        match self.mode {
+            PermissionMode::Ask => "",
+            PermissionMode::Yolo => "⚠ 免确认 · ",
+            PermissionMode::God => "⚡ GOD · ",
         }
     }
 
-    /// Purpose: The prompt title's colour: red while approvals are off, otherwise whatever the status asked for.
-    /// Contract: called by `draw`'s title arms; reads `App::yolo`.
+    /// Purpose: The footer's short badge for the session's mode, without the separator.
+    /// Contract: `""` for `ask`, `"⚠ 免确认"` for `yolo`, `"⚡ GOD"` for `god`.
+    /// Serves: the key-hint footer in `draw`.
+    /// Design: `docs/design/surfaces.md` §3; ADR-0022 §5.
+    /// Up: `App::draw`.
+    /// Down: `App::mode`.
+    /// Verify: `cargo test -p loong-tui-app god_has_a_mark_of_its_own`.
+    fn mode_badge(&self) -> &'static str {
+        match self.mode {
+            PermissionMode::Ask => "",
+            PermissionMode::Yolo => "⚠ 免确认",
+            PermissionMode::God => "⚡ GOD",
+        }
+    }
+
+    /// Purpose: The prompt title's colour: red while prompts are off, otherwise whatever
+    /// the status asked for.
+    /// Contract: called by `draw`'s title arms; reads `App::mode`.
+    /// Serves: `App::status`.
+    /// Design: `docs/design/surfaces.md` §3.
+    /// Up: `App::status`.
+    /// Down: `App::mode`.
+    /// Verify: `cargo test -p loong-tui-app`.
     fn title_style(&self, status: Style) -> Style {
-        if self.yolo {
+        if self.mode.skips_prompts() {
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
         } else {
             status
@@ -4483,10 +4542,10 @@ impl App {
                 ),
                 Span::raw(" 记录  "),
                 Span::styled(
-                    if self.yolo { "⚠ 免确认" } else { "" },
+                    self.mode_badge(),
                     Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                 ),
-                Span::raw(if self.yolo { "  " } else { "" }),
+                Span::raw(if self.mode.skips_prompts() { "  " } else { "" }),
                 Span::styled("ctrl-c", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(if self.busy { " 中断" } else { " 退出" }),
             ]

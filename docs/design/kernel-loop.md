@@ -1,7 +1,7 @@
 # Kernel loop: one turn
 
 - **Up:** [design/README.md](README.md) · [04 System overview](../04-system-overview.md)
-- **Authority:** [ADR-0004](../decisions/0004-microkernel-extension-model.md) · [ADR-0006](../decisions/0006-context-engine.md) · [ADR-0019](../decisions/0019-mid-turn-permissions.md)
+- **Authority:** [ADR-0004](../decisions/0004-microkernel-extension-model.md) · [ADR-0006](../decisions/0006-context-engine.md) · [ADR-0019](../decisions/0019-mid-turn-permissions.md) · [ADR-0022](../decisions/0022-god-mode-refuses-two-shapes.md)
 - **Code:** `crates/kernel/src/turn.rs`, `crates/kernel/src/turn/loop.rs`, `crates/kernel/src/turn/model.rs`
 - **Verify:** `cargo test -p loong-kernel` · `./scripts/check.sh`
 
@@ -107,8 +107,8 @@ Inside one registry tool call the events normally run: `tool.call`, any
 `post_tool` `hook.fired`. The PDP decides before `tool.call`; the hooks may tighten
 the verdict, so `policy.decided` records the stricter one. An ask fires the
 `permission_requested` hooks and then writes `approval.requested` in place of the
-result. A `/yolo` ask records the relaxation as a second `policy.decided` before
-it executes; it does not write a second `tool.call`, because one call is one event
+result. A `/yolo` or `/god` ask records the relaxation as a second `policy.decided`
+before it executes; it does not write a second `tool.call`, because one call is one event
 and a repeat would hand a resumed session two calls with one id, which strict
 providers reject. A `recall` call is the exception: it is answered from the
 session's own record and skips both the registry and the PDP, so it writes
@@ -194,11 +194,12 @@ state, and it does not reseat the L4 map: `Kernel.map_seated` is already true, s
 the request starts from the bytes the parked one ended with and the provider's
 cache still matches.
 
-**`/yolo`.** `Kernel::set_auto_approve` records `permissions.relaxed` and flips
-`Kernel.auto_approve`. The ask arm then executes instead of parking and records
-that the ruling was relaxed — except for an `Irreversible` ruling, which keeps
-asking, because a deletion or a leak cannot be taken back (ADR-0020). The sandbox
-is a different axis and still applies.
+**`/yolo` and `/god`.** `Kernel::set_mode` records `permissions.relaxed` and flips
+`Kernel.mode`. Under `/yolo` the ask arm executes instead of parking — except an
+`Irreversible` ruling, which keeps asking (ADR-0020). Under `/god` that class is
+allowed too, minus two shapes it denies instead: a deletion leaving the workspace,
+and secret egress (`god_refusal`; [tool-approval.md](flows/tool-approval.md) §3).
+`Verdict::Deny` is untouched and the sandbox still applies.
 
 A `/yolo` typed **while the turn is running** arrives through the surface's private
 control channel and waits in `Kernel.permissions_request`.

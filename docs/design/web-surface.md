@@ -1,7 +1,7 @@
 # The web surface
 
 - **Up:** [design/README.md](README.md) · [design/surfaces.md](surfaces.md)
-- **Authority:** [ADR-0009](../decisions/0009-surfaces.md) · [ADR-0002](../decisions/0002-json-rpc-wire-protocol.md)
+- **Authority:** [ADR-0009](../decisions/0009-surfaces.md) · [ADR-0002](../decisions/0002-json-rpc-wire-protocol.md) · [ADR-0022](../decisions/0022-god-mode-refuses-two-shapes.md)
 - **Code:** `crates/web/src/lib.rs`, `crates/web/src/app.rs`, `crates/web/src/sessions.rs`, `crates/web/src/index.html`, `crates/web/src/app.js`, `crates/web/src/style.css`, `crates/cli/src/web.rs`
 - **Verify:** `cargo test -p loong-web` · `./scripts/check.sh`
 
@@ -98,7 +98,7 @@ accumulator of `docs/design/cost-accounting.md` §4, in JavaScript — from `cos
 
 The page speaks **Chinese**: its chrome — buttons, empty states, toasts, chips, panels,
 pickers — renders user-facing text in Chinese, while identifiers that name things outside
-the page (model names, paths, the wordmark, `YOLO`) stay as they are.
+the page (model names, paths, the wordmark, `YOLO`, `GOD`) stay as they are.
 
 Three regions, all fed by the event stream:
 
@@ -118,36 +118,37 @@ Three regions, all fed by the event stream:
   model one slot** (`surfaces.md` §3) — the lit slot stays lit while the row rearranges
   around it, so the arrows send `model.reorder`, never `model.select`.
 
-  Which slot holds what the session cannot answer: its child read the profile at startup
-  and keeps answering `model.list` in *declaration* order, so the surface remembers the
-  arrangement per tab. `model.reorder {session_id, delta}` takes the bar's order as its
-  base and swaps one slot, answering the reordered `ModelList` plus `moved {name, from,
-  to}` and `persisted`; every later `model.list` is laid over the same order, so a refresh
-  does not snap back. A model added since appears last, one removed has no match, and an
-  edge is an answer, not a wrap (`alpha is already in the last slot`).
+  Which slot holds what the session cannot answer: its child read the profile at startup and keeps
+  answering `model.list` in *declaration* order, so the surface remembers the arrangement per tab.
+  `model.reorder {session_id, delta}` takes the bar's order as its base and swaps one slot, answering
+  the reordered `ModelList` plus `moved {name, from, to}` and `persisted`; every later `model.list` is
+  laid over the same order, so a refresh does not snap back. A model added since appears last, one
+  removed has no match, and an edge is an answer, not a wrap (`alpha is already in the last slot`).
 
-  `persisted` is where the modes differ, said rather than implied. On a local profile the
-  order goes back into `local.toml`'s `[[models]]` blocks, so later sessions start on the
-  new first block — hence the move is also said in the transcript, like the TUI's. On a
-  managed run, or with `--profile`, no file is this run's to rewrite: `persisted: false`,
-  arrangement on the bar. A failed write does not unmake the move — the row stays arranged
-  and the refusal returns in `warning` — and `model.add` drops the arrangement.
+  `persisted` is where the modes differ. On a local profile the order goes back into
+  `local.toml`'s `[[models]]` blocks, so later sessions start on the new first block — hence
+  the move is also said in the transcript. On a managed run, or with `--profile`, no file is
+  this run's to rewrite: `persisted: false`, arrangement on the bar. A failed write does not
+  unmake the move — the row stays arranged, the refusal returns in `warning` — `model.add` drops it.
 
   The chord split follows what the browser claims: `Ctrl+N` and `Ctrl+P` are its own,
   `Alt+←/→` are navigation — so the letters sit on Alt, the arrows on Ctrl. A running turn
   disables the slots until it ends; the row's right end carries **＋ Add model**, the panel
   of §6 beside the row it extends.
-- **YOLO switch** — the banner's right edge shows this session's approval state as a
+- **The mode pill** — the banner's right edge shows this session's approval state as a
   pill that says itself in words: `YOLO 关` quiet and outlined while prompts are on,
   `YOLO 开` filled red while the session lets every tool call through — red because a
-  turn that never asks is the dangerous state, and the page must not make it look calm.
+  turn that never asks is the dangerous state, and the page must not make it look calm. A
+  second pill, `GOD`, lights only in god mode and beside a red `YOLO 开`, because god is
+  the only stop that also lets a deletion through; a press on it **arms** for three
+  seconds before it sends, so the far stop is never one stray click away (ADR-0022 §6).
   It draws what the session says, never its own guess: `permissions.relaxed` is the record
   and `permissions.set`'s answer the confirmation, so an old session shows the opt-out it
-  really has (ADR-0007 §5, ADR-0020). A turn owns the session's bridge, so the flip cannot
-  ride it: the surface reaches a running child over ADR-0019's control channel — the same
-  private descriptor 3 the TUI uses — and answers at once with `queued: false` and when it
-  lands, never as if it had already landed. A platform with no channel forwards the
-  request, and the flip lands when the turn ends.
+  really has (ADR-0007 §5, ADR-0020), and the mode from that same last event (ADR-0022). A
+  turn owns the session's bridge, so the flip cannot ride it: the surface reaches a running
+  child over ADR-0019's control channel — the same private descriptor 3 the TUI uses — and
+  answers at once with `queued: false` and when it lands, never as if it had already landed.
+  A platform with no channel forwards the request, and the flip lands when the turn ends.
 - **Session rail** — the two-level tree of §2: workspaces newest added first, each
   expanding to its sessions **newest started first**, with new/delete/copy. Its head is the
   **add-workspace button** of §1, which opens the picker. Every workspace row also carries

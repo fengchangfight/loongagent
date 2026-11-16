@@ -1,6 +1,8 @@
 # ADR-0020 — YOLO never relaxes an irreversible action
 
-- **Status:** Accepted, implemented 2026-11-09
+- **Status:** Accepted, implemented 2026-11-09 · for `god` mode superseded by
+  [ADR-0022](0022-god-mode-refuses-two-shapes.md), which narrows the refusal
+  rather than widening YOLO
 - **Up:** [../design/README.md](../design/README.md)
 - **Date:** 2026-11-09
 - **Decides:** What YOLO is allowed to skip. Extends ADR-0007 §4 (autonomy is

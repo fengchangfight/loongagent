@@ -12,10 +12,10 @@ instead of attaching to a per-user daemon — so TUI, web, line mode and headles
 
 ## 1. The server owns the session while it runs
 
-`loongagent server --stdio` is the only implemented server transport. It builds one kernel,
-reads one JSON-RPC line at a time, and writes the events a request produced **before** the
-response. `Server::run_stdio` is the loop; `loong_protocol` owns the envelopes; the kernel owns
-the log, the ledger, the PDP and the tools.
+`loongagent server --stdio` is the only implemented server transport. It builds one kernel, reads
+one JSON-RPC line at a time, and writes the events a request produced **before** the response.
+`Server::run_stdio` is the loop; `loong_protocol` owns the envelopes; the kernel owns the log, the
+ledger, the PDP and the tools.
 
 A session is not a resident object the server holds forever: **the session's JSONL log is the
 source of truth**, and the server opens it when it starts. A process that ends leaves the log
@@ -62,15 +62,14 @@ owns it.
 `permissions.set`, `model.list`, `model.select` and `context.explain`, and renders the `event`
 and `model.delta` notifications it gets back. `PendingDecision` is assembled from those events,
 not from a second source: the approval panel can say which tool and arguments are waiting
-because the client already saw the `tool.call` and `approval.requested`.
-
-A question is offered only while the kernel that asked it is alive ([sessions-lineage.md](sessions-lineage.md) §5).
+because the client already saw the `tool.call` and `approval.requested`. A question is offered only
+while the kernel that asked it is alive ([sessions-lineage.md](sessions-lineage.md) §5).
 
 `loong-tui-app` is the ratatui screen over that client. A turn blocks on I/O, so the client
 lives on a worker thread and the screen talks to it over channels; the key handler and drawing
 are driven from ratatui's `TestBackend` in the tests. It adds only presentation and intents:
-the model picker, context panel, folds, `/yolo`, `/new`, and interrupt (a signal, not a
-protocol method); `Ctrl+←`/`Ctrl+→` reorder the model slots (`/left`, `/right` are the typed fallbacks). Local mode writes the new order back to `local.toml`'s `[[models]]`, so the next session starts with it and its first block is the default; a managed profile keeps the order for the run only. A paste arrives as one block; enter during a turn refuses a new prompt; `/yolo` still reaches the control channel. The mouse is captured by default: the wheel scrolls, and a left-drag selects the conversation and copies it on release — see [tui-selection.md](tui-selection.md); `/mouse` hands the mouse back for a terminal-native selection, and Shift-drag stays the terminal's. Server stderr becomes notes in the transcript. The page wraps: a line wider than the terminal is drawn on as many rows as it needs, breaking between words first and never inside a CJK glyph, so an answer, a tool call, a note and an open fold are all read in full instead of being cut at the right edge. Scrolling counts those rows, not the lines of the record ([tui-selection.md](tui-selection.md) §2).
+the model picker, context panel, folds, `/yolo`, `/god`, `/new`, and interrupt (a signal, not a
+protocol method); `Ctrl+←`/`Ctrl+→` reorder the model slots (`/left`, `/right` are the typed fallbacks). Local mode writes the new order back to `local.toml`'s `[[models]]`, so the next session starts with it and its first block is the default; a managed profile keeps the order for the run only. A paste arrives as one block; enter during a turn refuses a new prompt; `/yolo` and `/god` still reach the control channel. The mouse is captured by default: the wheel scrolls, and a left-drag selects the conversation and copies it on release — see [tui-selection.md](tui-selection.md); `/mouse` hands the mouse back for a terminal-native selection, and Shift-drag stays the terminal's. Server stderr becomes notes in the transcript. The page wraps: a line wider than the terminal is drawn on as many rows as it needs, breaking between words first and never inside a CJK glyph, so an answer, a tool call, a note and an open fold are all read in full instead of being cut at the right edge. Scrolling counts those rows, not the lines of the record ([tui-selection.md](tui-selection.md) §2).
 
 The prompt keeps a per-project history: ↑/↓ walk the prompts this project asked
 (`~/.loongagent/projects/<slug>/history.jsonl`, newest 200, multi-line intact), ↓ past the
@@ -86,12 +85,14 @@ during a turn. Menu and dispatcher read one table (`crates/tui-app/src/commands.
 spelling the menu offers is always one the dispatcher knows. Anything else still goes to the
 agent, where `/help` and the workspace's skills live, and the menu says so.
 
-Two rules keep the prompt title honest. The turn's status always wins it — working,
-interrupting, waiting, finished — with the YOLO warning as a mark in front, never a
-replacement: a session that stops asking must still look alive. And a question is **paused,
-not finished**: no `✓ 完成`, and the clock keeps running because it measures the turn.
+Two rules keep the prompt title honest. The turn's status always wins it — working, interrupting,
+waiting, finished — with the mode's mark in front, never a replacement: `⚠ 免确认`, and `⚡ GOD` for
+god, a mark of its own because under it an `irreversible` call raises no sheet at all and the two
+refusals arrive as a failed result. A session that stops asking must still look alive, and must say
+how far it stopped. And a question is **paused, not finished**: no `✓ 完成`, and the clock keeps
+running because it measures the turn.
 
-`/yolo` must not wait for a turn to end: the launcher gives the server a private control
+`/yolo` and `/god` must not wait for a turn to end: the launcher gives the server a private control
 channel, so it reaches the running kernel at its next boundary and the screen flips at
 once (`permissions.relaxed` confirms). Unix: a socketpair; Windows keeps the queued path.
 
@@ -168,6 +169,8 @@ both — a later mode adds a prefix and a tab, not a port ([reverse.md](reverse.
 **The page chooses the model and the URL opens itself.** The header lists the session's own
 models (`model.list`) and switches with `model.select`, the TUI's choice made with a mouse; `web`
 and `reverse` hand their printed URL to the OS opener, keeping it in the terminal when none exists.
+The permission buttons are the same two stops: YOLO flips at once, GOD arms for three seconds and
+then sends `mode: "god"` ([web-surface.md](web-surface.md) §4).
 
 ## 5. ACP: decided, not built
 
@@ -192,19 +195,16 @@ server. A surface may lag; the gap should be an explicit unsupported marker, not
 
 Every surface speaks newline-delimited **JSON-RPC 2.0** from [`crates/protocol`](../../crates/protocol/src/lib.rs):
 
-- a **request** carries `jsonrpc: "2.0"`, `id`, `method` and `params`; the server answers once
-  with `result` or a JSON-RPC `error`;
-- an **event** is a server-to-client notification with `method: "event"` and one event
-  envelope in `params`; it is written to the log first, then announced, so a surface cannot see
-  a decision the record does not have;
-- `model.delta` is the one transient notification: a preview of text being written, never the
-  record.
+- a **request** carries `jsonrpc: "2.0"`, `id`, `method` and `params`; the server answers once with
+  `result` or an `error`; an **event** is a server-to-client notification with `method: "event"` and
+  one envelope in `params`, written to the log first and announced after, so a surface cannot see a
+  decision the record does not have; `model.delta` is the one transient preview, never the record.
 
 The method and event names live in [`crates/schema/protocol.toml`](../../crates/schema/protocol.toml),
-which is the one source for the Rust types, the TypeScript client and the samples. `session.attach`
-returns `schema_version`, the event count, the request its kernel holds (`pending_approval`) and
-whether prompts are off (`auto_approve`) — a surface draws its YOLO toggle from that, never from a
-guess; there is no capability negotiation. The stream is [events-storage.md](events-storage.md)'s.
+the one source for the Rust types, the TypeScript client and the samples. `session.attach` returns
+`schema_version`, the event count, the request its kernel holds (`pending_approval`) and whether
+prompts are off (`auto_approve`): a surface takes its toggle from that and which mode from the log's
+last `permissions.relaxed`, never from a guess. The stream is [events-storage.md](events-storage.md)'s.
 
 ```mermaid
 flowchart LR
@@ -230,10 +230,10 @@ flowchart LR
 - **ACP is not built.** §5 carries what exists, which is only the schema's client label.
 - **The team web path is not built.** No control-plane relay: the local binary serves the page.
 - **The web token is the whole authentication.** The server has no user identity; a non-loopback
-  bind relies on the token and on the operator's network. `random_token` reads `/dev/urandom`,
-  so `loongagent web` is Unix-only today.
-- **The TUI is the widest surface.** Trust and plugin commands are CLI-only; the TUI has no
-  `/plugin`, `/hooks` or `/mcp` page. That is a surface gap, not a second implementation.
+  bind relies on the token and the operator's network. `random_token` reads `/dev/urandom`, so
+  `loongagent web` is Unix-only today.
+- **The TUI is the widest surface.** Trust and plugin commands are CLI-only; it has no `/plugin`,
+  `/hooks` or `/mcp` page. That is a surface gap, not a second implementation.
 - **No capability inventory.** The unsupported marker ADR-0009 asks for is a convention, not a
   checked list.
 ## 9. Where to read next

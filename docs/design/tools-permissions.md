@@ -1,7 +1,7 @@
 # Tools and permissions: one gate, two enforcers
 
 - **Up:** [design/README.md](README.md) · [04 System overview](../04-system-overview.md)
-- **Authority:** [ADR-0004](../decisions/0004-microkernel-extension-model.md) · [ADR-0007](../decisions/0007-permission-sandbox-engine.md) · [ADR-0019](../decisions/0019-mid-turn-permissions.md) · [ADR-0020](../decisions/0020-yolo-never-relaxes-irreversible.md)
+- **Authority:** [ADR-0004](../decisions/0004-microkernel-extension-model.md) · [ADR-0007](../decisions/0007-permission-sandbox-engine.md) · [ADR-0019](../decisions/0019-mid-turn-permissions.md) · [ADR-0020](../decisions/0020-yolo-never-relaxes-irreversible.md) · [ADR-0022](../decisions/0022-god-mode-refuses-two-shapes.md)
 - **Code:** `crates/tools/src/lib.rs`, `crates/sandbox/src/`, `crates/kernel/src/turn/confinement.rs`, `crates/proc/src/lib.rs`
 - **Verify:** `cargo test -p loong-tools -p loong-sandbox` · `./scripts/check.sh`
 
@@ -43,7 +43,7 @@ has four values:
 | `Investigate` | read-only, no side effects | allow |
 | `WriteWorkspace` | edits inside the workspace | allow |
 | `OutOfBounds` | network, outside the workspace, credentials | ask |
-| `Irreversible` | cannot be undone or un-leaked: deletion, data leaving | ask, and YOLO does not relax it (ADR-0020) |
+| `Irreversible` | cannot be undone or un-leaked: deletion, data leaving | ask; YOLO keeps it (ADR-0020), god denies two shapes instead (ADR-0022) |
 
 `Tool::action_class(args, cwd)` computes it before anything runs, which is what
 makes "investigate free, write gated" true rather than nominal:
@@ -54,18 +54,20 @@ makes "investigate free, write gated" true rather than nominal:
   write target may not exist yet); inside is `WriteWorkspace`, outside is
   `OutOfBounds`.
 - `classify_command` — a shell tool has no single class, so the command string
-  is read. First the two irreversible families, matched on whole command words
-  so `warm` is not `rm`: deleting verbs (`rm`, `git rm`, `find … -delete`) and
-  egress (a payload-bearing `curl`/`wget`, `scp`, `rsync`, `ssh`, `nc`,
-  `git push`, `cargo publish`). Then: known read-only verbs with no redirection
-  are `Investigate`, but their arguments are not resolved (`cat /etc/passwd` is
-  `Investigate`); network, privilege and outside-path patterns are
-  `OutOfBounds`; a mutating verb whose *absolute* path tokens leave the
-  workspace is `OutOfBounds`; anything else, unknown or mutating, is
+  is read. First the two irreversible families of ADR-0020 §4 — deleting, and
+  data leaving the machine — matched on whole command words so `warm` is not
+  `rm`; the verb lists live there, not here. Then: known read-only verbs with no
+  redirection are `Investigate`, but their arguments are not resolved
+  (`cat /etc/passwd` is `Investigate`); network, privilege and outside-path
+  patterns are `OutOfBounds`; a mutating verb whose *absolute* path tokens leave
+  the workspace is `OutOfBounds`; anything else, unknown or mutating, is
   `WriteWorkspace` — including `touch ../x`, which only the OS sandbox stops.
 
 The shell classifier is a **heuristic for allocating autonomy, never a security
-boundary** — the boundary is the PDP plus the confinement. `ReadFile`,
+boundary** — the boundary is the PDP plus the confinement. Under `/god` it also
+decides a *refusal* instead of a prompt, so a miss there costs autonomy rather
+than a file: `god_refusal` answers delete-outside and secret-egress itself
+([ADR-0022](../decisions/0022-god-mode-refuses-two-shapes.md) §2). `ReadFile`,
 `WriteFile`, `Edit` and `Shell` return `OutOfBounds` when the deciding argument
 is missing, rather than guessing; `Grep` and `Glob` default to the workspace and
 are `Investigate` when no path is given. MCP tools declare their class in
@@ -104,10 +106,10 @@ The three arms:
 - **Allow** — execute, record `tool.result`, fire `post_tool` hooks.
 - **Ask** — fire `permission_requested`, write `approval.requested` with an
   `appr-N` id, and park the turn. `Kernel::respond_to_approval` later writes
-  `approval.decided` and either runs the call or records a refusal. `/yolo`
-  (`Kernel::set_auto_approve`) turns an ask into an allow — for every class but
-  `Irreversible`, which keeps asking (ADR-0020) — and says so with a second
-  `policy.decided` and a second `tool.call`. The sequence is [tool-approval.md](flows/tool-approval.md).
+  `approval.decided` and either runs the call or records a refusal. `/yolo` and
+  `/god` (`Kernel::set_mode`) turn an ask into an allow — yolo for every class but
+  `Irreversible` (ADR-0020), god for that one too, minus two shapes (ADR-0022) —
+  with a second `policy.decided` and `tool.call` ([tool-approval.md](flows/tool-approval.md)).
   A `/yolo` asked for while a turn is running reaches the kernel at its next decision
   boundary through the surface's private control channel — [ADR-0019](../decisions/0019-mid-turn-permissions.md).
 - **Deny** — record `tool.result` with `ok: false` and the rule and reason. The
@@ -149,16 +151,14 @@ passes `ctx.confinement.confine` through, so the kernel's policy is the child's.
 (`crates/sandbox/src/sandbox.rs`) proves the mechanism by having a confined
 child attempt one allowed write, one forbidden write and a `/dev/null` open; a
 mechanism that cannot demonstrate denial is reported as `Broken`, not as
-present. `bubblewrap` is
-detected and named, not applied.
+present. `bubblewrap` is detected and named, not applied.
 
 The process-level seam is worth stating: an **MCP server process** is started by
 `McpClient::start` when the kernel is built, not from a tool call, so the
 `ExecContext` confinement does not cover it. Its gate is the declared action
-class plus the trust gate on `.loongagent/mcp.toml`, and its tool calls still go
-through `Kernel::dispatch`; but the server and every process it spawns (an
-`npx` → `node` tree, for example) are outside the Landlock policy. The
-direct-spawn case is §5; the `recall` bypass is §6.
+class plus the trust gate on `.loongagent/mcp.toml`; its tool calls still go
+through `Kernel::dispatch`, but the server and everything it spawns (an `npx` →
+`node` tree) sit outside the Landlock policy. Direct spawn is §5; `recall` is §6.
 
 ## 5. Why a tool cannot widen the confinement
 
@@ -175,19 +175,17 @@ confinement. The PDP is not in `ExecContext` at all. So:
   that writes outside the workspace.
 - A granted approval does not buy a different policy: `respond_to_approval`
   runs the same `Kernel::execute`, with the same `ExecContext`.
-- `/yolo` relaxes only the ask arm, and not the `irreversible` class. The
-  sandbox is a different axis and still applies — `Shell::execute` states it in
-  the comment beside the call: the restriction is irreversible and must not leak
-  into the server.
+- `/yolo` relaxes only the ask arm, not the `irreversible` class; `/god` relaxes
+  that too, minus two refusals. The sandbox is a different axis and still applies
+  — `Shell::execute` says so beside the call: the restriction must not leak out.
 
 The honest limit: the kernel hands a tool the confinement and the built-ins use
 `loong_proc` so it is applied, but nothing in the type system stops a tool from
-calling `Command::spawn` itself. A tool that ignores `ExecContext` is a trust
-failure and a bug, not a supported shape; that is why the tool contract is to
-spawn children through `loong_proc` with `ctx.confinement`. The same goes for the
-tool's own I/O: `Kernel::execute` runs `Tool::execute` in the unconfined server
-process, so a custom tool that writes outside the workspace in-process is caught
-by neither the sandbox nor the built-in guards.
+calling `Command::spawn` itself; that is a trust failure and a bug, not a
+supported shape, which is why the contract is `loong_proc` with
+`ctx.confinement`. The same goes for a tool's own I/O: `Tool::execute` runs in
+the unconfined server process, so an in-process write outside the workspace is
+caught by neither the sandbox nor the built-in guards.
 
 ## 6. The built-in tools, and the one exception
 
@@ -240,6 +238,8 @@ context side of it is [context-ledger.md](context-ledger.md) §5.
 - [ADR-0008](../decisions/0008-configuration-layering.md) — narrowing only.
 - [ADR-0020](../decisions/0020-yolo-never-relaxes-irreversible.md) — why a
   deletion or a leak still asks when prompts are off.
+- [ADR-0022](../decisions/0022-god-mode-refuses-two-shapes.md) — the third stop
+  past YOLO, and the two shapes it denies instead of asking.
 - [04 System overview](../04-system-overview.md) §3 item 4 and §5 — the PDP and
   "prompts are not permissions".
 - `crates/kernel/src/turn/tests.rs` —

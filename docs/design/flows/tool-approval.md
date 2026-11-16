@@ -225,6 +225,8 @@ the check that the two modes are different stops, not one setting spelled twice.
 - `crates/kernel/src/turn/tests.rs` —
   `opting_out_of_prompts_allows_the_action_and_says_so_in_the_log`,
   `a_granted_approval_still_cannot_escape_the_workspace`,
-  `god_mode_refuses_a_deletion_outside_the_workspace`.
+  `god_mode_refuses_a_deletion_outside_the_workspace`,
+  `god_mode_refuses_a_deletion_and_the_rewritten_command_runs`,
+  `god_mode_refuses_secret_egress_without_quoting_the_secret`.
 - `crates/tools/src/lib.rs` — `god_refuses_egress_of_secret_material`,
   `god_refuses_a_deletion_it_cannot_resolve`.

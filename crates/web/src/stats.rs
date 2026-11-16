@@ -60,8 +60,11 @@ impl Spend {
     /// Purpose: Add one `cost.recorded` event's `data` to this bucket.
     /// Serves: `usage`, for the total and for each cut of it.
     /// Design: `docs/design/web-stats.md` §2.
-    /// Contract: an event missing a field counts the field as 0 — a half-written line is
-    /// one lost counter, never a lost session; `price_basis` decides free from unknown.
+    /// Up: `usage`, once per `cost.recorded` line in a log.
+    /// Down: nothing; the event's `data` is already the wire shape.
+    /// Verify: `cargo test -p loong-web` (`usage_`).
+    /// An event missing a field counts the field as 0 — a half-written line is one lost
+    /// counter, never a lost session; `price_basis` decides free from unknown.
     fn add(&mut self, data: &Value) {
         let num = |name: &str| data.get(name).and_then(Value::as_u64).unwrap_or(0);
         self.calls += 1;
@@ -112,7 +115,10 @@ impl Spend {
     /// Serves: `usage`.
     /// Design: `docs/design/web-stats.md` §2 — the page prints these and takes the cache
     /// rate from `cache_hit` over `cache_hit + cache_miss`.
-    /// Contract: the same nine keys on every row, so the table needs one shape.
+    /// Up: `usage`, when it builds the answer.
+    /// Down: `serde_json::json!`, and the page's own row shape.
+    /// Verify: `cargo test -p loong-web` (`usage_`).
+    /// The same nine keys on every row, so the table needs one shape.
     fn json(&self) -> Value {
         json!({
             "calls": self.calls,

@@ -1019,6 +1019,14 @@ pub struct App {
     /// the surface has no private control channel (Windows, today): `/yolo` and `/god`
     /// then wait for the worker like any other command.
     pub set_permissions: Option<Box<dyn Fn(loong_schema::PermissionMode)>>,
+    /// How to hand a message to the turn that is running — `alt+enter`, or `/steer`.
+    /// `None` when there is no control channel (Windows, today): the screen then says so
+    /// and keeps the text in the queue instead of losing it.
+    pub steer: Option<Box<dyn Fn(&str) -> Result<(), String>>>,
+    /// Prompts typed while a turn was running, oldest first: the next turn's work, in the
+    /// order the person asked for it. Flushed one at a time as each turn ends, so the
+    /// screen never leaves a line stranded and never starts two turns at once.
+    pub queue: std::collections::VecDeque<String>,
     /// How to write a new slot order back to the profile. `None` when the models did
     /// not come from a writable local file (a managed profile) or in the tests: the
     /// bar then keeps the order for this run only.
@@ -1156,6 +1164,8 @@ impl App {
             mouse: true,
             interrupt: None,
             set_permissions: None,
+            steer: None,
+            queue: std::collections::VecDeque::new(),
             save_order: None,
             activity: None,
             busy_since: None,
@@ -1219,12 +1229,134 @@ impl App {
         // The prompt is now part of this project's history before the send returns: a
         // prompt a hook refuses is still something the person asked, and remembering it
         // is what lets them fix it with one up-arrow.
-        if self.history.record(&text) {
+        self.remember_prompt(&text);
+        Action::Send(ToWorker::Submit(text))
+    }
+
+    /// Purpose: Keep a prompt that arrived while a turn was running, in the order it was typed.
+    /// Serves: `App::handle_key`'s enter arm, `App::steer_now`'s fallback and `App::flush_queue`.
+    /// Design: `docs/design/surfaces.md` §3; `docs/design/sessions-lineage.md` §5.
+    /// Up: `App::handle_key` and `App::steer_now`.
+    /// Down: `App::queue`, `App::short` and `App::push_lines`.
+    /// Verify: `cargo test -p loong-tui-app a_prompt_typed_during_a_turn_waits_its_turn`.
+    fn enqueue(&mut self, text: String) -> Action {
+        self.input.clear();
+        self.cursor = 0;
+        // It stays in the history: a queued prompt is a prompt the person wrote, and
+        // up-arrow is how they get it back if they change their mind.
+        self.remember_prompt(&text);
+        self.queue.push_back(text.clone());
+        // The queue has to be visible, with the words in it. A line that disappears into
+        // an invisible queue reads as a line that was thrown away — which is exactly the
+        // experience this replaced.
+        self.push_lines(vec![format!(
+            "· 已排队（第 {} 条）：{} — 这一轮结束后发出；alt+enter 现在插进这一轮",
+            self.queue.len(),
+            Self::short(&text),
+        )]);
+        Action::None
+    }
+
+    /// Purpose: `alt+enter` and `/steer`: hand a message to the turn that is running, now.
+    /// Serves: `App::handle_key`'s alt+enter arm and `App::surface_command`'s `/steer`.
+    /// Design: `docs/design/sessions-lineage.md` §5.
+    /// Up: `App::handle_key` and `App::surface_command`.
+    /// Down: `App::queue`, `App::steer`, `App::remember_prompt`, `App::enqueue` and `App::begin_submit`.
+    /// Verify: `cargo test -p loong-tui-app an_alt_enter_steers_the_running_turn`.
+    fn steer_now(&mut self, typed: Option<String>) -> Action {
+        // The text is what was typed, or — with an empty prompt — the head of the queue,
+        // so a line that has already been queued can be promoted without retyping it.
+        let (text, queued) = match typed {
+            Some(text) if !text.trim().is_empty() => (text.trim().to_string(), false),
+            _ => match self.queue.front() {
+                Some(text) => (text.clone(), true),
+                None => {
+                    self.push_lines(vec!["· 没东西可插话：先打一句，或排队一条".to_string()]);
+                    return Action::None;
+                }
+            },
+        };
+        // Nothing is running, so there is nothing to steer: the words are an ordinary
+        // prompt and run as one.
+        if !self.busy && self.pending.is_none() {
+            if queued {
+                self.queue.pop_front();
+            }
+            return self.begin_submit(text);
+        }
+        // No control channel (Windows, today): the words are not lost, they queue — and
+        // the screen says why, instead of pretending they were delivered.
+        if self.steer.is_none() {
+            if queued {
+                self.queue.pop_front();
+            }
+            self.push_lines(vec![
+                "· 这个界面没有插话通道（只有 unix 终端有）—— 先把这句话排进队列".to_string(),
+            ]);
+            return self.enqueue(text);
+        }
+        let sent = match &self.steer {
+            Some(tell) => tell(&text),
+            None => Ok(()),
+        };
+        if let Err(e) = sent {
+            // A write that fails means the turn that owned the connection is already
+            // gone. Queueing is what keeps the words from vanishing with it.
+            self.push_lines(vec![format!("· 插话没送出去（{e}）—— 改成排队")]);
+            if queued {
+                self.queue.pop_front();
+            }
+            return self.enqueue(text);
+        }
+        if queued {
+            self.queue.pop_front();
+        }
+        self.input.clear();
+        self.cursor = 0;
+        self.remember_prompt(&text);
+        // Echoed once, here, exactly like a prompt: the worker drops the person's own
+        // `message.appended`, so this line is the only one they see.
+        self.push_lines(vec![format!("↪ 插话：{}", Self::short(&text))]);
+        Action::None
+    }
+
+    /// Purpose: Send the next queued prompt when nothing is running, one per call.
+    /// Serves: `surface::run`, after every drain — the moment a turn ends, the queue moves.
+    /// Design: `docs/design/surfaces.md` §3; `docs/design/sessions-lineage.md` §5.
+    /// Up: `surface::run`.
+    /// Down: `App::queue` and `App::begin_submit`.
+    /// Verify: `cargo test -p loong-tui-app the_queue_moves_when_the_turn_ends`.
+    pub fn flush_queue(&mut self) -> Option<Action> {
+        // A turn paused on an approval is not a finished turn: the kernel refuses a new
+        // prompt until the question is answered, so the queue waits for the answer.
+        if self.busy || self.pending.is_some() || self.approval.is_some() {
+            return None;
+        }
+        let text = self.queue.pop_front()?;
+        Some(self.begin_submit(text))
+    }
+
+    /// Purpose: One line for the transcript, however many lines the person's text has.
+    /// Contract: called by `enqueue` and `steer_now`; reads only the text.
+    fn short(text: &str) -> String {
+        let first = text.lines().next().unwrap_or("").trim();
+        let more = text.lines().count() > 1 || first.chars().count() > 80;
+        let cut: String = first.chars().take(80).collect();
+        if more {
+            format!("{cut}…")
+        } else {
+            cut
+        }
+    }
+
+    /// Purpose: Remember a prompt for up-arrow, and write the history down when it changed.
+    /// Contract: called by `begin_submit`, `enqueue` and `steer_now`; calls `History::record`.
+    fn remember_prompt(&mut self, text: &str) {
+        if self.history.record(text) {
             if let Some(path) = &self.history_path {
                 self.history.save(path);
             }
         }
-        Action::Send(ToWorker::Submit(text))
     }
 
     /// Purpose: `Alt+R`: submit the last prompt again to the model selected now, keeping the history.
@@ -2399,6 +2531,14 @@ impl App {
             self.cursor = 0;
             return Some(self.switch_to_slot(slot as usize));
         }
+        // `/steer <text>` takes an argument, so it is a family like `/1`..`/9` rather
+        // than a name the table can match on its own: the row names it for the menu, and
+        // this reads the words after it. Bare `/steer` steers the head of the queue.
+        if let Some(rest) = commands::steer_text(trimmed) {
+            self.input.clear();
+            self.cursor = 0;
+            return Some(self.steer_now(Some(rest.to_string())));
+        }
         // The table owns the names and the aliases, so a spelling the menu offers is
         // a spelling this dispatcher knows. It does not own what each one *does*:
         // that stays here, next to the action it asks for.
@@ -2521,6 +2661,13 @@ impl App {
     /// tool that is already running finishes — so the line says "interrupting", not
     /// "stopped".
     fn stop_turn(&mut self) {
+        // A stop means stop: queued prompts do not start a turn of their own the moment
+        // this one ends.
+        let dropped = self.queue.len();
+        if dropped > 0 {
+            self.queue.clear();
+            self.push_lines(vec![format!("· 队列里的 {dropped} 条已清掉")]);
+        }
         // A second esc while the first stop is pending retries the signal (a handler
         // that missed it is cheap to call again) but does not repeat the line: the
         // transcript should say it once, the title says it until the turn ends.
@@ -3083,6 +3230,7 @@ impl App {
     /// kinder than silently swallowing it.
     pub fn handle_key(&mut self, key: KeyEvent) -> Action {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
         // A menu put away by esc covered the text it had; the next key derives it
         // again, exactly as the `@` picker's dismissal works.
         self.commands_dismissed = false;
@@ -3370,6 +3518,13 @@ impl App {
             KeyCode::Enter if self.fold.is_some() && self.input.trim().is_empty() => {
                 self.toggle_fold()
             }
+            // `alt+enter` hands the text to the turn that is running instead of the next
+            // one. Above the plain enter arm because that arm would match this key too,
+            // and below the fold and approval arms, which own enter while they are up.
+            KeyCode::Enter if alt && self.pending.is_none() => {
+                let typed = self.input.clone();
+                self.steer_now(Some(typed))
+            }
             KeyCode::Enter if self.pending.is_none() => {
                 let text = self.input.trim().to_string();
                 if text.is_empty() {
@@ -3382,13 +3537,13 @@ impl App {
                 if let Some(action) = self.surface_command(&text) {
                     return action;
                 }
-                // A second prompt does not join a running turn: the worker would hold it
-                // until the turn returns, and a turn that returns **paused on an
-                // approval** would reject it with a protocol error. Say so instead of
-                // putting it in that queue.
+                // A prompt typed while a turn runs waits its turn instead of being
+                // refused. Sending it now would make the worker hold it until the turn
+                // returned, and a turn that returns **paused on an approval** rejects it
+                // with a protocol error — so it waits here, visibly, where the screen can
+                // also promote it to a steer with one key.
                 if self.busy {
-                    self.push_lines(vec!["· 上一轮还在跑 — 等它结束，或 ctrl-c 停下".to_string()]);
-                    return Action::None;
+                    return self.enqueue(text);
                 }
                 self.begin_submit(text)
             }
@@ -4571,6 +4726,25 @@ impl App {
         }
         if self.scroll > 0 {
             hints.push(Span::raw(format!("  [{}/{}]", shown, total)));
+        }
+        // The queue is not a place words go to be forgotten: while it has something in
+        // it, the bar carries the count and the key that promotes a line into the turn
+        // that is running.
+        if self.open.is_none() && !self.queue.is_empty() {
+            hints.push(Span::raw("  "));
+            hints.push(Span::styled(
+                format!("待发 {}", self.queue.len()),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            if self.steer.is_some() {
+                hints.push(Span::styled(
+                    " alt+enter",
+                    Style::default().add_modifier(Modifier::BOLD),
+                ));
+                hints.push(Span::raw(" 插话"));
+            }
         }
         if let Some(error) = &self.error {
             hints.push(Span::styled(

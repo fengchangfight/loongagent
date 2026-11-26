@@ -98,6 +98,7 @@ pub fn run<T: Transport + Send + 'static>(
     intro: Vec<String>,
     interrupt: Option<Box<dyn Fn()>>,
     permissions: Option<Box<dyn Fn(loong_schema::PermissionMode)>>,
+    steer: Option<Box<dyn Fn(&str) -> Result<(), String>>>,
     health: Option<Receiver<ModelHealth>>,
 ) -> RunOutcome {
     use ratatui::backend::CrosstermBackend;
@@ -142,6 +143,7 @@ pub fn run<T: Transport + Send + 'static>(
     app.spend = Spend::from_events(&costs);
     app.interrupt = interrupt;
     app.set_permissions = permissions;
+    app.steer = steer;
     if let Some(save) = save_order {
         app.set_order_saver(save);
     }
@@ -216,6 +218,12 @@ pub fn run<T: Transport + Send + 'static>(
     let outcome = (|| -> Result<(), String> {
         loop {
             app.drain(&from_worker);
+            // The queue moves the moment a turn ends, and only then: one prompt per
+            // turn, in the order it was typed. `flush_queue` refuses while a turn runs
+            // or an answer is pending, so this is safe to ask every pass.
+            if let Some(Action::Send(command)) = app.flush_queue() {
+                let _ = to_worker.send(command);
+            }
             // A background check reports when it reports; the bar is redrawn either way,
             // so a slow provider never holds up the first frame.
             if let Some(health) = &health {

@@ -1568,26 +1568,242 @@ fn a_pasted_block_stays_one_prompt() {
     assert!(!app.busy, "and it does not start a turn");
 }
 
-/// Purpose: A plain prompt typed during a turn is refused; a slash command still runs.
+/// Purpose: A plain prompt typed during a turn waits in the queue instead of being refused; a slash command still runs.
 #[test]
-fn enter_while_busy_refuses_a_prompt_but_not_a_command() {
+fn a_prompt_typed_during_a_turn_waits_in_the_queue() {
     let mut app = App::new("s-busy", "v");
     app.busy = true;
     app.input = "do it again".to_string();
     let action = app.handle_key(key(KeyCode::Enter));
-    assert!(matches!(action, Action::None), "{action:?}");
     assert!(
-        app.transcript().contains("上一轮还在跑"),
-        "the refusal says why: {}",
+        matches!(action, Action::None),
+        "nothing is sent now: {action:?}"
+    );
+    assert_eq!(
+        app.queue.len(),
+        1,
+        "the words were kept, not thrown away: {:?}",
+        app.queue
+    );
+    assert_eq!(app.queue[0], "do it again");
+    assert!(
+        app.input.is_empty(),
+        "the prompt box is free for the next line"
+    );
+    assert!(
+        app.transcript().contains("已排队（第 1 条）") && app.transcript().contains("do it again"),
+        "the queue is visible, with the words in it: {}",
         app.transcript()
     );
-    assert_eq!(app.input, "do it again", "the text is kept, not sent");
+
+    // Two prompts, in the order they were typed: the queue is a queue.
+    app.input = "and then the tests".to_string();
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        app.queue.iter().cloned().collect::<Vec<_>>(),
+        vec!["do it again".to_string(), "and then the tests".to_string()]
+    );
 
     app.input = "/yolo".to_string();
     let action = app.handle_key(key(KeyCode::Enter));
     assert!(
         matches!(action, Action::Send(_) | Action::None),
         "a slash command still reaches its handler: {action:?}"
+    );
+}
+
+/// Purpose: `alt+enter` hands the typed line to the running turn through the control channel, and echoes it once.
+#[test]
+fn an_alt_enter_steers_the_running_turn() {
+    let said = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let received = std::sync::Arc::clone(&said);
+    let mut app = App::new("s-steer", "v");
+    app.steer = Some(Box::new(move |text: &str| {
+        received.lock().unwrap().push(text.to_string());
+        Ok(())
+    }));
+    app.busy = true;
+    app.input = "no: use b.txt".to_string();
+    let action = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
+    assert!(
+        matches!(action, Action::None),
+        "the wire is not used: {action:?}"
+    );
+    assert_eq!(
+        *said.lock().unwrap(),
+        vec!["no: use b.txt".to_string()],
+        "the channel carried exactly the typed line"
+    );
+    assert!(app.input.is_empty(), "the box is emptied like a send");
+    assert_eq!(app.queue.len(), 0, "a steer is not a queued prompt");
+    assert!(
+        app.transcript().contains("↪ 插话：no: use b.txt"),
+        "the person sees it go: {}",
+        app.transcript()
+    );
+}
+
+/// Purpose: With an empty prompt, `alt+enter` steers the head of the queue rather than nothing.
+#[test]
+fn an_alt_enter_with_an_empty_prompt_steers_the_queue_head() {
+    let said = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let received = std::sync::Arc::clone(&said);
+    let mut app = App::new("s-steer-head", "v");
+    app.steer = Some(Box::new(move |text: &str| {
+        received.lock().unwrap().push(text.to_string());
+        Ok(())
+    }));
+    app.busy = true;
+    app.queue.push_back("first".to_string());
+    app.queue.push_back("second".to_string());
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
+    assert_eq!(*said.lock().unwrap(), vec!["first".to_string()]);
+    assert_eq!(
+        app.queue.iter().cloned().collect::<Vec<_>>(),
+        vec!["second".to_string()],
+        "only the head was promoted"
+    );
+}
+
+/// Purpose: With no control channel, `alt+enter` queues the words and says why, instead of pretending they were sent.
+#[test]
+fn an_alt_enter_without_a_channel_queues_instead() {
+    let mut app = App::new("s-steer-nix", "v");
+    app.busy = true;
+    app.input = "look at the tests".to_string();
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
+    assert_eq!(
+        app.queue.iter().cloned().collect::<Vec<_>>(),
+        vec!["look at the tests".to_string()],
+        "nothing is lost: the words wait in the queue"
+    );
+    assert!(
+        app.transcript().contains("没有插话通道"),
+        "and the screen says why: {}",
+        app.transcript()
+    );
+}
+
+/// Purpose: A channel that fails to take the steer falls back to the queue instead of dropping the words.
+#[test]
+fn a_failed_steer_is_queued_not_lost() {
+    let mut app = App::new("s-steer-fail", "v");
+    app.steer = Some(Box::new(|_: &str| {
+        Err("the control channel: broken pipe".to_string())
+    }));
+    app.busy = true;
+    app.input = "check the logs".to_string();
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
+    assert_eq!(
+        app.queue.iter().cloned().collect::<Vec<_>>(),
+        vec!["check the logs".to_string()]
+    );
+    assert!(
+        app.transcript().contains("改成排队"),
+        "{}",
+        app.transcript()
+    );
+}
+
+/// Purpose: The queue moves one prompt per turn, and only when nothing is running or pending.
+#[test]
+fn the_queue_moves_when_the_turn_ends() {
+    let mut app = App::new("s-flush", "v");
+    app.queue.push_back("second task".to_string());
+    app.queue.push_back("third task".to_string());
+
+    // A running turn keeps the queue where it is.
+    app.busy = true;
+    assert!(app.flush_queue().is_none(), "a running turn owns the wire");
+    app.busy = false;
+
+    // A turn paused on an approval is not finished either: the kernel refuses a new
+    // prompt until the question is answered.
+    app.pending = Some("appr-1".to_string());
+    assert!(app.flush_queue().is_none(), "the question comes first");
+    app.pending = None;
+
+    let first = app.flush_queue().expect("the head of the queue goes out");
+    match first {
+        Action::Send(ToWorker::Submit(text)) => assert_eq!(text, "second task"),
+        other => panic!("expected the first queued prompt to be sent: {other:?}"),
+    }
+    assert!(app.busy, "sending starts the turn");
+    assert!(
+        app.flush_queue().is_none(),
+        "and the next prompt waits for it to end"
+    );
+    assert_eq!(app.queue.len(), 1);
+}
+
+/// Purpose: A stop clears the queue: "stop" must not be followed by a turn that starts itself.
+#[test]
+fn a_stop_clears_the_queue() {
+    let mut app = App::new("s-stop-queue", "v");
+    app.busy = true;
+    app.queue.push_back("one".to_string());
+    app.queue.push_back("two".to_string());
+    app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert!(app.queue.is_empty(), "ctrl-c clears what was waiting");
+    assert!(
+        app.transcript().contains("队列里的 2 条已清掉"),
+        "and says so: {}",
+        app.transcript()
+    );
+}
+
+/// Purpose: `/steer <text>` is the typed fallback for the key, and reads the text after it.
+#[test]
+fn a_steer_command_takes_the_text_after_it() {
+    assert_eq!(
+        commands::steer_text("/steer check the tests"),
+        Some("check the tests")
+    );
+    assert_eq!(commands::steer_text("/steer"), Some(""));
+    assert_eq!(commands::steer_text("/Steer  spaced  "), Some("spaced"));
+    assert_eq!(
+        commands::steer_text("/steering"),
+        None,
+        "a longer name is not this one"
+    );
+    assert_eq!(
+        commands::steer_text("steer"),
+        None,
+        "and it needs its slash"
+    );
+
+    let said = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let received = std::sync::Arc::clone(&said);
+    let mut app = App::new("s-steer-cmd", "v");
+    app.steer = Some(Box::new(move |text: &str| {
+        received.lock().unwrap().push(text.to_string());
+        Ok(())
+    }));
+    app.busy = true;
+    app.input = "/steer check the tests".to_string();
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(*said.lock().unwrap(), vec!["check the tests".to_string()]);
+}
+
+/// Purpose: When nothing is running, `alt+enter` is an ordinary send, not a steer that goes nowhere.
+#[test]
+fn an_alt_enter_while_idle_is_a_plain_send() {
+    let said = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let received = std::sync::Arc::clone(&said);
+    let mut app = App::new("s-steer-idle", "v");
+    app.steer = Some(Box::new(move |text: &str| {
+        received.lock().unwrap().push(text.to_string());
+        Ok(())
+    }));
+    app.input = "start here".to_string();
+    let action = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
+    match action {
+        Action::Send(ToWorker::Submit(text)) => assert_eq!(text, "start here"),
+        other => panic!("expected a send: {other:?}"),
+    }
+    assert!(
+        said.lock().unwrap().is_empty(),
+        "nothing to steer while idle"
     );
 }
 

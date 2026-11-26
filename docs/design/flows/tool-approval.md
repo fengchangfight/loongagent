@@ -56,6 +56,12 @@ writes `permissions.relaxed` itself, so the log keeps one writer and one order. 
 interface may show the switch at once — that is the point of the command — and the
 event is the confirmation that it happened.
 
+The same channel carries a **steer** — `steer "<json string>"` beside `mode <word>` —
+because a message for the running turn has the same transport problem
+([ADR-0023](../../decisions/0023-steer-rides-the-control-channel.md)). It is applied at
+a step boundary only, after the stop and stall checks, and lands in the log as an
+ordinary user `message.appended` ([kernel-loop.md](../kernel-loop.md) §5).
+
 ## 2. One approval, in sequence
 
 ```mermaid

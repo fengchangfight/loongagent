@@ -96,6 +96,7 @@ impl ChildTransport {
             Self,
             Option<Receiver<String>>,
             Option<Box<dyn Fn(PermissionMode)>>,
+            Option<Box<dyn Fn(&str) -> Result<(), String>>>,
         ),
         String,
     > {
@@ -265,6 +266,16 @@ impl ChildTransport {
         };
         #[cfg(not(unix))]
         let control: Option<Box<dyn Fn(PermissionMode)>> = None;
+        // The steer, on the same descriptor: a message handed to a turn that already owns
+        // the child's stdin. Its error is reported rather than swallowed — the screen
+        // queues the words instead when the channel cannot take them, so nothing is lost.
+        #[cfg(unix)]
+        let steer: Option<Box<dyn Fn(&str) -> Result<(), String>>> = {
+            let write = std::sync::Arc::clone(&control_write);
+            Some(Box::new(move |text: &str| ask_steer(&write, text)))
+        };
+        #[cfg(not(unix))]
+        let steer: Option<Box<dyn Fn(&str) -> Result<(), String>>> = None;
         Ok((
             Self {
                 child,
@@ -275,6 +286,7 @@ impl ChildTransport {
             },
             notes,
             control,
+            steer,
         ))
     }
 }
@@ -349,7 +361,7 @@ pub(crate) fn full_screen(args: Args) -> Result<(), String> {
     if let Some(profile) = &resolved_settings {
         session_needs_a_model(&args, local, profile)?;
     }
-    let (transport, notes, control) = ChildTransport::spawn(&args, true)?;
+    let (transport, notes, control, steer) = ChildTransport::spawn(&args, true)?;
     // Taken before the transport moves into the client: the interface needs the pid to
     // stop a turn, and the client is blocked on the transport while one runs.
     let server_pid = transport.pid();
@@ -474,6 +486,7 @@ pub(crate) fn full_screen(args: Args) -> Result<(), String> {
         intro,
         Some(Box::new(move || loong_tui::interrupt(server_pid))),
         control,
+        steer,
         health,
     );
     // Leaving the interface — by `/exit`, ctrl-c, or an error — says where the session
@@ -509,6 +522,30 @@ fn ask_mode(
         .map_err(|e| format!("the control channel: {e}"))
 }
 
+/// Purpose: Write the control channel's own line for one steer — the line the server reads
+/// (`crates/server/src/lib.rs`, `the_control_channel_leaves_a_steer_for_the_kernel`).
+///
+/// Serves: the `steer` closure `run` hands the screen, so `alt+enter` reaches a turn that
+/// owns the child's stdin.
+/// Design: `docs/design/surfaces.md` §3; `docs/design/sessions-lineage.md` §5.
+/// Up: the closure built in `ChildTransport::spawn`.
+/// Down: the write end of the socketpair the spawning process kept.
+/// Verify: `cargo test -p loongagent --bin loongagent a_steer`.
+/// Contract: `Err` means the child and its channel are gone; the caller queues the words
+/// instead of dropping them.
+#[cfg(unix)]
+fn ask_steer(write: &std::os::unix::net::UnixStream, text: &str) -> Result<(), String> {
+    use std::io::Write;
+    // The payload is a JSON string, not the raw text: the channel is one line per
+    // message, and a message may have more than one line. A tab, a quote or a newline
+    // would otherwise end the message early or split it in two.
+    let quoted = serde_json::to_string(text).map_err(|e| format!("the steer: {e}"))?;
+    let line = format!("steer {quoted}\n");
+    let mut sink = write;
+    sink.write_all(line.as_bytes())
+        .map_err(|e| format!("the control channel: {e}"))
+}
+
 #[cfg(all(test, unix))]
 mod mode_tests {
     use super::*;
@@ -534,5 +571,28 @@ mod mode_tests {
             heard.extend_from_slice(&buf[..n]);
         }
         assert_eq!(heard, wanted);
+    }
+
+    /// Purpose: prove a steer is written as the one JSON-quoted line the server reads, newline and all.
+    #[test]
+    fn a_steer_writes_one_line_the_server_can_decode() {
+        let (write, mut read) = std::os::unix::net::UnixStream::pair().unwrap();
+        ask_steer(&write, "first line\nsecond \"line\"").unwrap();
+        let mut heard = Vec::new();
+        let mut buf = [0u8; 256];
+        while !heard.contains(&b'\n') {
+            let n = read.read(&mut buf).unwrap();
+            assert!(n > 0, "the channel closed before the steer was written");
+            heard.extend_from_slice(&buf[..n]);
+        }
+        let line = String::from_utf8(heard).unwrap();
+        assert_eq!(
+            line.matches('\n').count(),
+            1,
+            "one line, one message: {line:?}"
+        );
+        let payload = line.trim_end().strip_prefix("steer ").unwrap();
+        let text: String = serde_json::from_str(payload).unwrap();
+        assert_eq!(text, "first line\nsecond \"line\"");
     }
 }

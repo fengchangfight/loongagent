@@ -98,7 +98,7 @@ history beside them is not one, so it is not swept.
 |---|---|---|
 | **Resume** | `loongagent resume [ID]` opens the existing log (`Kernel::open`), `replay_history` rebuilds the conversation, attach/replay refill the surface. | Same session. |
 | **Retry** | In the TUI, `Alt+R` resends the last prompt to the model selected now. The history is kept: a resend is a new turn, not a rewind. | Same session, no new path. |
-| **Steer** | Not implemented. There is no channel that delivers a message to a running turn; the only mid-turn control is interrupt (`Ctrl-C`), which ends it. | — |
+| **Steer** | In the TUI, `alt+enter` (or `/steer <text>`) hands the text to the turn that is running; the kernel applies it at its next step boundary. Plain `enter` queues the text instead: it runs as the next turn. | Same session, no new path. |
 
 A bare `loongagent` (or `loongagent tui`) starts a fresh session. `loongagent reverse` does not:
 a project opens the conversation bound in `.reverse/projects/<project>/session`, and every start
@@ -131,10 +131,26 @@ create a path, a head, or a child session. ADR-0015's "retry creates a new path 
 session" is vocabulary the code has not implemented. In the TUI, `Alt+R` refuses while a turn
 is running.
 
-**Steer** has no implementation. The TUI lets a person type and send while a turn runs, but
-the worker loop is busy in `client.submit_with`, so the next command waits in the channel and
-runs as the **next turn** afterwards. That is a follow-up, not steering: the running model
-never sees it. `interrupt` is the only control that reaches a turn already in progress.
+**Steer** delivers a message to a turn already running. The worker loop is busy in
+`client.submit_with`, so a steer cannot ride the wire: it goes through the same private
+control channel `/yolo` uses — `steer "<json string>"` on the socketpair, a reader thread
+on the server that only fills `Kernel.steer_request`, and the turn as the single writer of
+the log. `Kernel::apply_requested_steer` takes it at a step boundary, after the stop and
+stall checks, and records it as a plain user `message.appended`; that boundary is the only
+place where no tool call is waiting for its result, and the message order a provider
+requires would break anywhere else ([kernel-loop.md](kernel-loop.md) §5). A steer therefore
+does not preempt a running tool — it arrives when that tool returns.
+
+Delivery is exactly-once by construction: one mutex-guarded `pop_front` decides where a
+text goes. Applied inside the turn, it is this turn's interjection; taken by
+`Kernel::submit_with` before the next prompt, it is spoken first and the prompt follows.
+Plain `enter` during a turn never refuses either: the text waits in the screen's queue and
+runs as the **next turn**. An explicit stop (`Ctrl-C`) clears that queue, because a stop
+that is followed by a turn starting itself is not a stop; a steer already handed to the
+kernel cannot be recalled. Windows keeps the queued path only, as it does for `/yolo`.
+[surfaces.md](surfaces.md) §3 owns the keys; [ADR-0023](../decisions/0023-steer-rides-the-control-channel.md)
+decides why the channel carries this second intent, and
+[steer-design.md](../superpowers/specs/2026-11-26-steer-design.md) owns the reasoning.
 
 ## 6. Export and import: decided, not built
 

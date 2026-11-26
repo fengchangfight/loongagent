@@ -194,25 +194,26 @@ state, and it does not reseat the L4 map: `Kernel.map_seated` is already true, s
 the request starts from the bytes the parked one ended with and the provider's
 cache still matches.
 
-**`/yolo` and `/god`.** `Kernel::set_mode` records `permissions.relaxed` and flips
-`Kernel.mode`. Under `/yolo` the ask arm executes instead of parking — except an
-`Irreversible` ruling, which keeps asking (ADR-0020). Under `/god` that class is
-allowed too, minus two shapes it denies instead: a deletion leaving the workspace,
-and secret egress (`god_refusal`; [tool-approval.md](flows/tool-approval.md) §3).
-`Verdict::Deny` is untouched and the sandbox still applies.
+**`/yolo` and `/god`.** `Kernel::set_mode` records `permissions.relaxed` and flips `Kernel.mode`.
+Under `/yolo` the ask arm executes instead of parking — except an `Irreversible` ruling, which keeps
+asking (ADR-0020). Under `/god` that class is allowed too, minus two shapes it denies instead: a
+deletion leaving the workspace, and secret egress (`god_refusal`;
+[tool-approval.md](flows/tool-approval.md) §3). `Verdict::Deny` is untouched and the sandbox still
+applies.
 
 A `/yolo` typed **while the turn is running** arrives through the surface's private
-control channel and waits in `Kernel.permissions_request`.
-`Kernel::apply_requested_permissions` takes it at the top of every step and at the start
-of `dispatch`, before `Pdp::decide`; the server calls the same method before handling a
-request, which catches one that arrived after the last boundary. The turn remains the
-only writer of `permissions.relaxed`.
+control channel and waits in `Kernel.permissions_request`; `Kernel::apply_requested_permissions`
+takes it at the top of every step and at the start of `dispatch`, before `Pdp::decide`, and
+the turn remains the only writer of `permissions.relaxed`. A steer waits in
+`Kernel.steer_request` and is taken in `run_inner` only, at the step boundary after the
+interrupt flag and the stall guard — a stop wins, and any earlier point splits an
+assistant's calls from their results; `Kernel::submit_with` drains it first for a steer
+that missed its turn ([ADR-0023](../decisions/0023-steer-rides-the-control-channel.md), [spec](../superpowers/specs/2026-11-26-steer-design.md)).
 
-**Session resume is not approval resume.** `Kernel::open` rebuilds the
-conversation with `Kernel::replay_history`, so the next turn sees the history it
-had. The parked `PendingCall` lives only in memory (`Kernel.pending`), so a
-restarted process does not resume an unanswered approval; the person starts a new
-turn. The end-to-end flow is [turn-lifecycle.md](flows/turn-lifecycle.md)
+**Session resume is not approval resume.** `Kernel::open` rebuilds the conversation with
+`Kernel::replay_history`, so the next turn sees the history it had. The parked `PendingCall` lives
+only in memory (`Kernel.pending`), so a restarted process does not resume an unanswered approval;
+the person starts a new turn. The end-to-end flow is [turn-lifecycle.md](flows/turn-lifecycle.md)
 (this document owns the loop, not the whole lifecycle).
 
 ## 6. How a turn ends
@@ -228,11 +229,10 @@ turn. The end-to-end flow is [turn-lifecycle.md](flows/turn-lifecycle.md)
 | **Refused before the loop** | `skill.invoked` with an `error`, or a tightening `hook.fired` from `user_prompt_submit` | `refused`, `steps` = 0 |
 | **Error** | The events written before the failure are still in the log | `Err(KernelError)`: `Model`, `Log`, `Encode`, or `OutOfOrder` |
 
-A tool that fails is not a failed turn: its `tool.result` has `ok: false`, the
-model reads the error, and the loop continues. A policy `Deny` is the same shape.
-`Kernel::append` treats an index write failure as a stale index, not as a lost
-event. What ends a turn with an error is the model transport, a log write, an
-encoding failure, or a caller using the API out of order.
+A tool that fails is not a failed turn: its `tool.result` has `ok: false`, the model reads the
+error, and the loop continues. A policy `Deny` is the same shape. `Kernel::append` treats an index
+write failure as a stale index, not as a lost event. What ends a turn with an error is the model
+transport, a log write, an encoding failure, or a caller using the API out of order.
 
 ## 7. One turn, in sequence
 

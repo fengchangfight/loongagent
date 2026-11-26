@@ -374,7 +374,7 @@ pub(crate) fn make_session(args: &Args) -> Result<Portal, String> {
             state.summary()
         );
     }
-    let (transport, notes, _control) = ChildTransport::spawn(args, true)?;
+    let (transport, notes, _control, _steer) = ChildTransport::spawn(args, true)?;
     let server_pid = transport.pid();
     if let Some(notes) = notes {
         // The server's own diagnostics go to this terminal, where the operator is.

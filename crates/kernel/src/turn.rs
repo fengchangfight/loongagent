@@ -46,6 +46,16 @@ use std::sync::{Arc, Mutex};
 /// Verify: `cargo test -p loong-kernel turn::tests::a_permissions_request_is_applied_at_the_next_decision`.
 pub type PermissionRequestSlot = std::sync::Arc<std::sync::Mutex<Option<PermissionMode>>>;
 
+/// The queue a surface's control channel writes a message for the running turn into.
+///
+/// Purpose: Name the slot once, so the kernel, the server and the CLI agree on it.
+/// Serves: `Kernel::steer_requestor`, `Kernel::use_steer_requester`, `Server`'s control reader.
+/// Design: `docs/design/kernel-loop.md` §5; `docs/design/sessions-lineage.md` §5.
+/// Up: `crates/server`.
+/// Down: `Kernel::apply_requested_steer`.
+/// Verify: `cargo test -p loong-kernel turn::tests::a_steer_reaches_the_model_inside_the_running_turn`.
+pub type SteerQueue = std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>;
+
 mod build;
 mod compaction;
 mod confinement;
@@ -538,6 +548,11 @@ pub struct Kernel {
     /// leaves the request here and the turn applies it at the next decision boundary,
     /// recording `permissions.relaxed` itself and in order.
     permissions_request: PermissionRequestSlot,
+    /// A message handed to the running turn from outside — the same control channel that
+    /// carries a permissions change. The person's words are not delivered on the spot: the
+    /// turn takes them at its next step boundary, where no tool call is waiting for a
+    /// result, and records them as an ordinary user message.
+    steer_request: SteerQueue,
     /// Ledger entry per message, in lockstep with `messages` (ADR-0006: the
     /// ledger decides, the wire view follows).
     entry_of: Vec<Option<u64>>,

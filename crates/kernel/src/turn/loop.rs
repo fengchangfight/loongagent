@@ -220,6 +220,10 @@ impl Kernel {
         if let Some(invocation) = invocation {
             events.push(self.append(gen::event::SKILL_INVOKED, &invocation)?);
         }
+        // A steer that missed its turn — the person pressed the key as the previous one was
+        // ending — is spoken before this prompt, not after it: it was typed first. One
+        // guarded drain decides where each text lands, so it is delivered exactly once.
+        self.apply_requested_steer(&mut events)?;
         events.push(self.record_user(&prompt)?);
         let report = self.fire_hooks(
             HookEvent::UserPromptSubmit,
@@ -507,6 +511,12 @@ impl Kernel {
                         interrupted: false,
                     });
                 }
+                // A message the person handed to this turn (steer) lands here and nowhere
+                // else: every tool call of the previous step has its result, so the user
+                // message sits where every provider expects one. It runs after the stop and
+                // stall checks on purpose — a stop and a stall both end the turn, and a
+                // message queued for it then belongs to the next one.
+                self.apply_requested_steer(&mut events)?;
                 self.refresh_memory();
                 // Both passes report what they freed. If both fired in one step they are one
                 // pass for the thrash window: the earlier `before` and the later `after`.
@@ -1520,6 +1530,64 @@ impl Kernel {
             .and_then(|mut slot| slot.take());
         if let Some(mode) = asked {
             self.set_mode(mode)?;
+        }
+        Ok(())
+    }
+
+    /// Purpose: Hand out the slot a control channel writes a message for the running turn into.
+    /// Serves: `Server::with_permissions`, whose reader thread receives the surface's steer
+    /// while a turn owns the connection.
+    /// Design: `docs/design/kernel-loop.md` §5; `docs/design/sessions-lineage.md` §5.
+    /// Up: `Server::with_permissions` and the server's `session.new` handler.
+    /// Down: `Kernel::steer_request`, read by `apply_requested_steer`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_steer_reaches_the_model_inside_the_running_turn`.
+    pub fn steer_requestor(&self) -> SteerQueue {
+        std::sync::Arc::clone(&self.steer_request)
+    }
+
+    /// Purpose: Adopt a process-owned steer queue, so `/new` does not leave the session
+    /// with an unreachable one.
+    /// Serves: a server that owns one control channel for every kernel it installs.
+    /// Design: `docs/design/kernel-loop.md` §5.
+    /// Up: `Server::with_permissions` and the server's `session.new` handler.
+    /// Down: `Kernel::steer_request`.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_steer_reaches_the_model_inside_the_running_turn`.
+    pub fn use_steer_requester(&mut self, slot: SteerQueue) {
+        self.steer_request = slot;
+    }
+
+    /// Purpose: Deliver every message handed to the turn since the last boundary, as a user
+    /// message the model will see on its next call.
+    /// Serves: steering — the person's correction arriving inside the turn instead of after it.
+    /// Design: `docs/design/kernel-loop.md` §5; `docs/design/sessions-lineage.md` §5.
+    /// Up: `Kernel::run_inner` at the step boundary, and `Kernel::submit_with` before the
+    /// new prompt; deliberately **not** from `Kernel::dispatch`, where a user message would
+    /// land between an assistant's calls and their results.
+    /// Down: `Kernel::fire_hooks` (`user_prompt_submit`), `Kernel::record_user` and
+    /// `Kernel::record_assistant` for a text a hook refuses.
+    /// Verify: `cargo test -p loong-kernel turn::tests::a_steer_reaches_the_model_inside_the_running_turn`.
+    pub fn apply_requested_steer(&mut self, events: &mut Vec<u64>) -> Result<(), KernelError> {
+        let said: Vec<String> = match self.steer_request.lock() {
+            Ok(mut queue) => queue.drain(..).collect(),
+            // A poisoned slot is a panic on the writer's side, not a reason to lose the
+            // turn: the queue is empty as far as this turn is concerned.
+            Err(_) => Vec::new(),
+        };
+        for text in said {
+            // A steer is a prompt submission, so the gate that screens prompts screens it
+            // too: one key must not be a way around a hook. "Ask" has no answerer here and
+            // fails closed, as it does for a submitted prompt (ADR-0007).
+            let report = self.fire_hooks(
+                HookEvent::UserPromptSubmit,
+                json!({"text": text, "profile": self.config.profile}),
+                events,
+            )?;
+            if report.tightening() {
+                let note = format!("steer refused by hook: {}", report.reason());
+                events.push(self.record_assistant(Some(&note), &[])?);
+                continue;
+            }
+            events.push(self.record_user(&text)?);
         }
         Ok(())
     }

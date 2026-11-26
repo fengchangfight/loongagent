@@ -525,6 +525,9 @@ impl Kernel {
             event_sink: None,
             interrupted: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             permissions_request: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            steer_request: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::VecDeque::new(),
+            )),
             entry_of: Vec::new(),
             pending: None,
             approvals,

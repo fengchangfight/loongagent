@@ -79,6 +79,11 @@ pub const COMMANDS: &[Command] = &[
         description: "把上一个提问再问一遍，用当前模型",
     },
     Command {
+        name: "/steer",
+        aliases: &[],
+        description: "把这句话插进正在跑的那一轮（alt+enter 也行）",
+    },
+    Command {
         name: "/left",
         aliases: &[],
         description: "把当前模型向左移一位（只影响本会话）",
@@ -138,6 +143,24 @@ pub fn slot(typed: &str) -> Option<u8> {
         return None;
     }
     Some(digit as u8)
+}
+
+/// Purpose: The text after `/steer`, if the typed line names it — the typed fallback for `alt+enter`.
+///
+/// Serves: `App::surface_command`.
+/// Design: `docs/design/surfaces.md` §3; `docs/design/sessions-lineage.md` §5.
+/// Up: `App::surface_command`.
+/// Down: no callee; it reads only the text.
+/// Verify: `cargo test -p loong-tui-app a_steer_command_takes_the_text_after_it`.
+pub fn steer_text(typed: &str) -> Option<&str> {
+    let typed = typed.trim();
+    let head = typed.find(char::is_whitespace).unwrap_or(typed.len());
+    // The menu writes the name in lower case, but a person may not: `/Steer` means the
+    // same thing, and a name is not a place to be strict about case.
+    if !typed[..head].eq_ignore_ascii_case("/steer") {
+        return None;
+    }
+    Some(typed[head..].trim())
 }
 
 /// Purpose: One row of the command menu: what choosing it writes, and what it does.

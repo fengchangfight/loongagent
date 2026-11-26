@@ -877,6 +877,199 @@ fn a_permissions_request_during_a_model_call_still_allows_the_call() {
     let _ = std::fs::remove_file(&escape);
 }
 
+/// Purpose: A message handed to a running turn reaches the model on that turn's next call, and is recorded where it arrived.
+#[test]
+fn a_steer_reaches_the_model_inside_the_running_turn() {
+    /// Purpose: A model that hands the turn a steer as it answers the first call, and keeps every request it saw.
+    ///
+    /// Serves: `a_steer_reaches_the_model_inside_the_running_turn`.
+    /// Design: `docs/design/kernel-loop.md` §5.
+    /// Up: the test constructs it; the kernel calls it.
+    /// Down: `ScriptedModel::complete`, the steer slot and the recorded requests.
+    /// Verify: `cargo test -p loong-kernel`.
+    struct SteersMidCall {
+        inner: ScriptedModel,
+        slot: super::SteerQueue,
+        seen: Arc<Mutex<Vec<Vec<ChatMessage>>>>,
+        fired: bool,
+    }
+    impl Model for SteersMidCall {
+        /// Purpose: Push the steer on the first call, then behave like the script.
+        /// Serves: `a_steer_reaches_the_model_inside_the_running_turn`.
+        /// Design: `docs/design/kernel-loop.md` §5.
+        /// Up: the kernel's model call.
+        /// Down: `ScriptedModel::complete`, the steer slot and the recorded requests.
+        /// Verify: `cargo test -p loong-kernel`.
+        fn complete(
+            &mut self,
+            request: &CompletionRequest,
+        ) -> Result<CompletionResponse, ModelError> {
+            self.seen.lock().unwrap().push(request.messages.clone());
+            if !self.fired {
+                self.fired = true;
+                self.slot
+                    .lock()
+                    .unwrap()
+                    .push_back("stop: use b.txt instead".to_string());
+            }
+            self.inner.complete(request)
+        }
+    }
+
+    let t = Temp::new();
+    std::fs::write(t.dir.join("a.txt"), "a").unwrap();
+    std::fs::write(t.dir.join("b.txt"), "b").unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let slot: super::SteerQueue = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    let mut k = Kernel::create(
+        &t.log,
+        KernelConfig::new(&t.dir),
+        Box::new(SteersMidCall {
+            inner: ScriptedModel::new(vec![
+                response(
+                    vec![call("c1", "read_file", json!({"path": "a.txt"}))],
+                    None,
+                ),
+                response(vec![], Some("read b instead")),
+            ]),
+            slot: Arc::clone(&slot),
+            seen: Arc::clone(&seen),
+            fired: false,
+        }),
+    )
+    .unwrap();
+    k.use_steer_requester(Arc::clone(&slot));
+    let outcome = k.submit("read a.txt").unwrap();
+    assert!(outcome.interrupted == false, "{:?}", outcome.interrupted);
+
+    // The second call of the same turn carries the steer, and it sits after the tool
+    // result of the step that was already running: a user message anywhere else would
+    // be a shape a provider rejects.
+    let seen = seen.lock().unwrap();
+    assert!(seen.len() >= 2, "the model was called twice: {seen:?}");
+    let second = &seen[1];
+    let steered = second
+        .iter()
+        .any(|m| matches!(m, ChatMessage::User { text } if text == "stop: use b.txt instead"));
+    assert!(steered, "the steer reached the next call: {second:?}");
+    let order: Vec<&str> = second
+        .iter()
+        .map(|m| match m {
+            ChatMessage::User { .. } => "user",
+            ChatMessage::Assistant { .. } => "assistant",
+            ChatMessage::Tool { .. } => "tool",
+            ChatMessage::System { .. } => "system",
+        })
+        .collect();
+    let tool_at = order.iter().rposition(|k| *k == "tool").unwrap();
+    let steer_at = second
+        .iter()
+        .rposition(|m| matches!(m, ChatMessage::User { text } if text == "stop: use b.txt instead"))
+        .unwrap();
+    assert!(
+        steer_at > tool_at,
+        "the steer lands after the step's results, not between a call and its result: {order:?}"
+    );
+    drop(seen);
+
+    // And the log says a person spoke mid-turn, where it happened.
+    let events = loong_eventlog::replay(&t.log).unwrap().events;
+    let said: Vec<&str> = events
+        .iter()
+        .filter(|e| e.kind == ev::MESSAGE_APPENDED && e.data["role"] == "user")
+        .filter_map(|e| e.data["text"].as_str())
+        .collect();
+    assert_eq!(
+        said,
+        vec!["read a.txt", "stop: use b.txt instead"],
+        "the prompt first, then the interjection: {said:?}"
+    );
+}
+
+/// Purpose: A steer that arrived after its turn ended is spoken before the next prompt, exactly once.
+#[test]
+fn a_steer_that_missed_its_turn_opens_the_next_one() {
+    let t = Temp::new();
+    let (model, seen) = RecordingModel::new(vec![response(vec![], Some("done"))]);
+    let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+    let slot = k.steer_requestor();
+    // Typed while the previous turn was finishing: the kernel never took it.
+    slot.lock()
+        .unwrap()
+        .push_back("and check the tests".to_string());
+    k.submit("next task").unwrap();
+
+    let seen = seen.lock().unwrap();
+    let users: Vec<String> = seen[0]
+        .iter()
+        .filter_map(|m| match m {
+            ChatMessage::User { text } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        users,
+        vec!["and check the tests".to_string(), "next task".to_string()],
+        "the earlier words come first, and are not repeated: {users:?}"
+    );
+    drop(seen);
+    assert!(
+        slot.lock().unwrap().is_empty(),
+        "the queue is drained, so the text cannot be delivered twice"
+    );
+}
+
+/// Purpose: A `user_prompt_submit` hook screens a steer too, so one key cannot walk around a prompt gate.
+#[test]
+fn a_steer_a_hook_refuses_never_reaches_the_model() {
+    let t = Temp::new();
+    install_hooks(
+        &t.dir,
+        "[[hook]]\nid = \"gate\"\nevent = \"user_prompt_submit\"\nkind = \"shell\"\nscript = \"gate.sh\"\n",
+        &[(
+            "gate.sh",
+            "cat > /dev/null\necho 'no interjections today' >&2\nexit 2\n",
+        )],
+        true,
+    );
+    let (model, seen) = RecordingModel::new(vec![response(vec![], Some("done"))]);
+    let mut k = Kernel::create(&t.log, KernelConfig::new(&t.dir), Box::new(model)).unwrap();
+    let slot = k.steer_requestor();
+    slot.lock().unwrap().push_back("sneak past".to_string());
+    // The prompt itself is refused by the same hook; what matters is that the steer was
+    // screened rather than appended, and that the refusal is in the log.
+    let _ = k.submit("a prompt");
+
+    let seen = seen.lock().unwrap();
+    assert!(
+        seen.is_empty(),
+        "the gate refused, so the model was never called: {seen:?}"
+    );
+    drop(seen);
+    let events = loong_eventlog::replay(&t.log).unwrap().events;
+    let said: Vec<&str> = events
+        .iter()
+        .filter(|e| e.kind == ev::MESSAGE_APPENDED && e.data["role"] == "user")
+        .filter_map(|e| e.data["text"].as_str())
+        .collect();
+    assert_eq!(
+        said,
+        vec!["a prompt"],
+        "the steer was not appended: {said:?}"
+    );
+    assert!(
+        events.iter().any(|e| {
+            e.kind == ev::MESSAGE_APPENDED
+                && e.data["role"] == "assistant"
+                && e.data["text"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("no interjections")
+        }),
+        "the screen is told why the steer was dropped"
+    );
+}
+
 /// Purpose: An out-of-bounds write parks the turn with `approval.requested`, writes nothing, and resumes on a denial with the answer in the log.
 #[test]
 fn an_out_of_bounds_write_asks_then_resumes_on_the_answer() {

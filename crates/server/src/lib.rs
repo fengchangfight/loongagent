@@ -16,7 +16,7 @@
 //! needs no agent logic to render what happened (ADR-0009) — and no client can
 //! see a decision that was not also written to the log.
 
-use loong_kernel::{Kernel, KernelError, PermissionRequestSlot};
+use loong_kernel::{Kernel, KernelError, PermissionRequestSlot, SteerQueue};
 use loong_protocol::{codes, Notification, Request, Response};
 use loong_schema::generated as gen;
 use loong_schema::PermissionMode;
@@ -307,23 +307,26 @@ pub struct Server {
     /// Lines with nowhere to go yet (no connection, which only tests and programs using
     /// `handle_line` hit).
     pending_lines: Vec<String>,
-    /// The permissions control channel, when a surface gave this server one: the slot its
-    /// reader thread writes a `/yolo` request into, and the descriptor to read. The kernel
-    /// applies the request at its next decision boundary.
-    permissions: Option<PermissionsChannel>,
+    /// The control channel, when a surface gave this server one: the slots its reader
+    /// thread writes a `/yolo` request and a steer into, and the descriptor to read. The
+    /// kernel applies each at its next boundary.
+    control: Option<ControlChannel>,
     turns: u64,
 }
 
-/// Purpose: The private parent→child control channel a surface uses for `/yolo` while a turn owns the connection.
+/// Purpose: The private parent→child control channel a surface uses for `/yolo` and for a steer while a turn owns the connection.
 /// Serves: `Server::with_permissions`, `run_stdio` and the server's `session.new` handler.
-/// Design: `docs/design/flows/tool-approval.md`; `docs/design/surfaces.md` §3.
+/// Design: `docs/design/flows/tool-approval.md`; `docs/design/surfaces.md` §3; `docs/design/sessions-lineage.md` §5.
 /// Up: `crates/cli/src/tui.rs` builds it and `Server::with_permissions` stores it.
-/// Down: `Kernel::permissions_requestor` and the reader thread in `run_stdio`.
-/// Verify: `cargo test -p loong-server`.
-struct PermissionsChannel {
+/// Down: `Kernel::permissions_requestor`, `Kernel::steer_requestor` and the reader thread in `run_stdio`.
+/// Verify: `cargo test -p loong-server the_control_channel`.
+struct ControlChannel {
     /// What the reader thread leaves for the kernel: `Some(true|false)` is a request not
     /// yet applied at a decision boundary.
     slot: PermissionRequestSlot,
+    /// What the reader thread leaves for a turn that is running: a message it takes at
+    /// its next step boundary.
+    steer: SteerQueue,
     /// The read end of the private pipe, inherited from the surface that spawned us.
     fd: i32,
 }
@@ -345,7 +348,7 @@ impl Server {
             last_sent: 0,
             connection: None,
             pending_lines: Vec::new(),
-            permissions: None,
+            control: None,
             turns: 0,
         }
     }
@@ -357,7 +360,8 @@ impl Server {
     /// Down: `run_stdio` (the reader thread) and `Kernel::use_permissions_requester`.
     /// Verify: `cargo test -p loong-server`.
     pub fn with_permissions(mut self, slot: PermissionRequestSlot, fd: i32) -> Self {
-        self.permissions = Some(PermissionsChannel { slot, fd });
+        let steer = self.kernel.steer_requestor();
+        self.control = Some(ControlChannel { slot, steer, fd });
         self
     }
 
@@ -849,9 +853,11 @@ impl Server {
         }
         // The control channel belongs to the process too: the new kernel must still be
         // reachable from the surface that is watching this server.
-        if let Some(control) = &self.permissions {
+        if let Some(control) = &self.control {
             self.kernel
                 .use_permissions_requester(std::sync::Arc::clone(&control.slot));
+            self.kernel
+                .use_steer_requester(std::sync::Arc::clone(&control.steer));
         }
         self.session_id = session_id;
         // The new session has its own log, so every counter about the old one is now wrong.
@@ -1042,8 +1048,12 @@ impl Server {
         // records the request; the kernel applies it at the next decision boundary, so
         // the turn stays the only writer of the log.
         #[cfg(unix)]
-        if let Some(control) = &self.permissions {
-            spawn_permissions_reader(control.fd, std::sync::Arc::clone(&control.slot));
+        if let Some(control) = &self.control {
+            spawn_control_reader(
+                control.fd,
+                std::sync::Arc::clone(&control.slot),
+                std::sync::Arc::clone(&control.steer),
+            );
         }
         let stdin = std::io::stdin();
         let mut stdout = std::io::stdout();
@@ -1064,15 +1074,16 @@ impl Server {
     }
 }
 
-/// Purpose: Read the surface's private control channel and leave each `/yolo` request for the kernel.
+/// Purpose: Read the surface's private control channel and leave each request — a mode change or a steer — for the kernel.
 /// Serves: `Server::run_stdio`, which starts it when the surface passed a descriptor.
-/// Design: `docs/design/flows/tool-approval.md`; `docs/design/surfaces.md` §3.
+/// Design: `docs/design/flows/tool-approval.md`; `docs/design/surfaces.md` §3; `docs/design/sessions-lineage.md` §5.
 /// Up: `Server::run_stdio`.
-/// Down: `PermissionsChannel::slot` (a `PermissionRequestSlot`), read by
-/// `Kernel::apply_requested_permissions`.
-/// Verify: `cargo test -p loong-server`.
+/// Down: `ControlChannel::slot` (a `PermissionRequestSlot`), read by
+/// `Kernel::apply_requested_permissions`, and `ControlChannel::steer`, read by
+/// `Kernel::apply_requested_steer`.
+/// Verify: `cargo test -p loong-server the_control_channel`.
 #[cfg(unix)]
-fn spawn_permissions_reader(fd: i32, slot: PermissionRequestSlot) {
+fn spawn_control_reader(fd: i32, slot: PermissionRequestSlot, steer: SteerQueue) {
     use std::io::BufRead;
     use std::os::unix::io::FromRawFd;
     std::thread::spawn(move || {
@@ -1090,9 +1101,22 @@ fn spawn_permissions_reader(fd: i32, slot: PermissionRequestSlot) {
             }
         }
         for line in std::io::BufReader::new(pipe).lines().map_while(Result::ok) {
+            let line = line.trim();
+            // A steer is free text, so it is one JSON string after the word: a newline in
+            // the middle of it would otherwise end the line and split one message in two.
+            if let Some(rest) = line.strip_prefix("steer ") {
+                // A malformed payload is skipped, like an unknown word below: one bad line
+                // must not end the channel and leave the person unable to steer again.
+                if let Ok(text) = serde_json::from_str::<String>(rest) {
+                    if let Ok(mut queue) = steer.lock() {
+                        queue.push_back(text);
+                    }
+                }
+                continue;
+            }
             // The `yolo on|off` words are the pre-ADR-0022 spelling and stay readable,
             // so an older surface keeps working; `mode <name>` is today's.
-            let mode = match line.trim() {
+            let mode = match line {
                 "yolo on" => PermissionMode::Yolo,
                 "yolo off" => PermissionMode::Ask,
                 "mode god" => PermissionMode::God,
@@ -2583,7 +2607,13 @@ mod tests {
         use std::os::unix::io::IntoRawFd;
         let (write, read) = std::os::unix::net::UnixStream::pair().unwrap();
         let slot = std::sync::Arc::new(std::sync::Mutex::new(None));
-        spawn_permissions_reader(read.into_raw_fd(), std::sync::Arc::clone(&slot));
+        let steer: SteerQueue =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+        spawn_control_reader(
+            read.into_raw_fd(),
+            std::sync::Arc::clone(&slot),
+            std::sync::Arc::clone(&steer),
+        );
         let wait_for = |wanted: Option<PermissionMode>| {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
             while *slot.lock().unwrap() != wanted && std::time::Instant::now() < deadline {
@@ -2606,5 +2636,54 @@ mod tests {
         wait_for(Some(PermissionMode::Yolo));
         (&write).write_all(b"yolo off\n").unwrap();
         wait_for(Some(PermissionMode::Ask));
+    }
+
+    /// Purpose: A `steer` line leaves the text for the kernel, keeps a newline inside one message, and a malformed line does not end the channel.
+    #[cfg(unix)]
+    #[test]
+    fn the_control_channel_leaves_a_steer_for_the_kernel() {
+        use std::io::Write;
+        use std::os::unix::io::IntoRawFd;
+        use std::sync::{Arc, Mutex};
+        let (write, read) = std::os::unix::net::UnixStream::pair().unwrap();
+        let slot = Arc::new(Mutex::new(None));
+        let steer: SteerQueue = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+        spawn_control_reader(read.into_raw_fd(), Arc::clone(&slot), Arc::clone(&steer));
+        let taken = || {
+            let mut said = Vec::new();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while said.is_empty() && std::time::Instant::now() < deadline {
+                if let Ok(mut queue) = steer.lock() {
+                    said.extend(queue.drain(..));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            said
+        };
+
+        // Free text is a JSON string, so a newline inside it stays one message instead of
+        // becoming two lines and two steers.
+        (&write)
+            .write_all("steer \"first line\\nsecond line\"\n".as_bytes())
+            .unwrap();
+        assert_eq!(
+            taken(),
+            vec!["first line\nsecond line".to_string()],
+            "the whole message arrives, newline and all"
+        );
+
+        // One bad line must not leave the person unable to steer again.
+        (&write).write_all(b"steer not a json string\n").unwrap();
+        (&write).write_all(b"mode yolo\n").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while slot.lock().unwrap().is_none() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(
+            *slot.lock().unwrap(),
+            Some(PermissionMode::Yolo),
+            "the reader survived the malformed line"
+        );
+        assert!(taken().is_empty(), "and nothing was invented");
     }
 }

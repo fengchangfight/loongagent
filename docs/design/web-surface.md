@@ -140,10 +140,8 @@ Three regions, all fed by the event stream:
   `YOLO 开` filled red while the session lets every tool call through — red because a
   turn that never asks is the dangerous state, and the page must not make it look calm. A
   second pill, `GOD`, lights only in god mode and beside a red `YOLO 开`, because god is
-  the only stop that also lets a deletion through; its press **arms** it for three seconds
-  — the pill says `再按` in amber, never `开` in the on-state's red — so the far stop is
-  never one stray click away, and an arm belongs to the session it was made in: moving
-  the tab drops it, so no single press elsewhere is the second one (ADR-0022 §6). It draws
+  the only stop that also lets a deletion through; it is an ordinary toggle — one press
+  turns it on, one press turns it off, no arming step (ADR-0022 §6). It draws
   what the record says: `permissions.relaxed` is the log and `permissions.set`'s answer
   the confirmation, so an old session shows the opt-out it really has (ADR-0007 §5,
   ADR-0020, ADR-0022). A turn owns the session's bridge, so the flip cannot ride it: the

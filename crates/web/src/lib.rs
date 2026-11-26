@@ -1560,38 +1560,31 @@ mod tests {
         );
     }
 
-    /// Purpose: Pins the GOD button's armed state as a state that tells the truth: the pill
-    /// says `再按` in amber instead of wearing the on-state's red under the word `关`, and an
-    /// arm belongs to the session it was made in, so moving the tab drops it rather than
-    /// letting one press in the next session be the second one (web-surface.md §4).
+    /// Purpose: Pins the GOD button as an ordinary toggle: one press switches it, the
+    /// pill only ever reads `开` or `关`, and no amber armed state exists
+    /// (web-surface.md §4).
     #[test]
-    fn the_god_button_says_that_it_is_only_armed() {
+    fn the_god_button_is_a_plain_toggle() {
         let render = APP_JS
             .split("function renderYolo()")
             .nth(1)
             .and_then(|rest| rest.split("\n}").next())
             .expect("app.js draws the switches in renderYolo");
         assert!(
-            render.contains("godArmed ? \"再按\" : \"关\""),
-            "the armed pill says its own word: a button painted like the on-state under the \
-             label `关` is a button nobody believes (web-surface.md §4)"
+            render.contains("god ? \"开\" : \"关\""),
+            "the god pill reads only 开 or 关: it is an ordinary toggle (web-surface.md §4)"
         );
         assert!(
-            render.contains("godArmedFor !== state.sessionId"),
-            "the repaint drops an arm made in another session (web-surface.md §4)"
-        );
-        let block = STYLE_CSS
-            .split("#god.arming {")
-            .nth(1)
-            .and_then(|rest| rest.split('}').next())
-            .expect("style.css paints the armed button");
-        assert!(
-            block.contains("var(--amber)"),
-            "armed is a question, not the answer: it takes the amber, not the on-state's red"
+            !APP_JS.contains("再按"),
+            "no armed state remains: nothing in app.js still says 再按"
         );
         assert!(
-            !block.contains("var(--red)"),
-            "armed must not wear the colour the session turns when it really stops asking"
+            !APP_JS.contains("godArmed"),
+            "no armed-state timer remains in app.js"
+        );
+        assert!(
+            !STYLE_CSS.contains("#god.arming"),
+            "no armed-state styling remains in style.css"
         );
     }
 

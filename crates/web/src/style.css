@@ -281,16 +281,7 @@ body {
 #yolo.on .state { background: #2b0605; color: #ffb3ad; }
 #god:disabled,
 #yolo:disabled { opacity: 0.5; cursor: not-allowed; }
-/* One press away from the switch beside it, and not undone by accident: the first press
-   only arms the button, for three seconds. Armed is *not* on — it takes the amber of a
-   question and puts its own word in the pill, so the colour and the label never disagree. */
-#god.arming {
-  border-color: var(--amber);
-  color: var(--text);
-  background: var(--amber-soft);
-}
-#god.arming .dot { background: var(--amber); }
-#god.arming .state { background: var(--amber); color: #2b0605; }
+/* GOD is an ordinary toggle: one press switches it, so there is no armed state to paint. */
 
 /* ── Body: rail + chat ──────────────────────────────────────────────── */
 

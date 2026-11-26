@@ -1560,6 +1560,41 @@ mod tests {
         );
     }
 
+    /// Purpose: Pins the GOD button's armed state as a state that tells the truth: the pill
+    /// says `再按` in amber instead of wearing the on-state's red under the word `关`, and an
+    /// arm belongs to the session it was made in, so moving the tab drops it rather than
+    /// letting one press in the next session be the second one (web-surface.md §4).
+    #[test]
+    fn the_god_button_says_that_it_is_only_armed() {
+        let render = APP_JS
+            .split("function renderYolo()")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}").next())
+            .expect("app.js draws the switches in renderYolo");
+        assert!(
+            render.contains("godArmed ? \"再按\" : \"关\""),
+            "the armed pill says its own word: a button painted like the on-state under the \
+             label `关` is a button nobody believes (web-surface.md §4)"
+        );
+        assert!(
+            render.contains("godArmedFor !== state.sessionId"),
+            "the repaint drops an arm made in another session (web-surface.md §4)"
+        );
+        let block = STYLE_CSS
+            .split("#god.arming {")
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .expect("style.css paints the armed button");
+        assert!(
+            block.contains("var(--amber)"),
+            "armed is a question, not the answer: it takes the amber, not the on-state's red"
+        );
+        assert!(
+            !block.contains("var(--red)"),
+            "armed must not wear the colour the session turns when it really stops asking"
+        );
+    }
+
     /// Purpose: Pins the banner's name and the inscription beside it: the wordmark is set
     /// in capitals, and the saying is the terminal's own — the two surfaces introduce
     /// themselves with the same words (web-surface.md §4, `surfaces.md` §3).

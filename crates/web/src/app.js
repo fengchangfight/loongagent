@@ -758,10 +758,29 @@ function busySession(id) {
  * with no channel the surface forwards the request and the flip lands when the turn ends,
  * which is what the switch says then (web-surface.md §4). */
 
+/* The arm the first press on `GOD` sets, and the session it was set in. A timer, not a
+ * mode: the pill says `再按` while it runs and never claims the session is in god mode. */
+let godArmed = null;
+let godArmedFor = null;
+
+/* Drop the arm and clear its face. Called by the timer, by the second press, and by any
+ * repaint that finds the tab on another session: an arm belongs to the session it was
+ * made in, or a single press there would already be the second one (web-surface.md §4). */
+function disarmGod() {
+  if (godArmed) clearTimeout(godArmed);
+  godArmed = null;
+  godArmedFor = null;
+  dom.god.classList.remove("arming");
+  dom.god.querySelector(".state").textContent = state.mode === "god" ? "开" : "关";
+}
+
 function renderYolo() {
   const mode = state.mode;
   const yolo = mode === "yolo";
   const god = mode === "god";
+  // A flip that landed from elsewhere (a `/god` in the TUI, a replayed event) ends the
+  // arm too: there is nothing left for the second press to confirm.
+  if (godArmed && (god || godArmedFor !== state.sessionId)) disarmGod();
   dom.yolo.classList.toggle("on", yolo);
   dom.yolo.setAttribute("aria-pressed", yolo ? "true" : "false");
   dom.yolo.disabled = !state.sessionId;
@@ -775,7 +794,7 @@ function renderYolo() {
   dom.yolo.title = yolo
     ? "这个会话的审批提示已关闭：工具调用不再询问（沙箱仍然生效）。点击恢复询问。"
     : "审批提示已开启：每次工具调用都会先询问。点击让这个会话不再询问——沙箱仍然生效。";
-  dom.god.querySelector(".state").textContent = god ? "开" : "关";
+  dom.god.querySelector(".state").textContent = god ? "开" : godArmed ? "再按" : "关";
   dom.god.title = god
     ? "GOD 已开启：删除和外发不再询问；工作区之外的删除和密钥外发会被直接拒绝。点击恢复询问。"
     : "GOD：连删除和外发也不再询问。工作区之外的删除和密钥外发会被直接拒绝，不弹窗（ADR-0022）。";
@@ -816,26 +835,33 @@ async function setMode(mode) {
 dom.yolo.onclick = () => setMode(state.mode === "yolo" ? "ask" : "yolo");
 
 // God is one press away from the switch beside it and is not undone by accident, so the
-// first press only arms the button for three seconds; the second press within that
-// window turns it on (web-surface.md §4).
-let godArms = null;
+// first press only arms the button for three seconds; the second press within that window
+// turns it on (web-surface.md §4). The arm says so in words — the pill reads `再按` and
+// takes amber, not the red of the on-state — because a button coloured "on" while its
+// label says "off" is a button nobody believes for the three seconds it lasts.
 dom.god.onclick = () => {
   if (state.mode === "god") {
+    disarmGod();
     setMode("ask");
     return;
   }
-  if (godArms) {
-    clearTimeout(godArms);
-    godArms = null;
-    dom.god.classList.remove("arming");
+  if (godArmed && godArmedFor !== state.sessionId) disarmGod(); // armed elsewhere; not ours
+  if (godArmed) {
+    disarmGod();
     setMode("god");
     return;
   }
+  godArmedFor = state.sessionId;
   dom.god.classList.add("arming");
-  notice("warn", "再按一次 GOD 开启：删除和外发不再询问");
-  godArms = setTimeout(() => {
-    godArms = null;
-    dom.god.classList.remove("arming");
+  dom.god.querySelector(".state").textContent = "再按";
+  // Said once: the transcript is where a sentence about the session belongs, and the pill
+  // is where the countdown is read, so a second press that re-arms does not repeat it.
+  if (!dom.messages.lastChild || !dom.messages.lastChild.classList.contains("arming-notice")) {
+    notice("warn", "再按一次 GOD 开启：删除和外发不再询问");
+    dom.messages.lastChild.classList.add("arming-notice");
+  }
+  godArmed = setTimeout(() => {
+    disarmGod();
   }, 3000);
 };
 

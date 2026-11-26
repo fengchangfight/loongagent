@@ -140,15 +140,15 @@ Three regions, all fed by the event stream:
   `YOLO 开` filled red while the session lets every tool call through — red because a
   turn that never asks is the dangerous state, and the page must not make it look calm. A
   second pill, `GOD`, lights only in god mode and beside a red `YOLO 开`, because god is
-  the only stop that also lets a deletion through; a press on it **arms** for three
-  seconds before it sends, so the far stop is never one stray click away (ADR-0022 §6).
-  It draws what the session says, never its own guess: `permissions.relaxed` is the record
-  and `permissions.set`'s answer the confirmation, so an old session shows the opt-out it
-  really has (ADR-0007 §5, ADR-0020), and the mode from that same last event (ADR-0022). A
-  turn owns the session's bridge, so the flip cannot ride it: the surface reaches a running
-  child over ADR-0019's control channel — the same private descriptor 3 the TUI uses — and
-  answers at once with `queued: false` and when it lands, never as if it had already landed.
-  A platform with no channel forwards the request, and the flip lands when the turn ends.
+  the only stop that also lets a deletion through; its press **arms** it for three seconds
+  — the pill says `再按` in amber, never `开` in the on-state's red — so the far stop is
+  never one stray click away, and an arm belongs to the session it was made in: moving
+  the tab drops it, so no single press elsewhere is the second one (ADR-0022 §6). It draws
+  what the record says: `permissions.relaxed` is the log and `permissions.set`'s answer
+  the confirmation, so an old session shows the opt-out it really has (ADR-0007 §5,
+  ADR-0020, ADR-0022). A turn owns the session's bridge, so the flip cannot ride it: the
+  surface reaches a running child over ADR-0019's control channel and answers at once
+  with `queued: false` and when it lands; with no channel it forwards, landing at the end.
 - **Session rail** — the two-level tree of §2: workspaces newest added first, each
   expanding to its sessions **newest started first**, with new/delete/copy. Its head is the
   **add-workspace button** of §1, which opens the picker. Every workspace row also carries

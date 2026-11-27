@@ -114,6 +114,8 @@ USAGE:
                             prefills it.
   loongagent run \"PROMPT\"   [--session PATH] [--cwd DIR] [--model NAME] [--budget N] [--keep-newest N]
                             [--max-steps N]   a step is one model call; 0 means no limit
+                            [--auto]          auto-approve tool calls (yolo), for cron/CI; the
+                                              irreversible class still refuses
   --debug-model             append every raw model exchange to <session>.models.jsonl:
                             request, finish_reason, content, tool_calls (why a call did
                             not run is then a grep, not a guess)
@@ -243,6 +245,10 @@ struct Args {
     bootstrap: Vec<String>,
     /// `plugin add --force`: replace an existing install of the same name.
     force: bool,
+    /// `run --auto`: auto-approve tool calls so the turn runs unattended (cron, CI).
+    /// Uses the same yolo ruling as `/yolo`: relaxes `ask` verdicts except the
+    /// irreversible class, which still refuses (ADR-0020 §2).
+    auto: bool,
     /// The reverse run directory this session reads its MCP manifest from (set by
     /// `reverse::run`, never by a flag). It reaches the server child as
     /// `LOONGAGENT_REVERSE_DIR`, so a second reverse process in the same project keeps
@@ -318,6 +324,7 @@ impl Args {
             skills: None,
             bootstrap: Vec::new(),
             force: false,
+            auto: false,
             reverse_dir: None,
             session_drawer: None,
             positional: Vec::new(),
@@ -485,6 +492,7 @@ impl Args {
                         .push(rest.get(i).ok_or("--bootstrap needs a skill name")?.clone());
                 }
                 "--force" => args.force = true,
+                "--auto" => args.auto = true,
                 other if other.starts_with("--") => {
                     return Err(format!("unknown flag {other:?}\n\n{USAGE}"))
                 }

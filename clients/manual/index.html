@@ -343,8 +343,49 @@ loongagent               # 启动会话，server 的工具就挂上了</code></p
 位置不一样就在设置里搜 <code>loongagent.path</code> 填上完整路径，或运行命令
 <code>loongagent: Locate the binary</code>。</p>
 
-<!-- ════════════════════ 8. 出问题去哪看 ════════════════════ -->
-<h2>8. 常用速查</h2>
+<!-- ════════════════════ 8. 非交互运行 ════════════════════ -->
+<h2>8. 非交互运行：让 loongagent 定时干活</h2>
+
+<p>想在服务器上挂个 cron，让 loongagent 每天定时收集信息、写日报？用
+<code>loongagent run</code>——发一条 prompt，跑完自动退出，不开交互界面。
+这是为脚本、CI、定时任务设计的。</p>
+
+<p><strong>最简单的例子</strong>：</p>
+
+<pre><code>loongagent run "收集今天的 GitHub trending，写成日报" \
+    --auto \
+    --model deepseek/deepseek-flash \
+    --cwd /home/me/daily-report \
+    > report.txt</code></pre>
+
+<p><code>--auto</code> 是关键：它让 loongagent <strong>自动批准工具调用</strong>（和 TUI 里的
+<code>/yolo</code> 是同一套规则），不再等人点"允许"。没有它，一旦模型要调工具（比如联网抓网页、
+写文件），<code>run</code> 会打印一行"approval required"然后退出——cron 里任务就死了。</p>
+
+<div class="warn"><code>--auto</code> 用的是 yolo 规则：放行<strong>工作区内的写操作</strong>和
+<strong>执行命令</strong>；但<strong>删除工作区外的文件</strong>（比如 <code>rm -rf ~</code>）
+仍然会被硬拒绝——这是设计上的安全底线，防止无人值守时出大事。日报、信息收集这类
+"读 + 写工作区内文件"的任务完全够用。</div>
+
+<p><strong>配 cron 的完整例子</strong>（每天早上 9 点跑）：</p>
+
+<pre><code># crontab -e
+0 9 * * * cd /home/me/daily-report && \
+    /home/me/.local/bin/loongagent run "收集今天的XX信息，写成日报" \
+    --auto --model deepseek/deepseek-flash \
+    > /home/me/daily-report/$(date +\%Y-\%m-\%d).txt 2>&1</code></pre>
+
+<p>注意 cron 环境里 PATH 可能不全，建议写绝对路径；模型名、工作目录、输出文件按需替换。
+如果日报要发到微信/邮件，让 prompt 自己调工具发（比如"把日报内容用 curl POST 到
+https://example.com/webhook"），或者把 <code>report.txt</code> 交给后面的脚本处理。</p>
+
+<div class="tip">想在跑之前看看 <code>run</code> 会做什么？先不加 <code>--auto</code> 跑一遍：
+<code>loongagent run "你的 prompt"</code>。它会正常执行，但遇到需要批准的操作时会停下来
+打印"approval required"。确认了它会调哪些工具、写哪些文件之后，再加 <code>--auto</code>
+上 cron。</div>
+
+<!-- ════════════════════ 9. 常用速查 ════════════════════ -->
+<h2>9. 常用速查</h2>
 
 <table>
   <tr><th>我想…</th><th>敲这个</th></tr>

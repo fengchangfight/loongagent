@@ -22,6 +22,13 @@ pub(crate) fn headless(args: Args, prompt: &str) -> Result<(), String> {
     let (transport, ..) = ChildTransport::spawn(&args, false)?;
     let mut client = Client::new(transport, args.session_id());
     client.attach(&args.cwd.to_string_lossy(), "headless")?;
+    // `run --auto` switches the session to the same yolo ruling `/yolo` uses:
+    // relax `ask` verdicts except the irreversible class, so a turn that needs
+    // an out-of-bounds write or a workspace edit runs unattended instead of
+    // exiting 3 waiting for an approval nobody will answer (cron, CI).
+    if args.auto {
+        client.set_auto_approve(true)?;
+    }
     // Headless output stays in order: the turn's events, then the answer. Streaming
     // would print the answer before the tool calls that produced it, which is
     // exactly wrong for a log someone reads afterwards. `repl`, `tui` and `web`
@@ -34,7 +41,9 @@ pub(crate) fn headless(args: Args, prompt: &str) -> Result<(), String> {
         std::process::exit(3);
     }
     if let Some(request_id) = client.pending_approval().map(|s| s.to_string()) {
-        eprintln!("approval required for {request_id}; rerun with `tui` to answer");
+        eprintln!(
+            "approval required for {request_id}; rerun with `--auto` to auto-approve, or `tui` to answer"
+        );
         std::process::exit(3);
     }
     Ok(())

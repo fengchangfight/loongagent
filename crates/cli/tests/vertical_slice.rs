@@ -327,3 +327,36 @@ fn the_tui_client_drives_a_real_server() {
     );
     assert!(t.path().join("session.jsonl").exists());
 }
+
+/// Purpose: `loongagent run --auto` switches the session to auto-approve so an in-workspace write runs unattended.
+/// This is the flag that makes `run` safe to call from cron: without it, `demo-write`'s
+/// write to `demo.txt` would block waiting for an approval nobody will answer, and
+/// headless exits 3 (see headless.rs `Drain::Pending`). With `--auto` the yolo ruling
+/// relaxes the `ask` verdict for a workspace write, the tool runs, and the turn finishes.
+#[test]
+fn the_run_auto_flag_auto_approves_a_workspace_write() {
+    let t = Temp::new();
+    let goal = t.path().join("demo.txt");
+    let out = common::isolated_command()
+        .env("LOONGAGENT_SERVER_BIN", env!("CARGO_BIN_EXE_loongagent"))
+        .arg("run")
+        .arg("write the goal file")
+        .arg("--auto")
+        .arg("--session")
+        .arg(t.path().join("session.jsonl"))
+        .arg("--cwd")
+        .arg(t.path())
+        .arg("--model")
+        .arg("demo-write")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        goal.exists(),
+        "yolo auto-approved the workspace write, so demo.txt exists"
+    );
+}

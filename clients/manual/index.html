@@ -343,6 +343,19 @@ loongagent               # 启动会话，server 的工具就挂上了</code></p
 位置不一样就在设置里搜 <code>loongagent.path</code> 填上完整路径，或运行命令
 <code>loongagent: Locate the binary</code>。</p>
 
+<p><strong>卸载</strong>：同样一条命令，按扩展 ID 删。先列一遍找到 ID（名字里带 loong 的那行）：</p>
+
+<pre><code>code --list-extensions | grep -i loong        # PowerShell 用：code --list-extensions | Select-String loong
+code --uninstall-extension loongagent.loongagent-vscode
+code --list-extensions | grep -i loong        # 没输出就是删掉了，重开窗口生效</code></pre>
+
+<p>扩展 ID 是 <code>发布者.扩展名</code> 的形式，写错只会回一句 <code>Extension not installed</code>，
+所以先列再删最稳。不想敲命令就点 VS Code 左侧扩展图标 → 搜 <code>loongagent</code> →
+齿轮/右键 → <code>Uninstall</code>，效果一样。</p>
+
+<div class="tip">卸载只删面板本身：<code>loongagent</code> 二进制、<code>~/.loongagent/</code> 里的模型配置和会话
+都还在，随时能重装回来。要彻底清干净，再删二进制和那个目录——但会话日志删了就没了。</div>
+
 <!-- ════════════════════ 8. 非交互运行 ════════════════════ -->
 <h2>8. 非交互运行：让 loongagent 定时干活</h2>
 

@@ -1,16 +1,25 @@
 import * as vscode from "vscode";
 import { spawnAgent } from "./agentSession.ts";
 import { withStoredSession } from "./resume.ts";
+import { logMode } from "./questions.ts";
 import { LoongSession } from "./session.ts";
 import { SessionCore } from "./sessionCore.ts";
 import type { AgentSession } from "./agentSession.ts";
 import type { TurnController, TurnSink } from "./turn.ts";
 import type { EventEnvelope } from "../../ts/protocol.generated.ts";
+import { parseMode } from "./webviewProtocol.ts";
+import type { PermissionMode } from "./webviewProtocol.ts";
 
 /** Where this workspace's resumed session id is remembered between windows. */
 const SESSION_KEY = "loongagent.sessionId";
-/** Whether this workspace last chose to stop being asked (ADR-0007 §5). */
-const AUTO_APPROVE_KEY = "loongagent.autoApprove";
+/**
+ * The mode this workspace last chose for a *new* session (ADR-0007 §5).
+ *
+ * `god` is deliberately not remembered: it is a decision about the turn in front
+ * of you, not a property of the workspace, and a reload should not quietly come
+ * back with every question silenced.
+ */
+const MODE_KEY = "loongagent.permissionMode";
 
 /**
  * One tab's agent: the child process, the session, and the turn gate.
@@ -54,19 +63,48 @@ export class SessionAgent {
     return this.core.session?.sessionId;
   }
 
-  /** The last answer to "stop asking?", or nothing if this workspace never answered. */
-  get autoApprove(): boolean | undefined {
-    return this.context.workspaceState.get<boolean>(AUTO_APPROVE_KEY);
+  /** What the attach result said, for a session that has changed nothing yet. */
+  private attachedAutoApprove: boolean | undefined;
+  /** How many events the log already had at attach: everything before is history. */
+  private attachedEventCount = 0;
+  /** The mode the server last answered with, so the chip never lags its own click. */
+  private answeredMode: PermissionMode | undefined;
+
+  /**
+   * What this session asks before it acts, as the server last recorded it.
+   *
+   * Only events that arrived *after* attach describe this kernel: a resumed log's
+   * older `permissions.relaxed` belongs to a process that is gone, and a fresh
+   * process starts from the config file's own default. `session.attach` reports how
+   * many events the log already had, which is exactly the boundary. The answer to
+   * our own `permissions.set` is the same authority, one round trip sooner.
+   */
+  get mode(): PermissionMode {
+    if (this.answeredMode !== undefined) return this.answeredMode;
+    const session = this.core.session;
+    if (session === undefined) return "ask";
+    return logMode(session.events.slice(this.attachedEventCount), this.attachedAutoApprove ?? false);
   }
 
-  async rememberAutoApprove(on: boolean): Promise<void> {
-    await this.context.workspaceState.update(AUTO_APPROVE_KEY, on);
+  /** Change the mode, and remember the two that may outlive this session. */
+  async setMode(mode: PermissionMode): Promise<PermissionMode> {
+    const session = await this.ensure();
+    const state = await session.setMode(mode);
+    const applied = parseMode(state.mode) ?? (state.auto_approve ? "yolo" : "ask");
+    this.answeredMode = applied;
+    if (applied !== "god") await this.context.workspaceState.update(MODE_KEY, applied);
+    return applied;
   }
 
   /** What a new session should start with: the workspace's answer, then the setting. */
-  private preferredAutoApprove(): boolean {
-    const remembered = this.autoApprove;
+  private preferredMode(): PermissionMode {
+    const remembered = parseMode(this.context.workspaceState.get<string>(MODE_KEY));
     if (remembered !== undefined) return remembered;
+    return this.configuredAutoApprove() ? "yolo" : "ask";
+  }
+
+  /** The `loongagent.autoApprove` setting, which predates modes and still means yolo. */
+  private configuredAutoApprove(): boolean {
     return vscode.workspace
       .getConfiguration("loongagent", this.folder.uri)
       .get<boolean>("autoApprove", false);
@@ -222,14 +260,29 @@ export class SessionAgent {
     }
     if (this.agent !== agent) throw new Error("the loongagent server exited before attach completed");
     this.core.adopt(session);
+    this.attachedAutoApprove = attached.auto_approve;
+    this.attachedEventCount = attached.existing_events;
     await this.context.workspaceState.update(SESSION_KEY, attached.session_id);
     this.output.appendLine(
       `ready: session ${attached.session_id} (schema ${attached.schema_version}, ` +
       `${attached.existing_events} events already)`,
     );
-    if (this.preferredAutoApprove()) {
-      await session.setAutoApprove(true);
-      this.output.appendLine("ready: approval prompts are off for this session (permissions.relaxed)");
+    if (attached.pending_approval !== undefined) {
+      this.output.appendLine(
+        `ready: the kernel still holds approval ${attached.pending_approval} — no turn is driving it`,
+      );
+    }
+    // A new process starts from the config file, so the person's standing choice is
+    // re-applied here — as a mode the server records, which is then what the panel
+    // shows. Nothing is imposed when the choice is to ask: that is already the
+    // default, and turning asking *on* is never the dangerous direction.
+    const preferred = this.preferredMode();
+    if (preferred !== "ask") {
+      const applied = await session.setMode(preferred);
+      this.answeredMode = parseMode(applied.mode) ?? (applied.auto_approve ? "yolo" : "ask");
+      this.output.appendLine(
+        `ready: this session starts in ${this.answeredMode} mode (permissions.relaxed)`,
+      );
     }
     return session;
   }

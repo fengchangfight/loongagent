@@ -1,5 +1,6 @@
-import type { Attachment, BinaryStatus, FileChoice, Focus, HostMessage, SessionInfo, TabState, UiPart } from "../src/webviewProtocol.ts";
+import type { Attachment, BinaryStatus, FileChoice, Focus, HostMessage, PermissionMode, SessionInfo, TabState, UiPart } from "../src/webviewProtocol.ts";
 import { insertMention, matchingFiles, mentionAt } from "../src/mention.ts";
+import { modeBadge, toggledMode } from "../src/questions.ts";
 
 type Models = Extract<HostMessage, { type: "bootstrap" }>["models"];
 
@@ -24,6 +25,20 @@ brand.className = "brand";
 brand.textContent = "loongagent";
 const status = document.createElement("span");
 status.className = "status";
+const modeChip = document.createElement("button");
+modeChip.className = "mode-chip";
+modeChip.type = "button";
+modeChip.setAttribute("aria-label", "How much this session asks before it acts");
+modeChip.addEventListener("click", () => {
+  if (state.activeTabId === undefined) return;
+  const next = state.mode === "ask" ? "yolo" : state.mode === "yolo" ? "god" : "ask";
+  // Show it before the host answers: the switch is queued behind a running turn, and
+  // a button that waits for that round trip looks broken for as long as the turn runs.
+  state.mode = next;
+  state.modePending = state.busy;
+  renderMode();
+  api.postMessage({ type: "mode", tabId: state.activeTabId, mode: next });
+});
 const modelSelect = document.createElement("select");
 modelSelect.className = "model";
 modelSelect.setAttribute("aria-label", "Model for this session");
@@ -32,7 +47,7 @@ stop.className = "stop";
 stop.textContent = "Stop";
 stop.setAttribute("aria-label", "Stop the running turn");
 stop.disabled = true;
-header.append(brand, status, modelSelect, stop);
+header.append(brand, status, modeChip, modelSelect, stop);
 
 const transcript = document.createElement("div");
 transcript.className = "transcript";
@@ -86,13 +101,15 @@ interface State {
   filesLoaded: boolean;
   mention?: { start: number; query: string; index: number };
   busy: boolean;
-  yolo: boolean;
+  mode: PermissionMode;
+  /** True while the shown mode is a switch still waiting for the turn to end. */
+  modePending: boolean;
 }
 
 const state: State = {
   parts: [], live: "", tabs: [], activeTabId: undefined, sessions: [], historyOpen: false,
   models: [], attachments: [], selection: undefined, focus: undefined, files: [],
-  filesLoaded: false, mention: undefined, busy: false, yolo: false,
+  filesLoaded: false, mention: undefined, busy: false, mode: "ask", modePending: false,
 };
 
 const cachedParts = new Map<string, UiPart[]>();
@@ -337,6 +354,32 @@ function renderStatus(): void {
     ? tab?.status === "waiting" ? "waiting for approval…" : "running…"
     : tab?.status === "stopped" ? "stopped" : "idle";
   status.className = `status ${state.busy ? "busy" : ""}`;
+  renderMode();
+}
+
+/**
+ * Show what this session asks, from the host's word — never from a local toggle.
+ *
+ * `ask` is quiet because it is the default; the relaxed modes are marked with their
+ * own names, so nobody is left believing they are still being asked, and the chip is
+ * also the button that walks `ask → yolo → god → ask`.
+ *
+ * A mode chosen during a turn is shown at once but drawn dashed: the server reads no
+ * request until the turn ends, so claiming it is already in force would be a lie.
+ */
+function renderMode(): void {
+  const badge = modeBadge(state.mode);
+  modeChip.textContent = badge === "" ? "ask" : badge;
+  const tone = state.mode === "god" ? " god" : state.mode === "yolo" ? " relaxed" : "";
+  modeChip.className = `mode-chip${tone}${state.modePending ? " pending" : ""}`;
+  const what = state.mode === "ask"
+    ? "Every guarded action is asked about."
+    : state.mode === "yolo"
+      ? "YOLO — prompts are off and the sandbox still applies."
+      : "GOD — deletions and outward sends are not asked about; two shapes are still refused.";
+  const next = state.mode === "ask" ? "/yolo" : state.mode === "yolo" ? "/god" : "/ask";
+  const when = state.modePending ? " Takes effect when this turn ends." : "";
+  modeChip.title = `${what}${when} Click for ${next}.`;
 }
 
 function renderEmpty(): void {
@@ -397,6 +440,10 @@ function renderPart(part: UiPart): HTMLElement | undefined {
         `approval — ${part.tool ?? part.actionClass}${part.state === "pending" ? "" : ` (${part.state})`}`));
       if (part.paths.length > 0) card.append(element("div", "paths", part.paths.join(" · ")));
       card.append(element("div", "reason", part.reason));
+      if (part.state === "expired") {
+        card.append(element("div", "paths",
+          "the turn that asked this is gone — there is nothing left to answer"));
+      }
       if (part.diff !== undefined) {
         card.append(element("div", "paths",
           `${part.diff.added} added · ${part.diff.removed} removed${part.diff.approximate ? " (approximate)" : ""}${part.diff.truncated ? " · truncated" : ""}`));
@@ -511,9 +558,20 @@ function submit(): void {
       input.value = "";
       return;
     }
-    if (command === "yolo") {
-      state.yolo = !state.yolo;
-      api.postMessage({ type: "yolo", tabId: state.activeTabId, on: state.yolo });
+    if (command === "yolo" || command === "god") {
+      const next = toggledMode(command, state.mode);
+      state.mode = next;
+      state.modePending = state.busy;
+      renderMode();
+      api.postMessage({ type: "mode", tabId: state.activeTabId, mode: next });
+      input.value = "";
+      return;
+    }
+    if (command === "ask") {
+      state.mode = "ask";
+      state.modePending = state.busy;
+      renderMode();
+      api.postMessage({ type: "mode", tabId: state.activeTabId, mode: "ask" });
       input.value = "";
       return;
     }
@@ -599,6 +657,7 @@ window.addEventListener("message", (event: MessageEvent<HostMessage>) => {
       state.model = message.model;
       state.selection = message.selection;
       state.focus = message.focus;
+      state.mode = message.mode ?? "ask";
       // The file list is host state. A second bootstrap (models ready) must
       // not erase a list the earlier `files` message already delivered.
       state.mention = undefined;
@@ -612,6 +671,11 @@ window.addEventListener("message", (event: MessageEvent<HostMessage>) => {
       renderMention();
       renderTabs();
       render();
+      break;
+    case "permissions":
+      state.mode = message.mode;
+      state.modePending = message.pending === true;
+      if (message.tabId === state.activeTabId) renderMode();
       break;
     case "tabs":
       state.tabs = message.tabs;

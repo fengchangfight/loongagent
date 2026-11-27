@@ -21,3 +21,15 @@ test("an attached file path is validated", () => {
     { type: "attachFile", tabId: "t1", path: "/w/a.ts" });
   assert.equal(parseWebviewMessage({ type: "attachFile", tabId: "t1" }), undefined);
 });
+
+test("a mode change carries one of the three modes", () => {
+  assert.deepEqual(parseWebviewMessage({ type: "mode", tabId: "t1", mode: "god" }),
+    { type: "mode", tabId: "t1", mode: "god" });
+  assert.equal(parseWebviewMessage({ type: "mode", tabId: "t1", mode: "off" }), undefined);
+  assert.equal(parseWebviewMessage({ type: "mode", tabId: "t1" }), undefined);
+  assert.equal(parseWebviewMessage({ type: "mode", mode: "yolo" }), undefined);
+});
+
+test("the old boolean yolo message is not a mode change", () => {
+  assert.equal(parseWebviewMessage({ type: "yolo", tabId: "t1", on: true }), undefined);
+});

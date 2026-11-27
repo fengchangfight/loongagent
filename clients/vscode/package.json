@@ -62,7 +62,7 @@
           "type": "boolean",
           "default": false,
           "scope": "machine",
-          "description": "Turn approval prompts off for this workspace (recorded as permissions.relaxed)."
+          "description": "Start a new session in YOLO mode: approval prompts off, the sandbox unchanged (recorded as permissions.relaxed). Prefer the header chip or /yolo, /god, /ask."
         },
         "loongagent.extraArgs": {
           "type": "array",

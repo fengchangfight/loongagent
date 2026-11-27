@@ -3,6 +3,16 @@ import type { ModelOffering } from "../../ts/protocol.generated.ts";
 /** A tab's lifecycle state as the tab bar shows it. */
 export type TabStatus = "idle" | "running" | "waiting" | "stopped";
 
+/**
+ * How much this session asks before it acts (ADR-0020, ADR-0022).
+ *
+ * The server decides it and the panel renders it: `ask` puts a question behind
+ * every guarded action, `yolo` silences the questions the sandbox already
+ * contains, and `god` also stops asking about deletions and outward sends while
+ * refusing two shapes outright.
+ */
+export type PermissionMode = "ask" | "yolo" | "god";
+
 /** One open conversation in the sidebar. */
 export interface TabState {
   id: string;
@@ -45,7 +55,12 @@ export type UiPart =
       reason: string;
       paths: string[];
       diff?: DiffPreview;
-      state: "pending" | "allowed" | "denied";
+      /**
+       * `expired` is a question the kernel is no longer holding: it belongs to a
+       * turn whose process is gone, so the card keeps the record and loses its
+       * buttons rather than offering an answer nothing is listening for.
+       */
+      state: "pending" | "allowed" | "denied" | "expired";
     }
   | { kind: "review"; token: string; paths: string[] }
   | { kind: "notice"; level: "info" | "warn" | "error"; text: string };
@@ -103,8 +118,11 @@ export type HostMessage =
       binary?: BinaryStatus;
       selection?: Attachment;
       focus?: Focus;
+      /** The server's own word on what this session asks, never a local guess. */
+      mode?: PermissionMode;
     }
   | { type: "tabs"; tabs: TabState[] }
+  | { type: "permissions"; tabId: string; mode: PermissionMode; pending?: boolean }
   | { type: "transcript"; tabId: string; parts: UiPart[] }
   | { type: "delta"; tabId: string; text: string }
   | { type: "part"; tabId: string; part: UiPart }
@@ -138,7 +156,7 @@ export type WebviewMessage =
   | { type: "removeAttachment"; tabId: string; id: string }
   | { type: "review"; tabId: string; token: string; paths: string[] }
   | { type: "openDiff"; tabId: string; token: string; path: string }
-  | { type: "yolo"; tabId: string; on: boolean };
+  | { type: "mode"; tabId: string; mode: PermissionMode };
 
 type RecordLike = Record<string, unknown>;
 
@@ -152,6 +170,11 @@ function isStringArray(value: unknown): value is string[] {
 
 function str(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+/** The protocol's three modes, or nothing when the text is something else. */
+export function parseMode(value: unknown): PermissionMode | undefined {
+  return value === "ask" || value === "yolo" || value === "god" ? value : undefined;
 }
 
 /** Parse one untrusted Webview message; unknown or malformed input is `undefined`. */
@@ -219,10 +242,10 @@ export function parseWebviewMessage(raw: unknown): WebviewMessage | undefined {
         ? undefined
         : { type, tabId, token, path };
     }
-    case "yolo": {
+    case "mode": {
       const tabId = str(raw.tabId);
-      if (tabId === undefined || typeof raw.on !== "boolean") return undefined;
-      return { type, tabId, on: raw.on };
+      const mode = parseMode(raw.mode);
+      return tabId === undefined || mode === undefined ? undefined : { type, tabId, mode };
     }
     default:
       return undefined;

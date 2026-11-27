@@ -151,6 +151,33 @@ test("cancel reaches the child", () => {
   assert.deepEqual(child.signals, ["SIGINT"]);
 });
 
+test("setMode sends the mode, never both spellings", async () => {
+  const { child, session } = makeSession();
+  await attachTo(child, session, "s1");
+  const pending = session.setMode("god");
+  assert.equal(child.sent()[1].method, "permissions.set");
+  assert.deepEqual(child.sent()[1].params, { session_id: "s1", mode: "god" });
+  answer(child, 1, { auto_approve: true, mode: "god" });
+  assert.deepEqual(await pending, { auto_approve: true, mode: "god" });
+});
+
+test("attach remembers the question its kernel holds", async () => {
+  const { child, session } = makeSession();
+  const pending = session.attach("/w");
+  answer(child, 0, { session_id: "s1", schema_version: "0.1.0", existing_events: 3,
+    pending_approval: "appr-4", auto_approve: false });
+  await pending;
+  assert.equal(session.pendingApproval, "appr-4");
+  session.clearPendingApproval();
+  assert.equal(session.pendingApproval, undefined, "an answered question is not asked twice");
+});
+
+test("a session with nothing waiting reports no question", async () => {
+  const { child, session } = makeSession();
+  await attachTo(child, session, "s1");
+  assert.equal(session.pendingApproval, undefined);
+});
+
 test("submit names the session and returns the turn", async () => {
   const { child, session } = makeSession();
   await attachTo(child, session, "s1");

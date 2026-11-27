@@ -10,6 +10,7 @@ import { focusedFile, sameFocus } from "./focus.ts";
 import { refusalToStart } from "./guards.ts";
 import { PreviewProvider } from "./previewProvider.ts";
 import { promptText } from "./prompt.ts";
+import { modeNotice, reconcileQuestions, refusedForApproval, switchDecision } from "./questions.ts";
 import { sameSelection, selectionAttachment } from "./selection.ts";
 import { pathsInArgs, Renderer } from "./render.ts";
 import { SessionAgent } from "./sessionAgent.ts";
@@ -23,8 +24,8 @@ import { EVENTS } from "../../ts/protocol.generated.ts";
 import type { ApprovalRequested, ModelList, ToolCall, ToolResult } from "../../ts/protocol.generated.ts";
 import type { DiffUris } from "./diffProvider.ts";
 import type { Preview } from "./diff.ts";
-import type { Attachment, BinaryStatus, Focus, HostMessage, UiPart } from "./webviewProtocol.ts";
-import type { ApprovalAnswer } from "./turn.ts";
+import type { Attachment, BinaryStatus, Focus, HostMessage, PermissionMode, UiPart } from "./webviewProtocol.ts";
+import type { ApprovalAnswer, TurnController } from "./turn.ts";
 import type { SessionAgent as Agent } from "./sessionAgent.ts";
 import type { LoongSession } from "./session.ts";
 
@@ -56,6 +57,24 @@ interface TabRuntime {
   attachments: Attachment[];
   running: boolean;
   pendingTool?: PendingTool;
+  /**
+   * The request this tab is asking the person to answer, if any.
+   *
+   * It is what Stop checks: answering the question is what ends a parked turn, so
+   * interrupting the server at the same moment drops the answer on the floor and
+   * leaves the kernel holding a question nobody can answer.
+   */
+  question?: string;
+  /**
+   * The mode this tab is waiting for, when a switch was asked during a turn.
+   *
+   * The server reads its next request only once the turn ends — `prompt.submit` runs
+   * the whole turn inside `dispatch`, so a `permissions.set` written meanwhile waits
+   * in the pipe. Rather than make the person wait for a round trip that cannot come,
+   * the choice is shown at once and applied the moment the turn ends. Last one wins,
+   * which is what clicking twice should mean.
+   */
+  pendingMode?: PermissionMode;
   unreviewed: Set<string>;
 }
 
@@ -369,8 +388,8 @@ export class ChatViewProvider {
       case "openSession":
         void this.openSession(message.sessionId);
         break;
-      case "yolo":
-        void this.yolo(message.tabId, message.on);
+      case "mode":
+        void this.setMode(message.tabId, message.mode);
         break;
       case "closeTab":
         this.closeTab(message.tabId);
@@ -392,6 +411,7 @@ export class ChatViewProvider {
       ...(this.binary === undefined ? {} : { binary: this.binary }),
       ...(this.selection === undefined ? {} : { selection: { ...this.selection } }),
       ...(this.focus === undefined ? {} : { focus: { ...this.focus } }),
+      ...(this.agent === undefined ? {} : { mode: this.agent.mode }),
     });
   }
 
@@ -509,12 +529,52 @@ export class ChatViewProvider {
         }
       }
       runtime.models = await session.models();
+      await this.reconcileParkedQuestions(tabId, session);
+      this.post({ type: "permissions", tabId, mode: agent.mode });
       return agent;
     } catch (error) {
       if (runtime.agent === agent) runtime.agent = undefined;
       agent.dispose();
       throw error;
     }
+  }
+
+  /**
+   * Sort the transcript's parked questions by what the kernel actually holds.
+   *
+   * A resumed session replays its log, and the log may end on a question — but a
+   * parked approval lives in the kernel's memory, so the replay's last word can be
+   * a question whose owner is gone. `session.attach` is the only authority: it
+   * names the request its kernel holds, and everything else is retired out loud
+   * rather than left as a button that answers nothing.
+   *
+   * When the kernel *does* still hold one, no turn is driving it (nothing is
+   * running in this window), so it is answered the way `TurnGate` answers a turn
+   * no surface holds — with a denial — which is what lets the next prompt through
+   * instead of being refused as out of order.
+   */
+  private async reconcileParkedQuestions(tabId: string, session: LoongSession): Promise<void> {
+    const runtime = this.runtimeFor(tabId);
+    const held = session.pendingApproval;
+    const { retire } = reconcileQuestions(runtime.transcript.all(), held);
+    for (const requestId of retire) {
+      this.retireQuestion(tabId, requestId,
+        "the process that asked it is gone, and the kernel is not holding it");
+    }
+    if (held === undefined) return;
+    if (runtime.running) return;
+    try {
+      await session.respondApproval(held, false, "once", "no surface is holding this turn");
+      session.clearPendingApproval();
+      this.output.appendLine(
+        `retired: ${held} — the kernel held it with no turn driving it, so it was denied`,
+      );
+    } catch (error) {
+      this.output.appendLine(`retired: ${held} — could not deny it: ${explain(error)}`);
+      return;
+    }
+    this.retireQuestion(tabId, held,
+      "it was still waiting when this window reopened, and no turn was driving it");
   }
 
   private dropTab(tabId: string, error: unknown): void {
@@ -694,35 +754,87 @@ export class ChatViewProvider {
     }
   }
 
-  private async yolo(tabId: string, on: boolean): Promise<void> {
+  /**
+   * Ask the server for a different mode — at once, or as soon as a turn allows.
+   *
+   * No confirmation step: the TUI switches on one keystroke too, and ADR-0007 §5
+   * asks that a relaxed session *look* relaxed rather than that changing it be
+   * laborious. The mark in the header is what carries the warning, which is why it
+   * must never lag the mode.
+   *
+   * A running turn is not a reason to block. `prompt.submit` runs the whole turn
+   * inside the server's dispatch, and the connection is read one line at a time, so
+   * a `permissions.set` sent now would not be *read* until the turn ended: the button
+   * would hang for minutes. The header flips instead, marked as pending, and the
+   * switch lands when the turn does — which is when it takes effect anyway.
+   */
+  private async setMode(tabId: string, mode: PermissionMode): Promise<void> {
+    let agent: Agent;
     try {
-      if (on) {
-        const choice = await vscode.window.showWarningMessage(
-          "Turn approval prompts off for this session? The sandbox stays in force.",
-          { modal: true },
-          "Turn prompts off",
-          "Cancel",
-        );
-        if (choice !== "Turn prompts off") return;
-      }
-      const agent = await this.ensureAgent(tabId);
-      const session = await agent.ensure();
-      const state = await session.setAutoApprove(on);
-      await agent.rememberAutoApprove(state);
-      const part: UiPart = {
-        kind: "notice",
-        level: state ? "warn" : "info",
-        text: state
-          ? "Approval prompts are off for this session. The sandbox is unchanged."
-          : "Approval prompts are on again for this session. The sandbox was never changed.",
-      };
-      this.runtimeFor(tabId).transcript.append(part);
-      this.post({ type: "part", tabId, part });
+      agent = await this.ensureAgent(tabId);
     } catch (error) {
+      this.post({ type: "error", tabId, message: startupAdvice(explain(error)) });
+      this.output.appendLine(`failed: ${explain(error)}`);
+      return;
+    }
+    const runtime = this.runtimeFor(tabId);
+    const current = agent.mode;
+    switch (switchDecision(runtime.running, mode, current, runtime.pendingMode)) {
+      case "ignore":
+        return;
+      case "cancel-pending":
+        // Asking for the mode already in force also cancels a switch still waiting to
+        // land: the last click is the one the person means.
+        runtime.pendingMode = undefined;
+        this.post({ type: "permissions", tabId, mode: current });
+        this.output.appendLine(`mode: ${current} — the pending switch was cancelled`);
+        return;
+      case "queue": {
+        runtime.pendingMode = mode;
+        this.post({ type: "permissions", tabId, mode, pending: true });
+        this.appendNotice(tabId, modeNotice(mode, { deferred: true }),
+          mode === "ask" ? "info" : "warn");
+        this.output.appendLine(`mode: ${mode} queued — the running turn is read before any request`);
+        return;
+      }
+      case "apply":
+        await this.applyMode(tabId, agent, mode, { quiet: false });
+    }
+  }
+
+  /**
+   * Put a mode into force, and say what the server answered.
+   *
+   * `quiet` is for a switch that already said its piece when it was queued: the
+   * promise was made then, so landing it again would only add noise. A failure is
+   * never quiet — the header is put back to what the server really records.
+   */
+  private async applyMode(
+    tabId: string,
+    agent: Agent,
+    mode: PermissionMode,
+    options: { quiet: boolean },
+  ): Promise<void> {
+    try {
+      const applied = await agent.setMode(mode);
+      if (!options.quiet) {
+        this.appendNotice(tabId, modeNotice(applied), applied === "ask" ? "info" : "warn");
+      }
+      this.post({ type: "permissions", tabId, mode: applied });
+      this.output.appendLine(`mode: ${applied} (permissions.relaxed)`);
+    } catch (error) {
+      this.post({ type: "permissions", tabId, mode: agent.mode });
       this.post({ type: "error", tabId,
         message: `I could not change the approval setting: ${explain(error)}` });
       this.output.appendLine(`failed: ${explain(error)}`);
     }
+  }
+
+  /** Add one notice to the transcript and put it on screen. */
+  private appendNotice(tabId: string, text: string, level: "info" | "warn" | "error"): void {
+    const part: UiPart = { kind: "notice", level, text };
+    this.runtimeFor(tabId).transcript.append(part);
+    this.post({ type: "part", tabId, part });
   }
 
   private async send(tabId: string, text: string): Promise<void> {
@@ -789,7 +901,7 @@ export class ChatViewProvider {
           if (event.kind === EVENTS.toolResult) {
             const result = event.data as unknown as ToolResult;
             if (runtime.unreviewed.delete(result.call_id) && result.ok) {
-              const auto = agent.autoApprove === true;
+              const auto = agent.mode !== "ask";
               const notice: UiPart = {
                 kind: "notice",
                 level: "warn",
@@ -826,6 +938,7 @@ export class ChatViewProvider {
             ?? this.approvals.wait(tabId, asked.request_id);
           this.pendingAnswers.delete(key);
           const answer = await waiting;
+          runtime.question = undefined;
           runtime.transcript.updateApproval(asked.request_id,
             { state: answer.granted ? "allowed" : "denied" });
           const updated = runtime.transcript.all().find((entry) =>
@@ -867,7 +980,7 @@ export class ChatViewProvider {
     this.persistTabs();
 
     try {
-      await controller.run(prompt);
+      await this.driveTurn(tabId, agent, controller, prompt);
       const changed = this.left.changedAmong(review.token, renderer.touchedFiles(), readNow)
         .filter((path) => isInside(folder.uri.fsPath, path));
       if (changed.length > 0) {
@@ -887,14 +1000,68 @@ export class ChatViewProvider {
       this.tabs.update(tabId, { status: failed ? "stopped" : "idle" });
       agent.endTurn();
       runtime.pendingTool = undefined;
+      runtime.question = undefined;
       for (const key of [...this.pendingAnswers.keys()]) {
         if (key.startsWith(`${tabId}:`)) this.pendingAnswers.delete(key);
       }
       runtime.unreviewed.clear();
       this.postTabs();
+      // The turn is over, so the connection is being read again: whatever was asked
+      // for while it ran can now reach the server. Denials and approvals already woke
+      // it; a mode switch is the one request that only ever waited.
+      const deferred = runtime.pendingMode;
+      runtime.pendingMode = undefined;
+      if (deferred !== undefined) await this.applyMode(tabId, agent, deferred, { quiet: true });
     }
   }
 
+  /**
+   * Run the turn, and step out of the one state that leaves a session unusable.
+   *
+   * The server refuses a prompt while it still holds an unanswered question from
+   * an earlier turn (`out of order: approval … is still pending`). That state has
+   * no card left to click and nothing for Stop to stop, so the refusal is treated
+   * as what it is — a question to be cleared — and the prompt is offered once
+   * more. Denying is the safe direction: nothing runs that the person has not
+   * just been asked about.
+   */
+  private async driveTurn(
+    tabId: string,
+    agent: Agent,
+    controller: TurnController,
+    prompt: string,
+  ): Promise<void> {
+    try {
+      await controller.run(prompt);
+    } catch (error) {
+      const stuck = refusedForApproval(explain(error));
+      if (stuck === undefined) throw error;
+      const session = await agent.ensure();
+      this.output.appendLine(`refused: ${stuck} is still pending — denying it and asking again`);
+      const notice: UiPart = {
+        kind: "notice",
+        level: "warn",
+        text: "One step from an earlier turn was still waiting with nothing able to answer it, "
+          + "so it is denied now and your prompt is sent again.",
+      };
+      const runtime = this.runtimeFor(tabId);
+      runtime.transcript.append(notice);
+      this.post({ type: "part", tabId, part: notice });
+      await session.respondApproval(stuck, false, "once", "cleared a question nothing could answer");
+      session.clearPendingApproval();
+      this.retireQuestion(tabId, stuck, "it outlived the turn that asked it");
+      await controller.run(prompt);
+    }
+  }
+
+  /**
+   * Take the person's answer to a card, and never swallow it.
+   *
+   * A card can outlive the turn that asked it: the transcript is replayed from the
+   * log, so a question whose process is gone still draws buttons. Silently
+   * returning leaves the person clicking at a wall, so the card is retired and the
+   * reason said out loud instead.
+   */
   private answerApproval(
     tabId: string,
     requestId: string,
@@ -903,14 +1070,47 @@ export class ChatViewProvider {
     const answer = choice === "deny"
       ? { granted: false, scope: "once" as const, reason: "denied in VS Code" }
       : { granted: true, scope: choice === "once" ? "once" as const : "action_class" as const };
-    if (!this.approvals.answer(tabId, requestId, answer)) return;
+    if (!this.approvals.answer(tabId, requestId, answer)) {
+      this.retireQuestion(tabId, requestId,
+        "that question belongs to a turn whose process is gone, so this answer cannot reach it");
+      return;
+    }
     this.tabs.update(tabId, { status: "running" });
     this.postTabs();
     const runtime = this.runtimeFor(tabId);
+    runtime.question = undefined;
     runtime.transcript.updateApproval(requestId, { state: answer.granted ? "allowed" : "denied" });
     const updated = runtime.transcript.all().find((entry) =>
       entry.kind === "approval" && entry.requestId === requestId);
     if (updated !== undefined) this.post({ type: "part", tabId, part: updated });
+  }
+
+  /**
+   * Retire a card nothing is listening for, and say so once.
+   *
+   * Retiring is not answering: the card keeps its place in the record, drops its
+   * buttons, and the transcript carries one line. This is the rule the TUI already
+   * follows for a question the kernel does not confirm — and like the TUI, the
+   * notice is advice rather than a protocol id, which belongs in the output channel.
+   */
+  private retireQuestion(tabId: string, requestId: string, why: string): void {
+    const runtime = this.runtimeFor(tabId);
+    const part = runtime.transcript.all().find((entry) =>
+      entry.kind === "approval" && entry.requestId === requestId);
+    if (part === undefined || part.kind !== "approval" || part.state === "expired") return;
+    runtime.transcript.updateApproval(requestId, { state: "expired" });
+    const updated = runtime.transcript.all().find((entry) =>
+      entry.kind === "approval" && entry.requestId === requestId);
+    if (updated !== undefined) this.post({ type: "part", tabId, part: updated });
+    const notice: UiPart = {
+      kind: "notice",
+      level: "warn",
+      text: "A question from an earlier turn can no longer be answered, so it is marked "
+        + "expired. Send your prompt again and it will be asked afresh.",
+    };
+    runtime.transcript.append(notice);
+    this.post({ type: "part", tabId, part: notice });
+    this.output.appendLine(`retired: ${requestId} — ${why}`);
   }
 
   private recordPendingTool(
@@ -956,6 +1156,7 @@ export class ChatViewProvider {
     // Register the waiter before the card is visible: a fast click must resolve
     // the same promise `decide` will await, not be lost between them.
     this.pendingAnswers.set(`${tabId}:${asked.request_id}`, this.approvals.wait(tabId, asked.request_id));
+    this.runtimeFor(tabId).question = asked.request_id;
     this.tabs.update(tabId, { status: "waiting" });
     this.postTabs();
     const runtime = this.runtimeFor(tabId);
@@ -1040,9 +1241,28 @@ export class ChatViewProvider {
     }
   }
 
+  /**
+   * Stop the turn — by answering the question first, when there is one.
+   *
+   * A turn parked on an approval is ended by the *answer*, not by the interrupt:
+   * the kernel's `SIGINT` only sets a flag the loop reads, and a parked loop is
+   * not reading anything. Denying and interrupting at once therefore races, and
+   * when the interrupt wins the kernel keeps the question in memory for good —
+   * every later prompt is refused with "approval … is still pending", there is no
+   * card left to click, and Stop has nothing to stop. So: answer, don't interrupt.
+   */
   private cancel(tabId: string): void {
     const runtime = this.runtimeFor(tabId);
-    if (!runtime.running) return;
+    const question = runtime.question;
+    if (question !== undefined) {
+      this.approvals.denyTab(tabId, "stopped by the person");
+      this.output.appendLine(`turn stop: answered ${question} with deny — the answer ends the turn`);
+      return;
+    }
+    if (!runtime.running) {
+      this.output.appendLine("turn stop: nothing is running in this tab");
+      return;
+    }
     this.output.appendLine("turn running: the person asked to stop");
     this.approvals.denyTab(tabId, "stopped by the person");
     runtime.agent?.cancel();

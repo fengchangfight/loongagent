@@ -6,9 +6,11 @@ import type {
   ContextExplain,
   EventEnvelope,
   ModelList,
+  PermissionsState,
   SessionAttachResult,
 } from "../../ts/protocol.generated.ts";
 import type { SessionInfo } from "./webviewProtocol.ts";
+import type { PermissionMode } from "./webviewProtocol.ts";
 
 /**
  * The server refuses a request that names a session it is not on rather than
@@ -44,6 +46,7 @@ const EVENT_NOTIFICATION = "event";
 export class LoongSession {
   private readonly agent: AgentSession;
   private current: string | undefined;
+  private attached: SessionAttachResult | undefined;
   private readonly seen: EventEnvelope[] = [];
   private eventObserver: ((event: EventEnvelope) => void) | undefined;
   private deltaObserver: ((text: string) => void) | undefined;
@@ -76,7 +79,25 @@ export class LoongSession {
       client: "vscode",
     });
     this.current = result.session_id;
+    this.attached = result;
     return result;
+  }
+
+  /**
+   * The question the kernel is holding in memory, as attach reported it.
+   *
+   * A parked approval lives in the kernel, not in the log: only this id can still
+   * be answered, and every other parked card was drawn from a log whose process
+   * is gone. Cleared as soon as an answer is sent, so a second answer to the same
+   * request is never attempted.
+   */
+  get pendingApproval(): string | undefined {
+    return this.attached?.pending_approval ?? undefined;
+  }
+
+  /** Forget a question that has been answered or cleared; the next one is new. */
+  clearPendingApproval(): void {
+    if (this.attached !== undefined) this.attached = { ...this.attached, pending_approval: undefined };
   }
 
   async newSession(): Promise<string> {
@@ -134,13 +155,24 @@ export class LoongSession {
     return this.call<ContextExplain>(METHODS.contextExplain, this.mine());
   }
 
-  /** Opting out of prompts is a session event; the new state is what comes back. */
+  /**
+   * Opting out of prompts is a session event; the new state is what comes back.
+   *
+   * The pre-ADR-0022 spelling of the same request: it can only say "no prompts"
+   * or "prompts", never which relaxed mode. New callers use `setMode`, which the
+   * server answers with both fields.
+   */
   async setAutoApprove(on: boolean): Promise<boolean> {
     const state = await this.call<{ auto_approve: boolean }>(
       METHODS.permissionsSet,
       this.mine({ auto_approve: on }),
     );
     return state.auto_approve;
+  }
+
+  /** `ask` | `yolo` | `god`, as the server records it (ADR-0020, ADR-0022). */
+  async setMode(mode: PermissionMode): Promise<PermissionsState> {
+    return this.call<PermissionsState>(METHODS.permissionsSet, this.mine({ mode }));
   }
 
   async respondApproval(

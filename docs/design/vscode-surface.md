@@ -4,7 +4,7 @@
 - **Authority:** [ADR-0009](../decisions/0009-surfaces.md) · [VS Code surface spec](../superpowers/specs/2026-10-26-vscode-webview-design.md)
 - **Code:** `clients/vscode/src/extension.ts`, `clients/vscode/src/chatView.ts`,
   `clients/vscode/src/sessionAgent.ts`, `clients/vscode/src/binary.ts`,
-  `clients/vscode/webview/main.ts`
+  `clients/vscode/src/questions.ts`, `clients/vscode/webview/main.ts`
 - **Verify:** `cd clients/vscode && npm run compile && npm test` · `./scripts/check.sh`
 
 The VS Code surface is a client of the same local server as the TUI and the browser. It opens
@@ -63,6 +63,25 @@ For `write_file` and `edit` the approval card carries a line diff:
   `denied in VS Code`; a closed card is Deny.
 - `project` scope is not offered.
 
+A parked approval lives in the kernel's memory, not in the log
+([sessions-lineage](sessions-lineage.md)). The transcript, however, is drawn from the log, so a
+replayed session can show a card nothing is listening for. Two rules keep that card from becoming
+a dead button:
+
+- `session.attach` answers with `pending_approval`, the one request the kernel still holds. A card
+  carrying any other id is retired: it keeps its place in the record, loses its buttons, and one
+  notice line names it. This is the TUI's rule, not a new one.
+- A held question with no turn driving it (no surface is running in this window) is answered with
+  a denial and reason `no surface is holding this turn` — the same answer `TurnGate` gives a turn
+  no surface holds — so the next prompt is accepted instead of refused as `out of order`.
+- An answer to a card the host is not listening for is never swallowed: the card is retired and
+  the reason said aloud.
+- A prompt the server refuses with `out of order: approval <id> is still pending` is treated as a
+  question to clear: that id is denied, the person is told, and the prompt is offered once more.
+- Stop answers the pending question instead of interrupting. Denying *and* sending `SIGINT` in the
+  same breath races, and when the interrupt wins the kernel keeps the question for good: no card,
+  nothing to stop, and every later prompt refused.
+
 The review-before-write flow needs the user's policy `[permissions] write_workspace = "ask"`.
 The extension never changes policy; with `allow` it says the write landed unreviewed.
 
@@ -95,8 +114,37 @@ transcript, never a file the extension reads.
 - While a turn is running without a live delta, the bottom of the transcript shows an animated
   `Thinking…`/`Working…`/`Running <tool>…` row. The protocol streams model output deltas but
   no hidden reasoning stream, so this is activity, not a fabricated chain of thought.
-- `/new`, `/model`, `/context` and `/yolo` are composer commands. `/yolo` asks for a modal
-  confirmation and renders `permissions.relaxed`.
+- `/new`, `/model`, `/context`, `/yolo`, `/god` and `/ask` are composer commands. The first three
+  change what is attached; the rest change what is asked. `/yolo` and `/god` toggle the way the
+  TUI toggles them: naming the mode already on turns it off, and `/yolo` from `god` lands on
+  `yolo`. `/ask` always asks again, and a click on the header chip walks `ask → yolo → god → ask`.
+- Switching takes one gesture, with no confirmation dialog — the TUI switches on one keystroke.
+  ADR-0007 §5 asks that a relaxed session *look* relaxed, not that changing it be laborious; the
+  header mark is what carries the warning, so it must never lag the mode.
+- A switch never blocks on a running turn. The server reads its next request only when the turn
+  ends — `prompt.submit` runs the whole turn inside dispatch, and the connection is read one line
+  at a time — so a `permissions.set` sent mid-turn would not even be *read* until the turn
+  finished. Instead the panel shows the chosen mode at once, drawn dashed with the words "takes
+  effect when this turn ends", and the switch lands in the turn's `finally`. A second switch
+  during the same turn replaces the first; switching back to the mode already in force withdraws
+  it. This is the reason the TUI needed a private control channel for the same gesture; the panel
+  queues instead of adding a second connection.
+- The mode belongs to the server, and only this process's word counts. A new kernel starts from
+  the config file, so the panel reads `session.attach`'s `auto_approve` plus the
+  `permissions.relaxed` events that arrived *after* attach — `existing_events` is the boundary —
+  and never a resumed log's older events, which describe a process that is gone.
+- A new process starts from the workspace's remembered choice (`ask` or `yolo`, never `god`: that
+  is a decision about the turn in front of you, not a property of the workspace) or, failing that,
+  from `loongagent.autoApprove`. The choice is re-applied as a recorded `permissions.relaxed`, so
+  the panel and the log agree. A remembered `ask` is not re-applied: asking is already the default,
+  and turning asking on is never the dangerous direction.
+- Each mode change writes one notice stating that mode's own promise: `yolo` leaves the sandbox
+  alone and still asks about irreversible actions, while `god` stops asking about deletions and
+  outward sends and refuses two shapes outright (ADR-0020, ADR-0022). A person who believes
+  nothing is asked any more would be wrong.
+- The header carries the mode's own name while it is relaxed — `⚠ YOLO`, `⚡ GOD` — and a plain
+  `ask` otherwise. The words are the commands, not a description of them: the TUI's own badge
+  reads `⚠ 免确认`, and either way a silenced session is never silent about being silenced.
 
 ## 5. Finding the binary
 
@@ -117,12 +165,14 @@ Locate.
 - Model text goes through the host-side Markdown subset; raw HTML is escaped, tool output uses
   `textContent`, and links are limited to http/https.
 - The Webview sends intents only; the host owns every request to the child.
-- Approval answers are keyed by tab and request id; an unknown answer is ignored.
+- Approval answers are keyed by tab and request id; an answer to a request this host is not
+  listening for retires the card and says so, rather than being dropped in silence.
 
 ## 7. Limits
 
 - No per-hunk accept/reject and no diff for shell writes.
 - No syntax highlighting, images or URL context.
-- Stop is a POSIX `SIGINT`; Windows is documented as unsupported.
+- Stop answers the pending question when there is one, and is a POSIX `SIGINT` otherwise; Windows
+  is documented as unsupported.
 - One window per session: the server has no cross-window write token yet.
 - The native `@loong` participant is gone; the editor panel is the VS Code entry point.

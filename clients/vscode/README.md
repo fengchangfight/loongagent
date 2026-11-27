@@ -98,7 +98,12 @@ write_workspace = "ask"
 - 写入前 diff 卡片：Allow once / Allow always / Deny；Open full diff
 - 一轮结束后的 Review 卡片：逐个打开 `vscode.diff`，左边是该轮第一次提到文件时的内容
 - `permissions.relaxed` 显示
-- `/new`、`/model`、`/context`、`/yolo` 命令
+- `/new`、`/model`、`/context` 命令；`/yolo`、`/god`、`/ask` 切换提问强度，和 TUI 同一套语义
+- 顶部模式徽标：`ask` 时不显眼，`⚠ YOLO` 和 `⚡ GOD` 各自标出来；点一下按 `ask → yolo → god → ask` 走。切换是一步到位，不弹确认框（TUI 也是一个键切过去）
+- 切换不阻塞：turn 在跑的时候点，徽标立刻变（虚线，标明「本轮结束后生效」），这一轮跑完自动落地。server 在 turn 期间根本不会读取新请求，所以等它就是干等
+- 每次切换在记录里写一句该模式自己的承诺：`YOLO` 不动沙箱、不可逆动作照样问；`GOD` 不问删除和外发，但越界删除和密钥外发直接拒绝
+- 审批卡只在服务端还握着那个请求时能点；上游进程没了的卡片会标成 `expired` 并说明原因，不会点了没反应
+- 服务端说 `approval … is still pending` 时自动否掉那条并重发一次，不会再卡成发不出消息
 - 多 tab：一个 tab 一个会话、一个子进程；最多 5 个；同一 session 只开一个
 - 关闭 tab 即拒绝 pending approval 并 dispose 子进程；`History` 打开最近会话
 - 重载后恢复 tab、活动 tab、会话和最近消息
@@ -107,7 +112,7 @@ write_workspace = "ask"
 
 - 不做逐 hunk 接受/拒绝；只做整个文件的 diff。
 - `shell` 的写入没有预览，只有策略/审批卡片。
-- Windows 上 Stop 未实现（POSIX `SIGINT`）。
+- Windows 上 Stop 未实现（POSIX `SIGINT`）；停在审批上的那一轮，Stop 用「拒绝该请求」收尾，不发信号。
 - 一个窗口最多 5 个会话；跨窗口的 write token 不在本阶段。
 - 原生 `@loong` participant 已移除；VS Code 入口就是这个编辑器面板。
 

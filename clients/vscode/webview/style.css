@@ -418,6 +418,49 @@ button:disabled {
   border-color: var(--vscode-errorForeground);
 }
 
+.card.approval.expired {
+  border-color: var(--vscode-descriptionForeground);
+  opacity: 0.75;
+}
+
+/**
+ * The mode chip: quiet while asking, marked the moment prompts are off.
+ *
+ * A surface that silences questions without saying so leaves the person unable to
+ * tell an agent that asked and was allowed from one that never asked (ADR-0007 §5).
+ */
+.mode-chip {
+  background: transparent;
+  border: 1px solid var(--vscode-panel-border, var(--vscode-descriptionForeground));
+  border-radius: 999px;
+  color: var(--vscode-descriptionForeground);
+  cursor: pointer;
+  font-size: 0.85em;
+  padding: 0.1em 0.6em;
+}
+
+.mode-chip.relaxed {
+  border-color: var(--vscode-editorWarning-foreground);
+  color: var(--vscode-editorWarning-foreground);
+}
+
+.mode-chip.god {
+  border-color: var(--vscode-errorForeground);
+  color: var(--vscode-errorForeground);
+  font-weight: 600;
+}
+
+/**
+ * A switch that is still queued behind a running turn.
+ *
+ * The mode is already chosen, so its name and colour are right; the dashed border is
+ * what says "not in force yet" — the server reads no request until the turn ends.
+ */
+.mode-chip.pending {
+  border-style: dashed;
+  opacity: 0.7;
+}
+
 .hint {
   color: var(--vscode-descriptionForeground);
   font-size: 0.85em;

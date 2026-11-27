@@ -4,6 +4,7 @@
 - **Authority:** [ADR-0009](../decisions/0009-surfaces.md) · [VS Code surface spec](../superpowers/specs/2026-10-26-vscode-webview-design.md)
 - **Code:** `clients/vscode/src/extension.ts`, `clients/vscode/src/chatView.ts`,
   `clients/vscode/src/sessionAgent.ts`, `clients/vscode/src/binary.ts`,
+  `clients/vscode/src/binaryHost.ts`, `clients/vscode/src/windowsPath.ts`,
   `clients/vscode/src/questions.ts`, `clients/vscode/webview/main.ts`
 - **Verify:** `cd clients/vscode && npm run compile && npm test` · `./scripts/check.sh`
 
@@ -153,6 +154,15 @@ The extension does not bundle the Rust binary. The server defaults to local mode
 `BinaryResolver` tries the `loongagent.path`
 setting, the path the user picked with **Locate**, PATH and the common install locations, then
 runs `--version`. A schema mismatch is a warning, never a refusal.
+
+On Windows the extension host inherits the PATH snapshot of the VS Code process that launched
+it, which can predate an installer's PATH edit — the TUI finds `loongagent` from a fresh
+terminal while the panel reports it missing. So the PATH the resolver searches is rebuilt the
+way a new login builds it: `windowsPath.ts` reads the machine and user `Path` values through
+.NET (`[Environment]::GetEnvironmentVariable`, no shell), expands `%VAR%` references by hand,
+and appends whatever the process snapshot missed, keeping the process entries first. Every
+failure — non-Windows, a missing value, a failed read — falls back to `process.env.PATH`
+unchanged, so the search is never worse than before.
 
 `loongagent.path`, `loongagent.autoApprove` and `loongagent.extraArgs` are machine-scoped. A
 repository's `.vscode/settings.json` must not be able to choose the executable or relax

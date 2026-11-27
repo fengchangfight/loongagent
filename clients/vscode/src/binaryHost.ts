@@ -1,14 +1,42 @@
 import * as vscode from "vscode";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { accessSync, constants, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { promisify } from "node:util";
 import { parseVersion, resolveBinary } from "./binary.ts";
+import { effectivePathEnv, type PathLevels } from "./windowsPath.ts";
 import { SCHEMA_VERSION } from "../../ts/protocol.generated.ts";
 import type { BinaryStatus } from "./webviewProtocol.ts";
 
 const run = promisify(execFile);
 const PICKED_KEY = "loongagent.binaryPath";
+
+/**
+ * Read the machine and user PATH through the .NET API, not `reg query`.
+ *
+ * `reg query "...\Environment" /v Path` is unreliable in practice -- on some
+ * machines the subcommand parses the quoted key as a syntax error and reads
+ * nothing. `[Environment]::GetEnvironmentVariable('Path', ...)` reads the same
+ * registry values through a stable API and expands nothing, so the resolver
+ * merges exactly what a fresh login would. A level that cannot be read comes
+ * back `undefined`, and the caller falls back for the rest.
+ */
+function readPathLevels(): PathLevels {
+  const read = (target: "Machine" | "User"): string | undefined => {
+    try {
+      const raw = execFileSync(
+        "powershell",
+        ["-NoProfile", "-NonInteractive", "-Command",
+          `[Console]::Out.Write([Environment]::GetEnvironmentVariable('Path','${target}'))`],
+        { encoding: "utf8", windowsHide: true },
+      );
+      return raw.trim() === "" ? undefined : raw;
+    } catch {
+      return undefined;
+    }
+  };
+  return { machine: read("Machine"), user: read("User") };
+}
 
 /** The resolved binary and the version information shown in the sidebar. */
 export type HostBinary = BinaryStatus;
@@ -26,12 +54,13 @@ export async function resolveHostBinary(
 ): Promise<HostBinary | undefined> {
   const configured = vscode.workspace.getConfiguration("loongagent").get<string>("path", "loongagent");
   const picked = context.globalState.get<string>(PICKED_KEY);
+  const effectivePath = effectivePathEnv(process.platform, process.env.PATH, readPathLevels, process.env);
   const resolved = resolveBinary({
     configured,
     picked,
     platform: process.platform,
     home: homedir(),
-    pathEnv: process.env.PATH,
+    pathEnv: effectivePath,
     exists: (path) => existsSync(path),
     isExecutable: (path) => process.platform === "win32"
       ? existsSync(path)

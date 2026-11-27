@@ -125,11 +125,14 @@ loongagent --version</code></pre>
 <pre><code>loongagent local add            # 列出服务商（本机 ollama 排第一），粘 key，现场探测
 loongagent local add ollama     # 直接指定某一个服务商
 loongagent local                # 查看已配置的模型和槽位顺序
+loongagent local check deepseek # 只探测：这家服务商有哪些模型名（不改配置）
 loongagent local ping           # 每个模型真打一次，确认能通</code></pre>
 
 <div class="tip">向导会现场探测：能列出模型的就列出来给你选，key 不对会直接告诉你。
 密钥按约定名（如 <code>LOONG_DEEPSEEK_KEY</code>）从 <code>~/.loongagent/env</code> 或环境变量读取，
-<strong>永远不会写进配置文件</strong>。</div>
+<strong>永远不会写进配置文件</strong>。
+只想看看、不想动配置，就用 <code>loongagent local check 服务商</code>：
+同一个探测，只打印对方返回的模型名，不写任何文件。</div>
 
 <p><strong>本机 ollama</strong>（不花钱、数据不出机器）：</p>
 <pre><code>ollama pull qwen2.5:7b-instruct     # 先拉一个模型
@@ -146,7 +149,10 @@ provider = "ollama/qwen2.5:7b-instruct"   # 槽位 1：本机 ollama
 
 [[models]]
 name = "deepseek-flash"
-provider = "deepseek/deepseek-flash"      # 槽位 2：云端</code></pre>
+provider = "deepseek/deepseek-flash"      # 槽位 2：云端
+
+[router]
+default = "qwen2.5:7b-instruct"           # 启动时的默认模型；删掉这行就取第一条</code></pre>
 
 <p><strong>删除模型</strong>也只需要一条命令——可以按状态栏序号、名字或服务商来指定：</p>
 
@@ -367,9 +373,22 @@ code --list-extensions | grep -i loong        # 没输出就是删掉了，重�
 
 <pre><code>loongagent run "收集今天的 GitHub trending，写成日报" \
     --auto \
-    --model deepseek/deepseek-flash \
     --cwd /home/me/daily-report \
     > report.txt</code></pre>
+
+<p><strong>用哪个模型？</strong>命令行里不用写：<code>run</code> 用 <code>loongagent local</code>
+里槽位 1 的那个模型，也就是 TUI 启动时的默认模型。想看、想换：</p>
+
+<pre><code>loongagent local                    # ▸[1] 那一行就是 run 会用的模型
+loongagent local check deepseek     # 这家服务商到底提供哪些模型名</code></pre>
+
+<p>换模型改 <code>~/.loongagent/local.toml</code>：把 <code>[router] default</code> 改成想要的名字，
+或者把那条 <code>[[models]]</code> 挪到最前面。</p>
+
+<div class="warn"><code>--model</code> <strong>不是</strong>用来选真模型的。它只认四个自测用的假模型
+（<code>echo</code>、<code>demo-write</code>、<code>demo-escape</code>、<code>openai-compat</code>）；
+写成 <code>--model deepseek/deepseek-flash</code> 会直接报
+<code>unknown --model "deepseek/deepseek-flash"</code> 然后退出。</div>
 
 <p><code>--auto</code> 是关键：它让 loongagent <strong>自动批准工具调用</strong>（和 TUI 里的
 <code>/yolo</code> 是同一套规则），不再等人点"允许"。没有它，一旦模型要调工具（比如联网抓网页、
@@ -385,10 +404,11 @@ code --list-extensions | grep -i loong        # 没输出就是删掉了，重�
 <pre><code># crontab -e
 0 9 * * * cd /home/me/daily-report && \
     /home/me/.local/bin/loongagent run "收集今天的XX信息，写成日报" \
-    --auto --model deepseek/deepseek-flash \
+    --auto \
     > /home/me/daily-report/$(date +\%Y-\%m-\%d).txt 2>&1</code></pre>
 
-<p>注意 cron 环境里 PATH 可能不全，建议写绝对路径；模型名、工作目录、输出文件按需替换。
+<p>注意 cron 环境里 PATH 可能不全，建议写绝对路径；工作目录、输出文件按需替换；
+模型不用写在命令里，按上面说的改 <code>local.toml</code>。
 如果日报要发到微信/邮件，让 prompt 自己调工具发（比如"把日报内容用 curl POST 到
 https://example.com/webhook"），或者把 <code>report.txt</code> 交给后面的脚本处理。</p>
 
@@ -403,6 +423,7 @@ https://example.com/webhook"），或者把 <code>report.txt</code> 交给后面
 <table>
   <tr><th>我想…</th><th>敲这个</th></tr>
   <tr><td>看看都配了什么模型</td><td><code>loongagent local</code></td></tr>
+  <tr><td>看某家服务商有哪些模型名</td><td><code>loongagent local check 服务商</code></td></tr>
   <tr><td>删掉一个模型</td><td><code>loongagent local delete 序号或名字</code></td></tr>
   <tr><td>测一遍模型能不能通</td><td><code>loongagent local ping</code></td></tr>
   <tr><td>开/关语义记忆、看记忆状态</td><td><code>loongagent local semantic on</code> / <code>off</code> / 不带参数看状态</td></tr>
